@@ -1,0 +1,226 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/datatype open
+  rhombus/hol/private/terminate open
+  rhombus/hol/private/recdef open
+  "spec_prelude.rhm" open
+
+def P = prelude
+def thy = P.thy
+
+fun eqs_of(n :: Symbol) :: List:
+  (P.funs[n] :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
+
+// -- the equations the specification's functions get -----------------------
+
+check:
+  eqs_of(#'app)
+  ~is ["forall (x :: List('a)): app(nil, x) === x",
+       "forall (x :: 'a, y :: List('a), z :: List('a)): "
+         ++ "app(cons(x, y), z) === cons(x, app(y, z))"]
+check:
+  eqs_of(#'rev)
+  ~is ["rev(nil) === nil",
+       "forall (x :: 'a, y :: List('a)): "
+         ++ "rev(cons(x, y)) === app(rev(y), cons(x, nil))"]
+check:
+  eqs_of(#'length)
+  ~is ["length(nil) === zero",
+       "forall (x :: 'a, y :: List('a)): length(cons(x, y)) === succ(length(y))"]
+check:
+  eqs_of(#'plus)
+  ~is ["forall (x :: Nat): plus(zero, x) === x",
+       "forall (x :: Nat, y :: Nat): plus(succ(x), y) === succ(plus(x, y))"]
+check:
+  eqs_of(#'flatten)
+  ~is ["flatten(leaf) === nil",
+       "forall (x :: 'a, y :: Tree('a), z :: Tree('a)): "
+         ++ "flatten(node(x, y, z)) === app(flatten(y), cons(x, flatten(z)))"]
+check:
+  eqs_of(#'size)
+  ~is ["size(leaf) === zero",
+       "forall (x :: 'a, y :: Tree('a), z :: Tree('a)): "
+         ++ "size(node(x, y, z)) === succ(plus(size(y), size(z)))"]
+
+// every equation is hypothesis-free and well-formed in the theory
+check:
+  let all_eqs = for values(acc :~ List = []) ((_, fi) in P.funs):
+                  acc ++ (fi :~ FunInfo).equations
+  for all (t in all_eqs): hyps_of(t) == []
+  ~is #true
+
+// the constants are declared at the types the definitions gave them
+check:
+  const_type(thy, #'app)
+  ~is mk_fun(list_ty(A), mk_fun(list_ty(A), list_ty(A)))
+check const_type(thy, #'flatten) ~is mk_fun(tree_ty(A), list_ty(A))
+check const_type(thy, #'plus) ~is mk_fun(nat_ty, mk_fun(nat_ty, nat_ty))
+
+// -- the recursion information -----------------------------------------------
+//
+// This is also the induction-scheme generator's input, so it has to name the
+// argument the prover should induct on.
+
+check (P.funs[#'app] :~ FunInfo).recinfo.positions ~is [0]
+check (P.funs[#'app] :~ FunInfo).recinfo.method ~is #'structural
+check (P.funs[#'rev] :~ FunInfo).recinfo.positions ~is [0]
+check (P.funs[#'plus] :~ FunInfo).recinfo.positions ~is [0]
+check (P.funs[#'length] :~ FunInfo).recinfo.positions ~is [0]
+// `size` and `flatten` recurse on both subtrees, so both calls must descend
+check (P.funs[#'size] :~ FunInfo).recinfo.positions ~is [0]
+check (P.funs[#'size] :~ FunInfo).recinfo.sites.length() ~is 2
+check (P.funs[#'flatten] :~ FunInfo).recinfo.sites.length() ~is 2
+
+check:
+  // a non-recursive definition has no descending position and says so
+  let n = v(#'n, nat_ty)
+  let spec = FunSpec(#'twice, [nat_ty], nat_ty,
+                     [DefClause([n], ap2(P.plus, n, n))])
+  let (t, info) = install_function(thy, spec, P.dts)
+  [info.recinfo.method, info.recinfo.positions]
+  ~is [#'none, []]
+
+// -- descends_at -----------------------------------------------------------
+
+check:
+  descends_at(ap2(P.cons, v(#'x, A), v(#'r, list_ty(A))), v(#'r, list_ty(A)))
+  ~is #true
+// the head field is not of the recursive type, so it is not a descent
+check:
+  descends_at(ap2(P.cons, v(#'x, A), v(#'r, list_ty(A))), v(#'x, A))
+  ~is #false
+check descends_at(v(#'xs, list_ty(A)), v(#'xs, list_ty(A))) ~is #false
+check descends_at(P.nil, P.nil) ~is #false
+
+// ==========================================================================
+// Rejections
+// ==========================================================================
+
+def n = v(#'n, nat_ty)
+def m = v(#'m, nat_ty)
+def xs = v(#'xs, list_ty(A))
+def ys = v(#'ys, list_ty(A))
+def hd = v(#'x, A)
+def tl = v(#'r, list_ty(A))
+
+// -- non-termination -------------------------------------------------------
+
+check:
+  // `loop(n) = loop(n)` -- the argument does not shrink
+  let loop_c = mk_const(#'loopy, mk_fun(nat_ty, nat_ty))
+  install_function(thy, FunSpec(#'loopy, [nat_ty], nat_ty,
+                                [DefClause([n], ap1(loop_c, n))]),
+                   P.dts)
+  ~throws "cannot see that the definition terminates"
+check:
+  // recursing on the successor rather than the predecessor
+  let up = mk_const(#'up, mk_fun(nat_ty, nat_ty))
+  install_function(thy, FunSpec(#'up, [nat_ty], nat_ty,
+                                [DefClause([P.zero], P.zero),
+                                 DefClause([ap1(P.succ, m)],
+                                           ap1(up, ap1(P.succ, ap1(P.succ, m))))]),
+                   P.dts)
+  ~throws "cannot see that the definition terminates"
+
+// -- nothing is added to the theory when a check fails ---------------------
+
+check:
+  let loop_c = mk_const(#'loopy2, mk_fun(nat_ty, nat_ty))
+  try:
+    install_function(thy, FunSpec(#'loopy2, [nat_ty], nat_ty,
+                                  [DefClause([n], ap1(loop_c, n))]),
+                     P.dts)
+    ~catch _: #void
+  const_type(thy, #'loopy2)
+  ~is #false
+
+// -- exhaustiveness and overlap --------------------------------------------
+
+check:
+  // missing the `cons` case
+  let f = mk_const(#'partial, mk_fun(list_ty(A), nat_ty))
+  install_function(thy, FunSpec(#'partial, [list_ty(A)], nat_ty,
+                                [DefClause([P.nil], P.zero)]),
+                   P.dts)
+  ~throws "not exhaustive"
+check:
+  let f = mk_const(#'dup, mk_fun(list_ty(A), nat_ty))
+  install_function(thy, FunSpec(#'dup, [list_ty(A)], nat_ty,
+                                [DefClause([P.nil], P.zero),
+                                 DefClause([P.nil], P.zero)]),
+                   P.dts)
+  ~throws "two clauses match the same constructor"
+check:
+  // a variable pattern mixed in with constructor patterns is a fall-through,
+  // which this version does not compile
+  let f = mk_const(#'mixed, mk_fun(list_ty(A), nat_ty))
+  install_function(thy, FunSpec(#'mixed, [list_ty(A)], nat_ty,
+                                [DefClause([P.nil], P.zero),
+                                 DefClause([xs], P.zero)]),
+                   P.dts)
+  ~throws "variable pattern mixed"
+
+// -- pattern shape ---------------------------------------------------------
+
+check:
+  // nested constructor patterns are beyond what the induction schemes of this
+  // version can follow
+  let f = mk_const(#'nested, mk_fun(list_ty(A), nat_ty))
+  let deep = ap2(P.cons, hd, ap2(P.cons, hd, tl))
+  install_function(thy, FunSpec(#'nested, [list_ty(A)], nat_ty,
+                                [DefClause([P.nil], P.zero),
+                                 DefClause([deep], P.zero)]),
+                   P.dts)
+  ~throws "distinct variables"
+check:
+  let f = mk_const(#'rep, mk_fun(list_ty(A), list_ty(A)))
+  let same = ap2(P.cons, hd, tl)
+  install_function(thy, FunSpec(#'rep, [list_ty(A), list_ty(A)], list_ty(A),
+                                [DefClause([P.nil, ys], ys),
+                                 DefClause([same, tl], ys)]),
+                   P.dts)
+  ~throws "repeated"
+
+// -- typing and scope ------------------------------------------------------
+
+check:
+  let f = mk_const(#'wrongty, mk_fun(list_ty(A), nat_ty))
+  install_function(thy, FunSpec(#'wrongty, [list_ty(A)], nat_ty,
+                                [DefClause([P.nil], P.nil),
+                                 DefClause([ap2(P.cons, hd, tl)], P.zero)]),
+                   P.dts)
+  ~throws "clause result has the wrong type"
+check:
+  // `m` is not bound by any pattern
+  let f = mk_const(#'openvar, mk_fun(list_ty(A), nat_ty))
+  install_function(thy, FunSpec(#'openvar, [list_ty(A)], nat_ty,
+                                [DefClause([P.nil], m),
+                                 DefClause([ap2(P.cons, hd, tl)], P.zero)]),
+                   P.dts)
+  ~throws "unbound variable"
+check:
+  install_function(thy, FunSpec(#'app, [list_ty(A)], nat_ty,
+                                [DefClause([xs], P.zero)]),
+                   P.dts)
+  ~throws "already declared"
+check:
+  install_function(thy, FunSpec(#'empty, [nat_ty], nat_ty, []), P.dts)
+  ~throws "at least one clause"
+
+// -- matching on more than one argument ------------------------------------
+
+check:
+  let f = mk_const(#'two, mk_fun(nat_ty, mk_fun(nat_ty, nat_ty)))
+  install_function(thy, FunSpec(#'two, [nat_ty, nat_ty], nat_ty,
+                                [DefClause([P.zero, P.zero], P.zero),
+                                 DefClause([ap1(P.succ, m), ap1(P.succ, n)],
+                                           P.zero)]),
+                   P.dts)
+  ~throws "more than one argument is matched"
+

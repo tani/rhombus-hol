@@ -1,0 +1,188 @@
+#lang rhombus/static
+
+// HOL types.
+//
+// Two constructors, HOL Light style: type variables and applications of a type
+// constructor to arguments.  The function type is not special-cased -- it is
+// just `TyApp(#'fun, [dom, rng])` -- and constructor arities live in the
+// theory, not in the type.
+
+export:
+  HType
+  TyVar
+  TyApp
+  bool_ty
+  mk_fun
+  dest_fun
+  is_fun
+  type_vars
+  type_subst
+  type_match
+  type_unify
+  type_occurs
+  type_ord
+  type_to_string
+
+class HType():
+  nonfinal
+
+class TyVar(name :: Symbol):
+  extends HType
+
+class TyApp(name :: Symbol, args :: List.of(HType)):
+  extends HType
+
+def bool_ty :: HType = TyApp(#'bool, [])
+
+fun mk_fun(dom :: HType, rng :: HType) :: HType:
+  TyApp(#'fun, [dom, rng])
+
+fun is_fun(t :: HType) :: Boolean:
+  match t
+  | TyApp(#'fun, [_, _]): #true
+  | ~else: #false
+
+// Throws if `t` is not a function type; callers that are not sure should ask
+// `is_fun` first.
+fun dest_fun(t :: HType) :: values(HType, HType):
+  match t
+  | TyApp(#'fun, [dom, rng]): values(dom, rng)
+  | ~else: error(~who: #'dest_fun, "not a function type",
+                 error.val(~label: "type", type_to_string(t)))
+
+// Type variables, in left-to-right order of first occurrence, without
+// duplicates.  Order matters: it is what makes generated axioms deterministic.
+fun type_vars(t :: HType) :: List.of(Symbol):
+  fun walk(t :: HType, acc :: List.of(Symbol)) :: List.of(Symbol):
+    match t
+    | TyVar(n): (if acc.contains(n) | acc | acc ++ [n])
+    | TyApp(_, args): for values(a = acc) (arg in args): walk(arg, a)
+  walk(t, [])
+
+fun type_subst(theta :: Map.of(Symbol, HType), t :: HType) :: HType:
+  cond
+  | theta.length() == 0: t
+  | ~else:
+      match t
+      | TyVar(n): theta.get(n, t)
+      | TyApp(n, args):
+          // Preserve `===` when nothing changed, so callers can short-circuit.
+          let args2 = args.map(fun (a): type_subst(theta, a))
+          cond
+          | (for all (a in args, b in args2): a === b): t
+          | ~else: TyApp(n, args2)
+
+// One-way matching: extend `acc` so that `type_subst(result, pat) == t`.
+// Returns `#false` when no such extension exists.
+fun type_match(pat :: HType, t :: HType, acc :: Map.of(Symbol, HType))
+     :: maybe(Map.of(Symbol, HType)):
+  match pat
+  | TyVar(n):
+      match acc.get(n, #false)
+      | #false: acc ++ { n: t }
+      | prev: prev == t && acc
+  | TyApp(n, pargs):
+      match t
+      | TyApp(n2, targs) when n == n2 && pargs.length() == targs.length():
+          recur loop (ps = pargs, ts = targs, a = acc):
+            match ps
+            | []: a
+            | List.cons(p, prest):
+                match ts
+                | List.cons(q, qrest):
+                    match type_match(p, q, a)
+                    | #false: #false
+                    | a2: loop(prest, qrest, a2)
+                | ~else: #false
+      | ~else: #false
+
+fun type_occurs(n :: Symbol, t :: HType) :: Boolean:
+  match t
+  | TyVar(m): n == m
+  | TyApp(_, args): for any (a in args): type_occurs(n, a)
+
+// Full unification with occurs check.  Used only by the elaborator; the kernel
+// never unifies, it only checks and matches.
+fun type_unify(a :: HType, b :: HType, acc :: Map.of(Symbol, HType))
+     :: maybe(Map.of(Symbol, HType)):
+  fun resolve(t :: HType, s :: Map.of(Symbol, HType)) :: HType:
+    match t
+    | TyVar(n):
+        match s.get(n, #false)
+        | #false: t
+        | t2: resolve(t2, s)
+    | ~else: t
+  fun bind(n :: Symbol, t :: HType, s :: Map.of(Symbol, HType))
+       :: maybe(Map.of(Symbol, HType)):
+    cond
+    | t is_a TyVar && (t :~ TyVar).name == n: s
+    | type_occurs(n, type_subst(s, t)): #false
+    | ~else: s ++ { n: t }
+  fun go(a :: HType, b :: HType, s :: Map.of(Symbol, HType))
+       :: maybe(Map.of(Symbol, HType)):
+    let a = resolve(a, s)
+    let b = resolve(b, s)
+    match a
+    | TyVar(n): bind(n, b, s)
+    | TyApp(na, aargs):
+        match b
+        | TyVar(m): bind(m, a, s)
+        | TyApp(nb, bargs) when na == nb && aargs.length() == bargs.length():
+            recur loop (xs = aargs, ys = bargs, s = s):
+              match xs
+              | []: s
+              | List.cons(x, xrest):
+                  match ys
+                  | List.cons(y, yrest):
+                      match go(x, y, s)
+                      | #false: #false
+                      | s2: loop(xrest, yrest, s2)
+                  | ~else: #false
+        | ~else: #false
+  go(a, b, acc)
+
+// Symbols are `comparable`, and comparing them is defined as comparing their
+// string forms -- exactly the order we want.
+fun symbol_ord(a :: Symbol, b :: Symbol) :: Int:
+  cond
+  | a < b: -1
+  | a > b: 1
+  | ~else: 0
+
+// A total order on types.  `TyVar` sorts before `TyApp`.
+fun type_ord(a :: HType, b :: HType) :: Int:
+  match a
+  | TyVar(na):
+      match b
+      | TyVar(nb): symbol_ord(na, nb)
+      | ~else: -1
+  | TyApp(na, aargs):
+      match b
+      | TyVar(_): 1
+      | TyApp(nb, bargs):
+          let c = symbol_ord(na, nb)
+          cond
+          | c != 0: c
+          | aargs.length() != bargs.length():
+              (if aargs.length() < bargs.length() | -1 | 1)
+          | ~else:
+              recur loop (xs = aargs, ys = bargs):
+                match xs
+                | []: 0
+                | List.cons(x, xrest):
+                    match ys
+                    | List.cons(y, yrest):
+                        let c = type_ord(x, y)
+                        (if c != 0 | c | loop(xrest, yrest))
+                    | ~else: 0
+
+fun type_to_string(t :: HType) :~ String:
+  match t
+  | TyVar(n): "'" ++ to_string(n)
+  | TyApp(#'fun, [dom, rng]):
+      let d = type_to_string(dom)
+      let ds = (if is_fun(dom) | "(" ++ d ++ ")" | d)
+      ds ++ " -> " ++ type_to_string(rng)
+  | TyApp(n, []): to_string(n)
+  | TyApp(n, args):
+      to_string(n) ++ "(" ++ String.join(args.map(type_to_string), ", ") ++ ")"

@@ -1,0 +1,124 @@
+#lang rhombus/static
+
+// Destructor elimination.
+//
+// None of the specification's examples reach this stage -- their functions
+// are defined by matching, so they present constructor patterns rather than
+// selector applications -- so it is exercised here directly.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/datatype open
+  rhombus/hol/private/recdef open
+  rhombus/hol/private/ruledb open
+  rhombus/hol/private/goal open
+  rhombus/hol/private/destruct open
+  rhombus/hol/private/waterfall open
+  "spec_prelude.rhm" open
+
+def P = prelude
+def thy = P.thy
+def LN = list_ty(nat_ty)
+
+def lenN = at(P.length, nat_ty)
+def consN = at(P.cons, nat_ty)
+def nilN = at(P.nil, nat_ty)
+def is_cons = mk_const(#'is_cons, mk_fun(LN, bool))
+def is_nil = mk_const(#'is_nil, mk_fun(LN, bool))
+def cons_tail = mk_const(#'cons_tail, mk_fun(LN, LN))
+def cons_head = mk_const(#'cons_head, mk_fun(LN, nat_ty))
+
+def x = v(#'x, LN)
+fun len_(a): ap1(lenN, a)
+fun succ_(a): ap1(P.succ, a)
+
+// definitions plus the datatypes' own discriminator and selector equations
+def db :: RuleDB:
+  let d = for values(acc :~ RuleDB = empty_db) ((nm, fi) in P.funs):
+            add_thms(thy, acc, nm, (fi :~ FunInfo).equations)
+  for values(acc :~ RuleDB = d) ((nm, dtms) in P.thms):
+    let dtms :~ DatatypeThms = dtms
+    add_thms(thy, add_thms(thy, acc, nm, dtms.discriminators),
+             nm, dtms.selectors)
+
+def ctx = mk_context(thy, ~rules: db, ~datatypes: P.thms, ~functions: P.funs)
+
+// -- when the stage applies ------------------------------------------------
+
+check:
+  // the goal applies a selector to `x`, and the guard is available
+  let g = mk_goal([ap1(is_cons, x)],
+                  mk_eq(len_(x), succ_(len_(ap1(cons_tail, x)))))
+  elimination_candidates(P.thms, g).map(
+    fun ([u, c]): [(u :~ FVar).name, (c :~ Ctor).name])
+  ~is [[#'x, #'cons]]
+check:
+  // without the guard the stage declines: `x` might be `nil`
+  let g = mk_goal([], mk_eq(len_(x), succ_(len_(ap1(cons_tail, x)))))
+  elimination_candidates(P.thms, g)
+  ~is []
+check:
+  // no selector application, nothing to eliminate
+  let g = mk_goal([ap1(is_cons, x)], mk_eq(len_(x), len_(x)))
+  elimination_candidates(P.thms, g)
+  ~is []
+
+// -- what it produces ------------------------------------------------------
+
+check:
+  let g = mk_goal([ap1(is_cons, x)],
+                  mk_eq(len_(x), succ_(len_(ap1(cons_tail, x)))))
+  let st = eliminate_goal(thy, P.thms, g) :~ Step
+  show((st.subgoals[0] :~ Goal).concl)
+  ~is "length(cons(d0, d1)) === succ(length(cons_tail(cons(d0, d1))))"
+check:
+  let g = mk_goal([ap1(is_cons, x)],
+                  mk_eq(len_(x), succ_(len_(ap1(cons_tail, x)))))
+  let st = eliminate_goal(thy, P.thms, g) :~ Step
+  (st.subgoals[0] :~ Goal).trail
+  ~is ["destructor elimination (x -> cons)"]
+
+// -- and that it really proves the original --------------------------------
+
+check:
+  let g = mk_goal([ap1(is_cons, x)],
+                  mk_eq(len_(x), succ_(len_(ap1(cons_tail, x)))))
+  let node = prove_goal(ctx, g)
+  is_closed(node)
+  ~is #true
+check:
+  let g = mk_goal([ap1(is_cons, x)],
+                  mk_eq(len_(x), succ_(len_(ap1(cons_tail, x)))))
+  let th = run(prove_goal(ctx, g)) :~ Thm
+  // the justification recovers the *original* goal, not the substituted one
+  [show(concl_of(th)), hyps_of(th).map(show)]
+  ~is ["length(x) === succ(length(cons_tail(x)))", ["is_cons(x)"]]
+check:
+  // and it is a kernel theorem in the prelude's theory
+  let g = mk_goal([ap1(is_cons, x)],
+                  mk_eq(len_(x), succ_(len_(ap1(cons_tail, x)))))
+  let th = run(prove_goal(ctx, g)) :~ Thm
+  descends(stamp_of(th), thy.stamp)
+  ~is #true
+
+// a second selector on the same variable is handled by the one substitution
+check:
+  let g = mk_goal([ap1(is_cons, x)],
+                  mk_eq(len_(x),
+                        succ_(len_(ap1(cons_tail, x)))))
+  let th = run(prove_goal(ctx, g))
+  th != #false
+  ~is #true
+check:
+  let head_goal = mk_goal([ap1(is_cons, x)],
+                          mk_eq(ap2(consN, ap1(cons_head, x),
+                                    ap1(cons_tail, x)),
+                                x))
+  let th = run(prove_goal(ctx, head_goal))
+  th != #false
+  ~is #true

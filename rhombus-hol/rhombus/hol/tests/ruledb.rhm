@@ -1,0 +1,242 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/conv open
+  rhombus/hol/private/drule open
+  rhombus/hol/private/order open
+  rhombus/hol/private/tmatch open
+  rhombus/hol/private/ruledb open
+  rhombus/hol/private/datatype open
+  rhombus/hol/private/recdef open
+  rhombus/hol/private/goal open
+  rhombus/hol/private/simp open
+  "spec_prelude.rhm" open
+
+def P = prelude
+def thy = P.thy
+def LN = list_ty(nat_ty)
+
+// the prelude's list functions, at `List(Nat)`
+def appN = at(P.app, nat_ty)
+def revN = at(P.rev, nat_ty)
+def lenN = at(P.length, nat_ty)
+def consN = at(P.cons, nat_ty)
+def nil_n = at(P.nil, nat_ty)
+
+def xs = v(#'xs, LN)
+def ys = v(#'ys, LN)
+def zs = v(#'zs, LN)
+def n = v(#'n, nat_ty)
+def m = v(#'m, nat_ty)
+
+fun app_(a, b): ap2(appN, a, b)
+fun cons_(a, b): ap2(consN, a, b)
+fun rev_(a): ap1(revN, a)
+fun len_(a): ap1(lenN, a)
+fun plus_(a, b): ap2(P.plus, a, b)
+
+// The definitional equations of everything in the prelude.
+def defs :: RuleDB:
+  for values(d :~ RuleDB = empty_db) ((nm, fi) in P.funs):
+    add_thms(thy, d, nm, (fi :~ FunInfo).equations)
+
+// ==========================================================================
+// matching
+// ==========================================================================
+
+check:
+  // a polymorphic pattern matches a monomorphic term, producing both a type
+  // and a term instantiation
+  let pv = v(#'ys, list_ty(A))
+  let pat = ap2(P.app, mk_const(#'nil, list_ty(A)), pv)
+  let m = term_match([pv], pat, app_(nil_n, xs)) :~ MatchResult
+  [m.tyin, m.theta.length()]
+  ~is [{#'a: nat_ty}, 1]
+check:
+  let pv = v(#'ys, list_ty(A))
+  let pat = ap2(P.app, mk_const(#'nil, list_ty(A)), pv)
+  term_match([pv], pat, app_(xs, ys))
+  ~is #false
+check:
+  // a repeated pattern variable has to match consistently
+  let pv = v(#'q, LN)
+  let pat = app_(pv, pv)
+  [term_match([pv], pat, app_(xs, xs)) != #false,
+   term_match([pv], pat, app_(xs, ys)) != #false]
+  ~is [#true, #false]
+check:
+  // a non-pattern variable must appear literally
+  term_match([], app_(xs, ys), app_(xs, zs))
+  ~is #false
+
+// ==========================================================================
+// orienting theorems into rules
+// ==========================================================================
+
+// every clause of every definition is one rule, and they share the function's
+// name so that `disable` can switch a whole definition off
+check rule_names(defs).length() ~is 12
+check Set(& rule_names(defs)).length() ~is 6
+check rules_of(defs, #'app).length() ~is 2
+check rules_of(defs, #'nope) ~is []
+
+check:
+  // a variable left-hand side would rewrite everything
+  let th = ASSUME(thy, mk_eq(xs, nil_n))
+  mk_rule(thy, #'bad, th)
+  ~is #false
+check:
+  // A *quantified* right-hand side variable the left side does not determine
+  // cannot be a rule: matching would leave it uninstantiated.
+  let (t2, th) = new_axiom(thy, mk_forall_list([xs, n], mk_eq(len_(xs), n)))
+  mk_rule(t2, #'bad, th)
+  ~is #false
+check:
+  // The same statement as an *assumption* is fine, and means something else:
+  // its variables are particular, not schematic, so it rewrites exactly the
+  // term `length(xs)` and nothing else.
+  let r = mk_rule(thy, #'asm, ASSUME(thy, mk_eq(len_(xs), n))) :~ RewriteRule
+  [show(r.lhs), show(r.rhs), r.vars]
+  ~is ["length(xs)", "n", []]
+check:
+  // and so it does not match a different list
+  let d = add_thm(thy, empty_db, #'asm, ASSUME(thy, mk_eq(len_(xs), n)))
+  [db_conv(d)(thy, len_(xs)) != #false, db_conv(d)(thy, len_(ys)) != #false]
+  ~is [#true, #false]
+check:
+  let th = REFL(thy, len_(xs))
+  mk_rule(thy, #'bad, th)
+  ~is #false
+check:
+  // a non-equation becomes `p === true`
+  let r = mk_rule(thy, #'fact, ASSUME(thy, mk_eq(len_(xs), n)
+                                        |> mk_neg(_))) :~ RewriteRule
+  [show(r.lhs), show(r.rhs)]
+  ~is ["length(xs) === n", "false"]
+check:
+  let dt = P.thms[#'List] :~ DatatypeThms
+  let r = mk_rule(thy, #'distinct, dt.distinctness[0]) :~ RewriteRule
+  [show(r.lhs), show(r.rhs), r.head]
+  ~is ["nil === cons(x, y)", "false", #'eq]
+
+// ==========================================================================
+// rewriting
+// ==========================================================================
+
+// `TOP_DEPTH_CONV` never fails -- it returns a reflexive theorem when nothing
+// applied -- so "no change" is a reflexive result, not a `#false`.
+fun norm_with(d :: RuleDB, t :: Term) :~ String:
+  match simp_conv(d)(thy, t)
+  | #false: "<no change>"
+  | th :~ Thm: (if is_refl_thm(th) | "<no change>" | show(rhs_of(th)))
+
+fun norm(t :: Term) :~ String: norm_with(defs, t)
+
+check norm(app_(nil_n, xs)) ~is "xs"
+check norm(app_(cons_(n, nil_n), xs)) ~is "cons(n, xs)"
+check norm(rev_(cons_(n, nil_n))) ~is "cons(n, nil)"
+check norm(rev_(cons_(n, cons_(m, nil_n)))) ~is "cons(m, cons(n, nil))"
+check norm(len_(cons_(n, cons_(m, nil_n)))) ~is "succ(succ(zero))"
+check:
+  norm(plus_(ap1(P.succ, P.zero), ap1(P.succ, P.zero)))
+  ~is "succ(succ(zero))"
+// rewriting is congruent: it works under any context
+check norm(len_(app_(cons_(n, nil_n), cons_(m, nil_n)))) ~is "succ(succ(zero))"
+// nothing to do
+check norm(app_(xs, ys)) ~is "<no change>"
+
+// every rewrite is justified by a theorem, and the theorem says what the
+// rewrite claims
+check:
+  let th = simp_conv(defs)(thy, rev_(cons_(n, nil_n))) :~ Thm
+  [show(concl_of(th)), hyps_of(th)]
+  ~is ["rev(cons(n, nil)) === cons(n, nil)", []]
+
+// -- reflexivity closes an equation ----------------------------------------
+
+check norm(mk_eq(app_(nil_n, xs), xs)) ~is "true"
+check norm(mk_eq(xs, ys)) ~is "<no change>"
+
+// -- disabling -------------------------------------------------------------
+
+check norm(app_(nil_n, xs)) ~is "xs"
+check norm_with(disable(defs, [#'app]), app_(nil_n, xs)) ~is "<no change>"
+check norm_with(enable(disable(defs, [#'app]), [#'app]), app_(nil_n, xs)) ~is "xs"
+
+// ==========================================================================
+// permutative rules cannot oscillate
+// ==========================================================================
+
+check:
+  // `plus(m, n) === plus(n, m)` is a variant of itself, so it is permutative
+  let comm = mk_forall_list([m, n], mk_eq(plus_(m, n), plus_(n, m)))
+  let (t2, th) = new_axiom(thy, comm)
+  let r = mk_rule(t2, #'plus_comm, th) :~ RewriteRule
+  r.permutative
+  ~is #true
+check:
+  // it fires in the direction that decreases the term, and only that one
+  let comm = mk_forall_list([m, n], mk_eq(plus_(m, n), plus_(n, m)))
+  let (t2, th) = new_axiom(thy, comm)
+  let d = add_thm(t2, empty_db, #'plus_comm, th)
+  let down = db_conv(d)(t2, plus_(n, m))
+  let up = db_conv(d)(t2, plus_(m, n))
+  [down != #false, up != #false]
+  ~is [#true, #false]
+check:
+  // so normalising terminates rather than looping between the two orientations
+  let comm = mk_forall_list([m, n], mk_eq(plus_(m, n), plus_(n, m)))
+  let (t2, th) = new_axiom(thy, comm)
+  let d = add_thm(t2, empty_db, #'plus_comm, th)
+  let r = simp_conv(d)(t2, plus_(n, m)) :~ Thm
+  show(rhs_of(r))
+  ~is "plus(m, n)"
+
+// ==========================================================================
+// the first real theorem, by simplification alone
+// ==========================================================================
+
+check:
+  let g = mk_goal([], mk_eq(app_(nil_n, ys), ys))
+  let st = simplify_goal(thy, defs, g) :~ Step
+  let th = st.justify([])
+  [show(concl_of(th)), hyps_of(th), st.subgoals.length()]
+  ~is ["app(nil, ys) === ys", [], 0]
+check:
+  // and it really is a kernel theorem in the prelude's theory
+  let g = mk_goal([], mk_eq(app_(nil_n, ys), ys))
+  let th = (simplify_goal(thy, defs, g) :~ Step).justify([])
+  descends(stamp_of(th), thy.stamp)
+  ~is #true
+check:
+  let g = mk_goal([], mk_eq(len_(cons_(n, nil_n)), ap1(P.succ, P.zero)))
+  let th = (simplify_goal(thy, defs, g) :~ Step).justify([])
+  show(concl_of(th))
+  ~is "length(cons(n, nil)) === succ(zero)"
+
+// an assumption is available to the simplifier as a rewrite rule -- this is
+// how an induction hypothesis does its work
+check:
+  let ih = mk_eq(app_(xs, nil_n), xs)
+  let g = mk_goal([ih], mk_eq(cons_(n, app_(xs, nil_n)), cons_(n, xs)))
+  let st = simplify_goal(thy, defs, g) :~ Step
+  let th = st.justify([])
+  [show(concl_of(th)), st.subgoals.length(), hyps_of(th).length()]
+  ~is ["cons(n, app(xs, nil)) === cons(n, xs)", 0, 1]
+
+// a goal that only partly simplifies leaves a smaller goal behind
+check:
+  let g = mk_goal([], mk_eq(app_(cons_(n, nil_n), ys), ys))
+  let st = simplify_goal(thy, defs, g) :~ Step
+  [st.subgoals.length(), show((st.subgoals[0] :~ Goal).concl)]
+  ~is [1, "cons(n, ys) === ys"]
+check:
+  let g = mk_goal([], mk_eq(app_(xs, ys), app_(xs, ys)))
+  simplify_goal(thy, defs, mk_goal([], mk_eq(xs, ys)))
+  ~is #false

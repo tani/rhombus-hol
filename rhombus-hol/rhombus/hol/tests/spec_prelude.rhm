@@ -1,0 +1,159 @@
+#lang rhombus/static
+
+// The theory the specification's examples live in, built through the kernel:
+// `Nat`, `List` and `Tree`, and the functions of specification sections 4.1
+// and 4.2.  Shared by the definition, rewriting and prover tests so that they
+// all reason about the same objects.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/datatype open
+  rhombus/hol/private/terminate open
+  rhombus/hol/private/recdef open
+
+export:
+  Prelude
+  prelude
+  A
+  nat_ty
+  list_ty
+  tree_ty
+  v
+  ap1
+  ap2
+  ap3
+  at
+
+def A :: HType = TyVar(#'a)
+def nat_ty :: HType = TyApp(#'Nat, [])
+fun list_ty(t :: HType) :: HType: TyApp(#'List, [t])
+fun tree_ty(t :: HType) :: HType: TyApp(#'Tree, [t])
+
+fun v(n :: Symbol, t :: HType) :: FVar: mk_var(n, t)
+fun ap1(f :: Term, a :: Term) :: Term: mk_comb(f, a)
+fun ap2(f :: Term, a :: Term, b :: Term) :: Term: mk_comb(mk_comb(f, a), b)
+fun ap3(f, a, b, c) :: Term: mk_comb(mk_comb(mk_comb(f, a), b), c)
+
+// A polymorphic constant at a particular element type.  HOL constants are
+// written at the instance type, so `app` over `List(Nat)` is not the same
+// term as `app` over `List('a)`.
+fun at(c :: Term, ty :: HType) :: Term: inst_type({#'a: ty}, c)
+
+class Prelude(thy :: Theory,
+              dts :: Map.of(Symbol, DatatypeSpec),
+              thms :: Map.of(Symbol, DatatypeThms),
+              funs :: Map.of(Symbol, FunInfo),
+              // handy constants
+              zero :: Term, succ :: Term,
+              nil :: Term, cons :: Term,
+              leaf :: Term, node :: Term,
+              plus :: Term, app :: Term, rev :: Term,
+              length :: Term, size :: Term, flatten :: Term)
+
+fun build() :: Prelude:
+  let thy = base_theory()
+
+  // -- datatypes -----------------------------------------------------------
+  let nat_spec = DatatypeSpec(#'Nat, [],
+                              [Ctor(#'zero, []),
+                               Ctor(#'succ, [Field(#'pred, nat_ty)])])
+  let (thy, nat_thms) = datatype_axioms(thy, nat_spec)
+
+  let list_spec = DatatypeSpec(#'List, [#'a],
+                               [Ctor(#'nil, []),
+                                Ctor(#'cons, [Field(#'head, A),
+                                              Field(#'tail, list_ty(A))])])
+  let (thy, list_thms) = datatype_axioms(thy, list_spec)
+
+  let tree_spec = DatatypeSpec(#'Tree, [#'a],
+                               [Ctor(#'leaf, []),
+                                Ctor(#'node, [Field(#'value, A),
+                                              Field(#'left, tree_ty(A)),
+                                              Field(#'right, tree_ty(A))])])
+  let (thy, tree_thms) = datatype_axioms(thy, tree_spec)
+
+  let dts = {#'Nat: nat_spec, #'List: list_spec, #'Tree: tree_spec}
+
+  let zero = mk_const(#'zero, nat_ty)
+  let succ = mk_const(#'succ, mk_fun(nat_ty, nat_ty))
+  let nil = mk_const(#'nil, list_ty(A))
+  let cons = mk_const(#'cons, mk_fun(A, mk_fun(list_ty(A), list_ty(A))))
+  let leaf = mk_const(#'leaf, tree_ty(A))
+  let node = mk_const(#'node,
+                      mk_fun(A, mk_fun(tree_ty(A), mk_fun(tree_ty(A), tree_ty(A)))))
+
+  // -- plus ----------------------------------------------------------------
+  //   plus(zero, n)    = n
+  //   plus(succ(m), n) = succ(plus(m, n))
+  let m = v(#'m, nat_ty)
+  let n = v(#'n, nat_ty)
+  let plus_c = mk_const(#'plus, mk_fun(nat_ty, mk_fun(nat_ty, nat_ty)))
+  let plus_spec = FunSpec(#'plus, [nat_ty, nat_ty], nat_ty,
+                          [DefClause([zero, n], n),
+                           DefClause([ap1(succ, m), n],
+                                     ap1(succ, ap2(plus_c, m, n)))])
+  let (thy, plus_info) = install_function(thy, plus_spec, dts)
+
+  // -- app -----------------------------------------------------------------
+  let xs = v(#'xs, list_ty(A))
+  let ys = v(#'ys, list_ty(A))
+  let hd = v(#'x, A)
+  let tl = v(#'r, list_ty(A))
+  let app_c = mk_const(#'app, mk_fun(list_ty(A), mk_fun(list_ty(A), list_ty(A))))
+  let app_spec = FunSpec(#'app, [list_ty(A), list_ty(A)], list_ty(A),
+                         [DefClause([nil, ys], ys),
+                          DefClause([ap2(cons, hd, tl), ys],
+                                    ap2(cons, hd, ap2(app_c, tl, ys)))])
+  let (thy, app_info) = install_function(thy, app_spec, dts)
+
+  // -- rev -----------------------------------------------------------------
+  let rev_c = mk_const(#'rev, mk_fun(list_ty(A), list_ty(A)))
+  let rev_spec = FunSpec(#'rev, [list_ty(A)], list_ty(A),
+                         [DefClause([nil], nil),
+                          DefClause([ap2(cons, hd, tl)],
+                                    ap2(app_c, ap1(rev_c, tl),
+                                        ap2(cons, hd, nil)))])
+  let (thy, rev_info) = install_function(thy, rev_spec, dts)
+
+  // -- length --------------------------------------------------------------
+  let len_c = mk_const(#'length, mk_fun(list_ty(A), nat_ty))
+  let len_spec = FunSpec(#'length, [list_ty(A)], nat_ty,
+                         [DefClause([nil], zero),
+                          DefClause([ap2(cons, hd, tl)],
+                                    ap1(succ, ap1(len_c, tl)))])
+  let (thy, len_info) = install_function(thy, len_spec, dts)
+
+  // -- size ----------------------------------------------------------------
+  let tv = v(#'v, A)
+  let tl_ = v(#'l, tree_ty(A))
+  let tr = v(#'r, tree_ty(A))
+  let size_c = mk_const(#'size, mk_fun(tree_ty(A), nat_ty))
+  let size_spec = FunSpec(#'size, [tree_ty(A)], nat_ty,
+                          [DefClause([leaf], zero),
+                           DefClause([ap3(node, tv, tl_, tr)],
+                                     ap1(succ, ap2(plus_c, ap1(size_c, tl_),
+                                                   ap1(size_c, tr))))])
+  let (thy, size_info) = install_function(thy, size_spec, dts)
+
+  // -- flatten -------------------------------------------------------------
+  let flat_c = mk_const(#'flatten, mk_fun(tree_ty(A), list_ty(A)))
+  let flat_spec = FunSpec(#'flatten, [tree_ty(A)], list_ty(A),
+                          [DefClause([leaf], nil),
+                           DefClause([ap3(node, tv, tl_, tr)],
+                                     ap2(app_c, ap1(flat_c, tl_),
+                                         ap2(cons, tv, ap1(flat_c, tr))))])
+  let (thy, flat_info) = install_function(thy, flat_spec, dts)
+
+  Prelude(thy, dts,
+          {#'Nat: nat_thms, #'List: list_thms, #'Tree: tree_thms},
+          {#'plus: plus_info, #'app: app_info, #'rev: rev_info,
+           #'length: len_info, #'size: size_info, #'flatten: flat_info},
+          zero, succ, nil, cons, leaf, node,
+          plus_c, app_c, rev_c, len_c, size_c, flat_c)
+
+def prelude :: Prelude = build()

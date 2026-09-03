@@ -1,0 +1,131 @@
+#lang rhombus/static
+
+// The waterfall's third stage: generalization.
+//
+// Replace a non-variable subterm that occurs more than once by a fresh
+// variable.  The point is not to make the goal easier to read: it is to make
+// induction *possible*.  A goal like
+//
+//     plus(size(y), succ(size(z))) === succ(plus(size(y), size(z)))
+//
+// has nothing to induct on -- `y` and `z` are of tree type, and inducting on
+// them just makes the same shape one level deeper.  Generalize `size(y)` and
+// `size(z)` to fresh naturals and the goal becomes an arithmetic fact that
+// induction settles at once.
+//
+// The step is sound by construction, and runs backwards: from `|- C[y]` with
+// `y` fresh, `SPEC(t, GEN(y, ...))` gives `|- C[t]`.  Its only risk is
+// *incompleteness* -- over-generalizing turns a provable goal into an
+// unprovable one, which shows up as a residue, never as a wrong theorem.
+// That asymmetry is why an aggressive heuristic is acceptable here.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
+  "printer.rhm" open
+  "bool.rhm" open
+  "drule.rhm" open
+  "goal.rhm" open
+
+export:
+  generalize_goal
+  generalization_candidates
+
+// Replace every occurrence of `old` by `new`.
+//
+// Occurrences under a binder are left alone: such a subterm may mention the
+// bound variable, and lifting it out would change what it means.
+fun replace_subterm(old :: Term, new :: Term, t :: Term) :: Term:
+  cond
+  | t == old: new
+  | ~else:
+      match t
+      | Comb(f, x):
+          let f2 = replace_subterm(old, new, f)
+          let x2 = replace_subterm(old, new, x)
+          (if f2 === f && x2 === x | t | Comb(f2, x2))
+      | ~else: t
+
+fun count_occurrences(sub :: Term, t :: Term) :: Int:
+  cond
+  | t == sub: 1
+  | ~else:
+      match t
+      | Comb(f, x): count_occurrences(sub, f) + count_occurrences(sub, x)
+      | ~else: 0
+
+// The application spines of `t`, and of its arguments, recursively.
+//
+// Deliberately *not* every syntactic subterm: walking into `Comb(f, x)` also
+// yields the partial application `f`, and generalizing `app(xs)` out of
+// `app(app(xs, ys), zs)` replaces a piece of a spine by a variable of function
+// type, wrecking the term rather than simplifying it.
+fun subterms(t :: Term) :: List.of(Term):
+  fun walk(t :: Term, acc :~ List) :~ List:
+    let acc2 = (if t is_a Comb && !acc.contains(t) | acc ++ [t] | acc)
+    let (_, args) = strip_comb(t)
+    for values(a :~ List = acc2) (arg in args): walk(arg, a)
+  walk(t, [])
+
+fun is_proper_subterm(sub :: Term, t :: Term) :: Boolean:
+  sub != t && count_occurrences(sub, t) > 0
+
+// Subterms worth generalizing, largest first.
+//
+//   * not a variable -- generalizing one achieves nothing;
+//   * not headed by a constructor -- `cons(a, b)` carries the shape induction
+//     works on, and hiding it behind a variable throws that away;
+//   * occurring at least twice, so that the generalization actually links two
+//     places rather than just renaming one;
+//   * maximal, so that generalizing `size(y)` is preferred to nothing and a
+//     subterm of an already-chosen candidate is not chosen too.
+fun generalization_candidates(ctors :: Set.of(Symbol),
+                              g :: Goal) :: List.of(Term):
+  let parts = g.asms ++ [g.concl]
+  let all_subs = for values(acc :~ List = []) (p in parts):
+                   for values(a :~ List = acc) (s in subterms(p)):
+                     (if a.contains(s) | a | a ++ [s])
+  let counted = all_subs.filter(
+    ~keep: fun (s :: Term):
+             cond
+             | !(s is_a Comb): #false
+             | s == g.concl: #false
+             // A function-typed candidate is a partial application; there is
+             // nothing useful to induct on once it is a variable.
+             | is_fun(type_of(s)): #false
+             | ~else:
+                 let (h, _) = strip_comb(s)
+                 match h
+                 | Const(n, _) when !(n in ctors) && n != c_eq:
+                     (for values(c = 0) (p in parts): c + count_occurrences(s, p)) >= 2
+                 | ~else: #false)
+  // maximal ones only
+  let maximal = counted.filter(
+    ~skip: fun (s :: Term):
+             for any (o in counted): is_proper_subterm(s, o))
+  maximal
+
+fun generalize_goal(thy :: Theory, ctors :: Set.of(Symbol),
+                    g :: Goal) :: maybe(Step):
+  match generalization_candidates(ctors, g)
+  | []: #false
+  | List.cons(t, _):
+      let t :~ Term = t
+      let avoid = g.asms ++ [g.concl]
+      let y = variant(avoid, mk_var(#'g, type_of(t)))
+      let asms2 = g.asms.map(fun (a): replace_subterm(t, y, a))
+      let concl2 = replace_subterm(t, y, g.concl)
+      let sub = note(Goal(asms2, concl2, g.trail),
+                     "generalization (" ++ show(t) ++ " -> "
+                       ++ to_string(y.name) ++ ")")
+      // Discharge the assumptions before generalizing, so that the fresh
+      // variable is not free in any hypothesis, then put them back afterwards.
+      fun justify(ths :: List.of(Thm)) :: Thm:
+        let discharged = for values(acc :~ Thm = ths[0]) (a in asms2.reverse()):
+                           DISCH(thy, a, acc)
+        let specialised = SPEC(thy, t, GEN(thy, y, discharged))
+        for values(acc :~ Thm = specialised) (a in g.asms):
+          MP(thy, acc, ASSUME(thy, a))
+      Step([sub], justify)

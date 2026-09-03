@@ -1,0 +1,367 @@
+#lang rhombus/static
+
+// Algebraic datatypes.
+//
+// ARCHITECTURAL INVARIANT, and the reason this file is a trust boundary:
+//
+//   v0.1 *postulates* the initial-algebra properties of a datatype rather than
+//   deriving them.  For the restricted grammar the positivity checker admits
+//   -- finitary, strictly positive, non-nested sums of products, with at least
+//   one non-recursive constructor -- those postulates are known to be
+//   conservative over HOL.  The entire soundness argument therefore rests on
+//   `check_spec` below, which is why it is written with kernel-grade paranoia
+//   and has its own test file.
+//
+//   `datatype_axioms` is *schematic*: it can emit only instances of the fixed
+//   templates written here, never an arbitrary formula.  Everything above this
+//   module depends solely on the *statements* in `DatatypeThms`, never on how
+//   they were obtained.  Replacing the body of `datatype_axioms` with a real
+//   `define_type` built on `new_basic_type_definition` is therefore a local
+//   change: nothing above it moves.
+//
+// Raw `new_axiom` is not used anywhere else in `type` or `fun`.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
+  "printer.rhm" open
+  "bool.rhm" open
+
+export:
+  Field
+  Ctor
+  DatatypeSpec
+  DatatypeThms
+  check_spec
+  datatype_axioms
+  is_recursive_field
+  ctor_type
+  discriminator_name
+  selector_name
+  nonrecursive_ctors
+  recursive_field_indexes
+
+class Field(name :: Symbol, ty :: HType)
+class Ctor(name :: Symbol, fields :: List.of(Field))
+class DatatypeSpec(name :: Symbol,
+                   params :: List.of(Symbol),
+                   ctors :: List.of(Ctor))
+
+class DatatypeThms(spec :: DatatypeSpec,
+                   // `Ci x... = Ci y... <=> x = y and ...`, one per ctor with fields
+                   injectivity :: Map.of(Symbol, Thm),
+                   // `not (Ci x... === Cj y...)`, keyed by `[i, j]` with i < j
+                   distinctness :: List.of(Thm),
+                   // `forall P. <case> and ... ==> forall x. P(x)`
+                   induction :: Thm,
+                   // `forall x. (exists ... x === C1 ...) or ...`
+                   cases :: Thm,
+                   // `is_Ci(Cj y...) <=> true/false`
+                   discriminators :: List.of(Thm),
+                   // `Ci_f(Ci x...) === x`
+                   selectors :: List.of(Thm),
+                   // `is_Ci(x) ==> Ci(Ci_f1(x), ...) === x`, for destructor elimination
+                   elim_rules :: List.of(Thm))
+
+fun self_type(spec :: DatatypeSpec) :: HType:
+  TyApp(spec.name, spec.params.map(fun (p :: Symbol): TyVar(p)))
+
+fun is_recursive_field(spec :: DatatypeSpec, f :: Field) :: Boolean:
+  f.ty == self_type(spec)
+
+fun ctor_type(spec :: DatatypeSpec, c :: Ctor) :: HType:
+  for values(ty :~ HType = self_type(spec)) (f in c.fields.reverse()):
+    mk_fun(f.ty, ty)
+
+fun discriminator_name(c :: Ctor) :: Symbol:
+  Symbol.from_string("is_" ++ to_string(c.name))
+
+fun selector_name(c :: Ctor, f :: Field) :: Symbol:
+  Symbol.from_string(to_string(c.name) ++ "_" ++ to_string(f.name))
+
+fun nonrecursive_ctors(spec :: DatatypeSpec) :: List.of(Ctor):
+  spec.ctors.filter(~keep: fun (c :: Ctor):
+                             for all (f in c.fields): !is_recursive_field(spec, f))
+
+fun recursive_field_indexes(spec :: DatatypeSpec, c :: Ctor) :: List.of(Int):
+  for values(acc :~ List = []) (f in c.fields, i in List.iota(c.fields.length())):
+    (if is_recursive_field(spec, f) | acc ++ [i] | acc)
+
+// -- the positivity checker: the load-bearing soundness component ----------
+
+fun occurs_in_type(n :: Symbol, t :: HType) :: Boolean:
+  match t
+  | TyVar(_): #false
+  | TyApp(m, args): m == n || (for any (a in args): occurs_in_type(n, a))
+
+// An argument type is admissible when it is either the datatype applied to
+// exactly its own parameters -- a direct recursive occurrence -- or a type in
+// which the datatype does not occur at all.
+//
+// This rejects, deliberately and with a clear message:
+//   * negative occurrences   `type Bad | mk(Bad -> Bad)`      -- inconsistent
+//   * any function type mentioning the datatype                -- ditto
+//   * nested occurrences     `type Rose | node(List(Rose))`    -- sound, but
+//     the induction scheme this file emits would be wrong for it
+//   * infinitary branching   `type Inf | lim(num -> Inf)`      -- inconsistent
+//     without an infinity axiom, which we do not have
+fun check_field_type(spec :: DatatypeSpec, thy :: Theory, c :: Ctor,
+                     f :: Field) :: Void:
+  let self = self_type(spec)
+  cond
+  | f.ty == self: #void
+  | occurs_in_type(spec.name, f.ty):
+      error(~who: #'type,
+            "constructor field mentions the type being defined in a position "
+              ++ "this version cannot admit",
+            error.val(~label: "type", spec.name),
+            error.val(~label: "constructor", c.name),
+            error.val(~label: "field", f.name),
+            error.val(~label: "field type", type_to_string(f.ty)),
+            error.val(~label: "admissible", "either exactly "
+                        ++ type_to_string(self)
+                        ++ ", or a type not mentioning "
+                        ++ to_string(spec.name)))
+  | ~else:
+      // Not recursive: it just has to be a real type over the parameters.
+      check_type(thy, f.ty)
+      for (v in type_vars(f.ty)):
+        unless spec.params.contains(v)
+        | error(~who: #'type, "constructor field mentions an unbound type variable",
+                error.val(~label: "type", spec.name),
+                error.val(~label: "constructor", c.name),
+                error.val(~label: "field", f.name),
+                error.val(~label: "variable", v))
+
+fun check_spec(thy :: Theory, spec :: DatatypeSpec) :: Void:
+  when type_arity(thy, spec.name) != #false
+  | error(~who: #'type, "type constructor is already declared",
+          error.val(~label: "name", spec.name))
+  when spec.ctors.length() == 0
+  | error(~who: #'type, "a datatype needs at least one constructor",
+          error.val(~label: "name", spec.name))
+  // Duplicate parameter names would make the arity meaningless.
+  recur dup (ps :~ List = spec.params, seen :~ List = []):
+    match ps
+    | []: #void
+    | List.cons(p, rest):
+        when seen.contains(p)
+        | error(~who: #'type, "duplicate type parameter",
+                error.val(~label: "name", spec.name),
+                error.val(~label: "parameter", p))
+        dup(rest, List.cons(p, seen))
+  recur dupc (cs :~ List = spec.ctors, seen :~ List = []):
+    match cs
+    | []: #void
+    | List.cons(c, rest):
+        let c :~ Ctor = c
+        when seen.contains(c.name)
+        | error(~who: #'type, "duplicate constructor",
+                error.val(~label: "constructor", c.name))
+        when const_type(thy, c.name) != #false
+        | error(~who: #'type, "constructor name is already a constant",
+                error.val(~label: "constructor", c.name))
+        recur dupf (fs :~ List = c.fields, fseen :~ List = []):
+          match fs
+          | []: #void
+          | List.cons(f, frest):
+              let f :~ Field = f
+              when fseen.contains(f.name)
+              | error(~who: #'type, "duplicate field",
+                      error.val(~label: "constructor", c.name),
+                      error.val(~label: "field", f.name))
+              dupf(frest, List.cons(f.name, fseen))
+        dupc(rest, List.cons(c.name, seen))
+  // The field types are checked against the theory *extended* with the type
+  // being defined, so that a recursive occurrence resolves.
+  let thy_with = new_type(thy, spec.name, spec.params.length())
+  for (c in spec.ctors):
+    let c :~ Ctor = c
+    for (f in c.fields): check_field_type(spec, thy_with, c, f)
+  // HOL types are inhabited by assumption, so a datatype with no base case
+  // would be an inconsistency, not merely an empty type.
+  when nonrecursive_ctors(spec).length() == 0
+  | error(~who: #'type,
+          "every constructor is recursive, so the type would be empty",
+          error.val(~label: "name", spec.name),
+          error.val(~label: "hint", "add a constructor with no field of type "
+                      ++ type_to_string(self_type(spec))))
+
+// -- axiom templates -------------------------------------------------------
+
+fun ctor_const(spec :: DatatypeSpec, c :: Ctor) :: Term:
+  mk_const(c.name, ctor_type(spec, c))
+
+fun ctor_vars(c :: Ctor, prefix :: String) :: List.of(FVar):
+  for List (f in c.fields, i in List.iota(c.fields.length())):
+    mk_var(Symbol.from_string(prefix ++ to_string(i)), (f :~ Field).ty)
+
+fun apply_ctor(spec :: DatatypeSpec, c :: Ctor, vs :: List.of(FVar)) :: Term:
+  list_mk_comb(ctor_const(spec, c), vs.map(fun (v :: FVar): v :~ Term))
+
+fun conj_all(ts :: List.of(Term)) :: Term:
+  match ts
+  | []: tm_true
+  | List.cons(t0, rest):
+      for values(acc :~ Term = t0) (t in rest): mk_conj(acc, t)
+
+fun imp_all(hs :: List.of(Term), c :: Term) :: Term:
+  for values(acc :~ Term = c) (h in hs.reverse()): mk_imp(h, acc)
+
+fun datatype_axioms(thy :: Theory, spec :: DatatypeSpec)
+     :: values(Theory, DatatypeThms):
+  check_spec(thy, spec)
+  let self = self_type(spec)
+
+  // 1. the type constructor
+  let thy = new_type(thy, spec.name, spec.params.length())
+
+  // 2. the value constructors
+  let thy = for values(t :~ Theory = thy) (c in spec.ctors):
+              new_constant(t, (c :~ Ctor).name, ctor_type(spec, c))
+
+  // 3. discriminators and selectors
+  let thy = for values(t :~ Theory = thy) (c in spec.ctors):
+              let c :~ Ctor = c
+              let t = new_constant(t, discriminator_name(c), mk_fun(self, bool))
+              for values(t2 :~ Theory = t) (f in c.fields):
+                let f :~ Field = f
+                new_constant(t2, selector_name(c, f), mk_fun(self, f.ty))
+
+  // 4. injectivity: `Ci x... === Ci y... <=> x0 === y0 and ...`
+  let (thy, injectivity) = build_injectivity(thy, spec)
+
+  // 5. distinctness: `not (Ci x... === Cj y...)` for every i < j
+  let (thy, distinctness) = build_distinctness(thy, spec)
+
+  // 6. structural induction
+  let (thy, induction) = build_induction(thy, spec)
+
+  // 7. exhaustion
+  let (thy, cases) = build_cases(thy, spec)
+
+  // 8. discriminator and selector equations
+  let (thy, discriminators) = build_discriminators(thy, spec)
+  let (thy, selectors) = build_selectors(thy, spec)
+
+  // 9. the destructor-elimination rules the waterfall's second stage needs
+  let (thy, elim_rules) = build_elim_rules(thy, spec)
+
+  values(thy,
+         DatatypeThms(spec, injectivity, distinctness, induction, cases,
+                      discriminators, selectors, elim_rules))
+
+fun build_injectivity(thy :: Theory, spec :: DatatypeSpec)
+     :: values(Theory, Map.of(Symbol, Thm)):
+  for values(t :~ Theory = thy, acc :~ Map = {}) (c in spec.ctors):
+    let c :~ Ctor = c
+    cond
+    | c.fields.length() == 0: values(t, acc)
+    | ~else:
+        let xs = ctor_vars(c, "x")
+        let ys = ctor_vars(c, "y")
+        let lhs = mk_eq(apply_ctor(spec, c, xs), apply_ctor(spec, c, ys))
+        let rhs = conj_all(for List (x in xs, y in ys): mk_eq(x, y))
+        let (t2, th) = new_axiom(t, mk_forall_list(xs ++ ys, mk_eq(lhs, rhs)))
+        values(t2, acc ++ {c.name: th})
+
+fun build_distinctness(thy :: Theory, spec :: DatatypeSpec)
+     :: values(Theory, List.of(Thm)):
+  let n = spec.ctors.length()
+  let pairs = for values(acc :~ List = []) (ci in spec.ctors, i in List.iota(n)):
+                for values(a :~ List = acc) (cj in spec.ctors, j in List.iota(n)):
+                  (if i < j | a ++ [[ci, cj]] | a)
+  for values(t :~ Theory = thy, acc :~ List = []) ([ci, cj] in pairs):
+    let ci :~ Ctor = ci
+    let cj :~ Ctor = cj
+    let xs = ctor_vars(ci, "x")
+    let ys = ctor_vars(cj, "y")
+    let stmt = mk_neg(mk_eq(apply_ctor(spec, ci, xs), apply_ctor(spec, cj, ys)))
+    let (t2, th) = new_axiom(t, mk_forall_list(xs ++ ys, stmt))
+    values(t2, acc ++ [th])
+
+// `forall P. (case for C1) and ... ==> forall x. P(x)`, where the case for
+// `C(x0..xn)` is `forall x0..xn. P(xi) and ... ==> P(C(x0..xn))` over the
+// recursive fields.
+fun build_induction(thy :: Theory, spec :: DatatypeSpec) :: values(Theory, Thm):
+  let self = self_type(spec)
+  let bigP = mk_var(#'P, mk_fun(self, bool))
+  let cases = for List (c in spec.ctors):
+                let c :~ Ctor = c
+                let xs = ctor_vars(c, "x")
+                let ihs = for values(acc :~ List = []) (x in xs):
+                            let x :~ FVar = x
+                            (if x.ty == self | acc ++ [mk_comb(bigP, x)] | acc)
+                let concl = mk_comb(bigP, apply_ctor(spec, c, xs))
+                mk_forall_list(xs, imp_all(ihs, concl))
+  let xv = mk_var(#'x, self)
+  let stmt = mk_forall(bigP, mk_imp(conj_all(cases),
+                                    mk_forall(xv, mk_comb(bigP, xv))))
+  new_axiom(thy, stmt)
+
+// `forall x. (exists x0... x === C1(x0...)) or ...`
+fun build_cases(thy :: Theory, spec :: DatatypeSpec) :: values(Theory, Thm):
+  let self = self_type(spec)
+  let xv = mk_var(#'x, self)
+  let alts = for List (c in spec.ctors):
+               let c :~ Ctor = c
+               let xs = ctor_vars(c, "a")
+               let body = mk_eq(xv, apply_ctor(spec, c, xs))
+               for values(acc :~ Term = body) (v in xs.reverse()):
+                 mk_exists(v, acc)
+  let disj = (match alts
+              | List.cons(a0, rest):
+                  for values(acc :~ Term = a0) (a in rest): mk_disj(acc, a))
+  new_axiom(thy, mk_forall(xv, disj))
+
+// `is_Ci(Cj(y...)) <=> true` when i = j, `<=> false` otherwise.
+fun build_discriminators(thy :: Theory, spec :: DatatypeSpec)
+     :: values(Theory, List.of(Thm)):
+  let self = self_type(spec)
+  for values(t :~ Theory = thy, acc :~ List = []) (ci in spec.ctors):
+    let ci :~ Ctor = ci
+    let disc = mk_const(discriminator_name(ci), mk_fun(self, bool))
+    for values(t2 :~ Theory = t, a2 :~ List = acc) (cj in spec.ctors):
+      let cj :~ Ctor = cj
+      let ys = ctor_vars(cj, "y")
+      let applied = mk_comb(disc, apply_ctor(spec, cj, ys))
+      let rhs = (if ci.name == cj.name | tm_true | tm_false)
+      let (t3, th) = new_axiom(t2, mk_forall_list(ys, mk_eq(applied, rhs)))
+      values(t3, a2 ++ [th])
+
+// `Ci_f(Ci(x0..xn)) === xk`.  Applied to a different constructor the selector
+// is simply underspecified, which is exactly what an axiomatic presentation
+// should say about it.
+fun build_selectors(thy :: Theory, spec :: DatatypeSpec)
+     :: values(Theory, List.of(Thm)):
+  let self = self_type(spec)
+  for values(t :~ Theory = thy, acc :~ List = []) (c in spec.ctors):
+    let c :~ Ctor = c
+    let xs = ctor_vars(c, "x")
+    let nf = c.fields.length()
+    for values(t2 :~ Theory = t, a2 :~ List = acc) (f in c.fields, i in List.iota(nf)):
+      let f :~ Field = f
+      let sel = mk_const(selector_name(c, f), mk_fun(self, f.ty))
+      let applied = mk_comb(sel, apply_ctor(spec, c, xs))
+      let (t3, th) = new_axiom(t2, mk_forall_list(xs, mk_eq(applied, xs[i])))
+      values(t3, a2 ++ [th])
+
+// `is_Ci(x) ==> Ci(Ci_f0(x), ...) === x`.  These drive the waterfall's
+// destructor-elimination stage: they are what lets a goal about `hd(x)` and
+// `tl(x)` be turned into a goal about `cons(a, b)`.
+fun build_elim_rules(thy :: Theory, spec :: DatatypeSpec)
+     :: values(Theory, List.of(Thm)):
+  let self = self_type(spec)
+  let xv = mk_var(#'x, self)
+  for values(t :~ Theory = thy, acc :~ List = []) (c in spec.ctors):
+    let c :~ Ctor = c
+    let disc = mk_const(discriminator_name(c), mk_fun(self, bool))
+    let parts = for List (f in c.fields):
+                  let f :~ Field = f
+                  mk_comb(mk_const(selector_name(c, f), mk_fun(self, f.ty)), xv)
+    let rebuilt = list_mk_comb(ctor_const(spec, c), parts)
+    let stmt = mk_forall(xv, mk_imp(mk_comb(disc, xv), mk_eq(rebuilt, xv)))
+    let (t2, th) = new_axiom(t, stmt)
+    values(t2, acc ++ [th])

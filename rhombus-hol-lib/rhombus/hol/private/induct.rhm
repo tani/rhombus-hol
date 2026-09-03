@@ -1,0 +1,161 @@
+#lang rhombus/static
+
+// The waterfall's last stage: structural induction.
+//
+// Every scheme this version uses is the datatype's own induction axiom,
+// instantiated at a predicate and beta-reduced.  Instantiating a
+// function-typed variable is something the kernel's `INST` already does, so
+// this adds no new trust; and because the scheme comes from the datatype
+// rather than from a bespoke generator, there is nothing here that can be
+// subtly wrong about a datatype the generator has not seen.
+//
+// The predicate is `\v. concl`, with the goal's *other* free variables left
+// free.  That gives the induction hypothesis exactly the shape the simplifier
+// wants -- an equation about the immediate subterm, in the same context.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
+  "printer.rhm" open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "datatype.rhm" open
+  "terminate.rhm" open
+  "recdef.rhm" open
+  "goal.rhm" open
+
+export:
+  induction_step
+  candidate_vars
+  inductive_type_name
+
+// The datatype a variable ranges over, or `#false` if it is not of one.
+fun inductive_type_name(v :: FVar) :: maybe(Symbol):
+  match v.ty
+  | TyApp(n, _): n
+  | ~else: #false
+
+// Split a conjunction that `conj_all` built by folding left, into exactly `n`
+// parts.
+//
+// `strip_conj` is the wrong tool here: a *case* can itself be a conjunction --
+// the goal `f(xs) === a and g(xs) === b` has a conjunctive base case -- and
+// flattening would then hand back more parts than there are constructors, each
+// mis-associated with the wrong case.
+fun split_cases(t :: Term, n :: Int) :: List.of(Term):
+  cond
+  | n <= 1: [t]
+  | ~else:
+      match dest_conj(t)
+      | [l, r]: split_cases(l, n - 1) ++ [r]
+      | ~else:
+          error(~who: #'induct, "malformed induction scheme",
+                error.val(~label: "term", show(t)))
+
+// Peel the leading universal quantifiers of `t`, choosing names that clash
+// with nothing in `avoid`.
+fun open_foralls(avoid :: List.of(Term), t :: Term)
+     :: values(List.of(FVar), Term):
+  recur loop (t = t, avoid :~ List = avoid, acc :~ List = []):
+    match dest_forall(t)
+    | #false: values(acc, t)
+    | [v0, body0]:
+        let v0 :~ FVar = v0
+        let v = variant(avoid, v0)
+        let body = (cond
+                    | v == v0: body0
+                    | ~else:
+                        let (_, absterm) = dest_comb(t)
+                        open_abs(v, absterm))
+        loop(body, avoid ++ [v :~ Term], acc ++ [v])
+
+fun strip_imps(t :: Term) :: values(List.of(Term), Term):
+  recur loop (t = t, acc :~ List = []):
+    match dest_imp(t)
+    | [a, b]: loop(b, acc ++ [a])
+    | ~else: values(acc, t)
+
+// Induct on `v`, which must be of a declared datatype.
+fun induction_step(thy :: Theory, dtms :: DatatypeThms, v :: FVar,
+                   g :: Goal) :: Step:
+  let spec = dtms.spec
+  let self = TyApp(spec.name, spec.params.map(fun (p :: Symbol): TyVar(p)))
+  let tyin = (match type_match(self, v.ty, {})
+              | #false:
+                  error(~who: #'induct,
+                        "variable is not of the datatype being inducted on",
+                        error.val(~label: "variable", show_typed(v)),
+                        error.val(~label: "datatype", spec.name))
+              | m: m)
+  let ax = INST_TYPE(thy, tyin, dtms.induction)
+  let pred = mk_abs(v, g.concl)
+  let sp = BETA_RULE(thy, SPEC(thy, pred, ax))
+  let [cases_term, _] = (match dest_imp(concl_of(sp))
+                         | #false:
+                             error(~who: #'induct, "malformed induction scheme")
+                         | pair: pair)
+  let case_terms = split_cases(cases_term, spec.ctors.length())
+
+  // Turn each case into a goal, remembering what has to be put back.
+  let avoid0 = g.asms ++ [g.concl]
+  let prepared = for List (ct in case_terms, c in spec.ctors):
+                   let (vars, body0) = open_foralls(avoid0, ct)
+                   let (ihs, body) = strip_imps(body0)
+                   [vars, ihs, body, (c :~ Ctor).name]
+  let subgoals = for List ([vars, ihs, body, cname] in prepared):
+                   note(Goal(g.asms ++ (ihs :~ List), body, g.trail),
+                        "induction on " ++ to_string(v.name)
+                          ++ " (case " ++ to_string(cname) ++ ")")
+
+  fun close_case(th :: Thm, vars :~ List, ihs :~ List) :: Thm:
+    let discharged = for values(acc :~ Thm = th) (ih in ihs.reverse()):
+                       DISCH(thy, ih, acc)
+    GENL(thy, vars, discharged)
+
+  Step(subgoals,
+       fun (ths :: List.of(Thm)):
+         let case_thms = for List (th in ths, pr in prepared):
+                           close_case(th, (pr :~ List)[0], (pr :~ List)[1])
+         SPEC(thy, v, MP(thy, sp, LIST_CONJ(thy, case_thms))))
+
+// Free variables of the goal that could be inducted on, best first.
+//
+// A variable scores a point for each recursive function applied to it in a
+// position that function actually recurses on -- the same `RecursionInfo` the
+// termination checker produced, so the prover inducts the way the definition
+// recurses.
+fun candidate_vars(funs :: Map.of(Symbol, FunInfo),
+                   dts :: Map.of(Symbol, DatatypeThms),
+                   g :: Goal) :: List.of(FVar):
+  let vars = free_vars(g.concl).filter(
+    ~keep: fun (v :: FVar):
+             match inductive_type_name(v)
+             | #false: #false
+             | n: dts.get(n, #false) != #false)
+  let scored = for List (v in vars): [v, score(funs, g.concl, v :~ FVar)]
+  let ranked = scored.sort(fun ([_, a], [_, b]): (a :~ Int) > (b :~ Int))
+  // A variable no recursive function touches is a poor guess, but it is still
+  // better than giving up when it is the only one.
+  ranked.map(fun ([v, _]): v :~ FVar)
+
+fun score(funs :: Map.of(Symbol, FunInfo), t :: Term, v :: FVar) :: Int:
+  fun walk(t :: Term, acc :: Int) :: Int:
+    let acc2:
+      let (head, args) = strip_comb(t)
+      match head
+      | Const(n, _):
+          match funs.get(n, #false)
+          | #false: acc
+          | fi:
+              let fi :~ FunInfo = fi
+              for values(a :~ Int = acc) (i in fi.recinfo.positions):
+                (if i < args.length() && args[i] == v | a + 1 | a)
+      | ~else: acc
+    match t
+    | Comb(f, x): walk(x, walk(f, acc2))
+    | Abs(_, b): walk(b, acc2)
+    | ~else: acc2
+  walk(t, 0)

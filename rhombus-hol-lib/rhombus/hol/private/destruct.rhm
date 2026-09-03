@@ -1,0 +1,170 @@
+#lang rhombus/static
+
+// The waterfall's second stage: destructor elimination.
+//
+// A goal that talks about `cons_head(x)` and `cons_tail(x)` is really a goal
+// about a `cons`.  Replacing `x` by `cons(a, b)` for fresh `a` and `b` lets
+// the selector equations fire and turns the goal into one the simplifier can
+// work on.
+//
+// The datatype's `elim_rules` -- `is_C(x) ==> C(C_f0(x), ...) === x` -- are
+// what justify the replacement, and they are guarded: eliminating on `x`
+// requires knowing that `x` really is a `C`.  This version fires only when
+// that discriminator is already among the assumptions, rather than trying to
+// derive it or splitting into cases; a goal that needs the case split is left
+// for the simplifier's own analysis to reach first.
+//
+// None of the specification's examples need this stage: their functions are
+// defined by matching, so they present constructor patterns, never selector
+// applications.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
+  "printer.rhm" open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "datatype.rhm" open
+  "goal.rhm" open
+
+export:
+  eliminate_goal
+  elimination_candidates
+
+// `[variable, constructor]` pairs: a variable the goal applies a selector to,
+// whose discriminator the assumptions already provide.
+fun elimination_candidates(dts :: Map.of(Symbol, DatatypeThms),
+                           g :: Goal) :: List:
+  let parts = g.asms ++ [g.concl]
+  for values(acc :~ List = []) ((_, dtms) in dts):
+    let dtms :~ DatatypeThms = dtms
+    let spec = dtms.spec
+    for values(a :~ List = acc) (c in spec.ctors):
+      let c :~ Ctor = c
+      cond
+      | (c :~ Ctor).fields.length() == 0: a
+      | ~else:
+          let disc = discriminator_name(c)
+          let sels = c.fields.map(fun (f :: Field): selector_name(c, f))
+          for values(a2 :~ List = a) (p in parts):
+            for values(a3 :~ List = a2) (v in selector_targets(sels, p)):
+              let guard = mk_comb(mk_const(disc, mk_fun((v :~ FVar).ty, bool)),
+                                  v)
+              cond
+              | !g.asms.contains(guard): a3
+              | a3.contains([v, c]): a3
+              | ~else: a3 ++ [[v, c]]
+
+// Variables that some selector in `sels` is applied to.
+fun selector_targets(sels :: List.of(Symbol), t :: Term) :: List.of(FVar):
+  fun walk(t :: Term, acc :~ List) :~ List:
+    let acc2:
+      match t
+      | Comb(Const(n, _), (u :: FVar)) when sels.contains(n):
+          (if acc.contains(u) | acc | acc ++ [u])
+      | ~else: acc
+    match t
+    | Comb(f, x): walk(x, walk(f, acc2))
+    | Abs(_, b): walk(b, acc2)
+    | ~else: acc2
+  walk(t, [])
+
+fun eliminate_goal(thy :: Theory, dts :: Map.of(Symbol, DatatypeThms),
+                   g :: Goal) :: maybe(Step):
+  match elimination_candidates(dts, g)
+  | []: #false
+  | List.cons([v, c], _):
+      let v :~ FVar = v
+      let c :~ Ctor = c
+      let avoid = g.asms ++ [g.concl]
+      // Fresh variables for the constructor's fields.
+      // The datatype is declared over type variables; the goal is about an
+      // instance of it, so every field type has to be instantiated to match.
+      let tyin = tyin_for(dts, v)
+      let nf = c.fields.length()
+      let (fresh, _):
+        for values(acc :~ List = [], av :~ List = avoid) (f in c.fields,
+                                                          i in List.iota(nf)):
+          let nm = Symbol.from_string("d" ++ to_string(i))
+          let fty = type_subst(tyin, (f :~ Field).ty)
+          let w = variant(av, mk_var(nm, fty))
+          values(acc ++ [w], av ++ [w :~ Term])
+      let ctor_term = list_mk_comb(
+        mk_const(c.name, type_subst(tyin_for(dts, v), ctor_type_of(dts, v, c))),
+        fresh.map(fun (w :: FVar): w :~ Term))
+      let theta = [[ctor_term, v :~ Term]]
+      let asms2 = g.asms.map(fun (a): inst_fvar(theta, a))
+      let concl2 = inst_fvar(theta, g.concl)
+      let sub = note(Goal(asms2, concl2, g.trail),
+                     "destructor elimination (" ++ to_string(v.name)
+                       ++ " -> " ++ to_string(c.name) ++ ")")
+      // From a proof for the fresh constructor application, recover the goal
+      // by generalizing the fields and specialising them at the selectors,
+      // then rewriting `C(C_f0(v), ...)` back to `v` with the guarded
+      // elimination rule.
+      fun justify(ths :: List.of(Thm)) :: Thm:
+        let discharged = for values(acc :~ Thm = ths[0]) (a in asms2.reverse()):
+                           DISCH(thy, a, acc)
+        let generalised = GENL(thy, fresh, discharged)
+        let sel_terms = c.fields.map(
+          fun (f :: Field):
+            let fty = type_subst(tyin, (f :~ Field).ty)
+            mk_comb(mk_const(selector_name(c, f), mk_fun(v.ty, fty)), v))
+        let at_selectors = SPECL(thy, sel_terms, generalised)
+        // `is_C(v) |- C(C_f0(v), ...) === v`
+        let elim = elim_theorem_for(thy, dts, v, c)
+        let rebuilt = CONV_RULE(ONCE_DEPTH_CONV(rewrite_with(elim)),
+                                thy, at_selectors)
+        let restored = (match rebuilt
+                        | #false: at_selectors
+                        | r :~ Thm: r)
+        for values(acc :~ Thm = restored) (a in g.asms):
+          MP(thy, acc, ASSUME(thy, a))
+      Step([sub], justify)
+
+// The type instantiation carrying the datatype's declaration to the instance
+// the goal is about.
+fun tyin_for(dts :: Map.of(Symbol, DatatypeThms), v :: FVar)
+     :: Map.of(Symbol, HType):
+  let tyname = (match v.ty | TyApp(n, _): n | ~else: #'unknown)
+  let spec = (dts[tyname] :~ DatatypeThms).spec
+  let self = TyApp(spec.name, spec.params.map(fun (p :: Symbol): TyVar(p)))
+  match type_match(self, v.ty, {})
+  | #false: {}
+  | m: m
+
+fun ctor_type_of(dts :: Map.of(Symbol, DatatypeThms), v :: FVar,
+                 c :: Ctor) :: HType:
+  let tyname = (match v.ty | TyApp(n, _): n | ~else: #'unknown)
+  ctor_type((dts[tyname] :~ DatatypeThms).spec, c)
+
+// The datatype's elimination rule for `c`, specialised to `v` and with its
+// guard undischarged, so that it is available as a rewrite from
+// `C(C_f0(v), ...)` to `v`.
+fun elim_theorem_for(thy :: Theory, dts :: Map.of(Symbol, DatatypeThms),
+                     v :: FVar, c :: Ctor) :: Thm:
+  let tyname = (match v.ty | TyApp(n, _): n | ~else: #'unknown)
+  let dtms :~ DatatypeThms = dts[tyname]
+  let idx = index_of_ctor(dtms.spec, c.name)
+  let rule = dtms.elim_rules[idx]
+  let self = TyApp(dtms.spec.name,
+                   dtms.spec.params.map(fun (p :: Symbol): TyVar(p)))
+  let tyin = (match type_match(self, v.ty, {}) | m: m)
+  UNDISCH(thy, SPEC(thy, v, INST_TYPE(thy, tyin, rule)))
+
+fun index_of_ctor(spec :: DatatypeSpec, name :: Symbol) :: Int:
+  recur loop (i = 0):
+    cond
+    | i >= spec.ctors.length(): 0
+    | (spec.ctors[i] :~ Ctor).name == name: i
+    | ~else: loop(i + 1)
+
+// A single-shot conversion built from an equational theorem.
+fun rewrite_with(th :: Thm):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match dest_eq(concl_of(th))
+    | [l, _] when l == t: th
+    | ~else: #false

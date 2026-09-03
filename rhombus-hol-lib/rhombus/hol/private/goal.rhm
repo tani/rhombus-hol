@@ -1,0 +1,105 @@
+#lang rhombus/static
+
+// Goals, proof steps, and the tree they build.
+//
+// A goal is a sequent: assumptions and a conclusion.  The specification's
+// pipeline is described in terms of ACL2 clauses, and clauses are the right
+// shape once case splitting on `if` matters; sequents are the same thing with
+// less bookkeeping, and every stage this version has -- simplification,
+// destructor elimination, generalization, induction -- is naturally a
+// sequent-to-sequents step.  A clause layer can be added later without
+// disturbing the driver, because the driver only ever sees `Step`.
+//
+// A `Step` carries its own justification: a function from proofs of the
+// subgoals to a proof of the parent.  **That is the whole anti-bypass
+// argument.** The only way a `Thm` comes out of the prover is by composing
+// `justify` functions, each written in terms of derived rules, each of which
+// bottoms out in the kernel's ten primitives.  There is no other exit.
+//
+// The tree is built first and run second.  A failed proof then pays no kernel
+// cost for the branches that did succeed -- it just walks the tree collecting
+// the open goals for the error message.
+
+import:
+  "term.rhm" open
+  "kernel.rhm" open
+  "printer.rhm" open
+
+export:
+  Goal
+  Step
+  ProofNode
+  Proved
+  Derived
+  Open
+  mk_goal
+  note
+  run
+  residues
+  is_closed
+  show_goal
+
+class Goal(asms :: List.of(Term),
+           concl :: Term,
+           // one line per stage that touched this goal, oldest first; this is
+           // what turns a stuck residue into an actionable message
+           trail :: List.of(String))
+
+class Step(subgoals :: List.of(Goal),
+           justify :: (List.of(Thm) -> Thm))
+
+class.together:
+  class ProofNode():
+    nonfinal
+  class Proved(thm :: Thm):
+    extends ProofNode
+  class Derived(step :: Step, kids :: List.of(ProofNode)):
+    extends ProofNode
+  class Open(goal :: Goal):
+    extends ProofNode
+
+fun mk_goal(asms :: List.of(Term), concl :: Term) :: Goal:
+  Goal(asms, concl, [])
+
+fun note(g :: Goal, line :~ String) :: Goal:
+  Goal(g.asms, g.concl, g.trail ++ [line])
+
+// `#false` when any leaf is still open.
+fun run(n :: ProofNode) :: maybe(Thm):
+  match n
+  | Proved(th): th
+  | Open(_): #false
+  | Derived(step, kids):
+      recur loop (ks :~ List = kids, acc :~ List = []):
+        match ks
+        | []: step.justify(acc)
+        | List.cons(k, rest):
+            match run(k :~ ProofNode)
+            | #false: #false
+            | th: loop(rest, acc ++ [th])
+
+fun is_closed(n :: ProofNode) :: Boolean:
+  match n
+  | Proved(_): #true
+  | Open(_): #false
+  | Derived(_, kids): for all (k in kids): is_closed(k)
+
+fun residues(n :: ProofNode) :: List.of(Goal):
+  match n
+  | Proved(_): []
+  | Open(g): [g]
+  | Derived(_, kids):
+      for values(acc :~ List = []) (k in kids): acc ++ residues(k)
+
+fun show_goal(g :: Goal) :~ String:
+  let steps = g.trail.map(fun (l :~ String): "    " ++ l)
+  let head:
+    cond
+    | steps.length() == 0: ""
+    | ~else: "  after\n" ++ String.join(steps, "\n") ++ "\n"
+  let asm_lines = g.asms.map(fun (a): "    assuming " ++ show(a))
+  let asms:
+    cond
+    | asm_lines.length() == 0: ""
+    | ~else: String.join(asm_lines, "\n") ++ "\n"
+  head ++ asms ++ "    " ++ show(g.concl)

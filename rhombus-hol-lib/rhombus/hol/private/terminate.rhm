@@ -1,0 +1,104 @@
+#lang rhombus/static
+
+// Termination checking for recursive definitions.
+//
+// The output is a `RecursionInfo`, and it is *also* the input to the
+// induction-scheme generator: the argument position a function recurses on is
+// the position the prover should induct on.  Computing it twice would let the
+// two drift apart, so it is computed once, here.
+//
+// v0.1 checks structural descent only.  That is purely syntactic and
+// generates no proof obligations, and it covers every function in the
+// specification's examples.  Measure-based termination lives in `measure.rhm`
+// and discharges its obligations through the waterfall.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "printer.rhm" open
+
+export:
+  RecursionInfo
+  CallSite
+  check_termination
+  descends_at
+
+class CallSite(args :: List.of(Term))
+
+class RecursionInfo(// argument positions that strictly decrease; empty for a
+                    // non-recursive definition
+                    positions :: List.of(Int),
+                    method :: Symbol,          // #'none | #'structural
+                    sites :: List.of(CallSite))
+
+// `arg` is a proper constructor-subterm of `pat`: `pat` is `C(v0, ..., vk)`
+// and `arg` is one of the `vi`, at the same type.
+//
+// This is deliberately shallow.  A deeper notion of subterm would admit
+// definitions whose recursion the one-constructor-deep induction schemes of
+// this version cannot follow, so the checker would be accepting functions the
+// prover could not reason about.
+fun descends_at(pat :: Term, arg :: Term) :: Boolean:
+  match pat
+  | FVar(_, _): #false
+  | ~else:
+      let (head, fields) = strip_comb(pat)
+      match head
+      | Const(_, _): fields.contains(arg) && type_of(arg) == type_of(pat)
+      | ~else: #false
+
+// Look for one argument position that descends at every recursive call in
+// every clause.
+//
+// The clauses arrive as `[patterns, body]` pairs rather than as the
+// `FunSpec` that `recdef.rhm` owns: the induction-scheme generator needs this
+// module too, and passing the two fields it reads keeps the dependency going
+// one way only.
+fun check_termination(who :: Symbol,
+                      name :: Symbol,
+                      arity :: Int,
+                      clauses :: List,
+                      fn :: Term) :: RecursionInfo:
+  // Collect every recursive call together with the clause patterns it sits
+  // under, so that a failure can point at the offending call.
+  let all_sites = for values(acc :~ List = []) ([pats, rhs] in clauses):
+                    let calls = calls_in(fn, arity, rhs)
+                    acc ++ calls.map(fun (args): [pats, args])
+  cond
+  | all_sites.length() == 0:
+      RecursionInfo([], #'none, [])
+  | ~else:
+      let good = for values(acc :~ List = []) (i in List.iota(arity)):
+                   let ok = for all ([pats, args] in all_sites):
+                              descends_at((pats :~ List)[i], (args :~ List)[i])
+                   (if ok | acc ++ [i] | acc)
+      cond
+      | good.length() > 0:
+          RecursionInfo(good, #'structural,
+                        all_sites.map(fun ([_, args]): CallSite(args)))
+      | ~else:
+          let [pats, args] = all_sites[0]
+          error(~who: who,
+                "cannot see that the definition terminates",
+                error.val(~label: "name", name),
+                error.val(~label: "clause",
+                          show(list_mk_comb(fn, pats :~ List))),
+                error.val(~label: "recursive call",
+                          show(list_mk_comb(fn, args :~ List))),
+                error.val(~label: "hint",
+                          "no argument position is a strict constructor "
+                            ++ "subterm of the corresponding pattern in every "
+                            ++ "recursive call"))
+
+fun calls_in(fn :: Term, arity :: Int, t :: Term) :: List.of(List.of(Term)):
+  fun walk(t :: Term, acc :~ List) :~ List:
+    let acc2:
+      let (head, args) = strip_comb(t)
+      cond
+      | head == fn && args.length() == arity: acc ++ [args]
+      | ~else: acc
+    match t
+    | Comb(f, x): walk(x, walk(f, acc2))
+    | Abs(_, b): walk(b, acc2)
+    | ~else: acc2
+  walk(t, [])

@@ -1,0 +1,488 @@
+#lang rhombus/static
+
+// The derived rules: everything the prover reasons with, built from the ten
+// primitives.
+//
+// Nothing here extends the trusted base.  Each rule is a recipe for composing
+// kernel calls, so a bug in this file can make a proof *fail*, never make an
+// unsound theorem.  That asymmetry is the whole point of the LCF design and is
+// why this layer can be written in a straightforward style.
+//
+// Every theory used with these rules must be an extension of `base_theory()`:
+// the connective definitions live there, and the kernel's lineage check will
+// reject a theorem from an unrelated theory.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
+  "printer.rhm" open
+  "bool.rhm" open
+  "conv.rhm" open
+
+export:
+  TRUTH
+  EQT_INTRO
+  EQT_ELIM
+  EQF_INTRO
+  EQF_ELIM
+  CONJ
+  CONJUNCT1
+  CONJUNCT2
+  CONJUNCTS
+  LIST_CONJ
+  MP
+  DISCH
+  DISCH_ALL
+  UNDISCH
+  UNDISCH_ALL
+  IMP_TRANS
+  IMP_ANTISYM_RULE
+  EQ_IMP_RULE
+  GEN
+  GENL
+  GEN_ALL
+  SPEC
+  SPECL
+  SPEC_ALL
+  DISJ1
+  DISJ2
+  DISJ_CASES
+  NOT_INTRO
+  NOT_ELIM
+  CONTR
+  CCONTR
+  EXISTS
+  CHOOSE
+  ETA_CONV
+  PROVE_HYP
+  ADD_ASSUM
+  unfold_def
+
+def bool_ty_ :: HType = TyApp(ty_bool, [])
+
+// Under a locally nameless representation there is no `retype` step here.
+// Rebuilding a term from a definition used to risk a renamed binder, so every
+// such theorem had to be coerced into the alpha-equal shape the caller
+// expected; now `mk_abs` and the definition's own `Abs` are literally the same
+// syntax tree, and `EQ_MP` matches on the nose.
+
+// `|- c = \x y. body` applied to arguments, beta-reduced: `|- c a b = ...`.
+fun unfold_def(thy :: Theory, def_th :: Thm, args :: List.of(Term)) :: Thm:
+  for values(th :~ Thm = def_th) (a in args):
+    let t1 = AP_THM(thy, th, a)
+    match BETA_CONV(thy, rhs_of(t1))
+    | #false: t1
+    | b :~ Thm: TRANS(t1, b)
+
+fun eq_term(a :: Term, b :: Term) :: Boolean: a == b
+
+fun unfold_conj(thy :: Theory, p :: Term, q :: Term) :: Thm:
+  unfold_def(thy, base_defs(c_conj), [p, q])
+
+fun unfold_imp(thy :: Theory, p :: Term, q :: Term) :: Thm:
+  unfold_def(thy, base_defs(c_imp), [p, q])
+
+fun unfold_disj(thy :: Theory, p :: Term, q :: Term) :: Thm:
+  unfold_def(thy, base_defs(c_disj), [p, q])
+
+fun unfold_neg(thy :: Theory, p :: Term) :: Thm:
+  unfold_def(thy, base_defs(c_neg), [p])
+
+// The quantifiers are polymorphic, so the definition must be specialised to
+// the bound variable's type before it is applied.
+fun unfold_forall(thy :: Theory, pred :: Term) :: Thm:
+  let (dom, _) = dest_fun(type_of(pred))
+  unfold_def(thy, INST_TYPE(thy, {#'a: dom}, base_defs(c_forall)), [pred])
+
+fun unfold_exists(thy :: Theory, pred :: Term) :: Thm:
+  let (dom, _) = dest_fun(type_of(pred))
+  unfold_def(thy, INST_TYPE(thy, {#'a: dom}, base_defs(c_exists)), [pred])
+
+fun unfold_false(thy :: Theory) :: Thm:
+  base_defs(c_false)
+
+// -- truth -----------------------------------------------------------------
+
+// `|- true`, from `true = ((\p. p) = (\p. p))` and reflexivity.
+fun TRUTH(thy :: Theory) :: Thm:
+  let p = mk_var(#'p, bool_ty_)
+  let idf = mk_abs(p, p)
+  EQ_MP(SYM(thy, base_defs(c_true)), REFL(thy, idf))
+
+// A |- t   ==>   A |- t <=> true
+fun EQT_INTRO(thy :: Theory, th :: Thm) :: Thm:
+  DEDUCT_ANTISYM_RULE(th, TRUTH(thy))
+
+// A |- t <=> true   ==>   A |- t
+fun EQT_ELIM(thy :: Theory, th :: Thm) :: Thm:
+  EQ_MP(SYM(thy, th), TRUTH(thy))
+
+// -- conjunction -----------------------------------------------------------
+//
+// `p and q` is `(\f. f p q) = (\f. f true true)`.  To introduce it, rewrite
+// both `p` and `q` to `true` inside the abstraction; to eliminate it, apply
+// both sides to a projection.
+
+// A |- p   B |- q   ==>   A u B |- p and q
+fun CONJ(thy :: Theory, thp :: Thm, thq :: Thm) :: Thm:
+  let p = concl_of(thp)
+  let q = concl_of(thq)
+  let ufd = unfold_conj(thy, p, q)
+  let target = rhs_of(ufd)
+  // Take the binder from the unfolded definition, so that a rename forced by
+  // capture avoidance is respected.
+  let [labs, _] = (match dest_eq(target) | l: l)
+  let (fv, _) = dest_abs(labs)
+  let e1 = EQT_INTRO(thy, thp)
+  let e2 = EQT_INTRO(thy, thq)
+  let body_eq = MK_COMB(AP_TERM(thy, fv, e1), e2)
+  let abs_th = ABS(thy, fv, body_eq)
+  EQ_MP(SYM(thy, ufd), abs_th)
+
+fun project(thy :: Theory, th :: Thm, take_first :: Boolean) :: Thm:
+  match dest_conj(concl_of(th))
+  | #false:
+      error(~who: (if take_first | #'CONJUNCT1 | #'CONJUNCT2),
+            "theorem is not a conjunction",
+            error.val(~label: "theorem", show(concl_of(th))))
+  | [p, q]:
+      let ufd = unfold_conj(thy, p, q)
+      let eqth = EQ_MP(ufd, th)
+      let a = mk_var(#'a, bool_ty_)
+      let b = mk_var(#'b, bool_ty_)
+      let sel = mk_abs(a, mk_abs(b, (if take_first | a | b)))
+      let applied = AP_THM(thy, eqth, sel)
+      // Reduce only the two applications we just made: a full beta traversal
+      // would also reduce redexes inside `p` and `q`, changing the very terms
+      // the caller is trying to project out.
+      match BINOP_CONV(HEAD_BETA_CONV)(thy, concl_of(applied))
+      | #false: error(~who: #'project, "beta reduction failed")
+      | red :~ Thm: EQT_ELIM(thy, EQ_MP(red, applied))
+
+fun CONJUNCT1(thy :: Theory, th :: Thm) :: Thm: project(thy, th, #true)
+fun CONJUNCT2(thy :: Theory, th :: Thm) :: Thm: project(thy, th, #false)
+
+// Flatten a nested conjunction into its leaves.
+fun CONJUNCTS(thy :: Theory, th :: Thm) :: List.of(Thm):
+  cond
+  | is_conj(concl_of(th)):
+      CONJUNCTS(thy, CONJUNCT1(thy, th)) ++ CONJUNCTS(thy, CONJUNCT2(thy, th))
+  | ~else: [th]
+
+fun LIST_CONJ(thy :: Theory, ths :: List.of(Thm)) :: Thm:
+  match ths
+  | []: error(~who: #'LIST_CONJ, "empty list")
+  | List.cons(t0, rest):
+      recur loop (acc :~ Thm = t0, rest :~ List = rest):
+        match rest
+        | []: acc
+        | List.cons(t, more): loop(CONJ(thy, acc, t), more)
+
+// -- implication -----------------------------------------------------------
+//
+// `p ==> q` is `(p and q) <=> p`.
+
+// A |- p ==> q   B |- p   ==>   A u B |- q
+fun MP(thy :: Theory, ith :: Thm, th :: Thm) :: Thm:
+  match dest_imp(concl_of(ith))
+  | #false:
+      error(~who: #'MP, "theorem is not an implication",
+            error.val(~label: "theorem", show(concl_of(ith))))
+  | [p, q]:
+      unless eq_term(p, concl_of(th))
+      | error(~who: #'MP, "antecedent does not match",
+              error.val(~label: "expected", show(p)),
+              error.val(~label: "given", show(concl_of(th))))
+      let eqth = EQ_MP(unfold_imp(thy, p, q), ith)
+      CONJUNCT2(thy, EQ_MP(SYM(thy, eqth), th))
+
+// A |- q   ==>   A - {p} |- p ==> q
+fun DISCH(thy :: Theory, p :: Term, th :: Thm) :: Thm:
+  let q = concl_of(th)
+  let th1 = CONJ(thy, ASSUME(thy, p), th)
+  let th2 = CONJUNCT1(thy, ASSUME(thy, mk_conj(p, q)))
+  let th3 = DEDUCT_ANTISYM_RULE(th1, th2)
+  EQ_MP(SYM(thy, unfold_imp(thy, p, q)), th3)
+
+fun DISCH_ALL(thy :: Theory, th :: Thm) :: Thm:
+  for values(acc :~ Thm = th) (h in hyps_of(th)): DISCH(thy, h, acc)
+
+// A |- p ==> q   ==>   A u {p} |- q
+fun UNDISCH(thy :: Theory, th :: Thm) :: Thm:
+  match dest_imp(concl_of(th))
+  | #false:
+      error(~who: #'UNDISCH, "theorem is not an implication")
+  | [p, _]: MP(thy, th, ASSUME(thy, p))
+
+fun UNDISCH_ALL(thy :: Theory, th :: Thm) :: Thm:
+  cond
+  | is_imp(concl_of(th)): UNDISCH_ALL(thy, UNDISCH(thy, th))
+  | ~else: th
+
+// A |- p ==> q   B |- q ==> r   ==>   A u B |- p ==> r
+fun IMP_TRANS(thy :: Theory, a :: Thm, b :: Thm) :: Thm:
+  match dest_imp(concl_of(a))
+  | #false: error(~who: #'IMP_TRANS, "first theorem is not an implication")
+  | [p, _]: DISCH(thy, p, MP(thy, b, UNDISCH(thy, a)))
+
+// A |- p ==> q   B |- q ==> p   ==>   A u B |- p <=> q
+fun IMP_ANTISYM_RULE(thy :: Theory, a :: Thm, b :: Thm) :: Thm:
+  SYM(thy, DEDUCT_ANTISYM_RULE(UNDISCH(thy, a), UNDISCH(thy, b)))
+
+// A |- p <=> q   ==>   (A |- p ==> q, A |- q ==> p)
+fun EQ_IMP_RULE(thy :: Theory, th :: Thm) :: values(Thm, Thm):
+  let [p, q] = (match dest_eq(concl_of(th))
+                | #false: error(~who: #'EQ_IMP_RULE, "not an equation")
+                | pair: pair)
+  values(DISCH(thy, p, EQ_MP(th, ASSUME(thy, p))),
+         DISCH(thy, q, EQ_MP(SYM(thy, th), ASSUME(thy, q))))
+
+// -- universal quantification ----------------------------------------------
+//
+// `!P` is `P = \x. true`.
+
+// A |- p   (v not free in A)   ==>   A |- forall v. p
+fun GEN(thy :: Theory, v :: FVar, th :: Thm) :: Thm:
+  let pred = mk_abs(v, concl_of(th))
+  let ufd = unfold_forall(thy, pred)
+  let target = rhs_of(ufd)
+  let abs_th = ABS(thy, v, EQT_INTRO(thy, th))
+  EQ_MP(SYM(thy, ufd), abs_th)
+
+fun GENL(thy :: Theory, vs :: List.of(FVar), th :: Thm) :: Thm:
+  for values(acc :~ Thm = th) (v in vs.reverse()): GEN(thy, v, acc)
+
+// Generalize over every variable free in the conclusion but not in the
+// hypotheses.
+fun GEN_ALL(thy :: Theory, th :: Thm) :: Thm:
+  let hyp_vars = for values(acc :~ List = []) (h in hyps_of(th)):
+                   acc ++ free_vars(h)
+  let vs = free_vars(concl_of(th)).filter(~skip: fun (v): hyp_vars.contains(v))
+  GENL(thy, vs, th)
+
+// A |- forall x. p   ==>   A |- p[t/x]
+fun SPEC(thy :: Theory, t :: Term, th :: Thm) :: Thm:
+  cond
+  | !is_forall(concl_of(th)):
+      error(~who: #'SPEC, "theorem is not universally quantified",
+            error.val(~label: "theorem", show(concl_of(th))))
+  | ~else:
+      let (_, absterm) = dest_comb(concl_of(th))
+      let bty = (absterm :~ Abs).arg_ty
+      unless type_of(t) == bty
+      | error(~who: #'SPEC, "instantiation has the wrong type",
+              error.val(~label: "binder", type_to_string(bty)),
+              error.val(~label: "term", show_typed(t)))
+      let eqth = EQ_MP(unfold_forall(thy, absterm), th)
+      let applied = AP_THM(thy, eqth, t)
+      match BINOP_CONV(HEAD_BETA_CONV)(thy, concl_of(applied))
+      | #false: error(~who: #'SPEC, "beta reduction failed")
+      | red :~ Thm: EQT_ELIM(thy, EQ_MP(red, applied))
+
+fun SPECL(thy :: Theory, ts :: List.of(Term), th :: Thm) :: Thm:
+  for values(acc :~ Thm = th) (t in ts): SPEC(thy, t, acc)
+
+// Strip every leading quantifier, keeping the bound variables' names.
+fun SPEC_ALL(thy :: Theory, th :: Thm) :: Thm:
+  cond
+  | is_forall(concl_of(th)):
+      match dest_forall(concl_of(th))
+      | [v, _]:
+          let v :~ FVar = v
+          let avoid = hyps_of(th) ++ [concl_of(th)]
+          SPEC_ALL(thy, SPEC(thy, variant(avoid, v), th))
+  | ~else: th
+
+// -- disjunction -----------------------------------------------------------
+//
+// `p or q` is `!r. (p ==> r) ==> ((q ==> r) ==> r)`.
+
+fun disj_intro(thy :: Theory, p :: Term, q :: Term, th :: Thm,
+               left :: Boolean) :: Thm:
+  let ufd = unfold_disj(thy, p, q)
+  let target = rhs_of(ufd)
+  let [rv, _] = (match dest_forall(target) | l: l)
+  let rv :~ FVar = rv
+  let r = rv
+  let a1 = ASSUME(thy, mk_imp(p, r))
+  let a2 = ASSUME(thy, mk_imp(q, r))
+  let got = MP(thy, (if left | a1 | a2), th)
+  let inner = DISCH(thy, mk_imp(q, r), got)
+  let outer = DISCH(thy, mk_imp(p, r), inner)
+  EQ_MP(SYM(thy, ufd), GEN(thy, r, outer))
+
+// A |- p   ==>   A |- p or q
+fun DISJ1(thy :: Theory, th :: Thm, q :: Term) :: Thm:
+  disj_intro(thy, concl_of(th), q, th, #true)
+
+// A |- q   ==>   A |- p or q
+fun DISJ2(thy :: Theory, p :: Term, th :: Thm) :: Thm:
+  disj_intro(thy, p, concl_of(th), th, #false)
+
+// A |- p or q   B,p |- r   C,q |- r   ==>   A u (B-p) u (C-q) |- r
+fun DISJ_CASES(thy :: Theory, dth :: Thm, ath :: Thm, bth :: Thm) :: Thm:
+  match dest_disj(concl_of(dth))
+  | #false:
+      error(~who: #'DISJ_CASES, "theorem is not a disjunction",
+            error.val(~label: "theorem", show(concl_of(dth))))
+  | [p, q]:
+      unless eq_term(concl_of(ath), concl_of(bth))
+      | error(~who: #'DISJ_CASES, "the two cases prove different things",
+              error.val(~label: "left", show(concl_of(ath))),
+              error.val(~label: "right", show(concl_of(bth))))
+      let r = concl_of(ath)
+      let th1 = EQ_MP(unfold_disj(thy, p, q), dth)
+      let th2 = SPEC(thy, r, th1)
+      MP(thy, MP(thy, th2, DISCH(thy, p, ath)), DISCH(thy, q, bth))
+
+// -- negation and falsity --------------------------------------------------
+//
+// `not p` is `p ==> false`, and `false` is `!p. p`.
+
+// A |- not p   ==>   A |- p ==> false
+fun NOT_ELIM(thy :: Theory, th :: Thm) :: Thm:
+  match dest_neg(concl_of(th))
+  | #false:
+      error(~who: #'NOT_ELIM, "theorem is not a negation",
+            error.val(~label: "theorem", show(concl_of(th))))
+  | p: EQ_MP(unfold_neg(thy, p), th)
+
+// A |- p ==> false   ==>   A |- not p
+fun NOT_INTRO(thy :: Theory, th :: Thm) :: Thm:
+  match dest_imp(concl_of(th))
+  | #false: error(~who: #'NOT_INTRO, "theorem is not an implication")
+  | [p, f]:
+      unless eq_term(f, tm_false)
+      | error(~who: #'NOT_INTRO, "consequent is not `false`")
+      EQ_MP(SYM(thy, unfold_neg(thy, p)), th)
+
+// A |- false   ==>   A |- t
+fun CONTR(thy :: Theory, t :: Term, th :: Thm) :: Thm:
+  unless eq_term(concl_of(th), tm_false)
+  | error(~who: #'CONTR, "theorem is not `false`")
+  SPEC(thy, t, EQ_MP(unfold_false(thy), th))
+
+// A |- not p   ==>   A |- p <=> false
+fun EQF_INTRO(thy :: Theory, th :: Thm) :: Thm:
+  let p = (match dest_neg(concl_of(th))
+           | #false: error(~who: #'EQF_INTRO, "theorem is not a negation")
+           | x: x)
+  let a = UNDISCH(thy, NOT_ELIM(thy, th))
+  let b = CONTR(thy, p, ASSUME(thy, tm_false))
+  SYM(thy, DEDUCT_ANTISYM_RULE(a, b))
+
+// A |- p <=> false   ==>   A |- not p
+fun EQF_ELIM(thy :: Theory, th :: Thm) :: Thm:
+  let [p, f] = (match dest_eq(concl_of(th))
+                | #false: error(~who: #'EQF_ELIM, "theorem is not an equation")
+                | pair: pair)
+  unless eq_term(f, tm_false)
+  | error(~who: #'EQF_ELIM, "right-hand side is not `false`")
+  NOT_INTRO(thy, DISCH(thy, p, EQ_MP(th, ASSUME(thy, p))))
+
+// A, not t |- false   ==>   A |- t.  This is where BOOL_CASES earns its keep.
+fun CCONTR(thy :: Theory, t :: Term, th :: Thm) :: Thm:
+  unless eq_term(concl_of(th), tm_false)
+  | error(~who: #'CCONTR, "theorem is not `false`")
+  let cases = SPEC(thy, t, base_axiom(#'BOOL_CASES_AX))
+  let case_t = EQT_ELIM(thy, ASSUME(thy, mk_eq(t, tm_true)))
+  let nt = EQF_ELIM(thy, ASSUME(thy, mk_eq(t, tm_false)))
+  let case_f = CONTR(thy, t, PROVE_HYP(thy, nt, th))
+  DISJ_CASES(thy, cases, case_t, case_f)
+
+// A |- p   B, p |- q   ==>   A u (B - p) |- q
+fun PROVE_HYP(thy :: Theory, ath :: Thm, bth :: Thm) :: Thm:
+  cond
+  | (for any (h in hyps_of(bth)): eq_term(h, concl_of(ath))):
+      EQ_MP(DEDUCT_ANTISYM_RULE(ath, bth), ath)
+  | ~else: bth
+
+// A |- p   ==>   A u {t} |- p
+fun ADD_ASSUM(thy :: Theory, t :: Term, th :: Thm) :: Thm:
+  MP(thy, DISCH(thy, t, th), ASSUME(thy, t))
+
+// -- existential quantification --------------------------------------------
+//
+// `?P` is `!q. (!x. P x ==> q) ==> q`.
+
+// A |- p[t/x]   ==>   A |- exists x. p
+fun EXISTS(thy :: Theory, target :: Term, witness :: Term, th :: Thm) :: Thm:
+  match dest_exists(target)
+  | #false:
+      error(~who: #'EXISTS, "target is not existentially quantified",
+            error.val(~label: "target", show(target)))
+  | [v, body]:
+      let v :~ FVar = v
+      let expect = inst_fvar([[witness, v]], body)
+      unless eq_term(expect, concl_of(th))
+      | error(~who: #'EXISTS, "theorem does not match the instantiated body",
+              error.val(~label: "expected", show(expect)),
+              error.val(~label: "given", show(concl_of(th))))
+      let pred = mk_abs(v, body)
+      let ufd = unfold_exists(thy, pred)
+      let unfolded = rhs_of(ufd)
+      let [qv, _] = (match dest_forall(unfolded) | l: l)
+      let qv :~ FVar = qv
+      let inner = mk_forall(v, mk_imp(mk_comb(pred, v), qv))
+      let a = ASSUME(thy, inner)
+      let spec = SPEC(thy, witness, a)
+      let beta = BETA_RULE(thy, spec)
+      let got = MP(thy, beta, th)
+      let disch = DISCH(thy, inner, got)
+      EQ_MP(SYM(thy, ufd), GEN(thy, qv, disch))
+
+// A |- exists x. p   B, p[v/x] |- r   (v fresh)   ==>   A u (B - p[v/x]) |- r
+fun CHOOSE(thy :: Theory, v :: FVar, exth :: Thm, th :: Thm) :: Thm:
+  match dest_exists(concl_of(exth))
+  | #false:
+      error(~who: #'CHOOSE, "theorem is not existentially quantified")
+  | [bv, body]:
+      let bv :~ FVar = bv
+      let pred = mk_abs(bv, body)
+      let inst_body = inst_fvar([[v, bv]], body)
+      when (for any (h in hyps_of(th)): h != inst_body && vfree_in(v, h))
+      | error(~who: #'CHOOSE,
+              "chosen variable is free in the other hypotheses",
+              error.val(~label: "variable", v.name))
+      when vfree_in(v, concl_of(th))
+      | error(~who: #'CHOOSE, "chosen variable is free in the conclusion",
+              error.val(~label: "variable", v.name))
+      let r = concl_of(th)
+      let th1 = EQ_MP(unfold_exists(thy, pred), exth)
+      let th2 = SPEC(thy, r, th1)
+      // `!v. pred v ==> r`, with `pred v` left unreduced so that it matches
+      // the shape the definition expects.
+      let step = DISCH(thy, inst_body, th)
+      let inner = GEN(thy, v, step)
+      let want = mk_forall(v, mk_imp(mk_comb(pred, v), r))
+      let unbeta = (match BETA_CONV(thy, mk_comb(pred, v))
+                    | #false: error(~who: #'CHOOSE, "beta failed")
+                    | b :~ Thm: b)
+      let fixed = EQ_MP(SYM(thy, congr_imp(thy, unbeta, r)),
+                        SPEC(thy, v, inner))
+      MP(thy, th2, GEN(thy, v, fixed))
+
+// `|- a = b`  ==>  `|- (a ==> r) = (b ==> r)`
+fun congr_imp(thy :: Theory, aeq :: Thm, r :: Term) :: Thm:
+  let impc = mk_const(c_imp, mk_fun(bool_ty_, mk_fun(bool_ty_, bool_ty_)))
+  AP_THM(thy, AP_TERM(thy, impc, aeq), r)
+
+// -- eta -------------------------------------------------------------------
+
+// `|- (\x. f x) = f`, when the bound variable does not occur in `f`.  In de
+// Bruijn form that is `Abs(ty, Comb(f, BVar(0)))` where `f` mentions no
+// `BVar(0)`, so that shifting it down out of the binder is well defined.
+fun ETA_CONV(thy :: Theory, t :: Term) :: maybe(Thm):
+  match t
+  | Abs(aty, Comb(f, BVar(0, _))):
+      cond
+      | !is_locally_closed(f):
+          // `f` still refers to the binder, so this is not an eta redex.
+          #false
+      | ~else:
+          let (dom, rng) = dest_fun(type_of(f))
+          let ax = INST_TYPE(thy, {#'a: dom, #'b: rng}, base_axiom(#'ETA_AX))
+          SPEC(thy, f, ax)
+  | ~else: #false

@@ -1,0 +1,649 @@
+#lang rhombus/static
+
+// The LCF kernel: the whole trust boundary of Rhombus/HOL.
+//
+// A `Thm` can be created only by the rules in this file.  `constructor ~none`
+// removes `Thm` from expression space, and the `internal _Thm` constructor is
+// not exported, so `Thm(...)` outside this module is an unbound identifier.
+// Reading a theorem stays available, because the derived layer needs it.
+//
+// Deliberately absent, and deliberately so:
+//   * `prefab`      -- `make-prefab-struct` forges instances out of nothing;
+//   * `Serializable`, `reconstructor` -- both are constructor back doors;
+//   * `nonfinal`    -- a subclass would inherit the fields and supply its own
+//                      constructor.
+// `authentic` is present so no chaperone can intercept field access and lie.
+//
+// Terms are locally nameless, so alpha-equivalence is plain structural
+// equality.  Every place this file would once have called `aconv` now uses
+// `==`, and `BETA` handles an arbitrary redex rather than only the trivial
+// one, because substitution can no longer capture.
+//
+// Theories are immutable values, threaded through the extension principles,
+// never global mutable state: `raco make` compiles many modules in one
+// process, and ML-style refs would leak one module's definitions into another
+// and make builds order-dependent.  Each `Thm` carries the `Stamp` of the
+// theory it was proved in, and every rule checks the lineage:
+//
+//   * a rule that consumes a theory requires the theorem to have been proved
+//     in that theory or an ancestor of it -- otherwise the theorem could
+//     mention constants the theory has not declared;
+//   * a rule that combines two theorems requires a common lineage, and stamps
+//     the result with the later generation of the two.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "printer.rhm" open
+
+export:
+  hol_version
+  Stamp
+  Thm
+  Theory
+  descends
+  // sequent access
+  hyps_of
+  concl_of
+  stamp_of
+  // well-formedness
+  check_type
+  check_term
+  is_bool
+  // equality helpers
+  mk_eq
+  dest_eq
+  is_eq
+  // the ten primitive rules
+  REFL
+  TRANS
+  MK_COMB
+  ABS
+  BETA
+  ASSUME
+  EQ_MP
+  DEDUCT_ANTISYM_RULE
+  INST
+  INST_TYPE
+  // theory extension
+  initial_theory
+  new_type
+  new_constant
+  new_axiom
+  new_basic_definition
+  new_basic_type_definition
+  import_theorem
+  // queries
+  type_arity
+  const_type
+  axioms_of
+  definition_of
+  trusted_imports_of
+  // hypothesis-set operations, exported because the derived layer needs them
+  hyp_union
+  hyp_insert
+  hyp_remove
+  rehash_hyps
+
+def hol_version :: String = "0.1"
+
+// -- lineage ---------------------------------------------------------------
+//
+// Every theory node has a unique identity, and carries the set of identities
+// of all its ancestors (itself included).  A theorem is stamped with the node
+// it was proved in.
+//
+// A linear `(root, generation)` counter is NOT enough, and getting this wrong
+// is an inconsistency rather than an inconvenience.  Immutable theories fork:
+// two modules can both extend one base theory, each declaring a constant of
+// the same name and type with a *different* definition.  Both extensions sit
+// at the same generation on the same root, so a counter cannot tell them
+// apart, and `|- c = zero` from one branch composes with `|- c = one` from the
+// other to give `|- zero = one`.  Ancestor sets make the branches
+// incomparable, which is what they are.
+//
+// `gen` is kept for error messages and debugging only; nothing decides
+// anything by comparing it.
+class Stamp(id :: Symbol, gen :: Int, ancestors :: Set.of(Symbol))
+
+// True when a theorem stamped `a` is usable in a theory stamped `b`: `b`'s
+// theory is `a`'s, or an extension of it.  A theorem from a sibling branch, or
+// from a later extension that `b` does not include, is not admissible.
+fun descends(a :: Stamp, b :: Stamp) :: Boolean:
+  a.id in b.ancestors
+
+fun fresh_stamp() :: Stamp:
+  let id = Symbol.uninterned_from_string("thy")
+  Stamp(id, 0, {id})
+
+fun next_stamp(prev :: Stamp) :: Stamp:
+  let id = Symbol.uninterned_from_string("thy")
+  Stamp(id, prev.gen + 1, prev.ancestors ++ {id})
+
+// Two theorems may be combined only when their theories lie on one line of
+// extension.  The result belongs to the later of the two.
+fun combine_stamps(who :: Symbol, a :: Stamp, b :: Stamp) :: Stamp:
+  cond
+  | descends(a, b): b
+  | descends(b, a): a
+  | ~else:
+      error(~who: who,
+            "theorems come from different theories",
+            error.val(~label: "detail",
+                      "neither theory is an extension of the other, so the "
+                        ++ "two theorems may disagree about what a shared "
+                        ++ "name means"))
+
+// -- theorems --------------------------------------------------------------
+
+// The stamp field is readable -- knowing which lineage a theorem belongs to
+// grants nothing.  What is gated is *construction*.
+class Thm(hyps :: List.of(Term),
+          concl :: Term,
+          stamp :: Stamp):
+  authentic
+  constructor ~none
+  internal _Thm
+  private implements Equatable
+  // Terms are locally nameless, so structural equality is already equality up
+  // to alpha; the stamp is provenance, not content.
+  private override equals(other :: Thm, recur):
+    recur(concl, other.concl) && recur(hyps, other.hyps)
+  private override hash_code(recur):
+    Equatable.hash_code_combine(recur(concl), recur(hyps))
+
+fun hyps_of(th :: Thm) :: List.of(Term): Thm.hyps(th)
+fun concl_of(th :: Thm) :: Term: Thm.concl(th)
+fun stamp_of(th :: Thm) :: Stamp: th.stamp
+
+// -- hypothesis sets -------------------------------------------------------
+//
+// Kept as a list sorted by `term_ord` and deduplicated.  A sorted list beats
+// `Set.of(Term)` here: hypothesis sets are tiny and hashing terms is
+// expensive.
+
+fun hyp_insert(t :: Term, hs :: List.of(Term)) :: List.of(Term):
+  match hs
+  | []: [t]
+  | List.cons(h, rest):
+      let c = term_ord(t, h)
+      cond
+      | c == 0: hs
+      | c < 0: List.cons(t, hs)
+      | ~else: List.cons(h, hyp_insert(t, rest))
+
+fun hyp_union(a :: List.of(Term), b :: List.of(Term)) :: List.of(Term):
+  cond
+  | a.length() == 0: b
+  | b.length() == 0: a
+  | ~else: for values(acc :~ List = b) (t in a): hyp_insert(t, acc)
+
+fun hyp_remove(t :: Term, hs :: List.of(Term)) :: List.of(Term):
+  hs.filter(~skip: fun (h :: Term): h == t)
+
+// Rebuild the canonical form of a hypothesis list.  Instantiation maps over
+// the hypotheses pointwise, which can both reorder them and make two of them
+// equal, so the result has to be re-sorted and deduplicated -- otherwise the
+// invariant that hypothesis lists are canonical quietly breaks, and `==` on
+// theorems starts reporting differences that are not there.
+fun rehash_hyps(hs :: List.of(Term)) :: List.of(Term):
+  for values(acc :~ List = []) (h in hs): hyp_insert(h, acc)
+
+// -- theories --------------------------------------------------------------
+
+class Theory(tyops :: Map.of(Symbol, Int),
+             consts :: Map.of(Symbol, HType),
+             axioms :: List.of(Thm),
+             defs :: Map.of(Symbol, Thm),
+             // Statements admitted on the word of another module's compile.
+             // Every entry here widens the trusted base and is reported.
+             trusted_imports :: List.of(Term),
+             stamp :: Stamp)
+
+fun type_arity(thy :: Theory, n :: Symbol) :: maybe(Int):
+  thy.tyops.get(n, #false)
+
+fun const_type(thy :: Theory, n :: Symbol) :: maybe(HType):
+  thy.consts.get(n, #false)
+
+fun axioms_of(thy :: Theory) :: List.of(Thm): thy.axioms
+fun definition_of(thy :: Theory, n :: Symbol) :: maybe(Thm): thy.defs.get(n, #false)
+fun trusted_imports_of(thy :: Theory) :: List.of(Term): thy.trusted_imports
+
+// A rule that takes a theory must check that the theorem belongs to it.
+fun in_theory(who :: Symbol, thy :: Theory, th :: Thm) :: Void:
+  unless descends(th.stamp, thy.stamp)
+  | error(~who: who,
+          "theorem was not proved in this theory or an ancestor of it")
+
+// A fresh, uninterned root, so two theories built in the same process (which
+// is what `raco make` does) cannot be confused for one another.
+fun initial_theory() :: Theory:
+  let a = TyVar(#'a)
+  Theory({ty_bool: 0, ty_fun: 2},
+         {c_eq: mk_fun(a, mk_fun(a, TyApp(ty_bool, [])))},
+         [],
+         {},
+         [],
+         fresh_stamp())
+
+fun extend(thy :: Theory,
+           ~tyops: tyops = thy.tyops,
+           ~consts: consts = thy.consts,
+           ~axioms: axioms = thy.axioms,
+           ~defs: defs = thy.defs,
+           ~trusted_imports: ti = thy.trusted_imports) :: Theory:
+  Theory(tyops, consts, axioms, defs, ti, next_stamp(thy.stamp))
+
+// -- well-formedness -------------------------------------------------------
+
+// Every type constructor must be declared, with the right arity.
+fun check_type(thy :: Theory, t :: HType) :: Void:
+  match t
+  | TyVar(_): #void
+  | TyApp(n, args):
+      match type_arity(thy, n)
+      | #false:
+          error(~who: #'check_type, "undeclared type constructor",
+                error.val(~label: "name", n))
+      | ar when ar != args.length():
+          error(~who: #'check_type, "type constructor arity mismatch",
+                error.val(~label: "name", n),
+                error.val(~label: "expected", ar),
+                error.val(~label: "given", args.length()))
+      | _: for (a in args): check_type(thy, a)
+
+// Every constant must be declared and used at an instance of its generic
+// type; every application must be well-typed; and every bound-variable index
+// must point at a real binder *of the type it claims*.  A term built with the
+// raw class constructors need not have gone through the smart ones, and the
+// kernel must not assume it did.
+//
+// The last point is not decoration.  `BVar` carries a type, and if nothing
+// checks it against the enclosing `Abs` then `Abs(num, Comb(neg, BVar(0,
+// bool)))` is accepted: it is locally closed, and both types are declared.
+// Its `type_of` is `num -> bool`, so it applies to a number, and beta-reducing
+// it yields `not zero` -- an ill-typed term inside a theorem.  From there
+// `type_of` is lying about every term built on top, and subject reduction is
+// gone.  Threading the binder types is what keeps `type_of` honest.
+fun check_term(thy :: Theory, t :: Term) :: Void:
+  check_open_term(thy, t, [])
+
+// `env` holds the argument types of the enclosing binders, innermost first.
+fun check_open_term(thy :: Theory, t :: Term, env :: List.of(HType)) :: Void:
+  match t
+  | FVar(_, ty): check_type(thy, ty)
+  | BVar(i, ty):
+      cond
+      | i >= env.length():
+          error(~who: #'check_term, "term has an unbound de Bruijn index",
+                error.val(~label: "index", i),
+                error.val(~label: "binders in scope", env.length()))
+      | env[i] != ty:
+          error(~who: #'check_term,
+                "bound variable's type does not match its binder",
+                error.val(~label: "index", i),
+                error.val(~label: "binder type", type_to_string(env[i])),
+                error.val(~label: "claimed", type_to_string(ty)))
+      | ~else: check_type(thy, ty)
+  | Const(n, ty):
+      check_type(thy, ty)
+      match const_type(thy, n)
+      | #false:
+          error(~who: #'check_term, "undeclared constant",
+                error.val(~label: "name", n))
+      | gty:
+          when type_match(gty, ty, {}) == #false
+          | error(~who: #'check_term, "constant used at a non-instance type",
+                  error.val(~label: "name", n),
+                  error.val(~label: "generic", type_to_string(gty)),
+                  error.val(~label: "used at", type_to_string(ty)))
+  | Abs(aty, b):
+      check_type(thy, aty)
+      check_open_term(thy, b, List.cons(aty, env))
+  | Comb(f, x):
+      check_open_term(thy, f, env)
+      check_open_term(thy, x, env)
+      let fty = type_of(f)
+      cond
+      | !is_fun(fty):
+          error(~who: #'check_term, "operator is not a function",
+                error.val(~label: "term", show(t)))
+      | ~else:
+          let (dom, _) = dest_fun(fty)
+          unless dom == type_of(x)
+          | error(~who: #'check_term, "ill-typed application",
+                  error.val(~label: "term", show(t)))
+
+fun is_bool(t :: Term) :: Boolean:
+  type_of(t) == TyApp(ty_bool, [])
+
+fun check_prop(who :: Symbol, thy :: Theory, t :: Term) :: Void:
+  check_term(thy, t)
+  unless is_bool(t)
+  | error(~who: who, "term is not a proposition",
+          error.val(~label: "term", show_typed(t)))
+
+// -- equality --------------------------------------------------------------
+
+fun mk_eq(l :: Term, r :: Term) :: Term:
+  let ty = type_of(l)
+  unless ty == type_of(r)
+  | error(~who: #'mk_eq, "sides of an equation have different types",
+          error.val(~label: "left", show_typed(l)),
+          error.val(~label: "right", show_typed(r)))
+  mk_comb(mk_comb(mk_const(c_eq, mk_fun(ty, mk_fun(ty, TyApp(ty_bool, [])))), l),
+          r)
+
+fun dest_eq(t :: Term) :: maybe(List.of(Term)):
+  match t
+  | Comb(Comb(Const(n, _), l), r) when n == c_eq: [l, r]
+  | ~else: #false
+
+fun is_eq(t :: Term) :: Boolean:
+  dest_eq(t) != #false
+
+fun need_eq(who :: Symbol, th :: Thm) :: List.of(Term):
+  match dest_eq(th.concl)
+  | #false:
+      error(~who: who, "theorem is not an equation",
+            error.val(~label: "theorem", show(th.concl)))
+  | pair: pair
+
+// -- the ten primitive rules ----------------------------------------------
+//
+// HOL Light's set, unchanged in content.  What the locally nameless
+// representation changes is only that the side conditions get simpler: no
+// alpha comparisons, and `BETA` is no longer restricted to `(\v. b) v`.
+//
+// The rules that introduce fresh terms take the theory, because they are the
+// points at which an undeclared constant, an ill-typed application or a
+// dangling index could otherwise enter a theorem.
+
+// |- t = t
+fun REFL(thy :: Theory, t :: Term) :: Thm:
+  check_term(thy, t)
+  _Thm([], mk_eq(t, t), thy.stamp)
+
+// |- l = m   |- m = r
+// -------------------
+//      |- l = r
+fun TRANS(a :: Thm, b :: Thm) :: Thm:
+  let st = combine_stamps(#'TRANS, a.stamp, b.stamp)
+  let [l, m1] = need_eq(#'TRANS, a)
+  let [m2, r] = need_eq(#'TRANS, b)
+  unless m1 == m2
+  | error(~who: #'TRANS, "middle terms do not match",
+          error.val(~label: "left", show(m1)),
+          error.val(~label: "right", show(m2)))
+  _Thm(hyp_union(a.hyps, b.hyps), mk_eq(l, r), st)
+
+// |- f = g   |- x = y
+// -------------------
+//   |- f x = g y
+fun MK_COMB(fth :: Thm, xth :: Thm) :: Thm:
+  let st = combine_stamps(#'MK_COMB, fth.stamp, xth.stamp)
+  let [f, g] = need_eq(#'MK_COMB, fth)
+  let [x, y] = need_eq(#'MK_COMB, xth)
+  let fty = type_of(f)
+  unless is_fun(fty)
+  | error(~who: #'MK_COMB, "operator is not a function")
+  let (dom, _) = dest_fun(fty)
+  unless dom == type_of(x)
+  | error(~who: #'MK_COMB, "types do not agree")
+  _Thm(hyp_union(fth.hyps, xth.hyps),
+       mk_eq(mk_comb(f, x), mk_comb(g, y)),
+       st)
+
+//        |- l = r          (v not free in the hypotheses)
+// -------------------------
+//  |- (\v. l) = (\v. r)
+//
+// Takes the theory so that the abstracted variable's type is checked: without
+// that, an undeclared type constructor could enter through the binder.
+fun ABS(thy :: Theory, v :: FVar, th :: Thm) :: Thm:
+  in_theory(#'ABS, thy, th)
+  check_term(thy, v)
+  when (for any (h in th.hyps): vfree_in(v, h))
+  | error(~who: #'ABS, "abstracted variable is free in the hypotheses",
+          error.val(~label: "variable", v.name))
+  let [l, r] = need_eq(#'ABS, th)
+  // The result is stamped with `thy`, not with `th`'s older theory: the
+  // abstracted variable was checked against `thy`, so `thy` is the earliest
+  // theory in which the conclusion is meaningful.
+  _Thm(th.hyps, mk_eq(mk_abs(v, l), mk_abs(v, r)), thy.stamp)
+
+// |- (\x. body) arg = body[arg]
+//
+// Any redex, not just the trivial one.  Under a locally nameless
+// representation `subst_bvar` cannot capture, so the general case needs no
+// renaming and is as primitive as the restricted one was.
+fun BETA(thy :: Theory, t :: Term) :: Thm:
+  check_term(thy, t)
+  match t
+  | Comb(Abs(_, body), arg):
+      _Thm([], mk_eq(t, subst_bvar(arg, body)), thy.stamp)
+  | ~else:
+      error(~who: #'BETA, "not a beta redex",
+            error.val(~label: "term", show(t)))
+
+// p |- p
+fun ASSUME(thy :: Theory, p :: Term) :: Thm:
+  check_prop(#'ASSUME, thy, p)
+  _Thm([p], p, thy.stamp)
+
+// |- p = q   |- p
+// ---------------
+//      |- q
+fun EQ_MP(eqth :: Thm, th :: Thm) :: Thm:
+  let st = combine_stamps(#'EQ_MP, eqth.stamp, th.stamp)
+  let [p, q] = need_eq(#'EQ_MP, eqth)
+  unless p == th.concl
+  | error(~who: #'EQ_MP, "antecedent does not match",
+          error.val(~label: "expected", show(p)),
+          error.val(~label: "given", show(th.concl)))
+  _Thm(hyp_union(eqth.hyps, th.hyps), q, st)
+
+//  A |- p       B |- q
+// ---------------------------------
+//  (A - q) u (B - p) |- p = q
+fun DEDUCT_ANTISYM_RULE(a :: Thm, b :: Thm) :: Thm:
+  let st = combine_stamps(#'DEDUCT_ANTISYM_RULE, a.stamp, b.stamp)
+  _Thm(hyp_union(hyp_remove(b.concl, a.hyps), hyp_remove(a.concl, b.hyps)),
+       mk_eq(a.concl, b.concl),
+       st)
+
+// Instantiate free variables.  `theta` is a list of `[replacement, variable]`
+// pairs.  The replacements are checked against the theory: this is the point
+// at which an undeclared constant could otherwise sneak in.
+fun INST(thy :: Theory, theta :: List, th :: Thm) :: Thm:
+  in_theory(#'INST, thy, th)
+  for ([rep, v] in theta):
+    // Anything but a free variable would silently never match, which hides
+    // caller bugs rather than reporting them.
+    unless v is_a FVar
+    | error(~who: #'INST, "substitution target is not a free variable",
+            error.val(~label: "target", show(v)))
+    check_term(thy, rep)
+    unless type_of(rep) == type_of(v)
+    | error(~who: #'INST, "instantiation changes a variable's type",
+            error.val(~label: "variable", show_typed(v)),
+            error.val(~label: "replacement", show_typed(rep)))
+  // Instantiation can merge two hypotheses or reorder them, so the canonical
+  // form has to be rebuilt rather than mapped over.
+  // Stamped with `thy`: the replacements were checked against `thy` and may
+  // mention constants declared after `th` was proved, so the result is not
+  // meaningful in `th`'s older theory.
+  _Thm(rehash_hyps(th.hyps.map(fun (h :: Term): inst_fvar(theta, h))),
+       inst_fvar(theta, th.concl),
+       thy.stamp)
+
+// Instantiate type variables.
+fun INST_TYPE(thy :: Theory, tyin :: Map.of(Symbol, HType), th :: Thm) :: Thm:
+  in_theory(#'INST_TYPE, thy, th)
+  for ((_, ty) in tyin): check_type(thy, ty)
+  _Thm(rehash_hyps(th.hyps.map(fun (h :: Term): inst_type(tyin, h))),
+       inst_type(tyin, th.concl),
+       thy.stamp)
+
+// -- theory extension ------------------------------------------------------
+
+fun new_type(thy :: Theory, n :: Symbol, arity :: NonnegInt) :: Theory:
+  when type_arity(thy, n) != #false
+  | error(~who: #'new_type, "type constructor is already declared",
+          error.val(~label: "name", n))
+  extend(thy, ~tyops: thy.tyops ++ {n: arity})
+
+fun new_constant(thy :: Theory, n :: Symbol, ty :: HType) :: Theory:
+  when const_type(thy, n) != #false
+  | error(~who: #'new_constant, "constant is already declared",
+          error.val(~label: "name", n))
+  check_type(thy, ty)
+  extend(thy, ~consts: thy.consts ++ {n: ty})
+
+// The escape hatch.  Nothing in `type` or `fun` routes through this; it exists
+// so that a user-level `axiom` form has somewhere to go, and every use shows
+// up in `axioms_of`.
+fun new_axiom(thy :: Theory, p :: Term) :: values(Theory, Thm):
+  check_prop(#'new_axiom, thy, p)
+  // One extension, one generation.  The stamp is minted first so that the
+  // theorem and the theory that records it agree on which node they belong to;
+  // extending twice would leave the theorem one node behind the theory it is
+  // stored in.
+  let st = next_stamp(thy.stamp)
+  let th = _Thm([], p, st)
+  values(Theory(thy.tyops, thy.consts, List.cons(th, thy.axioms), thy.defs,
+                thy.trusted_imports, st),
+         th)
+
+// A conservative definition: `c = rhs` where `c` is undeclared, `rhs` is
+// closed, and `rhs` has no type variables beyond those of its own type.
+fun new_basic_definition(thy :: Theory, tm :: Term) :: values(Theory, Thm):
+  match dest_eq(tm)
+  | #false:
+      error(~who: #'new_basic_definition, "definition is not an equation")
+  | [lhs, rhs]:
+      match lhs
+      | FVar(n, ty):
+          when const_type(thy, n) != #false
+          | error(~who: #'new_basic_definition, "constant is already declared",
+                  error.val(~label: "name", n))
+          check_term(thy, rhs)
+          unless free_vars(rhs).length() == 0
+          | error(~who: #'new_basic_definition,
+                  "right-hand side is not closed",
+                  error.val(~label: "free", show(free_vars(rhs)[0])))
+          unless ty == type_of(rhs)
+          | error(~who: #'new_basic_definition, "type mismatch in definition")
+          // Otherwise the constant would be more polymorphic than its body,
+          // which is unsound.
+          let rhs_tvs = term_type_vars(rhs)
+          let ty_tvs = type_vars(ty)
+          unless (for all (v in rhs_tvs): ty_tvs.contains(v))
+          | error(~who: #'new_basic_definition,
+                  "right-hand side has type variables not in the type")
+          let st = next_stamp(thy.stamp)
+          let c = mk_const(n, ty)
+          let th = _Thm([], mk_eq(c, rhs), st)
+          values(Theory(thy.tyops, thy.consts ++ {n: ty}, thy.axioms,
+                        thy.defs ++ {n: th}, thy.trusted_imports, st),
+                 th)
+      | ~else:
+          error(~who: #'new_basic_definition,
+                "left-hand side is not a fresh name")
+
+fun term_type_vars(t :: Term) :: List.of(Symbol):
+  fun add(ty :: HType, acc :~ List) :~ List:
+    for values(a :~ List = acc) (v in type_vars(ty)):
+      (if a.contains(v) | a | a ++ [v])
+  fun walk(t :: Term, acc :~ List) :~ List:
+    match t
+    | FVar(_, ty): add(ty, acc)
+    | BVar(_, ty): add(ty, acc)
+    | Const(_, ty): add(ty, acc)
+    | Comb(f, x): walk(x, walk(f, acc))
+    | Abs(aty, b): walk(b, add(aty, acc))
+  walk(t, [])
+
+// Carve out a new type in bijection with the subset of an existing type picked
+// out by `P`, given `|- P x` witnessing that the subset is inhabited.  This is
+// the one genuinely conservative type-formation principle; `type` does not use
+// it in v0.1 (see `datatype.rhm`), but having it means the axiomatic route can
+// be replaced later without touching anything above the kernel.
+fun new_basic_type_definition(thy :: Theory,
+                              tyname :: Symbol,
+                              absname :: Symbol,
+                              repname :: Symbol,
+                              th :: Thm) :: values(Theory, Thm, Thm):
+  in_theory(#'new_basic_type_definition, thy, th)
+  when const_type(thy, absname) != #false || const_type(thy, repname) != #false
+  | error(~who: #'new_basic_type_definition, "constant is already declared")
+  when type_arity(thy, tyname) != #false
+  | error(~who: #'new_basic_type_definition,
+          "type constructor is already declared",
+          error.val(~label: "name", tyname))
+  when absname == repname
+  | error(~who: #'new_basic_type_definition,
+          "abstraction and representation functions have the same name")
+  unless th.hyps.length() == 0
+  | error(~who: #'new_basic_type_definition,
+          "witness theorem has hypotheses")
+  match th.concl
+  | Comb(pred, witness):
+      unless free_vars(pred).length() == 0
+      | error(~who: #'new_basic_type_definition,
+              "predicate is not closed")
+      let tvs = term_type_vars(pred)
+      let rty = type_of(witness)
+      // Every type variable of the representing type must appear in the
+      // predicate, or the new type would be less polymorphic than `rep`'s
+      // result and `rep` would be a cast into an arbitrary type.
+      //
+      // As it happens this cannot fail: the witness theorem is `|- P x`, so
+      // `type_of(P)` is `rty -> bool`, and a term's type is built from the
+      // types of its leaves, which is exactly what `term_type_vars` collects.
+      // It is checked anyway -- a kernel should not rest a soundness property
+      // on an argument made somewhere else.
+      unless (for all (v in type_vars(rty)): tvs.contains(v))
+      | error(~who: #'new_basic_type_definition,
+              "witness has type variables not present in the predicate",
+              error.val(~label: "representing type", type_to_string(rty)))
+      // One extension for the whole package, so the two theorems and the
+      // theory they live in share a node.
+      let st = next_stamp(thy.stamp)
+      let aty = TyApp(tyname, tvs.map(fun (v :: Symbol): TyVar(v)))
+      let thy2 = Theory(thy.tyops ++ {tyname: tvs.length()},
+                        thy.consts ++ {absname: mk_fun(rty, aty),
+                                       repname: mk_fun(aty, rty)},
+                        thy.axioms, thy.defs, thy.trusted_imports, st)
+      let abs = mk_const(absname, mk_fun(rty, aty))
+      let rep = mk_const(repname, mk_fun(aty, rty))
+      let a = mk_var(#'a, aty)
+      let r = mk_var(#'r, rty)
+      values(thy2,
+             _Thm([], mk_eq(mk_comb(abs, mk_comb(rep, a)), a), st),
+             _Thm([],
+                  mk_eq(mk_comb(pred, r),
+                        mk_eq(mk_comb(rep, mk_comb(abs, r)), r)),
+                  st))
+  | ~else:
+      error(~who: #'new_basic_type_definition,
+            "witness theorem is not an application")
+
+// -- the cross-module trust boundary ---------------------------------------
+//
+// A `Thm` value cannot cross a module boundary: it belongs to the phase-1
+// instantiation of the module that proved it.  Re-running the proof on import
+// is not an option, so, exactly as HOL systems do with theory files, we admit
+// the *statement* on the word of the exporting module's compile.
+//
+// This is a trust boundary.  It is the reason every admitted statement is
+// recorded in `trusted_imports` and reported by the module's audit summary.
+// Nothing but the manifest loader may call this.
+fun import_theorem(thy :: Theory, statement :: Term, origin :: String)
+     :: values(Theory, Thm):
+  check_prop(#'import_theorem, thy, statement)
+  let thy2 = extend(thy,
+                    ~trusted_imports: List.cons(statement, thy.trusted_imports))
+  values(thy2, _Thm([], statement, thy2.stamp))

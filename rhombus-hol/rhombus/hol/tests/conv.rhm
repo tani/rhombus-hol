@@ -1,0 +1,205 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/conv open
+
+// A theory with arithmetic-ish constants to rewrite in.
+def thy:
+  let t = new_type(base_theory(), #'num, 0)
+  let num = TyApp(#'num, [])
+  let t = new_constant(t, #'zero, num)
+  let t = new_constant(t, #'s, mk_fun(num, num))
+  let t = new_constant(t, #'f, mk_fun(num, num))
+  let t = new_constant(t, #'g, mk_fun(num, num))
+  new_constant(t, #'plus, mk_fun(num, mk_fun(num, num)))
+
+def num = TyApp(#'num, [])
+def zero = mk_const(#'zero, num)
+def s = mk_const(#'s, mk_fun(num, num))
+def f = mk_const(#'f, mk_fun(num, num))
+def g = mk_const(#'g, mk_fun(num, num))
+def plus = mk_const(#'plus, mk_fun(num, mk_fun(num, num)))
+def x = mk_var(#'x, num)
+def y = mk_var(#'y, num)
+def z = mk_var(#'z, num)
+def w = mk_var(#'w, num)
+
+fun ap(fn, a): mk_comb(fn, a)
+fun pl(a, b): mk_comb(mk_comb(plus, a), b)
+
+// -- basic equality rules --------------------------------------------------
+
+def e_xy = ASSUME(thy, mk_eq(x, y))
+
+check AP_TERM(thy, f, e_xy).concl ~is mk_eq(ap(f, x), ap(f, y))
+check AP_THM(thy, ASSUME(thy, mk_eq(f, g)), x).concl ~is mk_eq(ap(f, x), ap(g, x))
+check SYM(thy, e_xy).concl ~is mk_eq(y, x)
+check SYM(thy, e_xy).hyps ~is [mk_eq(x, y)]
+check SYM(thy, SYM(thy, e_xy)).concl ~is mk_eq(x, y)
+check SYM(thy, REFL(thy, x)).concl ~is mk_eq(x, x)
+check SYM(thy, ASSUME(thy, mk_conj(mk_eq(x, y), mk_eq(x, y)))) ~throws "not an equation"
+
+check lhs_of(e_xy) ~is x
+check rhs_of(e_xy) ~is y
+check is_refl_thm(REFL(thy, x)) ~is #true
+check is_refl_thm(e_xy) ~is #false
+check:
+  // there is no `ALPHA` any more: alpha-equal terms are literally equal, so
+  // `REFL` already proves them so and it counts as no progress
+  mk_abs(x, x) == mk_abs(y, y)
+  ~is #true
+check is_refl_thm(REFL(thy, mk_abs(x, x))) ~is #true
+
+// -- beta conversion -------------------------------------------------------
+
+// `BETA_CONV` is a total wrapper on the kernel rule, which now handles an
+// arbitrary redex: there is no separate general-case derivation, because
+// substitution can no longer capture.
+check:
+  (BETA_CONV(thy, mk_comb(mk_abs(x, ap(f, x)), zero)) :~ Thm).concl
+  ~is mk_eq(mk_comb(mk_abs(x, ap(f, x)), zero), ap(f, zero))
+check BETA_CONV(thy, ap(f, x)) ~is #false
+check:
+  // substituting a variable under a binder of the same name cannot capture:
+  // the binder has no name to clash with
+  let t = mk_comb(mk_abs(x, mk_abs(y, pl(x, y))), y)
+  show(rhs_of(BETA_CONV(thy, t) :~ Thm))
+  ~is "fun (x :: num): plus(y, x)"
+
+// -- combinators -----------------------------------------------------------
+
+check (ALL_CONV(thy, x) :~ Thm).concl ~is mk_eq(x, x)
+check NO_CONV(thy, x) ~is #false
+
+// A conversion that rewrites `zero` to the variable `w`, once.  Note that the
+// replacement must not contain `zero`: a rule like `zero = s(zero)` is
+// non-terminating, and the repeating traversals below would rightly diverge on
+// it.  Guarding against that is the rewriter's job, not the traversals'.
+fun zero_to_w(thy :: Theory, t :: Term) :: maybe(Thm):
+  cond
+  | t == zero: ASSUME(thy, mk_eq(zero, w))
+  | ~else: #false
+
+check rhs_of(zero_to_w(thy, zero) :~ Thm) ~is w
+check zero_to_w(thy, x) ~is #false
+
+check THENC(zero_to_w, ALL_CONV)(thy, zero) ~matches _ :: Thm
+// THENC fails if either half fails
+check THENC(zero_to_w, zero_to_w)(thy, zero) ~is #false
+check THENC(NO_CONV, ALL_CONV)(thy, zero) ~is #false
+check ORELSEC(NO_CONV, zero_to_w)(thy, zero) ~matches _ :: Thm
+check ORELSEC(zero_to_w, NO_CONV)(thy, x) ~is #false
+check FIRST_CONV([NO_CONV, NO_CONV, zero_to_w])(thy, zero) ~matches _ :: Thm
+check FIRST_CONV([])(thy, zero) ~is #false
+check TRY_CONV(NO_CONV)(thy, x) ~matches _ :: Thm
+check is_refl_thm(TRY_CONV(NO_CONV)(thy, x) :~ Thm) ~is #true
+
+// REPEATC never fails, and stops when the conversion stops applying
+check is_refl_thm(REPEATC(NO_CONV)(thy, x) :~ Thm) ~is #true
+check rhs_of(REPEATC(zero_to_w)(thy, zero) :~ Thm) ~is w
+
+check CHANGED_CONV(ALL_CONV)(thy, x) ~is #false
+check CHANGED_CONV(zero_to_w)(thy, zero) ~matches _ :: Thm
+
+// -- subterm traversal -----------------------------------------------------
+
+check:
+  rhs_of(RAND_CONV(zero_to_w)(thy, ap(f, zero)) :~ Thm)
+  ~is ap(f, w)
+check RAND_CONV(zero_to_w)(thy, ap(f, x)) ~is #false
+check RAND_CONV(zero_to_w)(thy, zero) ~is #false
+check:
+  rhs_of(RATOR_CONV(RAND_CONV(zero_to_w))(thy, pl(zero, x)) :~ Thm)
+  ~is pl(w, x)
+check:
+  rhs_of(LAND_CONV(zero_to_w)(thy, pl(zero, x)) :~ Thm)
+  ~is pl(w, x)
+check:
+  rhs_of(COMB2_CONV(ALL_CONV, zero_to_w)(thy, ap(f, zero)) :~ Thm)
+  ~is ap(f, w)
+
+check:
+  rhs_of(ABS_CONV(zero_to_w)(thy, mk_abs(x, zero)) :~ Thm)
+  ~is mk_abs(x, w)
+check ABS_CONV(zero_to_w)(thy, mk_abs(x, x)) ~is #false
+// SUB_CONV needs the conversion to apply to *both* immediate subterms, so the
+// operator position has to be tolerated explicitly
+check SUB_CONV(zero_to_w)(thy, ap(f, zero)) ~is #false
+check:
+  rhs_of(SUB_CONV(TRY_CONV(zero_to_w))(thy, ap(f, zero)) :~ Thm)
+  ~is ap(f, w)
+// SUB_CONV leaves an atom alone rather than failing
+check is_refl_thm(SUB_CONV(zero_to_w)(thy, x) :~ Thm) ~is #true
+
+// ABS_CONV under a conversion whose hypotheses mention the bound variable
+// must not go through `ABS` directly.
+fun hyp_conv(thy :: Theory, t :: Term) :: maybe(Thm):
+  cond
+  | t == zero: ASSUME(thy, mk_eq(zero, w))
+  | ~else: #false
+
+check:
+  // the hypothesis mentions no bound variable here, so the direct path works
+  let th = ABS_CONV(hyp_conv)(thy, mk_abs(x, zero)) :~ Thm
+  [show(rhs_of(th)), hyps_of(th).length()]
+  ~is ["fun (x :: num): w", 1]
+
+// -- whole-term traversal --------------------------------------------------
+
+check:
+  rhs_of(ONCE_DEPTH_CONV(zero_to_w)(thy, ap(f, ap(g, zero))) :~ Thm)
+  ~is ap(f, ap(g, w))
+// both occurrences, since they are on different branches
+check:
+  rhs_of(ONCE_DEPTH_CONV(zero_to_w)(thy, pl(zero, zero)) :~ Thm)
+  ~is pl(w, w)
+check:
+  rhs_of(DEPTH_CONV(zero_to_w)(thy, ap(f, zero)) :~ Thm)
+  ~is ap(f, w)
+check:
+  rhs_of(TOP_DEPTH_CONV(zero_to_w)(thy, pl(zero, ap(f, zero))) :~ Thm)
+  ~is pl(w, ap(f, w))
+check:
+  rhs_of(TOP_SWEEP_CONV(zero_to_w)(thy, ap(f, zero)) :~ Thm)
+  ~is ap(f, w)
+check:
+  rhs_of(REDEPTH_CONV(zero_to_w)(thy, ap(f, zero)) :~ Thm)
+  ~is ap(f, w)
+// a traversal that finds nothing still succeeds, with no change
+check is_refl_thm(DEPTH_CONV(zero_to_w)(thy, ap(f, x)) :~ Thm) ~is #true
+
+// nested beta redexes, all reduced
+check:
+  let t = mk_comb(mk_abs(x, mk_comb(mk_abs(y, pl(x, y)), zero)), zero)
+  show(rhs_of(TOP_DEPTH_CONV(BETA_CONV)(thy, t) :~ Thm))
+  ~is "plus(zero, zero)"
+check:
+  let inner = mk_comb(mk_abs(y, ap(f, y)), x)
+  let t = ap(g, mk_comb(mk_abs(x, inner), zero))
+  show(rhs_of(DEPTH_CONV(BETA_CONV)(thy, t) :~ Thm))
+  ~is "g(f(zero))"
+
+// -- conversions applied to theorems ---------------------------------------
+
+check:
+  let th = ASSUME(thy, mk_eq(ap(f, zero), x))
+  show((CONV_RULE(ONCE_DEPTH_CONV(zero_to_w), thy, th) :~ Thm).concl)
+  ~is "f(w) === x"
+check CONV_RULE(zero_to_w, thy, REFL(thy, x)) ~is #false
+check:
+  let redex = mk_comb(mk_abs(x, ap(f, x)), zero)
+  show(BETA_RULE(thy, ASSUME(thy, mk_eq(redex, y))).concl)
+  ~is "f(zero) === y"
+// BETA_RULE on a theorem with no redex is the identity
+check BETA_RULE(thy, e_xy).concl ~is mk_eq(x, y)
+
+// -- genvar ----------------------------------------------------------------
+
+check genvar(num) == genvar(num) ~is #false
+check genvar(num).ty ~is num

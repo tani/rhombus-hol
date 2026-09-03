@@ -1,0 +1,75 @@
+#lang rhombus/static
+
+// ACL2's term order, used to stop permutative rewrite rules from looping.
+//
+// A permutative rule (`x + y = y + x`, `x + (y + z) = y + (x + z)`) fires only
+// when the *instantiated* right-hand side is strictly smaller than the
+// instantiated left-hand side under this order.  Because the check is made per
+// instance, the property that makes it sound is not stability under
+// substitution -- it is that `term_order` is a well-founded total order that is
+// monotonic under term contexts.  Both are tested in `tests/order.rhm`.
+//
+// The comparison is ACL2's, in three tiers:
+//   1. total number of variable *occurrences*;
+//   2. total number of function/constant applications;
+//   3. `term_ord`, as a total tie-breaker.
+// Tiers 1 and 2 are additive over subterms, which is what makes the order
+// monotonic under contexts; tier 3 is decided at the first structural
+// difference, which is inside the hole, so it is monotonic too.
+
+import:
+  "term.rhm" open
+
+export:
+  var_count
+  fn_count
+  var_fn_count
+  term_order
+  term_lt
+  term_le
+  smallest
+
+// Counts every occurrence, not every distinct variable: `g(x, x)` counts 2.
+// A bound variable's occurrences count the same as a free one's.
+fun var_fn_count(t :: Term) :: values(Int, Int):
+  recur loop (t = t, vc = 0, fc = 0):
+    match t
+    | FVar(_, _): values(vc + 1, fc)
+    // A bound occurrence counts as a variable occurrence just as a free one
+    // does; the binder itself counts as structure, like a function symbol.
+    | BVar(_, _): values(vc + 1, fc)
+    | Const(_, _): values(vc, fc + 1)
+    | Comb(f, x):
+        let (vc, fc) = loop(f, vc, fc)
+        loop(x, vc, fc)
+    | Abs(_, b): loop(b, vc, fc + 1)
+
+fun var_count(t :: Term) :: Int:
+  let (vc, _) = var_fn_count(t)
+  vc
+
+fun fn_count(t :: Term) :: Int:
+  let (_, fc) = var_fn_count(t)
+  fc
+
+fun term_order(t1 :: Term, t2 :: Term) :: Int:
+  let (v1, f1) = var_fn_count(t1)
+  let (v2, f2) = var_fn_count(t2)
+  cond
+  | v1 != v2: (if v1 < v2 | -1 | 1)
+  | f1 != f2: (if f1 < f2 | -1 | 1)
+  | ~else: term_ord(t1, t2)
+
+fun term_lt(t1 :: Term, t2 :: Term) :: Boolean:
+  term_order(t1, t2) < 0
+
+fun term_le(t1 :: Term, t2 :: Term) :: Boolean:
+  term_order(t1, t2) <= 0
+
+// The `term_order`-least element, or `#false` for an empty list.
+fun smallest(ts :: List.of(Term)) :: maybe(Term):
+  match ts
+  | []: #false
+  | List.cons(t0, rest):
+      for values(best :~ Term = t0) (t in rest):
+        (if term_lt(t, best) | t | best)

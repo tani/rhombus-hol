@@ -1,0 +1,242 @@
+#lang rhombus/static
+
+// Recursive function definitions.
+//
+// A definition is given as a list of *clauses* `f(p1, ..., pn) = rhs`, where
+// each `pi` is a variable or a constructor applied to distinct variables.
+// That clausal shape is not an accident of the surface syntax: it is what the
+// rewriter wants (each clause becomes one unconditional rewrite rule) and what
+// the induction-scheme generator reads.
+//
+// Like `datatype.rhm`, this module postulates rather than derives.  Once
+// termination, exhaustiveness and non-overlap are established, the clausal
+// equations are a conservative extension -- that is the standard argument --
+// and `install_function` is the single seam behind which the postulation
+// happens.  Replacing it with a `WF_REC` derivation changes nothing above it.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
+  "printer.rhm" open
+  "bool.rhm" open
+  "datatype.rhm" open
+  "terminate.rhm" open
+
+export:
+  DefClause
+  FunSpec
+  FunInfo
+  fun_type
+  install_function
+  recursive_calls
+
+// `f(pats...) === rhs`.  The variables are those bound by the patterns.
+class DefClause(pats :: List.of(Term), rhs :: Term)
+
+class FunSpec(name :: Symbol,
+              arg_types :: List.of(HType),
+              ret_type :: HType,
+              clauses :: List.of(DefClause))
+
+class FunInfo(spec :: FunSpec,
+              fn :: Term,                  // the declared constant
+              equations :: List.of(Thm),   // one per clause, universally closed
+              recinfo :: RecursionInfo)
+
+fun fun_type(spec :: FunSpec) :: HType:
+  for values(ty :~ HType = spec.ret_type) (a in spec.arg_types.reverse()):
+    mk_fun(a, ty)
+
+// -- pattern checking ------------------------------------------------------
+
+// A pattern is a variable, or a constructor applied to distinct variables.
+// Deeper patterns are a v0.1 scope cut: the induction schemes this version
+// derives are one constructor deep, so admitting deeper patterns would produce
+// definitions no scheme matches.
+fun pattern_vars(who :: Symbol, p :: Term) :: List.of(FVar):
+  match p
+  | FVar(_, _): [p :~ FVar]
+  | ~else:
+      let (head, args) = strip_comb(p)
+      match head
+      | Const(_, _):
+          for (a in args):
+            unless a is_a FVar
+            | error(~who: who,
+                    "constructor pattern must be applied to distinct variables",
+                    error.val(~label: "pattern", show(p)))
+          args.map(fun (a): a :~ FVar)
+      | ~else:
+          error(~who: who, "not a pattern",
+                error.val(~label: "pattern", show(p)))
+
+// The constructor a pattern matches, or `#false` for a variable pattern.
+fun pattern_ctor(p :: Term) :: maybe(Symbol):
+  match p
+  | FVar(_, _): #false
+  | ~else:
+      let (head, _) = strip_comb(p)
+      match head
+      | Const(n, _): n
+      | ~else: #false
+
+fun check_distinct(who :: Symbol, vs :: List.of(FVar)) :: Void:
+  recur loop (vs :~ List = vs, seen :~ List = []):
+    match vs
+    | []: #void
+    | List.cons(v, rest):
+        when seen.contains(v)
+        | error(~who: who, "pattern variable is repeated",
+                error.val(~label: "variable", (v :~ FVar).name))
+        loop(rest, List.cons(v, seen))
+
+// -- recursive calls -------------------------------------------------------
+
+// Every application of `fn` to a full argument list inside `t`.
+fun recursive_calls(fn :: Term, arity :: Int, t :: Term) :: List.of(List.of(Term)):
+  fun walk(t :: Term, acc :~ List) :~ List:
+    let acc2:
+      let (head, args) = strip_comb(t)
+      cond
+      | head == fn && args.length() == arity: acc ++ [args]
+      | ~else: acc
+    match t
+    | Comb(f, x): walk(x, walk(f, acc2))
+    | Abs(_, b): walk(b, acc2)
+    | ~else: acc2
+  walk(t, [])
+
+// -- installation ----------------------------------------------------------
+
+// `dts` maps a type constructor name to its datatype declaration, so that
+// exhaustiveness can be checked against the real constructor list.
+fun install_function(thy :: Theory,
+                     spec :: FunSpec,
+                     dts :: Map.of(Symbol, DatatypeSpec))
+     :: values(Theory, FunInfo):
+  let who = #'fun
+  let fty = fun_type(spec)
+  when const_type(thy, spec.name) != #false
+  | error(~who: who, "constant is already declared",
+          error.val(~label: "name", spec.name))
+  when spec.clauses.length() == 0
+  | error(~who: who, "a definition needs at least one clause",
+          error.val(~label: "name", spec.name))
+  let arity = spec.arg_types.length()
+
+  // -- shape and typing of each clause
+  for (cl in spec.clauses):
+    let cl :~ DefClause = cl
+    unless cl.pats.length() == arity
+    | error(~who: who, "clause has the wrong number of arguments",
+            error.val(~label: "name", spec.name),
+            error.val(~label: "expected", arity),
+            error.val(~label: "given", cl.pats.length()))
+    for (p in cl.pats, ty in spec.arg_types):
+      unless type_of(p) == ty
+      | error(~who: who, "pattern has the wrong type",
+              error.val(~label: "pattern", show(p)),
+              error.val(~label: "expected", type_to_string(ty)))
+    let vs = clause_vars(who, cl)
+    check_distinct(who, vs)
+    unless type_of(cl.rhs) == spec.ret_type
+    | error(~who: who, "clause result has the wrong type",
+            error.val(~label: "expected", type_to_string(spec.ret_type)),
+            error.val(~label: "given", type_to_string(type_of(cl.rhs))))
+    // A variable free in the body but not bound by the patterns would make
+    // the equation say something about an arbitrary value.
+    for (v in free_vars(cl.rhs)):
+      unless vs.contains(v) || v == mk_var(spec.name, fty)
+      | error(~who: who, "clause body mentions an unbound variable",
+              error.val(~label: "variable", (v :~ FVar).name))
+
+  // -- exhaustiveness and non-overlap, over the matched column
+  let col = matched_column(who, spec)
+  check_coverage(who, spec, dts, col)
+
+  // -- termination
+  let fn_placeholder = mk_const(spec.name, fty)
+  let recinfo = check_termination(
+    who, spec.name, arity,
+    spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
+    fn_placeholder)
+
+  // -- only now is anything added to the theory
+  let thy2 = new_constant(thy, spec.name, fty)
+  let fn = mk_const(spec.name, fty)
+  let (thy3, eqs):
+    for values(t :~ Theory = thy2, acc :~ List = []) (cl in spec.clauses):
+      let cl :~ DefClause = cl
+      let lhs = list_mk_comb(fn, cl.pats)
+      let stmt = mk_forall_list(clause_vars(who, cl), mk_eq(lhs, cl.rhs))
+      let (t2, th) = new_axiom(t, stmt)
+      values(t2, acc ++ [th])
+  values(thy3, FunInfo(spec, fn, eqs, recinfo))
+
+fun clause_vars(who :: Symbol, cl :: DefClause) :: List.of(FVar):
+  for values(acc :~ List = []) (p in cl.pats): acc ++ pattern_vars(who, p)
+
+// The single argument position that is matched by constructors.  `#false`
+// means no position is -- a non-recursive, single-clause definition.
+fun matched_column(who :: Symbol, spec :: FunSpec) :: maybe(Int):
+  let n = spec.arg_types.length()
+  let cols = for values(acc :~ List = []) (i in List.iota(n)):
+               let any_ctor = for any (cl in spec.clauses):
+                                pattern_ctor((cl :~ DefClause).pats[i]) != #false
+               (if any_ctor | acc ++ [i] | acc)
+  cond
+  | cols.length() == 0: #false
+  | cols.length() == 1: cols[0]
+  | ~else:
+      error(~who: who,
+            "more than one argument is matched by constructors",
+            error.val(~label: "name", spec.name),
+            error.val(~label: "positions", to_string(cols)),
+            error.val(~label: "hint",
+                      "this version matches on a single argument; split the "
+                        ++ "definition into nested functions"))
+
+fun check_coverage(who :: Symbol, spec :: FunSpec,
+                   dts :: Map.of(Symbol, DatatypeSpec), col :: maybe(Int)) :: Void:
+  cond
+  | col == #false:
+      unless spec.clauses.length() == 1
+      | error(~who: who,
+              "several clauses but no argument is matched by constructors",
+              error.val(~label: "name", spec.name))
+  | ~else:
+      let ty = spec.arg_types[col]
+      let tyname = (match ty
+                    | TyApp(n, _): n
+                    | ~else:
+                        error(~who: who,
+                              "cannot match on an argument of variable type",
+                              error.val(~label: "name", spec.name)))
+      let dt :~ DatatypeSpec = (match dts.get(tyname, #false)
+                                | #false:
+                                    error(~who: who,
+                                          "no datatype declaration for the matched type",
+                                          error.val(~label: "type", tyname))
+                                | d: d)
+      let seen = for values(acc :~ List = []) (cl in spec.clauses):
+                   match pattern_ctor((cl :~ DefClause).pats[col])
+                   | #false:
+                       error(~who: who,
+                             "a variable pattern mixed with constructor patterns",
+                             error.val(~label: "name", spec.name),
+                             error.val(~label: "hint",
+                                       "give every clause a constructor pattern "
+                                         ++ "in the matched position"))
+                   | c:
+                       when acc.contains(c)
+                       | error(~who: who, "two clauses match the same constructor",
+                               error.val(~label: "constructor", c))
+                       acc ++ [c]
+      for (c in dt.ctors):
+        let c :~ Ctor = c
+        unless seen.contains(c.name)
+        | error(~who: who, "definition is not exhaustive",
+                error.val(~label: "name", spec.name),
+                error.val(~label: "missing constructor", c.name))

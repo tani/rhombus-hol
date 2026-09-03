@@ -1,0 +1,112 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/order open
+
+def num = TyApp(#'num, [])
+def n2 = mk_fun(num, mk_fun(num, num))
+
+def x = mk_var(#'x, num)
+def y = mk_var(#'y, num)
+def z = mk_var(#'z, num)
+def plus = mk_const(#'plus, n2)
+def times = mk_const(#'times, n2)
+def zero = mk_const(#'zero, num)
+def s = mk_const(#'s, mk_fun(num, num))
+
+fun pl(a, b): mk_comb(mk_comb(plus, a), b)
+fun tm(a, b): mk_comb(mk_comb(times, a), b)
+fun sc(a): mk_comb(s, a)
+
+// -- counting --------------------------------------------------------------
+
+check var_fn_count(x) ~is values(1, 0)
+check var_fn_count(zero) ~is values(0, 1)
+// `plus` and both arguments are counted; the two `Comb` nodes are not symbols
+check var_fn_count(pl(x, y)) ~is values(2, 1)
+check var_fn_count(pl(x, x)) ~is values(2, 1)
+check var_fn_count(pl(x, zero)) ~is values(1, 2)
+// the bound occurrence counts as a variable; the binder counts as structure
+check var_count(mk_abs(x, pl(x, y))) ~is 2
+check fn_count(mk_abs(x, pl(x, y))) ~is 2
+
+// -- a total, irreflexive, transitive, antisymmetric order -----------------
+
+def sample = [x, y, z, zero, sc(x), sc(zero), pl(x, y), pl(y, x), pl(x, x),
+              tm(x, y), pl(x, pl(y, z)), pl(pl(x, y), z), mk_abs(x, x)]
+
+check:
+  for all (a in sample): term_order(a, a) == 0
+  ~is #true
+check:
+  for all (a in sample, b in sample): term_order(a, b) == -term_order(b, a)
+  ~is #true
+check:
+  for all (a in sample, b in sample, c in sample):
+    !(term_lt(a, b) && term_lt(b, c)) || term_lt(a, c)
+  ~is #true
+// `term_order` is a *total* order: only equal terms compare equal
+check:
+  for all (a in sample, b in sample): (term_order(a, b) == 0) == (a == b)
+  ~is #true
+
+// -- the three tiers, in priority order ------------------------------------
+
+// tier 1: fewer variable occurrences wins, even with many more functions
+check term_lt(sc(sc(sc(zero))), x) ~is #true
+// tier 2: same variable count, fewer functions wins
+check term_lt(x, sc(x)) ~is #true
+check term_lt(pl(x, y), pl(x, sc(y))) ~is #true
+// tier 3: all counts equal, so the structural tie-breaker decides
+check var_fn_count(pl(x, y)) ~is var_fn_count(pl(y, x))
+check term_order(pl(x, y), pl(y, x)) ~is -1
+check term_order(pl(x, y), tm(x, y)) ~is -1
+
+// -- monotonicity under contexts: this is what makes rewriting terminate ---
+
+// If a subterm strictly decreases, the whole term strictly decreases.
+check:
+  let pairs = [[x, sc(x)], [pl(x, y), pl(y, x)], [zero, sc(zero)], [x, pl(x, y)]]
+  for all ([a, b] in pairs):
+    term_lt(a, b)
+      && term_lt(sc(a), sc(b))
+      && term_lt(pl(a, z), pl(b, z))
+      && term_lt(pl(z, a), pl(z, b))
+      && term_lt(tm(sc(a), y), tm(sc(b), y))
+  ~is #true
+
+// -- the commutativity rule cannot oscillate -------------------------------
+
+// `x + y = y + x` may fire only when it strictly decreases.  Applying it to
+// its own output must therefore be refused, in either orientation.
+fun comm_fires(a, b) :: Boolean:
+  term_lt(pl(b, a), pl(a, b))
+
+check comm_fires(y, x) ~is #true      // y + x  ~>  x + y  is a decrease
+check comm_fires(x, y) ~is #false     // x + y  ~>  y + x  is not
+// so exactly one of the two orientations is permitted -- no loop
+check:
+  let args = [[x, y], [y, x], [x, x], [sc(x), y], [y, sc(x)], [zero, x]]
+  for all ([a, b] in args):
+    !(comm_fires(a, b) && comm_fires(b, a))
+  ~is #true
+
+// The associative-commutative rule `x + (y + z) = y + (x + z)` likewise.
+fun ac_fires(a, b, c) :: Boolean:
+  term_lt(pl(b, pl(a, c)), pl(a, pl(b, c)))
+
+check ac_fires(y, x, z) ~is #true
+check ac_fires(x, y, z) ~is #false
+check:
+  let vs = [x, y, z]
+  for all (a in vs, b in vs, c in vs):
+    !(ac_fires(a, b, c) && ac_fires(b, a, c))
+  ~is #true
+
+// -- smallest --------------------------------------------------------------
+
+check smallest([]) ~is #false
+check smallest([sc(x), x, pl(x, y)]) ~is x
+check smallest([pl(y, x), pl(x, y)]) ~is pl(x, y)

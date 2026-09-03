@@ -1,0 +1,292 @@
+#lang rhombus/static
+
+// The logical constants, and the base theory everything else is built on.
+//
+// Every connective is *defined*, Church-style, on top of the kernel's `=`;
+// only choice (`select`) is a primitive constant.  Three axioms are assumed --
+// ETA, SELECT and BOOL_CASES -- following HOL4 rather than HOL Light.
+// BOOL_CASES is derivable from choice plus eta by Diaconescu's argument, but
+// taking it directly saves a long stretch of fiddly derived-rule script and
+// costs nothing in confidence: it is a standard consistent basis.
+//
+// `INFINITY_AX` is deliberately absent.  Datatypes arrive axiomatically from
+// `datatype.rhm`, so we never need to bootstrap an infinite type.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
+
+export:
+  bool
+  base_theory
+  base_defs
+  base_axiom
+  // term construction
+  tm_true
+  tm_false
+  mk_conj
+  mk_disj
+  mk_imp
+  mk_neg
+  mk_forall
+  mk_forall_list
+  mk_exists
+  mk_exists1
+  mk_select
+  mk_cond
+  // term destruction
+  dest_conj
+  dest_disj
+  dest_imp
+  dest_neg
+  dest_forall
+  dest_exists
+  dest_cond
+  is_conj
+  is_disj
+  is_imp
+  is_neg
+  is_forall
+  is_exists
+  is_cond
+  strip_forall
+  strip_conj
+  strip_imp
+
+def bool :: HType = TyApp(ty_bool, [])
+def tyA :: HType = TyVar(#'a)
+def tyB :: HType = TyVar(#'b)
+
+fun pred_ty(ty :: HType) :: HType: mk_fun(ty, bool)
+fun binop_ty(ty :: HType) :: HType: mk_fun(ty, mk_fun(ty, ty))
+
+// -- term construction -----------------------------------------------------
+//
+// Each connective's constant is monomorphic in `bool` except the quantifiers,
+// choice and the conditional, whose type comes from the term they are applied
+// to.
+
+def tm_true :: Term = mk_const(c_true, bool)
+def tm_false :: Term = mk_const(c_false, bool)
+
+fun mk_conj(a :: Term, b :: Term) :: Term:
+  mk_comb(mk_comb(mk_const(c_conj, binop_ty(bool)), a), b)
+
+fun mk_disj(a :: Term, b :: Term) :: Term:
+  mk_comb(mk_comb(mk_const(c_disj, binop_ty(bool)), a), b)
+
+fun mk_imp(a :: Term, b :: Term) :: Term:
+  mk_comb(mk_comb(mk_const(c_imp, binop_ty(bool)), a), b)
+
+fun mk_neg(a :: Term) :: Term:
+  mk_comb(mk_const(c_neg, mk_fun(bool, bool)), a)
+
+fun mk_forall(v :: FVar, body :: Term) :: Term:
+  mk_comb(mk_const(c_forall, mk_fun(pred_ty(v.ty), bool)), mk_abs(v, body))
+
+fun mk_forall_list(vs :: List.of(FVar), body :: Term) :: Term:
+  for values(t :~ Term = body) (v in vs.reverse()): mk_forall(v, t)
+
+fun mk_exists(v :: FVar, body :: Term) :: Term:
+  mk_comb(mk_const(c_exists, mk_fun(pred_ty(v.ty), bool)), mk_abs(v, body))
+
+fun mk_exists1(v :: FVar, body :: Term) :: Term:
+  mk_comb(mk_const(c_exists1, mk_fun(pred_ty(v.ty), bool)), mk_abs(v, body))
+
+fun mk_select(v :: FVar, body :: Term) :: Term:
+  mk_comb(mk_const(c_select, mk_fun(pred_ty(v.ty), v.ty)), mk_abs(v, body))
+
+fun mk_cond(c :: Term, t :: Term, e :: Term) :: Term:
+  let ty = type_of(t)
+  mk_comb(mk_comb(mk_comb(mk_const(c_cond, mk_fun(bool, binop_ty(ty))), c), t),
+          e)
+
+// -- term destruction ------------------------------------------------------
+
+fun dest_binary(n :: Symbol, t :: Term) :: maybe(List.of(Term)):
+  match t
+  | Comb(Comb(Const(m, _), a), b) when m == n: [a, b]
+  | ~else: #false
+
+fun dest_conj(t :: Term) :: maybe(List.of(Term)): dest_binary(c_conj, t)
+fun dest_disj(t :: Term) :: maybe(List.of(Term)): dest_binary(c_disj, t)
+fun dest_imp(t :: Term) :: maybe(List.of(Term)): dest_binary(c_imp, t)
+
+fun dest_neg(t :: Term) :: maybe(Term):
+  match t
+  | Comb(Const(n, _), a) when n == c_neg: a
+  | ~else: #false
+
+// Binders carry no name any more, so destructing one has to *open* it: pick a
+// free variable that does not clash with anything already free in the body and
+// substitute it for the bound occurrences.  `dest_abs` chooses the name
+// deterministically, so repeated calls on the same term agree.
+fun dest_binder(n :: Symbol, t :: Term) :: maybe(List):
+  match t
+  | Comb(Const(m, _), (abs :: Abs)) when m == n:
+      let (v, body) = dest_abs(abs)
+      [v, body]
+  | ~else: #false
+
+fun dest_forall(t :: Term) :: maybe(List): dest_binder(c_forall, t)
+fun dest_exists(t :: Term) :: maybe(List): dest_binder(c_exists, t)
+
+fun dest_cond(t :: Term) :: maybe(List.of(Term)):
+  match t
+  | Comb(Comb(Comb(Const(n, _), c), a), b) when n == c_cond: [c, a, b]
+  | ~else: #false
+
+fun is_conj(t :: Term) :: Boolean: dest_conj(t) != #false
+fun is_disj(t :: Term) :: Boolean: dest_disj(t) != #false
+fun is_imp(t :: Term) :: Boolean: dest_imp(t) != #false
+fun is_neg(t :: Term) :: Boolean: dest_neg(t) != #false
+fun is_forall(t :: Term) :: Boolean: dest_forall(t) != #false
+fun is_exists(t :: Term) :: Boolean: dest_exists(t) != #false
+fun is_cond(t :: Term) :: Boolean: dest_cond(t) != #false
+
+fun strip_forall(t :: Term) :: values(List.of(FVar), Term):
+  recur loop (t = t, acc :~ List = []):
+    match dest_forall(t)
+    | [v, b]: loop(b, List.cons(v, acc))
+    | ~else: values(acc.reverse(), t)
+
+// `a and b and c` flattened; a non-conjunction is a one-element list.
+fun strip_conj(t :: Term) :: List.of(Term):
+  match dest_conj(t)
+  | [a, b]: strip_conj(a) ++ strip_conj(b)
+  | ~else: [t]
+
+// `a ==> b ==> c` as `([a, b], c)`.
+fun strip_imp(t :: Term) :: values(List.of(Term), Term):
+  recur loop (t = t, acc :~ List = []):
+    match dest_imp(t)
+    | [a, b]: loop(b, List.cons(a, acc))
+    | ~else: values(acc.reverse(), t)
+
+// -- the base theory -------------------------------------------------------
+
+class Base(thy :: Theory,
+           defs :: Map.of(Symbol, Thm),
+           axioms :: Map.of(Symbol, Thm))
+
+fun define(thy :: Theory, name :: Symbol, ty :: HType, rhs :: Term)
+     :: values(Theory, Thm):
+  new_basic_definition(thy, mk_eq(mk_var(name, ty), rhs))
+
+fun build() :: Base:
+  let thy = initial_theory()
+  let p = mk_var(#'p, bool)
+  let q = mk_var(#'q, bool)
+  let r = mk_var(#'r, bool)
+
+  // true = ((\p. p) = (\p. p))
+  let (thy, def_true):
+    define(thy, c_true, bool, mk_eq(mk_abs(p, p), mk_abs(p, p)))
+
+  // conj = \p q. ((\f. f p q) = (\f. f true true))
+  let ff = mk_var(#'f, binop_ty(bool))
+  let (thy, def_conj):
+    let lhs = mk_abs(ff, mk_comb(mk_comb(ff, p), q))
+    let rhs = mk_abs(ff, mk_comb(mk_comb(ff, tm_true), tm_true))
+    define(thy, c_conj, binop_ty(bool),
+           mk_abs(p, mk_abs(q, mk_eq(lhs, rhs))))
+
+  // imp = \p q. ((p and q) = p)
+  let (thy, def_imp):
+    define(thy, c_imp, binop_ty(bool),
+           mk_abs(p, mk_abs(q, mk_eq(mk_conj(p, q), p))))
+
+  // forall = \P. (P = \x. true)
+  let bigP = mk_var(#'P, pred_ty(tyA))
+  let xa = mk_var(#'x, tyA)
+  let (thy, def_forall):
+    define(thy, c_forall, mk_fun(pred_ty(tyA), bool),
+           mk_abs(bigP, mk_eq(bigP, mk_abs(xa, tm_true))))
+
+  // choice is primitive: only its axiom constrains it
+  let thy = new_constant(thy, c_select, mk_fun(pred_ty(tyA), tyA))
+
+  // exists = \P. !q. (!x. P x ==> q) ==> q
+  let (thy, def_exists):
+    let inner = mk_forall(xa, mk_imp(mk_comb(bigP, xa), q))
+    define(thy, c_exists, mk_fun(pred_ty(tyA), bool),
+           mk_abs(bigP, mk_forall(q, mk_imp(inner, q))))
+
+  // disj = \p q. !r. (p ==> r) ==> ((q ==> r) ==> r)
+  let (thy, def_disj):
+    let body = mk_forall(r, mk_imp(mk_imp(p, r), mk_imp(mk_imp(q, r), r)))
+    define(thy, c_disj, binop_ty(bool), mk_abs(p, mk_abs(q, body)))
+
+  // false = !p. p
+  let (thy, def_false): define(thy, c_false, bool, mk_forall(p, p))
+
+  // neg = \p. p ==> false
+  let (thy, def_neg):
+    define(thy, c_neg, mk_fun(bool, bool),
+           mk_abs(p, mk_imp(p, tm_false)))
+
+  // exists1 = \P. exists P and !x y. P x and P y ==> x = y
+  let ya = mk_var(#'y, tyA)
+  let (thy, def_exists1):
+    let both = mk_conj(mk_comb(bigP, xa), mk_comb(bigP, ya))
+    let uniq = mk_forall(xa, mk_forall(ya, mk_imp(both, mk_eq(xa, ya))))
+    let ex_c = mk_const(c_exists, mk_fun(pred_ty(tyA), bool))
+    let ex_P = mk_comb(ex_c, bigP)
+    define(thy, c_exists1, mk_fun(pred_ty(tyA), bool),
+           mk_abs(bigP, mk_conj(ex_P, uniq)))
+
+  // cond = \t t1 t2. @x. ((t = true) ==> (x = t1)) and ((t = false) ==> (x = t2))
+  let t1 = mk_var(#'t1, tyA)
+  let t2 = mk_var(#'t2, tyA)
+  let tb = mk_var(#'t, bool)
+  let (thy, def_cond):
+    let body = mk_conj(mk_imp(mk_eq(tb, tm_true), mk_eq(xa, t1)),
+                       mk_imp(mk_eq(tb, tm_false), mk_eq(xa, t2)))
+    define(thy, c_cond, mk_fun(bool, binop_ty(tyA)),
+           mk_abs(tb, mk_abs(t1, mk_abs(t2, mk_select(xa, body)))))
+
+  // -- the three axioms ----------------------------------------------------
+
+  // ETA_AX: !f. (\x. f x) = f
+  let (thy, ax_eta):
+    let fab = mk_var(#'f, mk_fun(tyA, tyB))
+    let eta = mk_eq(mk_abs(xa, mk_comb(fab, xa)), fab)
+    new_axiom(thy, mk_forall(fab, eta))
+
+  // SELECT_AX: !P. !x. P x ==> P (select P)
+  let (thy, ax_select):
+    let sel = mk_comb(mk_const(c_select, mk_fun(pred_ty(tyA), tyA)), bigP)
+    let body = mk_imp(mk_comb(bigP, xa), mk_comb(bigP, sel))
+    new_axiom(thy, mk_forall(bigP, mk_forall(xa, body)))
+
+  // BOOL_CASES_AX: !t. (t = true) or (t = false)
+  let (thy, ax_bool_cases):
+    let cases = mk_disj(mk_eq(tb, tm_true), mk_eq(tb, tm_false))
+    new_axiom(thy, mk_forall(tb, cases))
+
+  Base(thy,
+       {c_true: def_true, c_conj: def_conj, c_imp: def_imp,
+        c_forall: def_forall, c_exists: def_exists, c_disj: def_disj,
+        c_false: def_false, c_neg: def_neg, c_exists1: def_exists1,
+        c_cond: def_cond},
+       {#'ETA_AX: ax_eta, #'SELECT_AX: ax_select,
+        #'BOOL_CASES_AX: ax_bool_cases})
+
+def base :: Base = build()
+
+fun base_theory() :: Theory: base.thy
+
+// The defining equation of a logical constant, e.g. `base_defs(c_conj)`.
+fun base_defs(n :: Symbol) :: Thm:
+  match base.defs.get(n, #false)
+  | #false: error(~who: #'base_defs, "no such definition",
+                  error.val(~label: "name", n))
+  | th: th
+
+fun base_axiom(n :: Symbol) :: Thm:
+  match base.axioms.get(n, #false)
+  | #false: error(~who: #'base_axiom, "no such axiom",
+                  error.val(~label: "name", n))
+  | th: th

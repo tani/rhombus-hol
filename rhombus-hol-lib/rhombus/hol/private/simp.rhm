@@ -1,0 +1,47 @@
+#lang rhombus/static
+
+// The waterfall's first stage: simplification.
+//
+// Rewrite the conclusion to a normal form with the rule database, with the
+// goal's own assumptions thrown in as rules.  If it reaches `true` the goal is
+// closed; otherwise the simplified goal replaces the original.
+
+import:
+  "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
+  "printer.rhm" open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "ruledb.rhm" open
+  "goal.rhm" open
+
+export:
+  with_assumptions
+  simplify_goal
+
+// Extend a database with the goal's assumptions.  An equational assumption
+// becomes a rewrite rule -- which is how an induction hypothesis does its work
+// -- and any other assumption becomes `p === true`.
+fun with_assumptions(thy :: Theory, db :: RuleDB,
+                     asms :: List.of(Term)) :: RuleDB:
+  for values(d :~ RuleDB = db) (a in asms):
+    add_thm(thy, d, #'assumption, ASSUME(thy, a))
+
+fun simplify_goal(thy :: Theory, db :: RuleDB, g :: Goal) :: maybe(Step):
+  let db2 = with_assumptions(thy, db, g.asms)
+  match simp_conv(db2)(thy, g.concl)
+  | #false: #false
+  | eqth :~ Thm:
+      let simplified = rhs_of(eqth)
+      cond
+      | simplified == g.concl: #false
+      | simplified == tm_true:
+          // `|- concl === true`, so the goal is closed outright.
+          Step([], fun (_ :: List.of(Thm)): EQT_ELIM(thy, eqth))
+      | ~else:
+          let sub = note(Goal(g.asms, simplified, g.trail), "simplification")
+          Step([sub],
+               fun (ths :: List.of(Thm)):
+                 EQ_MP(SYM(thy, eqth), ths[0]))

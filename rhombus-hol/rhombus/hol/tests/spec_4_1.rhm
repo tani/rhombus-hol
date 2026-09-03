@@ -1,0 +1,188 @@
+#lang rhombus/static
+
+// Acceptance test for specification section 4.1: list reversal and the
+// associativity of append.
+//
+// Each theorem is proved by the waterfall and then registered as a rewrite
+// rule, exactly as the specification's `@rewrite_rule` attribute describes, so
+// that the later proofs can use the earlier ones.  Every theorem here is a
+// kernel `Thm`: `prove` checks that the result is hypothesis-free and matches
+// the statement before handing it back.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/datatype open
+  rhombus/hol/private/recdef open
+  rhombus/hol/private/ruledb open
+  rhombus/hol/private/goal open
+  rhombus/hol/private/induct open
+  rhombus/hol/private/waterfall open
+  "spec_prelude.rhm" open
+
+def P = prelude
+def thy = P.thy
+
+def defs :: RuleDB:
+  for values(d :~ RuleDB = empty_db) ((nm, fi) in P.funs):
+    add_thms(thy, d, nm, (fi :~ FunInfo).equations)
+
+fun ctx_with(db :: RuleDB) :: Context:
+  mk_context(thy, ~rules: db, ~datatypes: P.thms, ~functions: P.funs)
+
+def xs = v(#'xs, list_ty(A))
+def ys = v(#'ys, list_ty(A))
+def zs = v(#'zs, list_ty(A))
+fun candidate_vars_of(g :: Goal) :: List.of(Symbol):
+  candidate_vars(P.funs, P.thms, g).map(fun (u :: FVar): u.name)
+
+fun app_(a, b): ap2(P.app, a, b)
+fun rev_(a): ap1(P.rev, a)
+
+// A proved theorem, plus the database with it registered as a rewrite rule.
+fun prove_rule(db :: RuleDB, name :: Symbol, stmt :: Term,
+               ~names: names :: List.of(Symbol) = [],
+               ~induct: hint :: maybe(Symbol) = #false)
+     :: values(Thm, RuleDB):
+  let (th, node) = prove(ctx_with(db), stmt, ~names: names, ~induct: hint)
+  match th
+  | #false: error(~who: name, residue_message(name, node))
+  | t :~ Thm: values(t, add_thm(thy, db, name, t))
+
+// ==========================================================================
+// theorem app_nil_r: forall (xs): app(xs, nil) === xs
+// ==========================================================================
+
+def (app_nil_r, db1):
+  prove_rule(defs, #'app_nil_r,
+             mk_forall(xs, mk_eq(app_(xs, P.nil), xs)),
+             ~names: [#'xs], ~induct: #'xs)
+
+check:
+  show(concl_of(app_nil_r))
+  ~is "forall (x :: List('a)): app(x, nil) === x"
+check hyps_of(app_nil_r) ~is []
+check descends(stamp_of(app_nil_r), thy.stamp) ~is #true
+
+// ==========================================================================
+// theorem app_assoc: forall (xs, ys, zs):
+//   app(app(xs, ys), zs) === app(xs, app(ys, zs))
+// ==========================================================================
+
+def (app_assoc, db2):
+  prove_rule(db1, #'app_assoc,
+             mk_forall_list([xs, ys, zs],
+                            mk_eq(app_(app_(xs, ys), zs),
+                                  app_(xs, app_(ys, zs)))),
+             ~names: [#'xs, #'ys, #'zs], ~induct: #'xs)
+
+check:
+  show(concl_of(app_assoc))
+  ~is "forall (x :: List('a), y :: List('a), z :: List('a)): "
+        ++ "app(app(x, y), z) === app(x, app(y, z))"
+check hyps_of(app_assoc) ~is []
+
+// ==========================================================================
+// theorem rev_app_distr: forall (xs, ys):
+//   rev(app(xs, ys)) === app(rev(ys), rev(xs))
+// ==========================================================================
+
+def (rev_app_distr, db3):
+  prove_rule(db2, #'rev_app_distr,
+             mk_forall_list([xs, ys],
+                            mk_eq(rev_(app_(xs, ys)),
+                                  app_(rev_(ys), rev_(xs)))),
+             ~names: [#'xs, #'ys], ~induct: #'xs)
+
+check:
+  show(concl_of(rev_app_distr))
+  ~is "forall (x :: List('a), y :: List('a)): "
+        ++ "rev(app(x, y)) === app(rev(y), rev(x))"
+check hyps_of(rev_app_distr) ~is []
+
+// ==========================================================================
+// theorem rev_involutive: forall (xs): rev(rev(xs)) === xs
+//
+// The specification's remark that the accumulated rewrite rules let this go
+// through "in one induction" is the point of the test: nothing below mentions
+// the earlier lemmas, they are simply in the database.
+// ==========================================================================
+
+def (rev_involutive, db4):
+  prove_rule(db3, #'rev_involutive,
+             mk_forall(xs, mk_eq(rev_(rev_(xs)), xs)),
+             ~names: [#'xs], ~induct: #'xs)
+
+check:
+  show(concl_of(rev_involutive))
+  ~is "forall (x :: List('a)): rev(rev(x)) === x"
+check hyps_of(rev_involutive) ~is []
+
+// ==========================================================================
+// the choice of induction variable is found without a hint
+// ==========================================================================
+
+check:
+  // `rev` recurses on its only argument, so `xs` is the obvious candidate
+  let g = mk_goal([], mk_eq(rev_(rev_(xs)), xs))
+  candidate_vars_of(g)
+  ~is [#'xs]
+check:
+  // `app` recurses on its first argument, so `xs` outscores `ys`
+  let g = mk_goal([], mk_eq(app_(app_(xs, ys), zs), app_(xs, app_(ys, zs))))
+  candidate_vars_of(g)
+  ~is [#'xs, #'ys, #'zs]
+check:
+  let (th, _) = prove(ctx_with(db3), mk_forall(xs, mk_eq(rev_(rev_(xs)), xs)),
+                      ~names: [#'xs])
+  th != #false
+  ~is #true
+
+// ==========================================================================
+// a false conjecture is not proved, and says why it is stuck
+// ==========================================================================
+
+// The specification's own counterexample: `rev` does not distribute over
+// `app` without swapping the arguments.
+def bad_stmt = mk_forall_list([xs, ys],
+                              mk_eq(rev_(app_(xs, ys)),
+                                    app_(rev_(xs), rev_(ys))))
+
+check:
+  let (th, _) = prove(ctx_with(db4), bad_stmt, ~names: [#'xs, #'ys], ~induct: #'xs)
+  th
+  ~is #false
+check:
+  let (_, node) = prove(ctx_with(db4), bad_stmt, ~names: [#'xs, #'ys], ~induct: #'xs)
+  residues(node).length() > 0
+  ~is #true
+check:
+  let (_, node) = prove(ctx_with(db4), bad_stmt, ~names: [#'xs, #'ys], ~induct: #'xs)
+  residue_message(#'rev_app_wrong, node) is_a String
+  ~is #true
+check:
+  // the residue names the stages it went through, so the user can see where
+  // the proof ran out
+  let (_, node) = prove(ctx_with(db4), bad_stmt, ~names: [#'xs, #'ys], ~induct: #'xs)
+  let g = residues(node)[0] :~ Goal
+  g.trail.length() > 0
+  ~is #true
+
+// ==========================================================================
+// nothing above bypassed the kernel
+// ==========================================================================
+
+check:
+  // every acceptance theorem is stamped in the prelude's theory
+  let all_thms = [app_nil_r, app_assoc, rev_app_distr, rev_involutive]
+  for all (t in all_thms): descends(stamp_of(t), thy.stamp)
+  ~is #true
+check:
+  let all_thms = [app_nil_r, app_assoc, rev_app_distr, rev_involutive]
+  for all (t in all_thms): hyps_of(t) == []
+  ~is #true
+

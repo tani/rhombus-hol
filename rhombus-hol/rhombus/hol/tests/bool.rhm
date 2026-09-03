@@ -1,0 +1,151 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+
+def thy = base_theory()
+def A = TyVar(#'a)
+def p = mk_var(#'p, bool)
+def q = mk_var(#'q, bool)
+def x = mk_var(#'x, A)
+def y = mk_var(#'y, A)
+
+// -- the base signature ----------------------------------------------------
+
+check type_arity(thy, ty_bool) ~is 0
+check type_arity(thy, ty_fun) ~is 2
+check const_type(thy, c_eq) ~is mk_fun(A, mk_fun(A, bool))
+check const_type(thy, c_true) ~is bool
+check const_type(thy, c_false) ~is bool
+check const_type(thy, c_conj) ~is mk_fun(bool, mk_fun(bool, bool))
+check const_type(thy, c_disj) ~is mk_fun(bool, mk_fun(bool, bool))
+check const_type(thy, c_imp) ~is mk_fun(bool, mk_fun(bool, bool))
+check const_type(thy, c_neg) ~is mk_fun(bool, bool)
+check const_type(thy, c_forall) ~is mk_fun(mk_fun(A, bool), bool)
+check const_type(thy, c_exists) ~is mk_fun(mk_fun(A, bool), bool)
+check const_type(thy, c_exists1) ~is mk_fun(mk_fun(A, bool), bool)
+// choice is the one primitive constant: declared, never defined
+check const_type(thy, c_select) ~is mk_fun(mk_fun(A, bool), A)
+check definition_of(thy, c_select) ~is #false
+check const_type(thy, c_cond) ~is mk_fun(bool, mk_fun(A, mk_fun(A, A)))
+
+// -- everything built here is well-formed in the base theory ---------------
+
+check check_term(thy, mk_conj(p, q)) ~is #void
+check check_term(thy, mk_disj(p, q)) ~is #void
+check check_term(thy, mk_imp(p, q)) ~is #void
+check check_term(thy, mk_neg(p)) ~is #void
+check check_term(thy, mk_forall(x, mk_eq(x, x))) ~is #void
+check check_term(thy, mk_exists(x, mk_eq(x, y))) ~is #void
+check check_term(thy, mk_exists1(x, mk_eq(x, y))) ~is #void
+check check_term(thy, mk_select(x, mk_eq(x, y))) ~is #void
+check check_term(thy, mk_cond(p, x, y)) ~is #void
+
+check is_bool(mk_conj(p, q)) ~is #true
+check type_of(mk_select(x, mk_eq(x, y))) ~is A
+check type_of(mk_cond(p, x, y)) ~is A
+
+// -- construction and destruction round-trip -------------------------------
+
+check dest_conj(mk_conj(p, q)) ~is [p, q]
+check dest_disj(mk_disj(p, q)) ~is [p, q]
+check dest_imp(mk_imp(p, q)) ~is [p, q]
+check dest_neg(mk_neg(p)) ~is p
+check dest_forall(mk_forall(x, p)) ~is [x, p]
+check dest_exists(mk_exists(x, p)) ~is [x, p]
+check dest_cond(mk_cond(p, x, y)) ~is [p, x, y]
+check dest_conj(mk_disj(p, q)) ~is #false
+check dest_neg(p) ~is #false
+check is_conj(mk_conj(p, q)) ~is #true
+check is_conj(p) ~is #false
+
+// Binders have no names, so `strip_forall` invents them; what it guarantees
+// is that the variables it hands back really are the ones in the body.
+check:
+  let (vs, b) = strip_forall(mk_forall(x, mk_forall(y, mk_eq(x, y))))
+  [vs.length(), b == mk_eq(vs[0], vs[1])]
+  ~is [2, #true]
+check:
+  let (vs, b) = strip_forall(mk_forall(x, mk_forall(y, mk_eq(x, y))))
+  mk_forall_list(vs, b)
+  ~is mk_forall(x, mk_forall(y, mk_eq(x, y)))
+check strip_conj(mk_conj(p, mk_conj(q, p))) ~is [p, q, p]
+check strip_conj(p) ~is [p]
+check:
+  let (hs, c) = strip_imp(mk_imp(p, mk_imp(q, p)))
+  [hs, c == p]
+  ~is [[p, q], #true]
+check mk_forall_list([x, y], mk_eq(x, y)) ~is mk_forall(x, mk_forall(y, mk_eq(x, y)))
+
+// -- the printer agrees with the constructors ------------------------------
+
+check show(mk_conj(p, q)) ~is "p and q"
+check show(mk_imp(mk_neg(p), q)) ~is "not p ==> q"
+check show(mk_forall(x, mk_eq(x, x))) ~is "forall (x :: 'a): x === x"
+check show(mk_cond(p, x, y)) ~is "if p | x | y"
+check show(tm_true) ~is "true"
+
+// -- the definitional theorems ---------------------------------------------
+
+// Each connective is *defined*, so its equation is derivable, not assumed.
+check base_defs(c_true).hyps ~is []
+check:
+  // `true = ((\p. p) = (\p. p))`; the binder name is gone, so any variable
+  // of the right type rebuilds the same term
+  base_defs(c_true).concl
+  ~is mk_eq(tm_true, mk_eq(mk_abs(q, q), mk_abs(q, q)))
+check:
+  // `imp` is defined in terms of `conj`, so its equation mentions `and`
+  let [lhs, rhs] = (match dest_eq(base_defs(c_imp).concl) | l: l)
+  lhs
+  ~is mk_const(c_imp, mk_fun(bool, mk_fun(bool, bool)))
+check:
+  // `neg p` unfolds to `p ==> false`.  The binder prints as `x`: the name it
+  // was built with is not part of the term.
+  show(base_defs(c_neg).concl)
+  ~is "neg === fun (x :: bool): x ==> false"
+check:
+  show(base_defs(c_false).concl)
+  ~is "false <=> forall (x :: bool): x"
+check:
+  show(base_defs(c_forall).concl)
+  ~is "forall === fun (x :: 'a -> bool): x === fun (y :: 'a): true"
+
+check base_defs(#'nope) ~throws "no such definition"
+
+// -- the three axioms, and only three --------------------------------------
+
+check axioms_of(thy).length() ~is 3
+check base_axiom(#'ETA_AX).hyps ~is []
+check:
+  show(base_axiom(#'ETA_AX).concl)
+  ~is "forall (x :: 'a -> 'b): (fun (y :: 'a): x(y)) === x"
+check:
+  show(base_axiom(#'SELECT_AX).concl)
+  ~is "forall (x :: 'a -> bool, y :: 'a): x(y) ==> x(select(x))"
+check:
+  show(base_axiom(#'BOOL_CASES_AX).concl)
+  ~is "forall (x :: bool): (x <=> true) or (x <=> false)"
+check base_axiom(#'nope) ~throws "no such axiom"
+
+// -- soundness-relevant invariants -----------------------------------------
+
+// Nothing in the base theory was admitted on trust from another module.
+check trusted_imports_of(thy) ~is []
+// Every definition really is a definition: it has a recorded defining theorem.
+check:
+  let named = [c_true, c_conj, c_imp, c_forall, c_exists, c_disj,
+               c_false, c_neg, c_exists1, c_cond]
+  for all (n in named): definition_of(thy, n) != #false
+  ~is #true
+// and the definitional theorems are hypothesis-free
+check:
+  let named = [c_true, c_conj, c_imp, c_forall, c_exists, c_disj,
+               c_false, c_neg, c_exists1, c_cond]
+  for all (n in named): base_defs(n).hyps == []
+  ~is #true

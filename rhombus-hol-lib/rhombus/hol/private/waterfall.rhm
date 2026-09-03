@@ -1,0 +1,194 @@
+#lang rhombus/static
+
+// The waterfall: the driver that pushes a goal through the stages.
+//
+//   simplification -> destructor elimination -> generalization -> induction
+//
+// A stage that makes progress restarts its subgoals at the top of the
+// pipeline; a goal that falls off the bottom is left open, and its trail
+// becomes the stuck-residue message.
+//
+// Nothing here can produce a theorem on its own.  Each stage hands back a
+// `Step` carrying its own justification, and `run` composes them; the only
+// theorems that exist are the ones the kernel made.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
+  "printer.rhm" open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "datatype.rhm" open
+  "recdef.rhm" open
+  "ruledb.rhm" open
+  "goal.rhm" open
+  "simp.rhm" open
+  "destruct.rhm" open
+  "general.rhm" open
+  "induct.rhm" open
+
+export:
+  Context
+  mk_context
+  prove_goal
+  prove
+  residue_message
+
+class Context(thy :: Theory,
+              db :: RuleDB,
+              dts :: Map.of(Symbol, DatatypeThms),
+              funs :: Map.of(Symbol, FunInfo),
+              // every constructor of every known datatype; generalization
+              // needs it to know what not to hide behind a variable
+              ctors :: Set.of(Symbol))
+
+fun mk_context(thy :: Theory,
+               ~rules: db :: RuleDB = empty_db,
+               ~datatypes: dts :: Map.of(Symbol, DatatypeThms) = {},
+               ~functions: funs :: Map.of(Symbol, FunInfo) = {}) :: Context:
+  let ctors = for values(acc :~ Set = Set()) ((_, dtms) in dts):
+                for values(a :~ Set = acc) (c in (dtms :~ DatatypeThms).spec.ctors):
+                  a ++ {(c :~ Ctor).name}
+  Context(thy, db, dts, funs, ctors)
+
+// How many nested inductions the driver will attempt.
+//
+// This is not a tunable budget, it is what makes the driver a function rather
+// than a search: each induction replaces a variable by constructor patterns
+// that introduce *new* variables of the same type, so without a bound the
+// driver would keep finding something to induct on forever.  Two levels is
+// what ACL2 uses and what the specification's examples need.
+def max_induction_depth = 2
+
+fun stage_simplify(ctx :: Context, g :: Goal) :: maybe(Step):
+  simplify_goal(ctx.thy, ctx.db, g)
+
+fun stage_eliminate(ctx :: Context, g :: Goal) :: maybe(Step):
+  eliminate_goal(ctx.thy, ctx.dts, g)
+
+fun stage_generalize(ctx :: Context, g :: Goal) :: maybe(Step):
+  generalize_goal(ctx.thy, ctx.ctors, g)
+
+fun stage_induct(ctx :: Context, g :: Goal, hint :: maybe(FVar)) :: maybe(Step):
+  let vs = (cond
+            | hint: [hint]
+            | ~else: candidate_vars(ctx.funs, ctx.dts, g))
+  recur loop (vs :~ List = vs):
+    match vs
+    | []: #false
+    | List.cons(v, rest):
+        let v :~ FVar = v
+        match inductive_type_name(v)
+        | #false: loop(rest)
+        | tyname:
+            match ctx.dts.get(tyname, #false)
+            | #false: loop(rest)
+            | dtms: induction_step(ctx.thy, dtms :~ DatatypeThms, v, g)
+
+// `hint` forces the first induction variable; deeper inductions always choose
+// for themselves.
+fun prove_goal(ctx :: Context, g :: Goal,
+               ~induct: hint :: maybe(FVar) = #false) :: ProofNode:
+  fun go(g :: Goal, depth :: Int, hint :: maybe(FVar)) :: ProofNode:
+    fun descend(st :: Step, next_depth :: Int) :: ProofNode:
+      Derived(st, st.subgoals.map(fun (s :: Goal): go(s, next_depth, #false)))
+    // `#false` first in every one of these: `:~` is an assertion, not a
+    // test, so a `Step`-annotated clause placed first would swallow `#false`.
+    match stage_simplify(ctx, g)
+    | #false:
+        match stage_eliminate(ctx, g)
+        | #false:
+            match stage_generalize(ctx, g)
+            | #false:
+                cond
+                | depth >= max_induction_depth: Open(g)
+                | ~else:
+                    match stage_induct(ctx, g, hint)
+                    | #false: Open(g)
+                    | st: descend(st :~ Step, depth + 1)
+            | st: descend(st :~ Step, depth)
+        | st: descend(st :~ Step, depth)
+    | st: descend(st :~ Step, depth)
+  go(g, 0, hint)
+
+// Prove a closed proposition.  Leading universal quantifiers are stripped
+// first -- the prover works on the matrix and puts the quantifiers back --
+// and the result is checked against what was asked for before it is returned.
+//
+// `names` supplies the names to give those quantified variables.  Terms are
+// locally nameless, so a binder's name is not part of the statement: it lives
+// in the source the statement was written from.  Anything that refers to a
+// bound variable by name -- the specification's `~induct: xs` hint, and the
+// variable names a residue message shows the user -- therefore has to be told
+// what the source called them.  Without `names` the prover invents its own,
+// which is fine for a machine-generated goal and unhelpful for a human one.
+fun prove(ctx :: Context, statement :: Term,
+          ~names: names :: List.of(Symbol) = [],
+          ~induct: hint :: maybe(Symbol) = #false)
+     :: values(maybe(Thm), ProofNode):
+  let thy = ctx.thy
+  let (vars, matrix) = strip_forall_all(statement, names)
+  let hint_var = (cond
+                  | hint:
+                      recur loop (vs :~ List = vars):
+                        match vs
+                        | []:
+                            error(~who: #'prove,
+                                  "no such variable to induct on",
+                                  error.val(~label: "variable", hint),
+                                  error.val(~label: "quantified variables",
+                                            to_string(vars.map(
+                                              fun (u :: FVar): u.name))),
+                                  error.val(~label: "hint",
+                                            "pass the source names with "
+                                              ++ "`~names:`; a locally "
+                                              ++ "nameless term does not "
+                                              ++ "carry them"))
+                        | List.cons(v, rest):
+                            (if (v :~ FVar).name == hint | v | loop(rest))
+                  | ~else: #false)
+  let node = prove_goal(ctx, mk_goal([], matrix), ~induct: hint_var)
+  match run(node)
+  | #false: values(#false, node)
+  | th :~ Thm:
+      let closed = GENL(thy, vars, th)
+      // The prover is not trusted to have proved what was asked: check it.
+      cond
+      | hyps_of(closed).length() != 0:
+          error(~who: #'prove, "proof left hypotheses behind",
+                error.val(~label: "hypotheses", show_hyps(hyps_of(closed))))
+      | concl_of(closed) != statement:
+          error(~who: #'prove, "proof does not match the statement",
+                error.val(~label: "asked", show(statement)),
+                error.val(~label: "got", show(concl_of(closed))))
+      | ~else: values(closed, node)
+
+fun strip_forall_all(t :: Term, names :: List.of(Symbol))
+     :: values(List.of(FVar), Term):
+  recur loop (t = t, i = 0, acc :~ List = []):
+    match dest_forall(t)
+    | #false: values(acc, t)
+    | [v0, body0]:
+        let v0 :~ FVar = v0
+        cond
+        | i >= names.length(): loop(body0, i + 1, acc ++ [v0])
+        | ~else:
+            // Use the caller's name, unless something free in the body already
+            // claims it.
+            let wanted = mk_var(names[i], v0.ty)
+            let v = variant([body0], wanted)
+            let (_, absterm) = dest_comb(t)
+            loop(open_abs(v, absterm), i + 1, acc ++ [v])
+
+// The stuck-residue message: what is left, and how it got there.
+fun residue_message(name :: Symbol, node :: ProofNode) :~ String:
+  let open_goals = residues(node)
+  let body = String.join(open_goals.map(show_goal), "\n\n")
+  to_string(name) ++ ": could not prove.\n"
+    ++ (if open_goals.length() == 1
+        | "Remaining goal,\n"
+        | to_string(open_goals.length()) ++ " remaining goals,\n")
+    ++ body

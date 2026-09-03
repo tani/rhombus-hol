@@ -1,0 +1,165 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/printer open
+
+def bl = bool_ty
+def num = TyApp(#'num, [])
+def A = TyVar(#'a)
+
+fun binop(n :: Symbol, ty :: HType):
+  mk_const(n, mk_fun(ty, mk_fun(ty, bl)))
+
+def eq_num = mk_const(c_eq, mk_fun(num, mk_fun(num, bl)))
+def eq_bool = mk_const(c_eq, mk_fun(bl, mk_fun(bl, bl)))
+def imp = binop(c_imp, bl)
+def conj = binop(c_conj, bl)
+def disj = binop(c_disj, bl)
+def neg = mk_const(c_neg, mk_fun(bl, bl))
+def cnd = mk_const(c_cond, mk_fun(bl, mk_fun(num, mk_fun(num, num))))
+
+def x = mk_var(#'x, num)
+def y = mk_var(#'y, num)
+def z = mk_var(#'z, num)
+def p = mk_var(#'p, bl)
+def q = mk_var(#'q, bl)
+def r = mk_var(#'r, bl)
+def f = mk_const(#'f, mk_fun(num, num))
+def g = mk_const(#'g, mk_fun(num, mk_fun(num, num)))
+def pr = mk_const(#'pr, mk_fun(num, bl))
+
+fun b2(op, a, b): mk_comb(mk_comb(op, a), b)
+fun eqn(a, b): b2(eq_num, a, b)
+fun eqb(a, b): b2(eq_bool, a, b)
+fun imps(a, b): b2(imp, a, b)
+fun ands(a, b): b2(conj, a, b)
+fun ors(a, b): b2(disj, a, b)
+fun nots(a): mk_comb(neg, a)
+
+fun all_of(v :: FVar, body):
+  mk_comb(mk_const(c_forall, mk_fun(mk_fun(v.ty, bl), bl)), mk_abs(v, body))
+fun some_of(v :: FVar, body):
+  mk_comb(mk_const(c_exists, mk_fun(mk_fun(v.ty, bl), bl)), mk_abs(v, body))
+
+// -- atoms and applications ------------------------------------------------
+
+check show(x) ~is "x"
+check show(mk_comb(f, x)) ~is "f(x)"
+check show(b2(g, x, y)) ~is "g(x, y)"
+check show(mk_comb(f, mk_comb(f, x))) ~is "f(f(x))"
+check show(mk_const(c_true, bl)) ~is "true"
+check show(mk_const(c_false, bl)) ~is "false"
+
+// -- relations and connectives ---------------------------------------------
+
+check show(eqn(x, y)) ~is "x === y"
+// equality at type bool prints as `<=>`
+check show(eqb(p, q)) ~is "p <=> q"
+check show(nots(p)) ~is "not p"
+check show(ands(p, q)) ~is "p and q"
+check show(ors(p, q)) ~is "p or q"
+check show(imps(p, q)) ~is "p ==> q"
+
+// -- precedence ------------------------------------------------------------
+
+// `===` binds tighter than `and`
+check show(ands(eqn(x, y), p)) ~is "x === y and p"
+// `not` binds tighter than `and`, looser than `===`
+check show(ands(nots(p), q)) ~is "not p and q"
+check show(nots(ands(p, q))) ~is "not (p and q)"
+// an operand that is itself an operator expression is parenthesized for
+// readability even where the precedence table would not require it
+check show(nots(eqn(x, y))) ~is "not (x === y)"
+check show(nots(nots(p))) ~is "not (not p)"
+check show(nots(mk_comb(pr, x))) ~is "not pr(x)"
+// `and` binds tighter than `or`
+check show(ors(ands(p, q), r)) ~is "p and q or r"
+check show(ands(ors(p, q), r)) ~is "(p or q) and r"
+// `==>` is the loosest of the three and is right associative
+check show(imps(p, imps(q, r))) ~is "p ==> q ==> r"
+check show(imps(imps(p, q), r)) ~is "(p ==> q) ==> r"
+check show(imps(ands(p, q), r)) ~is "p and q ==> r"
+check show(ands(imps(p, q), r)) ~is "(p ==> q) and r"
+// `<=>` is looser than `==>`
+check show(eqb(imps(p, q), r)) ~is "p ==> q <=> r"
+check show(imps(eqb(p, q), r)) ~is "(p <=> q) ==> r"
+// `and` and `or` associate to the left, so a right-nested one needs parens
+check show(ands(ands(p, q), r)) ~is "p and q and r"
+check show(ands(p, ands(q, r))) ~is "p and (q and r)"
+
+// -- quantifiers -----------------------------------------------------------
+
+check show(all_of(x, eqn(x, x))) ~is "forall (x :: num): x === x"
+check show(some_of(x, eqn(x, y))) ~is "exists (x :: num): x === y"
+// a run of like quantifiers collapses into one binder list
+check:
+  show(all_of(x, all_of(y, eqn(x, y))))
+  ~is "forall (x :: num, y :: num): x === y"
+// but a change of quantifier does not
+check:
+  show(all_of(x, some_of(y, eqn(x, y))))
+  ~is "forall (x :: num): exists (y :: num): x === y"
+// a de Bruijn index resolves to the right binder, however deep
+check:
+  show(all_of(x, all_of(y, all_of(z, eqn(x, z)))))
+  ~is "forall (x :: num, y :: num, z :: num): x === z"
+// the body extends as far right as possible, so a quantifier under a
+// connective must be parenthesized
+check:
+  show(ands(all_of(x, eqn(x, x)), p))
+  ~is "(forall (x :: num): x === x) and p"
+check:
+  show(imps(p, all_of(x, eqn(x, x))))
+  ~is "p ==> forall (x :: num): x === x"
+
+// -- lambda and conditional ------------------------------------------------
+
+check show(mk_abs(x, mk_comb(f, x))) ~is "fun (x :: num): f(x)"
+check:
+  show(mk_comb(mk_abs(x, mk_comb(f, x)), y))
+  ~is "(fun (x :: num): f(x))(y)"
+check:
+  show(mk_comb(mk_comb(mk_comb(cnd, p), x), y))
+  ~is "if p | x | y"
+
+// -- typed and sequent rendering -------------------------------------------
+
+check show_typed(x) ~is "x :: num"
+check show_typed(mk_abs(x, x)) ~is "fun (x :: num): x :: num -> num"
+check show_hyps([]) ~is ""
+check show_hyps([p]) ~is "p |- "
+check show_hyps([p, eqn(x, y)]) ~is "p, x === y |- "
+
+// -- binder names are invented, not remembered -----------------------------
+//
+// Terms are locally nameless, so the printer chooses names.  It draws from
+// `x, y, z, u, v, w` and then `x1, y1, ...`, skipping anything free in the
+// term, so a printed binder never shadows a free variable.
+
+check:
+  // the bound variable was called `u` when the term was built; that name is
+  // simply not part of the term any more
+  let v = mk_var(#'u, A)
+  show(all_of(v, eqb(p, p)))
+  ~is "forall (x :: 'a): p <=> p"
+check:
+  // nested binders get distinct names, innermost last
+  show(all_of(x, all_of(y, eqn(x, y))))
+  ~is "forall (x :: num, y :: num): x === y"
+check:
+  // a binder never shadows a free variable of the same name
+  let vx = mk_var(#'x, num)
+  show(all_of(vx, eqn(vx, y)))
+  ~is "forall (x :: num): x === y"
+check:
+  // here `x` really is free, so the binder has to be called something else
+  show(all_of(y, eqn(y, x)))
+  ~is "forall (y :: num): y === x"
+check:
+  // alpha-equal terms are the same term, so they print identically
+  show(mk_abs(x, x)) == show(mk_abs(y, y))
+  ~is #true
+check show(mk_abs(y, y)) ~is "fun (x :: num): x"

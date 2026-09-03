@@ -1,0 +1,214 @@
+#lang rhombus/static
+
+// Acceptance test for specification section 4.2: flattening a binary tree
+// preserves its size.
+//
+// This is the real integration test.  It needs the section 4.1 machinery, a
+// lemma about `append` and `length`, and -- because there is no arithmetic
+// decision procedure in this version, `Nat` being an ordinary datatype -- one
+// arithmetic lemma of its own, proved by its own induction.  That is the
+// lemma-accumulation workflow the specification describes, carried out for
+// real.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/datatype open
+  rhombus/hol/private/recdef open
+  rhombus/hol/private/ruledb open
+  rhombus/hol/private/goal open
+  rhombus/hol/private/simp open
+  rhombus/hol/private/general open
+  rhombus/hol/private/induct open
+  rhombus/hol/private/waterfall open
+  "spec_prelude.rhm" open
+
+def P = prelude
+def thy = P.thy
+
+def defs :: RuleDB:
+  for values(d :~ RuleDB = empty_db) ((nm, fi) in P.funs):
+    add_thms(thy, d, nm, (fi :~ FunInfo).equations)
+
+fun ctx_with(db :: RuleDB) :: Context:
+  mk_context(thy, ~rules: db, ~datatypes: P.thms, ~functions: P.funs)
+
+fun prove_rule(db :: RuleDB, name :: Symbol, stmt :: Term,
+               ~names: names :: List.of(Symbol) = [],
+               ~induct: hint :: maybe(Symbol) = #false)
+     :: values(Thm, RuleDB):
+  let (th, node) = prove(ctx_with(db), stmt, ~names: names, ~induct: hint)
+  match th
+  | #false: error(~who: name, residue_message(name, node))
+  | t :~ Thm: values(t, add_thm(thy, db, name, t))
+
+def xs = v(#'xs, list_ty(A))
+def ys = v(#'ys, list_ty(A))
+def m = v(#'m, nat_ty)
+def n = v(#'n, nat_ty)
+def t = v(#'t, tree_ty(A))
+
+fun app_(a, b): ap2(P.app, a, b)
+fun len_(a): ap1(P.length, a)
+fun plus_(a, b): ap2(P.plus, a, b)
+fun succ_(a): ap1(P.succ, a)
+fun size_(a): ap1(P.size, a)
+fun flat_(a): ap1(P.flatten, a)
+
+// ==========================================================================
+// lemma plus_succ: forall (m, n): plus(m, succ(n)) === succ(plus(m, n))
+//
+// `plus` recurses on its first argument, so it computes on `succ(n)` in the
+// second position only after `m` has been taken apart.  Without this the main
+// theorem gets stuck with `plus(size(l), succ(size(r)))` on one side and
+// `succ(plus(size(l), size(r)))` on the other.
+// ==========================================================================
+
+def (plus_succ, db1):
+  prove_rule(defs, #'plus_succ,
+             mk_forall_list([m, n], mk_eq(plus_(m, succ_(n)),
+                                          succ_(plus_(m, n)))),
+             ~names: [#'m, #'n], ~induct: #'m)
+
+check:
+  show(concl_of(plus_succ))
+  ~is "forall (x :: Nat, y :: Nat): plus(x, succ(y)) === succ(plus(x, y))"
+check hyps_of(plus_succ) ~is []
+
+// ==========================================================================
+// theorem length_app: forall (xs, ys):
+//   length(app(xs, ys)) === plus(length(xs), length(ys))
+// ==========================================================================
+
+def (length_app, db2):
+  prove_rule(db1, #'length_app,
+             mk_forall_list([xs, ys],
+                            mk_eq(len_(app_(xs, ys)),
+                                  plus_(len_(xs), len_(ys)))),
+             ~names: [#'xs, #'ys], ~induct: #'xs)
+
+check:
+  show(concl_of(length_app))
+  ~is "forall (x :: List('a), y :: List('a)): "
+        ++ "length(app(x, y)) === plus(length(x), length(y))"
+check hyps_of(length_app) ~is []
+
+// ==========================================================================
+// theorem flatten_preserves_size: forall (t): length(flatten(t)) === size(t)
+//
+// Two induction hypotheses in the `node` case, one per subtree, and both are
+// needed.
+// ==========================================================================
+
+def (flatten_preserves_size, db3):
+  prove_rule(db2, #'flatten_preserves_size,
+             mk_forall(t, mk_eq(len_(flat_(t)), size_(t))),
+             ~names: [#'t], ~induct: #'t)
+
+check:
+  show(concl_of(flatten_preserves_size))
+  ~is "forall (x :: Tree('a)): length(flatten(x)) === size(x)"
+check hyps_of(flatten_preserves_size) ~is []
+check descends(stamp_of(flatten_preserves_size), thy.stamp) ~is #true
+
+// the induction variable is found without a hint, too
+check:
+  let (th, _) = prove(ctx_with(db2), mk_forall(t, mk_eq(len_(flat_(t)), size_(t))),
+                      ~names: [#'t])
+  th != #false
+  ~is #true
+
+// ==========================================================================
+// the node case really does use both hypotheses
+// ==========================================================================
+
+check:
+  let g = mk_goal([], mk_eq(len_(flat_(t)), size_(t)))
+  let st = induction_step(thy, P.thms[#'Tree] :~ DatatypeThms, t, g) :~ Step
+  let node_goal = st.subgoals[1] :~ Goal
+  node_goal.asms.map(show)
+  ~is ["length(flatten(y)) === size(y)", "length(flatten(z)) === size(z)"]
+check:
+  let g = mk_goal([], mk_eq(len_(flat_(t)), size_(t)))
+  let st = induction_step(thy, P.thms[#'Tree] :~ DatatypeThms, t, g) :~ Step
+  [st.subgoals.length(), show((st.subgoals[0] :~ Goal).concl)]
+  ~is [2, "length(flatten(leaf)) === size(leaf)"]
+
+// ==========================================================================
+// generalization earns its place here
+// ==========================================================================
+
+def db_no_plus_succ :: RuleDB:
+  let d = for values(acc :~ RuleDB = empty_db) ((nm, fi) in P.funs):
+            add_thms(thy, acc, nm, (fi :~ FunInfo).equations)
+  add_thm(thy, d, #'length_app, length_app)
+
+check:
+  // One induction and one simplification into the proof, what is left is the
+  // arithmetic fact `plus_succ` -- so without that lemma the goal is stuck as
+  // far as rewriting is concerned.
+  let g = mk_goal([], mk_eq(len_(flat_(t)), size_(t)))
+  let st = induction_step(thy, P.thms[#'Tree] :~ DatatypeThms, t, g) :~ Step
+  let node_goal = st.subgoals[1] :~ Goal
+  let s2 = simplify_goal(thy, db_no_plus_succ, node_goal) :~ Step
+  show((s2.subgoals[0] :~ Goal).concl)
+  ~is "plus(size(y), succ(size(z))) === succ(plus(size(y), size(z)))"
+
+check:
+  // But `size(y)` and `size(z)` each occur twice and neither is headed by a
+  // constructor, so generalization replaces them with fresh naturals...
+  let stuck = mk_goal([],
+                      mk_eq(plus_(size_(v(#'y, tree_ty(A))),
+                                  succ_(size_(v(#'z, tree_ty(A))))),
+                            succ_(plus_(size_(v(#'y, tree_ty(A))),
+                                        size_(v(#'z, tree_ty(A)))))))
+  let ctors = Set(#'zero, #'succ, #'nil, #'cons, #'leaf, #'node)
+  generalization_candidates(ctors, stuck).map(show)
+  ~is ["size(y)", "size(z)"]
+check:
+  // ... and what is left after both is exactly `plus_succ`, which induction
+  // settles on its own.
+  let stuck = mk_goal([],
+                      mk_eq(plus_(size_(v(#'y, tree_ty(A))),
+                                  succ_(size_(v(#'z, tree_ty(A))))),
+                            succ_(plus_(size_(v(#'y, tree_ty(A))),
+                                        size_(v(#'z, tree_ty(A)))))))
+  let ctors = Set(#'zero, #'succ, #'nil, #'cons, #'leaf, #'node)
+  let s1 = generalize_goal(thy, ctors, stuck) :~ Step
+  let s2 = generalize_goal(thy, ctors, s1.subgoals[0] :~ Goal) :~ Step
+  show((s2.subgoals[0] :~ Goal).concl)
+  ~is "plus(g, succ(g_1)) === succ(plus(g, g_1))"
+
+check:
+  // So the main theorem goes through with no arithmetic lemma supplied at all.
+  // This is what generalization is for: the goal it produces is one induction
+  // can finish, and the one it replaced was not.
+  let (th, _) = prove(ctx_with(db_no_plus_succ),
+                      mk_forall(t, mk_eq(len_(flat_(t)), size_(t))),
+                      ~names: [#'t], ~induct: #'t)
+  match th
+  | #false: "<stuck>"
+  | x :~ Thm: show(concl_of(x))
+  ~is "forall (x :: Tree('a)): length(flatten(x)) === size(x)"
+
+check:
+  // and the trail records that generalization was what unblocked it
+  let (_, node) = prove(ctx_with(db_no_plus_succ),
+                        mk_forall(t, mk_eq(len_(flat_(t)), size_(t))),
+                        ~names: [#'t], ~induct: #'t)
+  is_closed(node)
+  ~is #true
+
+// ==========================================================================
+// nothing bypassed the kernel
+// ==========================================================================
+
+check:
+  let all_thms = [plus_succ, length_app, flatten_preserves_size]
+  for all (th in all_thms):
+    hyps_of(th) == [] && descends(stamp_of(th), thy.stamp)
+  ~is #true

@@ -1,0 +1,293 @@
+#lang rhombus/static
+
+// Equality conversions: HOL Light's `equal.ml`.
+//
+// A *conversion* maps a term `t` to a theorem `|- t = t'`.  Every rewrite the
+// prover performs is a conversion, so this is the layer the whole simplifier
+// is made of, and it is the hot loop.
+//
+// Because terms are locally nameless, this layer lost a whole class of
+// problems: there is no `ALPHA`, no `ALPHA_CONV`, and `ABS_CONV` needs no
+// capture-repair fallback -- opening a binder with a fresh variable and
+// abstracting it again is exact.
+//
+// Conversions here take the theory explicitly and return `maybe(Thm)`:
+// `#false` means "did not apply".  HOL Light signals that with an exception,
+// which is the natural ML idiom but an expensive one in a loop that fails far
+// more often than it succeeds -- `ORELSEC` on the failure path would cost a
+// continuation capture per candidate rule.  Returning `#false` keeps the
+// failure path allocation-free.
+//
+// This module knows nothing about the connectives; it needs only `=`.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
+  "printer.rhm" open
+
+export:
+  lhs_of
+  rhs_of
+  genvar
+  // basic equality rules
+  AP_TERM
+  AP_THM
+  SYM
+  BETA_CONV
+  HEAD_BETA_CONV
+  BINOP_CONV
+  // combinators
+  ALL_CONV
+  NO_CONV
+  THENC
+  ORELSEC
+  FIRST_CONV
+  EVERY_CONV
+  REPEATC
+  TRY_CONV
+  CHANGED_CONV
+  // subterm traversal
+  RATOR_CONV
+  RAND_CONV
+  LAND_CONV
+  COMB2_CONV
+  ABS_CONV
+  BINDER_CONV
+  SUB_CONV
+  // whole-term traversal
+  ONCE_DEPTH_CONV
+  DEPTH_CONV
+  REDEPTH_CONV
+  TOP_DEPTH_CONV
+  TOP_SWEEP_CONV
+  // applying a conversion to a theorem
+  CONV_RULE
+  BETA_RULE
+  is_refl_thm
+
+fun sides(who :: Symbol, th :: Thm) :: List.of(Term):
+  match dest_eq(concl_of(th))
+  | #false:
+      error(~who: who, "theorem is not an equation",
+            error.val(~label: "theorem", show(concl_of(th))))
+  | pair: pair
+
+fun lhs_of(th :: Thm) :: Term: sides(#'lhs_of, th)[0]
+fun rhs_of(th :: Thm) :: Term: sides(#'rhs_of, th)[1]
+
+// `|- t = t` counts as no progress.
+fun is_refl_thm(th :: Thm) :: Boolean:
+  match dest_eq(concl_of(th))
+  | [l, r]: l == r
+  | ~else: #false
+
+def genvar_counter :: Box = Box(0)
+
+// A variable guaranteed not to appear anywhere the caller has seen.
+fun genvar(ty :: HType) :: FVar:
+  let n = genvar_counter.value
+  genvar_counter.value := n + 1
+  mk_var(Symbol.from_string("_gv" ++ to_string(n)), ty)
+
+// -- basic equality rules --------------------------------------------------
+
+// |- x = y   ==>   |- f x = f y
+fun AP_TERM(thy :: Theory, f :: Term, th :: Thm) :: Thm:
+  MK_COMB(REFL(thy, f), th)
+
+// |- f = g   ==>   |- f x = g x
+fun AP_THM(thy :: Theory, th :: Thm, x :: Term) :: Thm:
+  MK_COMB(th, REFL(thy, x))
+
+// |- l = r   ==>   |- r = l
+//
+// Derived, not primitive: apply `l = _` to both sides of the equation, giving
+// `|- (l = l) = (l = r)`, then eliminate with `|- l = l`.
+fun SYM(thy :: Theory, th :: Thm) :: Thm:
+  let [l, r] = sides(#'SYM, th)
+  let ty = type_of(l)
+  let eqc = mk_const(c_eq, mk_fun(ty, mk_fun(ty, TyApp(ty_bool, []))))
+  let lth = REFL(thy, l)
+  EQ_MP(MK_COMB(AP_TERM(thy, eqc, th), lth), lth)
+
+// Beta conversion.  The kernel rule already handles an arbitrary redex, so
+// this is just a total wrapper that reports "did not apply" instead of
+// raising.
+fun BETA_CONV(thy :: Theory, t :: Term) :: maybe(Thm):
+  cond
+  | is_beta_redex(t): BETA(thy, t)
+  | ~else: #false
+
+// Reduce beta redexes along the application spine only, leaving the arguments
+// alone.  `TOP_DEPTH_CONV(BETA_CONV)` is the wrong tool wherever the *shape* of
+// the surrounding term matters -- it happily reduces redexes the caller meant
+// to keep, which silently changes the term a later rule has to match against.
+fun HEAD_BETA_CONV(thy :: Theory, t :: Term) :: maybe(Thm):
+  REPEATC(ORELSEC(BETA_CONV, RATOR_CONV(HEAD_BETA_CONV)))(thy, t)
+
+// Apply a conversion to both arguments of a binary application `f a b`.
+fun BINOP_CONV(c): COMB2_CONV(RAND_CONV(c), c)
+
+// -- combinators -----------------------------------------------------------
+
+fun ALL_CONV(thy :: Theory, t :: Term) :: maybe(Thm): REFL(thy, t)
+fun NO_CONV(thy :: Theory, t :: Term) :: maybe(Thm): #false
+
+fun THENC(c1, c2):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match c1(thy, t)
+    | #false: #false
+    | th1 :~ Thm:
+        match c2(thy, rhs_of(th1))
+        | #false: #false
+        | th2 :~ Thm: TRANS(th1, th2)
+
+fun ORELSEC(c1, c2):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match c1(thy, t)
+    | #false: c2(thy, t)
+    | th: th
+
+fun FIRST_CONV(cs :: List):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    recur loop (cs :~ List = cs):
+      match cs
+      | []: #false
+      | List.cons(c, rest):
+          match c(thy, t)
+          | #false: loop(rest)
+          | th: th
+
+fun EVERY_CONV(cs :: List):
+  for values(acc = ALL_CONV) (c in cs): THENC(acc, c)
+
+fun TRY_CONV(c): ORELSEC(c, ALL_CONV)
+
+// Apply until it stops applying; never fails, but may do nothing.
+fun REPEATC(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    recur loop (acc :: maybe(Thm) = #false, t = t):
+      match c(thy, t)
+      | #false: (if acc | acc | REFL(thy, t))
+      | th :~ Thm:
+          let next = rhs_of(th)
+          let acc2 = (if acc | TRANS(acc :~ Thm, th) | th)
+          // A conversion that returns its input unchanged would spin here.
+          (if next == t | acc2 | loop(acc2, next))
+
+// Succeeds only if the term actually changed.
+fun CHANGED_CONV(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match c(thy, t)
+    | #false: #false
+    | th :~ Thm: (if is_refl_thm(th) | #false | th)
+
+// -- subterm traversal -----------------------------------------------------
+
+fun RATOR_CONV(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match t
+    | Comb(f, x):
+        match c(thy, f)
+        | #false: #false
+        | th :~ Thm: AP_THM(thy, th, x)
+    | ~else: #false
+
+fun RAND_CONV(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match t
+    | Comb(f, x):
+        match c(thy, x)
+        | #false: #false
+        | th :~ Thm: AP_TERM(thy, f, th)
+    | ~else: #false
+
+// The left argument of a binary application `f a b`.
+fun LAND_CONV(c): RATOR_CONV(RAND_CONV(c))
+
+fun COMB2_CONV(cf, cx):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match t
+    | Comb(f, x):
+        match cf(thy, f)
+        | #false: #false
+        | fth :~ Thm:
+            match cx(thy, x)
+            | #false: #false
+            | xth :~ Thm: MK_COMB(fth, xth)
+    | ~else: #false
+
+// Under a binder: open the abstraction with a fresh variable, convert the
+// body, and abstract the variable again.  Because the variable is fresh, the
+// only way `ABS` can refuse is if the conversion itself produced a hypothesis
+// mentioning it -- which a *conditional* rewrite can do, and which genuinely
+// is not liftable out of the binder.  Report that as "did not apply".
+fun ABS_CONV(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match t
+    | Abs(aty, body):
+        let v = genvar(aty)
+        match c(thy, subst_bvar(v, body))
+        | #false: #false
+        | th :~ Thm:
+            cond
+            | (for any (h in hyps_of(th)): vfree_in(v, h)): #false
+            | ~else: ABS(thy, v, th)
+    | ~else: #false
+
+fun BINDER_CONV(c): ABS_CONV(c)
+
+// Apply to each immediate subterm; an atom is left alone rather than failing.
+fun SUB_CONV(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match t
+    | Comb(_, _): COMB2_CONV(c, c)(thy, t)
+    | Abs(_, _): ABS_CONV(c)(thy, t)
+    | ~else: REFL(thy, t)
+
+// -- whole-term traversal --------------------------------------------------
+
+// Topmost applicable position on each branch, once.
+fun ONCE_DEPTH_CONV(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    ORELSEC(c, SUB_CONV(ONCE_DEPTH_CONV(c)))(thy, t)
+
+// Bottom-up, repeating at each position.
+fun DEPTH_CONV(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    THENC(SUB_CONV(DEPTH_CONV(c)), REPEATC(c))(thy, t)
+
+// Bottom-up, revisiting a position after its subterms change.
+fun REDEPTH_CONV(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    THENC(SUB_CONV(REDEPTH_CONV(c)),
+          ORELSEC(THENC(c, REDEPTH_CONV(c)), ALL_CONV))(thy, t)
+
+// Top-down, revisiting after each change.  This is the one the simplifier
+// wants: it rewrites the head before descending, so a rule that collapses a
+// whole subterm saves the work of normalizing it.
+fun TOP_DEPTH_CONV(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    THENC(REPEATC(c),
+          TRY_CONV(THENC(CHANGED_CONV(SUB_CONV(TOP_DEPTH_CONV(c))),
+                         TRY_CONV(THENC(c, TOP_DEPTH_CONV(c))))))(thy, t)
+
+fun TOP_SWEEP_CONV(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    THENC(REPEATC(c),
+          TRY_CONV(CHANGED_CONV(SUB_CONV(TOP_SWEEP_CONV(c)))))(thy, t)
+
+// -- applying a conversion to a theorem ------------------------------------
+
+// From `|- p` and a conversion proving `|- p = q`, conclude `|- q`.
+fun CONV_RULE(c, thy :: Theory, th :: Thm) :: maybe(Thm):
+  match c(thy, concl_of(th))
+  | #false: #false
+  | eqth :~ Thm: EQ_MP(eqth, th)
+
+fun BETA_RULE(thy :: Theory, th :: Thm) :: Thm:
+  match CONV_RULE(TOP_DEPTH_CONV(BETA_CONV), thy, th)
+  | #false: th
+  | th2 :~ Thm: th2

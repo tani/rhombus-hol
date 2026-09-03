@@ -1,0 +1,203 @@
+#lang rhombus/static
+
+// Rendering terms back into the surface syntax the user wrote.
+//
+// This is not a debugging aid -- it is the front half of the stuck-residue
+// error message, which is the single highest-value piece of UX in the system.
+// A residue the user cannot read is a residue they cannot act on, so terms
+// print as Rhombus/HOL source, not as HOL Light's `!x. P x /\ Q x`.
+//
+// Terms are locally nameless, so binders carry no names and the printer has to
+// invent them.  It keeps a stack of names, innermost first: `BVar(i)` prints
+// as the `i`th entry, and descending under an `Abs` pushes a fresh one.  Names
+// are drawn from `x, y, z, u, v, w` and then `x1, y1, ...`, skipping anything
+// that is free in the term or already on the stack -- so a printed binder
+// never shadows a free variable, and the output can be read back as written.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+
+export:
+  show
+  show_typed
+  show_hyps
+
+// Binding strengths, matching the `hol_prop` space's precedence:
+//   ===        70
+//   not        60
+//   and        50
+//   or         40
+//   ==>        30   (right associative)
+//   <=>        20
+//   forall/exists/lambda  10  (body extends as far right as possible)
+// An atom or application binds at 100 and never needs parentheses.
+def prec_atom = 100
+def prec_eq = 70
+def prec_not = 60
+def prec_and = 50
+def prec_or = 40
+def prec_imp = 30
+def prec_iff = 20
+def prec_quant = 10
+
+def base_names :: List = ["x", "y", "z", "u", "v", "w"]
+
+fun paren(s :~ String, have :: Int, want :: Int) :~ String:
+  if have < want | "(" ++ s ++ ")" | s
+
+// -- binder naming ---------------------------------------------------------
+
+// `stack` holds the names of the enclosing binders, innermost first.
+// `taken` holds every name already in use: free variables of the whole term,
+// plus the binders currently on the stack.
+class Env(stack :: List.of(String), taken :: Set.of(String))
+
+fun fresh_name(env :: Env) :~ String:
+  recur loop (n = 0):
+    let base = base_names[n mod base_names.length()]
+    let round = n div base_names.length()
+    let name = (if round == 0 | base | base ++ to_string(round))
+    (if name in env.taken | loop(n + 1) | name)
+
+fun push(env :: Env, name :~ String) :: Env:
+  Env(List.cons(name, env.stack), env.taken ++ {name})
+
+fun bvar_name(env :: Env, i :: NonnegInt) :~ String:
+  cond
+  // A dangling index is not a well-formed term, but the printer is used in
+  // error paths and must never itself throw.
+  | i >= env.stack.length(): "?" ++ to_string(i)
+  | ~else: env.stack[i]
+
+fun initial_env(t :: Term) :: Env:
+  Env([], for Set (v in free_vars(t)): to_string((v :~ FVar).name))
+
+// -- shape recognizers -----------------------------------------------------
+
+// A binary logical constant applied to exactly two arguments, or `#false`.
+fun as_binop(t :: Term) :: maybe(List):
+  match t
+  | Comb(Comb(Const(n, _), a), b): [n, a, b]
+  | ~else: #false
+
+// `forall`/`exists` are constants applied to a lambda.
+fun as_quant(t :: Term) :: maybe(List):
+  match t
+  | Comb(Const(n, _), Abs(aty, body)) when n == c_forall || n == c_exists:
+      [n, aty, body]
+  | ~else: #false
+
+fun quant_word(n :: Symbol) :~ String:
+  if n == c_forall | "forall" | "exists"
+
+fun decl(name :~ String, ty :: HType) :~ String:
+  name ++ " :: " ++ type_to_string(ty)
+
+// Collect `forall x: forall y: P` into a single `forall (x, y): P`, naming
+// each binder as it is peeled.
+fun strip_quants(n :: Symbol, t :: Term, env :: Env)
+     :: values(List, Term, Env):
+  recur loop (t = t, env = env, acc :~ List = []):
+    match as_quant(t)
+    | [n2, aty, body] when n2 == n:
+        let nm = fresh_name(env)
+        let env2 = push(env, nm)
+        loop(body, env2, acc ++ [decl(nm, aty)])
+    | ~else: values(acc, t, env)
+
+// -- the printer -----------------------------------------------------------
+
+// `want` is the ambient binding strength; `trailing` says whether the term
+// sits at the far right of its enclosing expression.  Quantifiers and lambdas
+// extend as far right as they can, so they need parentheses exactly when they
+// are *not* trailing: `p ==> forall (x): P` is unambiguous, but
+// `(forall (x): P) and q` is not.
+fun pp(t :: Term, want :: Int, trailing :: Boolean, env :: Env) :~ String:
+  fun extend(s :~ String) :~ String:
+    if trailing | s | "(" ++ s ++ ")"
+  match as_quant(t)
+  | [n, _, _]:
+      let (decls, body, env2) = strip_quants(n, t, env)
+      extend(quant_word(n) ++ " (" ++ String.join(decls, ", ") ++ "): "
+               ++ pp(body, 0, #true, env2))
+  | ~else:
+      match t
+      | FVar(n, _): to_string(n)
+      | BVar(i, _): bvar_name(env, i)
+      | Const(n, _):
+          cond
+          | n == c_true: "true"
+          | n == c_false: "false"
+          | ~else: to_string(n)
+      | Abs(aty, b):
+          let nm = fresh_name(env)
+          let env2 = push(env, nm)
+          extend("fun (" ++ decl(nm, aty) ++ "): " ++ pp(b, 0, #true, env2))
+      | ~else: pp_app(t, want, trailing, env)
+
+fun pp_app(t :: Term, want :: Int, trailing :: Boolean, env :: Env) :~ String:
+  fun args_of(args :: List.of(Term)) :~ String:
+    // Inside the parentheses of an application every argument is delimited,
+    // so each one is both unconstrained and trailing.
+    "(" ++ String.join(args.map(fun (a): pp(a, 0, #true, env)), ", ") ++ ")"
+  match as_binop(t)
+  | [n, a, b] when n == c_eq:
+      // Equality at type `bool` is if-and-only-if, and reads much better
+      // spelled that way in a residue.
+      cond
+      | type_of(a) == TyApp(ty_bool, []):
+          paren(pp(a, prec_iff + 1, #false, env) ++ " <=> "
+                  ++ pp(b, prec_iff + 1, trailing, env),
+                prec_iff, want)
+      | ~else:
+          paren(pp(a, prec_eq + 1, #false, env) ++ " === "
+                  ++ pp(b, prec_eq + 1, trailing, env),
+                prec_eq, want)
+  | [n, a, b] when n == c_imp:
+      // right associative: the right operand may stay at the same level
+      paren(pp(a, prec_imp + 1, #false, env) ++ " ==> "
+              ++ pp(b, prec_imp, trailing, env),
+            prec_imp, want)
+  | [n, a, b] when n == c_conj:
+      paren(pp(a, prec_and, #false, env) ++ " and "
+              ++ pp(b, prec_and + 1, trailing, env),
+            prec_and, want)
+  | [n, a, b] when n == c_disj:
+      paren(pp(a, prec_or, #false, env) ++ " or "
+              ++ pp(b, prec_or + 1, trailing, env),
+            prec_or, want)
+  | ~else:
+      match t
+      | Comb(Const(n, _), a) when n == c_neg:
+          // `not` binds looser than `===`, so `not a === b` is unambiguous --
+          // but it does not *read* that way.  Parenthesize any operand that is
+          // not an atom or an application; a residue has to be scannable.
+          paren("not " ++ pp(a, prec_atom, trailing, env), prec_not, want)
+      | Comb(Comb(Comb(Const(n, _), c), th), el) when n == c_cond:
+          let s = "if " ++ pp(c, 0, #false, env) ++ " | " ++ pp(th, 0, #false, env)
+                    ++ " | " ++ pp(el, 0, #true, env)
+          (if trailing | s | "(" ++ s ++ ")")
+      | ~else:
+          let (head, args) = strip_comb(t)
+          match head
+          | FVar(_, _) || BVar(_, _) || Const(_, _):
+              pp(head, prec_atom, #false, env) ++ args_of(args)
+          | ~else:
+              // An applied lambda or other compound head: parenthesize it.
+              "(" ++ pp(head, 0, #true, env) ++ ")" ++ args_of(args)
+
+// The term as Rhombus/HOL surface syntax.
+fun show(t :: Term) :~ String:
+  pp(t, 0, #true, initial_env(t))
+
+// The term with its type, for messages where the type is the point.
+fun show_typed(t :: Term) :~ String:
+  show(t) ++ " :: " ++ type_to_string(type_of(t))
+
+// A sequent's hypotheses, as they appear above a goal.
+fun show_hyps(hyps :: List.of(Term)) :~ String:
+  cond
+  | hyps.length() == 0: ""
+  | ~else: String.join(hyps.map(show), ", ") ++ " |- "

@@ -1,0 +1,107 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/private/htype open
+
+def a = TyVar(#'a)
+def b = TyVar(#'b)
+def num = TyApp(#'num, [])
+def lista = TyApp(#'list, [a])
+def listnum = TyApp(#'list, [num])
+
+// -- structural equality ---------------------------------------------------
+
+check TyVar(#'a) ~is a
+check TyApp(#'list, [TyVar(#'a)]) ~is lista
+check lista == listnum ~is #false
+
+// -- constructors ----------------------------------------------------------
+
+check bool_ty ~is TyApp(#'bool, [])
+check mk_fun(a, b) ~is TyApp(#'fun, [a, b])
+check is_fun(mk_fun(a, b)) ~is #true
+check is_fun(num) ~is #false
+check:
+  let (d, r) = dest_fun(mk_fun(a, num))
+  [d, r]
+  ~is [a, num]
+check dest_fun(num) ~throws "not a function type"
+
+// -- type_vars: left-to-right, deduplicated --------------------------------
+
+check type_vars(num) ~is []
+check type_vars(mk_fun(a, mk_fun(b, a))) ~is [#'a, #'b]
+check type_vars(mk_fun(b, a)) ~is [#'b, #'a]
+
+// -- substitution ----------------------------------------------------------
+
+check type_subst({}, lista) ~is lista
+check type_subst({#'a: num}, lista) ~is listnum
+check type_subst({#'a: num}, b) ~is b
+check type_subst({#'a: num}, mk_fun(a, a)) ~is mk_fun(num, num)
+// unchanged subterms are preserved by identity, not just by equality
+check type_subst({#'b: num}, lista) ~is_now lista
+
+// -- matching --------------------------------------------------------------
+
+check type_match(a, num, {}) ~is {#'a: num}
+check type_match(lista, listnum, {}) ~is {#'a: num}
+check type_match(mk_fun(a, a), mk_fun(num, num), {}) ~is {#'a: num}
+// a repeated pattern variable must be matched consistently
+check type_match(mk_fun(a, a), mk_fun(num, bool_ty), {}) ~is #false
+check type_match(num, a, {}) ~is #false
+check type_match(TyApp(#'list, [a]), TyApp(#'set, [num]), {}) ~is #false
+// matching is one-way: the result substitutes the pattern into the target
+check:
+  let s = type_match(mk_fun(a, lista), mk_fun(num, listnum), {})
+  type_subst(s, mk_fun(a, lista))
+  ~is mk_fun(num, listnum)
+
+// -- unification -----------------------------------------------------------
+
+check type_unify(a, num, {}) ~is {#'a: num}
+check type_unify(lista, TyApp(#'list, [b]), {}) ~is {#'a: b}
+check type_unify(a, a, {}) ~is {}
+check type_unify(num, bool_ty, {}) ~is #false
+// occurs check
+check type_unify(a, lista, {}) ~is #false
+check type_occurs(#'a, lista) ~is #true
+check type_occurs(#'b, lista) ~is #false
+check:
+  let s = type_unify(mk_fun(a, num), mk_fun(bool_ty, b), {})
+  [type_subst(s, a), type_subst(s, b)]
+  ~is [bool_ty, num]
+
+// -- total order -----------------------------------------------------------
+
+check type_ord(a, a) ~is 0
+check type_ord(a, b) ~is -1
+check type_ord(b, a) ~is 1
+// TyVar sorts before TyApp
+check type_ord(a, num) ~is -1
+check type_ord(num, a) ~is 1
+check type_ord(num, bool_ty) ~is 1
+check type_ord(lista, TyApp(#'list, [b])) ~is -1
+check type_ord(TyApp(#'list, []), lista) ~is -1
+
+// antisymmetry and reflexivity over a sample
+check:
+  let ts = [a, b, num, bool_ty, lista, listnum, mk_fun(a, b), mk_fun(num, num)]
+  for all (x in ts, y in ts):
+    type_ord(x, y) == -type_ord(y, x)
+  ~is #true
+check:
+  let ts = [a, b, num, bool_ty, lista, listnum, mk_fun(a, b)]
+  for all (x in ts, y in ts):
+    (type_ord(x, y) == 0) == (x == y)
+  ~is #true
+
+// -- printing --------------------------------------------------------------
+
+check type_to_string(a) ~is "'a"
+check type_to_string(num) ~is "num"
+check type_to_string(lista) ~is "list('a)"
+check type_to_string(mk_fun(a, b)) ~is "'a -> 'b"
+// `->` is right-associative, so a function domain needs parentheses
+check type_to_string(mk_fun(mk_fun(a, b), num)) ~is "('a -> 'b) -> num"
+check type_to_string(mk_fun(a, mk_fun(b, num))) ~is "'a -> 'b -> num"

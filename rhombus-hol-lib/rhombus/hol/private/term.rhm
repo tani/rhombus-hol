@@ -1,0 +1,442 @@
+#lang rhombus/static
+
+// HOL terms, in locally nameless (de Bruijn) form.
+//
+// Variables are split in two.  A `FVar` is a free variable: it has a name, and
+// it is what hypotheses, goals and instantiations talk about.  A `BVar` is a
+// bound variable: it has no name, only a de Bruijn index counting outwards
+// from the innermost enclosing `Abs`.  An `Abs` therefore stores only its
+// argument type and its body.
+//
+// The point of the split is that alpha-equivalence disappears.  Two terms are
+// equal exactly when their syntax trees are equal, so `==` is the only
+// equality anyone needs; there is no `aconv`, no alpha-aware hashing, and no
+// alpha-aware ordering.  Substitution loses its capture-avoidance machinery
+// too: `inst_fvar` is a plain recursive walk, because a free variable cannot
+// be captured by a binder that has no name to clash with.
+//
+// The invariant every well-formed term satisfies is *local closure*: no `BVar`
+// index escapes its binder.  `is_locally_closed` checks it, and the kernel
+// enforces it, because a dangling index is a term with no meaning at all.
+//
+// Construction goes through the smart constructors: `mk_abs` takes a real
+// named variable and abstracts it, `mk_comb` type-checks, and callers never
+// need to build a `BVar` by hand.
+
+import:
+  "htype.rhm" open
+
+export:
+  Term
+  FVar
+  BVar
+  Const
+  Comb
+  Abs
+  mk_var
+  mk_const
+  mk_comb
+  mk_abs
+  type_of
+  dest_comb
+  dest_abs
+  open_abs
+  strip_comb
+  list_mk_comb
+  strip_abs
+  list_mk_abs
+  // locally nameless primitives
+  shift
+  subst_bvar
+  abstract_fvar
+  inst_fvar
+  inst_type
+  is_locally_closed
+  // free variables
+  free_vars
+  vfree_in
+  variant
+  // ordering
+  term_ord
+  // beta
+  is_beta_redex
+  beta_reduce
+  // debugging
+  term_to_string
+
+class Term():
+  nonfinal
+
+// A free variable: named, and visible to hypotheses and instantiation.
+class FVar(name :: Symbol, ty :: HType):
+  extends Term
+
+// A bound variable: `index` counts binders outwards from the innermost `Abs`,
+// so `BVar(0)` refers to the binder immediately enclosing it.
+class BVar(index :: NonnegInt, ty :: HType):
+  extends Term
+
+class Const(name :: Symbol, ty :: HType):
+  extends Term
+
+class Comb(func :: Term, arg :: Term):
+  extends Term
+
+// No binder name: that is what makes structural equality the right equality.
+class Abs(arg_ty :: HType, body :: Term):
+  extends Term
+
+// -- construction ----------------------------------------------------------
+
+fun mk_var(name :: Symbol, ty :: HType) :: FVar: FVar(name, ty)
+fun mk_const(name :: Symbol, ty :: HType) :: Const: Const(name, ty)
+
+fun type_of(t :: Term) :: HType:
+  match t
+  | FVar(_, ty): ty
+  | BVar(_, ty): ty
+  | Const(_, ty): ty
+  | Abs(aty, body): mk_fun(aty, type_of(body))
+  | Comb(f, _):
+      let fty = type_of(f)
+      cond
+      | is_fun(fty):
+          let (_, rng) = dest_fun(fty)
+          rng
+      | ~else:
+          error(~who: #'type_of, "ill-typed application",
+                error.val(~label: "operator type", type_to_string(fty)))
+
+// The only type check in the term layer: an application must be a function
+// applied to something of its domain type.
+fun mk_comb(func :: Term, arg :: Term) :: Comb:
+  let fty = type_of(func)
+  cond
+  | !is_fun(fty):
+      error(~who: #'mk_comb, "operator is not a function",
+            error.val(~label: "operator type", type_to_string(fty)))
+  | ~else:
+      let (dom, _) = dest_fun(fty)
+      let aty = type_of(arg)
+      cond
+      | dom == aty: Comb(func, arg)
+      | ~else:
+          error(~who: #'mk_comb, "operand type does not match operator domain",
+                error.val(~label: "domain", type_to_string(dom)),
+                error.val(~label: "operand", type_to_string(aty)))
+
+// `\v. body`, with `v`'s occurrences turned into `BVar(0)`.
+fun mk_abs(v :: FVar, body :: Term) :: Abs:
+  Abs(v.ty, abstract_fvar(v, body))
+
+fun dest_comb(t :: Term) :: values(Term, Term):
+  match t
+  | Comb(f, x): values(f, x)
+  | ~else: error(~who: #'dest_comb, "not an application")
+
+// Open an abstraction with a specific free variable.
+fun open_abs(v :: FVar, t :: Term) :: Term:
+  match t
+  | Abs(aty, body):
+      unless v.ty == aty
+      | error(~who: #'open_abs, "variable type does not match the binder",
+              error.val(~label: "binder", type_to_string(aty)),
+              error.val(~label: "variable", type_to_string(v.ty)))
+      subst_bvar(v, body)
+  | ~else: error(~who: #'open_abs, "not an abstraction")
+
+def base_names :: List = ["x", "y", "z", "u", "v", "w"]
+
+// The name to give a binder being opened: the first of `x, y, z, u, v, w`,
+// then `x1, y1, ...`, that is not already free in the body.  Deterministic, so
+// two calls on the same term agree -- and the same policy the printer uses, so
+// that a variable a user sees in a residue matches the one `SPEC_ALL` and
+// friends actually produced.
+fun fresh_for(body :: Term, ty :: HType) :: FVar:
+  let fvs = free_vars(body)
+  recur loop (n = 0):
+    let base = base_names[n mod base_names.length()]
+    let round = n div base_names.length()
+    let text = (if round == 0 | base | base ++ to_string(round))
+    let name = Symbol.from_string(text)
+    let v = FVar(name, ty)
+    // A name is taken if *any* free variable uses it, whatever its type:
+    // reusing it at a different type would be legal but unreadable.
+    (if (for any (u in fvs): (u :~ FVar).name == name) | loop(n + 1) | v)
+
+// Open an abstraction with a fresh variable.
+fun dest_abs(t :: Term) :: values(FVar, Term):
+  match t
+  | Abs(aty, body):
+      let v = fresh_for(body, aty)
+      values(v, subst_bvar(v, body))
+  | ~else: error(~who: #'dest_abs, "not an abstraction")
+
+// `f a1 ... an` as `(f, [a1, ..., an])`.
+fun strip_comb(t :: Term) :: values(Term, List.of(Term)):
+  recur loop (t = t, acc :~ List = []):
+    match t
+    | Comb(f, x): loop(f, List.cons(x, acc))
+    | ~else: values(t, acc)
+
+fun list_mk_comb(f :: Term, args :: List.of(Term)) :: Term:
+  for values(t :~ Term = f) (a in args): mk_comb(t, a)
+
+fun strip_abs(t :: Term) :: values(List.of(FVar), Term):
+  recur loop (t = t, acc :~ List = []):
+    match t
+    | Abs(_, _):
+        let (v, body) = dest_abs(t)
+        loop(body, List.cons(v, acc))
+    | ~else: values(acc.reverse(), t)
+
+fun list_mk_abs(vs :: List.of(FVar), body :: Term) :: Term:
+  for values(t :~ Term = body) (v in vs.reverse()): mk_abs(v, t)
+
+// -- the locally nameless primitives ---------------------------------------
+
+// Add `d` to every `BVar` index at or above `cutoff`.  Indices below the
+// cutoff point at binders inside the term being moved, so they stay put.
+fun shift(d :: Int, cutoff :: NonnegInt, tm :: Term) :: Term:
+  match tm
+  | BVar(i, ty):
+      cond
+      | i < cutoff: tm
+      | ~else:
+          let i2 = i + d
+          cond
+          | i2 < 0:
+              error(~who: #'shift, "shift would produce a negative index",
+                    error.val(~label: "index", i),
+                    error.val(~label: "by", d))
+          | ~else: BVar(i2, ty)
+  | Comb(f, x):
+      let f2 = shift(d, cutoff, f)
+      let x2 = shift(d, cutoff, x)
+      (if f2 === f && x2 === x | tm | Comb(f2, x2))
+  | Abs(aty, b):
+      let b2 = shift(d, cutoff + 1, b)
+      (if b2 === b | tm | Abs(aty, b2))
+  | ~else: tm
+
+fun subst_at(j :: NonnegInt, s :: Term, t :: Term) :: Term:
+  match t
+  | BVar(i, _): (if i == j | shift(j, 0, s) | t)
+  | Comb(f, x):
+      let f2 = subst_at(j, s, f)
+      let x2 = subst_at(j, s, x)
+      (if f2 === f && x2 === x | t | Comb(f2, x2))
+  | Abs(aty, b):
+      let b2 = subst_at(j + 1, s, b)
+      (if b2 === b | t | Abs(aty, b2))
+  | ~else: t
+
+// Replace the innermost bound variable by `s`, closing up the indices above
+// it.  This is the whole of beta reduction, and it cannot capture anything.
+fun subst_bvar(s :: Term, body :: Term) :: Term:
+  shift(-1, 0, subst_at(0, s, body))
+
+fun abstract_at(j :: NonnegInt, v :: FVar, t :: Term) :: Term:
+  match t
+  | FVar(_, _): (if t == v | BVar(j, v.ty) | t)
+  | Comb(f, x):
+      let f2 = abstract_at(j, v, f)
+      let x2 = abstract_at(j, v, x)
+      (if f2 === f && x2 === x | t | Comb(f2, x2))
+  | Abs(aty, b):
+      let b2 = abstract_at(j + 1, v, b)
+      (if b2 === b | t | Abs(aty, b2))
+  | ~else: t
+
+// Turn every occurrence of the free variable `v` into a bound one, ready to
+// be wrapped in an `Abs`.
+fun abstract_fvar(v :: FVar, body :: Term) :: Term:
+  abstract_at(0, v, body)
+
+// Substitute for free variables.  `theta` is a list of `[replacement,
+// variable]` pairs, applied simultaneously.  No capture avoidance is needed
+// or possible: binders have no names to clash with.  Bound-variable indices in
+// the replacements are shifted as the walk descends under binders.
+fun inst_fvar(theta :: List, tm :: Term) :: Term:
+  fun lookup(v :: FVar, depth :: NonnegInt) :: maybe(Term):
+    recur loop (th :~ List = theta):
+      match th
+      | []: #false
+      | List.cons([rep, x], rest):
+          (if x == v | (if depth == 0 | rep | shift(depth, 0, rep)) | loop(rest))
+  fun go(t :: Term, depth :: NonnegInt) :: Term:
+    match t
+    | FVar(_, _):
+        match lookup(t :~ FVar, depth)
+        | #false: t
+        | rep: rep
+    | Comb(f, x):
+        let f2 = go(f, depth)
+        let x2 = go(x, depth)
+        (if f2 === f && x2 === x | t | Comb(f2, x2))
+    | Abs(aty, b):
+        let b2 = go(b, depth + 1)
+        (if b2 === b | t | Abs(aty, b2))
+    | ~else: t
+  cond
+  | theta.length() == 0: tm
+  | ~else: go(tm, 0)
+
+// Substitute for type variables throughout a term.  Two distinct free
+// variables can be merged by this -- `x :: 'a` and `x :: num` become the same
+// variable when `'a := num` -- which is standard HOL behaviour and sound.
+// What used to need capture repair, a bound variable colliding with a free
+// one, cannot happen: bound variables have no names.
+fun inst_type(tyin :: Map.of(Symbol, HType), tm :: Term) :: Term:
+  fun go(t :: Term) :: Term:
+    match t
+    | FVar(n, ty):
+        let ty2 = type_subst(tyin, ty)
+        (if ty2 === ty | t | FVar(n, ty2))
+    | BVar(i, ty):
+        let ty2 = type_subst(tyin, ty)
+        (if ty2 === ty | t | BVar(i, ty2))
+    | Const(n, ty):
+        let ty2 = type_subst(tyin, ty)
+        (if ty2 === ty | t | Const(n, ty2))
+    | Comb(f, x):
+        let f2 = go(f)
+        let x2 = go(x)
+        (if f2 === f && x2 === x | t | Comb(f2, x2))
+    | Abs(aty, b):
+        let aty2 = type_subst(tyin, aty)
+        let b2 = go(b)
+        (if aty2 === aty && b2 === b | t | Abs(aty2, b2))
+  cond
+  | tyin.length() == 0: tm
+  | ~else: go(tm)
+
+// No `BVar` index may escape its binder.  A term that fails this has no
+// meaning; the kernel rejects it.
+fun is_locally_closed(t :: Term) :: Boolean:
+  fun go(t :: Term, depth :: NonnegInt) :: Boolean:
+    match t
+    | BVar(i, _): i < depth
+    | Comb(f, x): go(f, depth) && go(x, depth)
+    | Abs(_, b): go(b, depth + 1)
+    | ~else: #true
+  go(t, 0)
+
+// -- free variables --------------------------------------------------------
+
+fun vfree_in(v :: FVar, t :: Term) :: Boolean:
+  match t
+  | FVar(_, _): v == t
+  | Comb(f, x): vfree_in(v, f) || vfree_in(v, x)
+  | Abs(_, b): vfree_in(v, b)
+  | ~else: #false
+
+// Free variables in left-to-right order of first occurrence, without
+// duplicates.  The order is part of the contract: generated axioms depend on
+// it.
+fun free_vars(t :: Term) :: List.of(FVar):
+  fun walk(t :: Term, acc :~ List) :~ List:
+    match t
+    | FVar(_, _): (if acc.contains(t) | acc | acc ++ [t])
+    | Comb(f, x): walk(x, walk(f, acc))
+    | Abs(_, b): walk(b, acc)
+    | ~else: acc
+  walk(t, [])
+
+// A variant of `v` that is free in none of `avoid`.  Numeric suffixes rather
+// than primes, because these names can reach the emitted executable Rhombus
+// code, and `x'` is not a Rhombus identifier.
+fun variant(avoid :: List.of(Term), v :: FVar) :: FVar:
+  fun clashes(w :: FVar) :: Boolean:
+    for any (t in avoid): vfree_in(w, t)
+  cond
+  | !clashes(v): v
+  | ~else:
+      let base = to_string(v.name)
+      recur loop (n = 1):
+        let w = FVar(Symbol.from_string(base ++ "_" ++ to_string(n)), v.ty)
+        (if clashes(w) | loop(n + 1) | w)
+
+// -- ordering --------------------------------------------------------------
+
+fun rank(t :: Term) :: Int:
+  match t
+  | Const(_, _): 0
+  | FVar(_, _): 1
+  | BVar(_, _): 2
+  | Comb(_, _): 3
+  | Abs(_, _): 4
+
+fun sym_ord(a :: Symbol, b :: Symbol) :: Int:
+  cond
+  | a < b: -1
+  | a > b: 1
+  | ~else: 0
+
+// A total order on terms, used to keep hypothesis lists canonical.  Since
+// terms are now compared structurally, so is this: `term_ord(a, b) == 0`
+// exactly when `a == b`.
+fun term_ord(a :: Term, b :: Term) :: Int:
+  let ra = rank(a)
+  let rb = rank(b)
+  cond
+  | ra != rb: (if ra < rb | -1 | 1)
+  | ~else:
+      match a
+      | FVar(n, ty):
+          let b :~ FVar = b
+          let c = sym_ord(n, b.name)
+          (if c != 0 | c | type_ord(ty, b.ty))
+      | Const(n, ty):
+          let b :~ Const = b
+          let c = sym_ord(n, b.name)
+          (if c != 0 | c | type_ord(ty, b.ty))
+      | BVar(i, ty):
+          let b :~ BVar = b
+          cond
+          | i != b.index: (if i < b.index | -1 | 1)
+          | ~else: type_ord(ty, b.ty)
+      | Comb(f, x):
+          let b :~ Comb = b
+          let c = term_ord(f, b.func)
+          (if c != 0 | c | term_ord(x, b.arg))
+      | Abs(aty, body):
+          let b :~ Abs = b
+          let c = type_ord(aty, b.arg_ty)
+          (if c != 0 | c | term_ord(body, b.body))
+
+// -- beta ------------------------------------------------------------------
+
+fun is_beta_redex(t :: Term) :: Boolean:
+  match t
+  | Comb(Abs(_, _), _): #true
+  | ~else: #false
+
+// Raw, unjustified beta reduction.  The kernel's `BETA` rule is what turns
+// this into a theorem; nothing else should call it to "prove" anything.
+fun beta_reduce(t :: Term) :: Term:
+  match t
+  | Comb(Abs(_, body), arg): subst_bvar(arg, body)
+  | ~else: error(~who: #'beta_reduce, "not a beta redex")
+
+// -- debugging -------------------------------------------------------------
+
+// A raw rendering that shows de Bruijn indices as they are.  `printer.rhm`
+// provides the readable one, which invents binder names; this one is for
+// debugging the representation itself.
+fun term_to_string(t :: Term) :~ String:
+  match t
+  | FVar(n, _): to_string(n)
+  | BVar(i, _): "#" ++ to_string(i)
+  | Const(n, _): to_string(n)
+  | Comb(_, _):
+      let (head, args) = strip_comb(t)
+      cond
+      | head is_a Abs:
+          "(" ++ term_to_string(head) ++ ")"
+            ++ "(" ++ String.join(args.map(term_to_string), ", ") ++ ")"
+      | ~else:
+          term_to_string(head)
+            ++ "(" ++ String.join(args.map(term_to_string), ", ") ++ ")"
+  | Abs(aty, b):
+      "\\" ++ type_to_string(aty) ++ ". " ++ term_to_string(b)

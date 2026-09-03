@@ -1,0 +1,544 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  // shadows rhombus's own `show`, which prints rather than returning a string
+  rhombus/hol/private/printer open
+
+def bl = TyApp(ty_bool, [])
+def A = TyVar(#'a)
+
+// A small working theory: a type `num`, a couple of constants over it, and a
+// predicate.
+def thy0 = initial_theory()
+def thy1 = new_type(thy0, #'num, 0)
+def num = TyApp(#'num, [])
+def thy2 = new_constant(thy1, #'zero, num)
+def thy3 = new_constant(thy2, #'s, mk_fun(num, num))
+def thy4 = new_constant(thy3, #'plus, mk_fun(num, mk_fun(num, num)))
+def thy5 = new_constant(thy4, #'p, mk_fun(num, bl))
+def thy = new_constant(thy5, #'q, mk_fun(num, bl))
+
+def zero = mk_const(#'zero, num)
+def s = mk_const(#'s, mk_fun(num, num))
+def plus = mk_const(#'plus, mk_fun(num, mk_fun(num, num)))
+def pp = mk_const(#'p, mk_fun(num, bl))
+def qq = mk_const(#'q, mk_fun(num, bl))
+
+def x = mk_var(#'x, num)
+def y = mk_var(#'y, num)
+def z = mk_var(#'z, num)
+
+fun sc(a): mk_comb(s, a)
+fun pl(a, b): mk_comb(mk_comb(plus, a), b)
+fun px(a): mk_comb(pp, a)
+fun qx(a): mk_comb(qq, a)
+
+// ==========================================================================
+// Opacity: the trust boundary
+// ==========================================================================
+
+def kernel_eval:
+  def e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }:
+    Evaluator.import(ModulePath'rhombus/hol/private/htype')
+    Evaluator.import(ModulePath'rhombus/hol/private/term')
+    Evaluator.import(ModulePath'rhombus/hol/private/kernel')
+  e
+
+// `Thm` is not bound in expression space outside the kernel, so no one can
+// manufacture a theorem.  (Inside a module this is a compile-time unbound
+// identifier; the evaluator's top level reports it as `undefined` instead.)
+check:
+  ~eval: kernel_eval
+  Thm([], mk_const(#'false, TyApp(#'bool, [])), 0)
+  ~throws "Thm: undefined"
+// nor is the internal constructor exported
+check:
+  ~eval: kernel_eval
+  _Thm([], mk_const(#'false, TyApp(#'bool, [])), 0)
+  ~throws "_Thm: undefined"
+// but `Thm` *is* bound as an annotation and as a binding pattern
+check:
+  ~eval: kernel_eval
+  REFL(initial_theory(), mk_var(#'x, TyVar(#'a))) is_a Thm
+  ~is #true
+
+// Reading a theorem still works: accessors, annotation, and binding pattern.
+def r0 = REFL(thy, x)
+check r0.concl ~is mk_eq(x, x)
+check r0.hyps ~is []
+check r0 is_a Thm ~is #true
+check (match r0 | Thm(h, c, _): [h, c == mk_eq(x, x)]) ~is [[], #true]
+check hyps_of(r0) ~is []
+check concl_of(r0) ~is mk_eq(x, x)
+
+// ==========================================================================
+// Well-formedness checking
+// ==========================================================================
+
+check check_type(thy, num) ~is #void
+check check_type(thy, TyApp(#'nope, [])) ~throws "undeclared type constructor"
+check check_type(thy, TyApp(#'num, [num])) ~throws "arity mismatch"
+check check_term(thy, pl(x, y)) ~is #void
+check check_term(thy, mk_const(#'nope, num)) ~throws "undeclared constant"
+// a constant may only be used at an instance of its declared generic type
+check check_term(thy, mk_const(#'zero, bl)) ~throws "non-instance type"
+// polymorphic `eq` may be used at any instance
+check check_term(thy, mk_eq(x, y)) ~is #void
+check check_term(thy, mk_eq(px(x), qx(y))) ~is #void
+// a term built with the raw constructors, bypassing `mk_comb`, is still caught
+check check_term(thy, Comb(zero, x)) ~throws "operator is not a function"
+check check_term(thy, Comb(s, px(x))) ~throws "ill-typed application"
+
+check is_bool(px(x)) ~is #true
+check is_bool(x) ~is #false
+check ASSUME(thy, x) ~throws "not a proposition"
+check REFL(thy, mk_const(#'nope, num)) ~throws "undeclared constant"
+
+// ==========================================================================
+// The ten primitive rules
+// ==========================================================================
+
+// -- REFL ------------------------------------------------------------------
+check REFL(thy, pl(x, y)).concl ~is mk_eq(pl(x, y), pl(x, y))
+
+// -- TRANS -----------------------------------------------------------------
+def e_xy = ASSUME(thy, mk_eq(x, y))
+def e_yz = ASSUME(thy, mk_eq(y, z))
+check TRANS(e_xy, e_yz).concl ~is mk_eq(x, z)
+check TRANS(e_xy, e_yz).hyps ~is hyp_union([mk_eq(x, y)], [mk_eq(y, z)])
+check TRANS(e_xy, ASSUME(thy, mk_eq(z, x))) ~throws "middle terms do not match"
+check TRANS(ASSUME(thy, px(x)), e_yz) ~throws "not an equation"
+// alpha-equal middles are accepted
+check:
+  // alpha-equal middles are literally the same term now, so this just works
+  let a = ASSUME(thy, mk_eq(x, mk_comb(mk_abs(y, y), x)))
+  let b = ASSUME(thy, mk_eq(mk_comb(mk_abs(z, z), x), y))
+  TRANS(a, b).concl
+  ~is mk_eq(x, y)
+
+// -- MK_COMB ---------------------------------------------------------------
+check:
+  MK_COMB(REFL(thy, s), e_xy).concl
+  ~is mk_eq(sc(x), sc(y))
+check MK_COMB(e_xy, e_xy) ~throws "operator is not a function"
+check:
+  MK_COMB(REFL(thy, s), ASSUME(thy, mk_eq(px(x), px(y))))
+  ~throws "types do not agree"
+
+// -- ABS -------------------------------------------------------------------
+check:
+  ABS(thy, x, REFL(thy, pl(x, y))).concl
+  ~is mk_eq(mk_abs(x, pl(x, y)), mk_abs(x, pl(x, y)))
+// the abstracted variable must not be free in the hypotheses
+check ABS(thy, x, e_xy) ~throws "free in the hypotheses"
+check ABS(thy, z, e_xy).concl ~is mk_eq(mk_abs(z, x), mk_abs(z, y))
+
+// -- BETA ------------------------------------------------------------------
+// Any redex, not just `(\v. b) v`: with locally nameless terms the general
+// case needs no renaming, so it is as primitive as the restricted one was.
+check:
+  BETA(thy, mk_comb(mk_abs(x, sc(x)), x)).concl
+  ~is mk_eq(mk_comb(mk_abs(x, sc(x)), x), sc(x))
+check:
+  BETA(thy, mk_comb(mk_abs(x, sc(x)), zero)).concl
+  ~is mk_eq(mk_comb(mk_abs(x, sc(x)), zero), sc(zero))
+// reduction under a binder keeps the outer indices right
+def beta_inner = mk_abs(y, pl(x, y))
+check:
+  BETA(thy, mk_comb(mk_abs(x, beta_inner), y)).concl
+  ~is mk_eq(mk_comb(mk_abs(x, beta_inner), y),
+            Abs(num, Comb(Comb(plus, y), BVar(0, num))))
+check BETA(thy, sc(x)) ~throws "not a beta redex"
+
+// -- ASSUME ----------------------------------------------------------------
+check ASSUME(thy, px(x)).hyps ~is [px(x)]
+check ASSUME(thy, px(x)).concl ~is px(x)
+
+// -- EQ_MP -----------------------------------------------------------------
+check:
+  EQ_MP(ASSUME(thy, mk_eq(px(x), qx(x))), ASSUME(thy, px(x))).concl
+  ~is qx(x)
+check:
+  EQ_MP(ASSUME(thy, mk_eq(px(x), qx(x))), ASSUME(thy, qx(x)))
+  ~throws "antecedent does not match"
+check EQ_MP(ASSUME(thy, px(x)), ASSUME(thy, px(x))) ~throws "not an equation"
+
+// -- DEDUCT_ANTISYM_RULE ---------------------------------------------------
+// From `p |- q` and `q |- p` conclude `|- p = q`, with the hypotheses cancelling.
+check:
+  let a = ASSUME(thy, px(x))     // p |- p
+  let b = ASSUME(thy, qx(x))     // q |- q
+  let th = DEDUCT_ANTISYM_RULE(a, b)
+  [th.hyps, th.concl == mk_eq(px(x), qx(x))]
+  ~is [[px(x), qx(x)], #true]
+check:
+  // each side discharges the other's conclusion from its hypotheses: with
+  // `p |- p` on both sides, `p` cancels and the result is `|- p = p`
+  let a = ASSUME(thy, px(x))
+  let th = DEDUCT_ANTISYM_RULE(a, a)
+  [th.hyps, th.concl == mk_eq(px(x), px(x))]
+  ~is [[], #true]
+check:
+  // only the *other* conclusion is discharged, so unrelated hypotheses stay
+  let a = EQ_MP(ASSUME(thy, mk_eq(qx(x), px(x))), ASSUME(thy, qx(x)))
+  let b = ASSUME(thy, qx(x))
+  DEDUCT_ANTISYM_RULE(a, b).hyps
+  ~is hyp_union([mk_eq(qx(x), px(x))], [qx(x)])
+
+// -- INST ------------------------------------------------------------------
+check INST(thy, [[zero, x]], e_xy).concl ~is mk_eq(zero, y)
+check INST(thy, [[zero, x]], e_xy).hyps ~is [mk_eq(zero, y)]
+// simultaneous substitution
+check INST(thy, [[y, x], [x, y]], e_xy).concl ~is mk_eq(y, x)
+check INST(thy, [[px(x), x]], e_xy) ~throws "changes a variable's type"
+check:
+  INST(thy, [[mk_const(#'nope, num), x]], e_xy)
+  ~throws "undeclared constant"
+
+// -- INST_TYPE -------------------------------------------------------------
+check:
+  let v = mk_var(#'v, A)
+  let th = REFL(thy, v)
+  INST_TYPE(thy, {#'a: num}, th).concl
+  ~is mk_eq(mk_var(#'v, num), mk_var(#'v, num))
+check:
+  let v = mk_var(#'v, A)
+  INST_TYPE(thy, {#'a: TyApp(#'nope, [])}, REFL(thy, v))
+  ~throws "undeclared type constructor"
+
+// ==========================================================================
+// Lineage: theorems from different theories may not be combined
+// ==========================================================================
+
+def other_thy:
+  let t = new_type(initial_theory(), #'num, 0)
+  new_constant(t, #'p, mk_fun(TyApp(#'num, []), bl))
+
+check TRANS(e_xy, INST(thy, [], e_yz)).concl ~is mk_eq(x, z)
+check:
+  TRANS(e_xy, ASSUME(other_thy, mk_eq(y, z)))
+  ~throws "different theories"
+check:
+  EQ_MP(ASSUME(other_thy, mk_eq(px(x), px(x))), ASSUME(thy, px(x)))
+  ~throws "different theories"
+// but a theorem stays valid in any *extension* of the theory it was proved in
+check:
+  let thy_ext = new_constant(thy, #'r, mk_fun(num, bl))
+  TRANS(e_xy, ASSUME(thy_ext, mk_eq(y, z))).concl
+  ~is mk_eq(x, z)
+
+// ==========================================================================
+// Theory extension
+// ==========================================================================
+
+check type_arity(thy, #'num) ~is 0
+check type_arity(thy, #'nope) ~is #false
+check const_type(thy, #'zero) ~is num
+check new_type(thy, #'num, 0) ~throws "already declared"
+check new_constant(thy, #'zero, num) ~throws "already declared"
+check new_constant(thy, #'w, TyApp(#'nope, [])) ~throws "undeclared type"
+
+// -- new_axiom -------------------------------------------------------------
+check:
+  let (thy2, ax) = new_axiom(thy, px(zero))
+  [ax.concl == px(zero), ax.hyps, axioms_of(thy2).length()]
+  ~is [#true, [], 1]
+check new_axiom(thy, x) ~throws "not a proposition"
+
+// -- new_basic_definition --------------------------------------------------
+check:
+  let one = mk_var(#'one, num)
+  let (thy2, df) = new_basic_definition(thy, mk_eq(one, sc(zero)))
+  [const_type(thy2, #'one) == num,
+   df.concl == mk_eq(mk_const(#'one, num), sc(zero)),
+   definition_of(thy2, #'one) != #false]
+  ~is [#true, #true, #true]
+check:
+  // the right-hand side must be closed
+  new_basic_definition(thy, mk_eq(mk_var(#'one, num), sc(x)))
+  ~throws "not closed"
+check:
+  new_basic_definition(thy, mk_eq(mk_var(#'zero, num), sc(zero)))
+  ~throws "already declared"
+check new_basic_definition(thy, px(zero)) ~throws "not an equation"
+check:
+  // a definition may not be more polymorphic than its body's type
+  let junk = mk_var(#'junk, num)
+  new_basic_definition(thy, mk_eq(junk, sc(zero)))
+  ~completes
+check:
+  // `poly :: bool` defined as `(\u:'a. u) === (\u:'a. u)` would be a constant
+  // less polymorphic than its body, which is unsound
+  let u = mk_var(#'u, A)
+  let body = mk_eq(mk_abs(u, u), mk_abs(u, u))
+  new_basic_definition(thy, mk_eq(mk_var(#'poly, bl), body))
+  ~throws "type variables not in the type"
+
+// -- new_basic_type_definition ---------------------------------------------
+check:
+  // carve out the subtype of `num` satisfying `p`
+  let witness = ASSUME(thy, px(zero))
+  let (thy2, abs_rep, rep_abs) = new_basic_type_definition(
+    thy, #'sub, #'mk_sub, #'dest_sub, witness)
+  #void
+  ~throws "has hypotheses"
+check:
+  let (thy_w, witness) = new_axiom(thy, px(zero))
+  let (thy2, abs_rep, rep_abs) = new_basic_type_definition(
+    thy_w, #'sub, #'mk_sub, #'dest_sub, witness)
+  let sub = TyApp(#'sub, [])
+  [type_arity(thy2, #'sub),
+   const_type(thy2, #'mk_sub) == mk_fun(num, sub),
+   const_type(thy2, #'dest_sub) == mk_fun(sub, num),
+   abs_rep.hyps,
+   rep_abs.hyps]
+  ~is [0, #true, #true, [], []]
+
+// ==========================================================================
+// The cross-module trust boundary
+// ==========================================================================
+
+check trusted_imports_of(thy) ~is []
+check:
+  let (thy2, th) = import_theorem(thy, px(zero), "list_theory.rhm")
+  [th.concl == px(zero), th.hyps, trusted_imports_of(thy2).length()]
+  ~is [#true, [], 1]
+// an imported statement must still be well-formed in the importing theory
+check:
+  import_theorem(thy, mk_comb(mk_const(#'nope, mk_fun(num, bl)), zero), "m.rhm")
+  ~throws "undeclared constant"
+check import_theorem(thy, x, "m.rhm") ~throws "not a proposition"
+
+// ==========================================================================
+// Hypothesis sets
+// ==========================================================================
+
+check hyp_insert(px(x), []) ~is [px(x)]
+check hyp_insert(px(x), [px(x)]) ~is [px(x)]
+check hyp_union([px(x)], [px(x)]) ~is [px(x)]
+check hyp_union([], [px(x)]) ~is [px(x)]
+check hyp_remove(px(x), [px(x), qx(x)]) ~is [qx(x)]
+// Alpha-equal hypotheses are not merely treated as one hypothesis -- they are
+// the same term, so there is nothing to merge.
+check:
+  let h1 = px(mk_comb(mk_abs(x, x), zero))
+  let h2 = px(mk_comb(mk_abs(y, y), zero))
+  [h1 == h2, hyp_union([h1], [h2]).length()]
+  ~is [#true, 1]
+check:
+  let h1 = px(mk_comb(mk_abs(x, x), zero))
+  let h2 = px(mk_comb(mk_abs(y, y), zero))
+  hyp_remove(h2, [h1])
+  ~is []
+// `rehash_hyps` restores the canonical order after a pointwise map
+check rehash_hyps([qx(x), px(x), qx(x)]) ~is hyp_union([px(x)], [qx(x)])
+check rehash_hyps([]) ~is []
+// the order is `term_ord`, so hypothesis lists are canonical
+check hyp_union([qx(x)], [px(x)]) ~is hyp_union([px(x)], [qx(x)])
+
+// ==========================================================================
+// Lineage: a theorem may only be used in the theory it was proved in, or an
+// extension of it
+// ==========================================================================
+
+// `descends(a, b)` reads "a theorem stamped `a` is usable in a theory stamped
+// `b`": the same lineage, and no later a generation.
+check descends(stamp_of(e_xy), stamp_of(e_xy)) ~is #true
+check:
+  let ext = new_constant(thy, #'r2, mk_fun(num, bl))
+  descends(stamp_of(e_xy), ext.stamp)
+  ~is #true
+check:
+  // a theorem from a *later* extension may mention constants the earlier
+  // theory has not declared, so it is not admissible there
+  let ext = new_constant(thy, #'r3, mk_fun(num, bl))
+  let later = ASSUME(ext, mk_comb(mk_const(#'r3, mk_fun(num, bl)), zero))
+  INST(thy, [], later)
+  ~throws "not proved in this theory or an ancestor"
+check:
+  let ext = new_constant(thy, #'r4, mk_fun(num, bl))
+  let later = REFL(ext, mk_const(#'r4, mk_fun(num, bl)))
+  INST_TYPE(thy, {}, later)
+  ~throws "not proved in this theory or an ancestor"
+check:
+  let ext = new_constant(thy, #'r5, mk_fun(num, bl))
+  let later = REFL(ext, x)
+  ABS(thy, x, later)
+  ~throws "not proved in this theory or an ancestor"
+
+// Combining two theorems takes the later generation, so the result stays
+// usable exactly where both premises were.
+check:
+  let ext = new_constant(thy, #'r6, mk_fun(num, bl))
+  let a = REFL(thy, x)
+  let b = REFL(ext, x)
+  stamp_of(TRANS(a, b)).gen == ext.stamp.gen
+  ~is #true
+check:
+  let ext = new_constant(thy, #'r7, mk_fun(num, bl))
+  let a = ASSUME(thy, mk_eq(px(x), qx(x)))
+  let b = ASSUME(ext, px(x))
+  stamp_of(EQ_MP(a, b)).gen == ext.stamp.gen
+  ~is #true
+
+// `ABS` checks the abstracted variable against the theory, so an undeclared
+// type cannot enter a theorem through the binder.
+check:
+  ABS(thy, mk_var(#'w, TyApp(#'nope, [])), REFL(thy, x))
+  ~throws "undeclared type constructor"
+
+// ==========================================================================
+// Local closure: a dangling de Bruijn index is not a term
+// ==========================================================================
+
+check REFL(thy, BVar(0, num)) ~throws "unbound de Bruijn index"
+check REFL(thy, Abs(num, BVar(1, num))) ~throws "unbound de Bruijn index"
+check ASSUME(thy, Abs(num, BVar(1, bl))) ~throws "unbound de Bruijn index"
+check REFL(thy, Abs(num, BVar(0, num))) ~completes
+check:
+  INST(thy, [[BVar(0, num), x]], e_xy)
+  ~throws "unbound de Bruijn index"
+
+// ==========================================================================
+// Instantiation restores the canonical hypothesis list
+// ==========================================================================
+
+// Instantiating can make two distinct hypotheses equal; the result must not
+// keep both, or `==` on theorems starts reporting differences that are gone.
+// `p(x) , p(y) |- p(x)`, instantiated with `x := y`, has one hypothesis, not
+// two copies of the same one.
+def two_hyps = DEDUCT_ANTISYM_RULE(ASSUME(thy, px(x)), ASSUME(thy, px(y)))
+check two_hyps.hyps.length() ~is 2
+check hyps_of(INST(thy, [[y, x]], two_hyps)).length() ~is 1
+// and instantiation can also reorder them, so the order is rebuilt too
+check:
+  let th = DEDUCT_ANTISYM_RULE(ASSUME(thy, px(y)), ASSUME(thy, qx(x)))
+  let inst = INST(thy, [[zero, x], [zero, y]], th)
+  inst.hyps
+  ~is hyp_union([px(zero)], [qx(zero)])
+
+// ==========================================================================
+// Soundness regressions
+//
+// Each block below corresponds to an attack that the kernel once admitted.
+// They are the reason the checks they exercise exist; do not relax them.
+// ==========================================================================
+
+// -- forked theories may not be combined -----------------------------------
+//
+// Immutable theories fork.  Two sibling extensions of one base can each define
+// a constant of the same name and type differently, and a linear generation
+// counter cannot tell them apart -- so `|- c = zero` from one branch composed
+// with `|- c = one` from the other used to yield `|- zero = one`.
+
+def one = sc(zero)
+def (thy_a, def_a) = new_basic_definition(thy, mk_eq(mk_var(#'c, num), zero))
+def (thy_b, def_b) = new_basic_definition(thy, mk_eq(mk_var(#'c, num), one))
+
+check show(def_a.concl) ~is "c === zero"
+check show(def_b.concl) ~is "c === s(zero)"
+// the branches are at the same depth, and neither extends the other
+check stamp_of(def_a).gen ~is stamp_of(def_b).gen
+check descends(stamp_of(def_a), stamp_of(def_b)) ~is #false
+check descends(stamp_of(def_b), stamp_of(def_a)) ~is #false
+// `|- l = r  ==>  |- r = l`, derived here so this file needs only the kernel.
+fun sym(t :: Theory, th :: Thm) :: Thm:
+  let [l, r] = (match dest_eq(concl_of(th)) | pair: pair)
+  let ty = type_of(l)
+  let eqc = mk_const(c_eq, mk_fun(ty, mk_fun(ty, bl)))
+  let lth = REFL(t, l)
+  EQ_MP(MK_COMB(MK_COMB(REFL(t, eqc), th), lth), lth)
+
+check sym(thy, e_xy).concl ~is mk_eq(y, x)
+check:
+  TRANS(sym(thy_a, def_a), def_b)
+  ~throws "different theories"
+
+// -- a bound variable may not lie about its binder's type ------------------
+//
+// `Abs(num, Comb(p, BVar(0, bool)))` is locally closed and mentions only
+// declared types, but its `type_of` is `num -> bool`, so it applies to a
+// number and beta-reduces to `p(zero)` built from a `p` that was handed a
+// `bool`.  Admitting it puts an ill-typed term inside a theorem, and from
+// there `type_of` is lying about everything built on top.
+
+def liar = Abs(num, Comb(pp, BVar(0, bl)))
+check type_of(liar) ~is mk_fun(num, bl)
+check is_locally_closed(liar) ~is #true
+check check_term(thy, liar) ~throws "does not match its binder"
+check REFL(thy, liar) ~throws "does not match its binder"
+check BETA(thy, Comb(liar, zero)) ~throws "does not match its binder"
+// the honest version of the same shape is fine
+check check_term(thy, Abs(num, Comb(pp, BVar(0, num)))) ~is #void
+// a deeper index must match the binder it actually points at
+check:
+  check_term(thy, Abs(num, Abs(bl, BVar(1, bl))))
+  ~throws "does not match its binder"
+check check_term(thy, Abs(num, Abs(bl, BVar(1, num)))) ~is #void
+
+// -- a rule that takes a theory stamps its result with that theory ---------
+//
+// Otherwise a theorem mentioning a constant declared in a later extension
+// keeps the older stamp and can be carried back into a theory that never
+// declared it.
+
+check:
+  let ext = new_constant(thy, #'later, num)
+  let later = mk_const(#'later, num)
+  let inst = INST(ext, [[later, x]], e_xy)
+  // the result mentions `later`, so it belongs to `ext`, not to `thy`
+  [show(concl_of(inst)), descends(stamp_of(inst), thy.stamp)]
+  ~is ["later === y", #false]
+check:
+  let ext = new_constant(thy, #'later2, num)
+  let inst = INST(ext, [[mk_const(#'later2, num), x]], e_xy)
+  INST(thy, [], inst)
+  ~throws "not proved in this theory or an ancestor"
+check:
+  let ext = new_constant(thy, #'later3, num)
+  descends(stamp_of(ABS(ext, x, REFL(ext, x))), thy.stamp)
+  ~is #false
+
+// -- an instantiation target must be a free variable -----------------------
+
+check:
+  INST(thy, [[zero, mk_const(#'zero, num)]], e_xy)
+  ~throws "not a free variable"
+check:
+  INST(thy, [[zero, sc(x)]], e_xy)
+  ~throws "not a free variable"
+
+// -- an extension is one node, and its theorem lives in it -----------------
+//
+// Extending twice left the theorem one node behind the theory that recorded
+// it, so the two disagreed about which node they belonged to.
+
+check:
+  let (thy2, ax) = new_axiom(thy, px(zero))
+  [stamp_of(ax).gen == thy2.stamp.gen, stamp_of(ax).gen == thy.stamp.gen + 1]
+  ~is [#true, #true]
+check:
+  let (thy2, df) = new_basic_definition(thy, mk_eq(mk_var(#'two, num), zero))
+  [stamp_of(df).gen == thy2.stamp.gen, stamp_of(df).gen == thy.stamp.gen + 1]
+  ~is [#true, #true]
+check:
+  let (thy_w, w) = new_axiom(thy, px(zero))
+  let (thy2, ar, ra) = new_basic_type_definition(thy_w, #'sub2, #'mk2, #'de2, w)
+  [stamp_of(ar).gen == thy2.stamp.gen, stamp_of(ra).gen == thy2.stamp.gen]
+  ~is [#true, #true]
+
+// -- new_basic_type_definition rejects malformed packages ------------------
+
+check:
+  let (thy_w, w) = new_axiom(thy, px(zero))
+  new_basic_type_definition(thy_w, #'num, #'mk3, #'de3, w)
+  ~throws "type constructor is already declared"
+check:
+  let (thy_w, w) = new_axiom(thy, px(zero))
+  new_basic_type_definition(thy_w, #'sub3, #'same, #'same, w)
+  ~throws "same name"

@@ -1,0 +1,236 @@
+#lang rhombus/static
+
+// Terms are locally nameless: free variables have names, bound variables have
+// de Bruijn indices, and alpha-equivalence is plain structural equality.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+
+def A = TyVar(#'a)
+def num = TyApp(#'num, [])
+def bl = bool_ty
+
+def x = mk_var(#'x, num)
+def y = mk_var(#'y, num)
+def z = mk_var(#'z, num)
+def xa = mk_var(#'x, A)
+def f = mk_const(#'f, mk_fun(num, num))
+def g = mk_const(#'g, mk_fun(num, mk_fun(num, num)))
+def p = mk_const(#'p, mk_fun(num, bl))
+
+fun app1(fn, a): mk_comb(fn, a)
+fun app2(fn, a, b): mk_comb(mk_comb(fn, a), b)
+
+// -- representation --------------------------------------------------------
+
+// `\x. f x` holds no name at all: just the argument type and a body in which
+// the variable has become index 0.
+check mk_abs(x, app1(f, x)) ~is Abs(num, Comb(f, BVar(0, num)))
+check mk_abs(x, y) ~is Abs(num, y)
+// nesting increments the index of the outer binder
+check:
+  mk_abs(x, mk_abs(y, app2(g, x, y)))
+  ~is Abs(num, Abs(num, Comb(Comb(g, BVar(1, num)), BVar(0, num))))
+
+// THE payoff: alpha-equivalent terms are now literally the same term, so `==`
+// is all anyone needs.  There is no `aconv`.
+check mk_abs(x, x) ~is mk_abs(y, y)
+check mk_abs(x, mk_abs(y, x)) ~is mk_abs(y, mk_abs(x, y))
+check mk_abs(x, mk_abs(y, x)) == mk_abs(x, mk_abs(y, y)) ~is #false
+check mk_abs(x, y) == mk_abs(y, y) ~is #false
+// binder types are still part of the term
+check mk_abs(x, x) == mk_abs(xa, xa) ~is #false
+
+// -- typing ----------------------------------------------------------------
+
+check type_of(x) ~is num
+check type_of(f) ~is mk_fun(num, num)
+check type_of(app1(f, x)) ~is num
+check type_of(app2(g, x, y)) ~is num
+check type_of(mk_abs(x, app1(f, x))) ~is mk_fun(num, num)
+check type_of(BVar(0, num)) ~is num
+
+check mk_comb(x, y) ~throws "operator is not a function"
+check mk_comb(f, p) ~throws "operand type does not match operator domain"
+
+// -- local closure ---------------------------------------------------------
+
+check is_locally_closed(x) ~is #true
+check is_locally_closed(mk_abs(x, app1(f, x))) ~is #true
+// an index with no binder to point at is not a term at all
+check is_locally_closed(BVar(0, num)) ~is #false
+check is_locally_closed(Abs(num, BVar(1, num))) ~is #false
+check is_locally_closed(Abs(num, Abs(num, BVar(1, num)))) ~is #true
+
+// -- shift -----------------------------------------------------------------
+
+check shift(1, 0, x) ~is x
+check shift(1, 0, BVar(0, num)) ~is BVar(1, num)
+check shift(2, 0, BVar(3, num)) ~is BVar(5, num)
+// indices below the cutoff point at binders inside the term, so they stay
+check shift(1, 1, BVar(0, num)) ~is BVar(0, num)
+check shift(1, 1, BVar(1, num)) ~is BVar(2, num)
+// descending under a binder raises the cutoff
+check shift(1, 0, Abs(num, BVar(0, num))) ~is Abs(num, BVar(0, num))
+check shift(1, 0, Abs(num, BVar(1, num))) ~is Abs(num, BVar(2, num))
+check shift(-1, 0, BVar(0, num)) ~throws "negative index"
+
+// -- abstract and open are inverse ----------------------------------------
+
+check abstract_fvar(x, app1(f, x)) ~is Comb(f, BVar(0, num))
+check abstract_fvar(x, y) ~is y
+check:
+  abstract_fvar(x, mk_abs(y, app2(g, x, y)))
+  ~is Abs(num, Comb(Comb(g, BVar(1, num)), BVar(0, num)))
+check subst_bvar(x, Comb(f, BVar(0, num))) ~is app1(f, x)
+check:
+  let t = app2(g, x, mk_comb(mk_abs(y, app2(g, x, y)), x))
+  subst_bvar(x, abstract_fvar(x, t)) == t
+  ~is #true
+check:
+  let t = mk_abs(y, app2(g, x, y))
+  open_abs(z, mk_abs(x, t))
+  ~is mk_abs(y, app2(g, z, y))
+check open_abs(xa, mk_abs(x, x)) ~throws "does not match"
+check open_abs(x, x) ~throws "not an abstraction"
+
+// `dest_abs` names the opened variable deterministically, from the same
+// sequence the printer uses, skipping anything already free in the body.
+check:
+  let (v, b) = dest_abs(mk_abs(y, app2(g, y, x)))
+  [v, b]
+  ~is [y, app2(g, y, x)]
+check:
+  let (v, b) = dest_abs(mk_abs(y, app1(f, y)))
+  [v, b]
+  ~is [x, app1(f, x)]
+check:
+  // `x` and `y` are both taken, so the next name in the sequence is used
+  let (v, _) = dest_abs(mk_abs(z, app2(g, x, y)))
+  v
+  ~is z
+check dest_abs(x) ~throws "not an abstraction"
+
+// -- spines ----------------------------------------------------------------
+
+check:
+  let (h, args) = strip_comb(app2(g, x, y))
+  [h == g, args]
+  ~is [#true, [x, y]]
+check list_mk_comb(g, [x, y]) ~is app2(g, x, y)
+check:
+  let (vs, b) = strip_abs(mk_abs(x, mk_abs(y, app2(g, x, y))))
+  [vs.length(), b]
+  ~is [2, app2(g, mk_var(#'x, num), mk_var(#'y, num))]
+check:
+  list_mk_abs([x, y], app2(g, x, y))
+  ~is mk_abs(x, mk_abs(y, app2(g, x, y)))
+
+// -- free variables --------------------------------------------------------
+
+check free_vars(app2(g, x, y)) ~is [x, y]
+check free_vars(app2(g, y, x)) ~is [y, x]
+check free_vars(app2(g, x, x)) ~is [x]
+check free_vars(mk_abs(x, app2(g, x, y))) ~is [y]
+check free_vars(f) ~is []
+// same name, different type: distinct variables
+check free_vars(app2(g, x, y)) == [xa, y] ~is #false
+
+check vfree_in(x, app2(g, x, y)) ~is #true
+check vfree_in(z, app2(g, x, y)) ~is #false
+check vfree_in(x, mk_abs(x, x)) ~is #false
+
+check variant([], x) ~is x
+check variant([x], x) ~is mk_var(#'x_1, num)
+check variant([x, mk_var(#'x_1, num)], x) ~is mk_var(#'x_2, num)
+// only *free* occurrences count as a clash
+check variant([mk_abs(x, x)], x) ~is x
+
+// -- substitution ----------------------------------------------------------
+
+check inst_fvar([], app1(f, x)) ~is app1(f, x)
+check inst_fvar([[y, x]], app1(f, x)) ~is app1(f, y)
+check inst_fvar([[y, x]], f) ~is f
+check inst_fvar([[y, x]], app2(g, x, x)) ~is app2(g, y, y)
+// simultaneous, not sequential
+check inst_fvar([[y, x], [x, y]], app2(g, x, y)) ~is app2(g, y, x)
+// a bound occurrence is untouched, because it is not a free variable at all
+check inst_fvar([[y, x]], mk_abs(x, x)) ~is mk_abs(x, x)
+check:
+  inst_fvar([[y, x]], mk_abs(z, app2(g, x, z)))
+  ~is mk_abs(z, app2(g, y, z))
+
+// The case that used to need capture avoidance.  Substituting `y` for `x`
+// under a binder for `y` cannot capture anything, because the binder has no
+// name: the result is simply the term with `y` in both positions.
+check:
+  inst_fvar([[y, x]], mk_abs(y, app2(g, x, y)))
+  ~is Abs(num, Comb(Comb(g, y), BVar(0, num)))
+// and that is *not* the same term as the one where both are bound
+check:
+  inst_fvar([[y, x]], mk_abs(y, app2(g, x, y))) == mk_abs(y, app2(g, y, y))
+  ~is #false
+
+// -- type instantiation ----------------------------------------------------
+
+def ida = mk_const(#'id, mk_fun(A, A))
+check inst_type({}, ida) ~is ida
+check inst_type({#'a: num}, ida) ~is mk_const(#'id, mk_fun(num, num))
+check inst_type({#'a: num}, xa) ~is x
+check inst_type({#'a: num}, mk_abs(xa, xa)) ~is mk_abs(x, x)
+// the binder's type is instantiated too
+check inst_type({#'a: num}, mk_abs(xa, xa)) ~is Abs(num, BVar(0, num))
+// A bound variable cannot be captured by instantiation, because it has no
+// name: what used to need a `Clash` and a rename is now just a walk.
+check:
+  let h = mk_const(#'h, mk_fun(A, num))
+  let t = mk_abs(xa, app2(g, x, mk_comb(h, xa)))
+  free_vars(inst_type({#'a: num}, t))
+  ~is [x]
+
+// -- ordering --------------------------------------------------------------
+
+check term_ord(x, x) ~is 0
+check term_ord(mk_abs(x, x), mk_abs(y, y)) ~is 0
+check term_ord(x, y) ~is -1
+check term_ord(y, x) ~is 1
+// Const < FVar < BVar < Comb < Abs
+check term_ord(f, x) ~is -1
+check term_ord(x, app1(f, x)) ~is -1
+check term_ord(app1(f, x), mk_abs(x, x)) ~is -1
+
+check:
+  let ts = [x, y, xa, f, g, app1(f, x), app2(g, x, y), app2(g, y, x),
+            mk_abs(x, x), mk_abs(x, y), mk_abs(y, mk_abs(x, y))]
+  for all (s in ts, t in ts): term_ord(s, t) == -term_ord(t, s)
+  ~is #true
+// The order is total and agrees with equality -- which, now, is the only
+// equality there is.
+check:
+  let ts = [x, y, xa, f, app1(f, x), app2(g, x, y), mk_abs(x, x), mk_abs(x, y)]
+  for all (s in ts, t in ts): (term_ord(s, t) == 0) == (s == t)
+  ~is #true
+check:
+  let ts = [x, y, xa, f, g, app1(f, x), app2(g, x, y), mk_abs(x, x)]
+  for all (s in ts, t in ts, u in ts):
+    !(term_ord(s, t) < 0 && term_ord(t, u) < 0) || term_ord(s, u) < 0
+  ~is #true
+
+// -- beta ------------------------------------------------------------------
+
+check is_beta_redex(mk_comb(mk_abs(x, app1(f, x)), y)) ~is #true
+check is_beta_redex(app1(f, y)) ~is #false
+check beta_reduce(mk_comb(mk_abs(x, app1(f, x)), y)) ~is app1(f, y)
+check beta_reduce(mk_comb(mk_abs(x, y), z)) ~is y
+// reduction under a binder keeps the outer index correct
+check:
+  beta_reduce(mk_comb(mk_abs(x, mk_abs(y, app2(g, x, y))), y))
+  ~is Abs(num, Comb(Comb(g, y), BVar(0, num)))
+check beta_reduce(app1(f, x)) ~throws "not a beta redex"
+
+// -- debugging output ------------------------------------------------------
+
+check term_to_string(x) ~is "x"
+check term_to_string(app1(f, x)) ~is "f(x)"
+check term_to_string(mk_abs(x, app1(f, x))) ~is "\\num. f(#0)"

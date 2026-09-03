@@ -1,0 +1,169 @@
+#lang rhombus/static
+
+// The positivity checker is the whole soundness argument for axiomatic
+// datatypes, so it gets its own rejection battery.  Anything that slips
+// through here is an inconsistency, not a bug.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/datatype open
+
+def A = TyVar(#'a)
+def B = TyVar(#'b)
+def base = base_theory()
+
+// A theory with a `num` to build bad specs out of.
+def thy = new_type(base, #'num, 0)
+def num = TyApp(#'num, [])
+
+fun accept(spec :: DatatypeSpec) :: Boolean:
+  check_spec(thy, spec)
+  #true
+
+// -- accepted --------------------------------------------------------------
+
+def list_spec:
+  DatatypeSpec(#'List, [#'a],
+               [Ctor(#'nil, []),
+                Ctor(#'cons, [Field(#'head, A),
+                              Field(#'tail, TyApp(#'List, [A]))])])
+
+check accept(list_spec) ~is #true
+check:
+  // an enumeration
+  accept(DatatypeSpec(#'Colour, [],
+                      [Ctor(#'red, []), Ctor(#'green, [])]))
+  ~is #true
+check:
+  // a record-like single constructor with no recursion
+  accept(DatatypeSpec(#'Point, [],
+                      [Ctor(#'pt, [Field(#'x, num), Field(#'y, num)])]))
+  ~is #true
+check:
+  // several parameters, several recursive fields
+  accept(DatatypeSpec(#'T, [#'a, #'b],
+                      [Ctor(#'l, [Field(#'v, B)]),
+                       Ctor(#'n, [Field(#'a1, TyApp(#'T, [A, B])),
+                                  Field(#'a2, TyApp(#'T, [A, B]))])]))
+  ~is #true
+// a function type is fine as long as the datatype does not occur in it
+check:
+  accept(DatatypeSpec(#'Wrap, [],
+                      [Ctor(#'wrap, [Field(#'f, mk_fun(num, num))])]))
+  ~is #true
+
+// -- rejected: no base case ------------------------------------------------
+
+// HOL types are inhabited by assumption, so an empty datatype is not merely
+// useless -- postulating one is inconsistent.
+check:
+  check_spec(thy, DatatypeSpec(#'Empty, [],
+                               [Ctor(#'e, [Field(#'r, TyApp(#'Empty, []))])]))
+  ~throws "the type would be empty"
+check:
+  check_spec(thy, DatatypeSpec(#'Two, [],
+                               [Ctor(#'a1, [Field(#'r, TyApp(#'Two, []))]),
+                                Ctor(#'a2, [Field(#'r, TyApp(#'Two, []))])]))
+  ~throws "the type would be empty"
+check:
+  check_spec(thy, DatatypeSpec(#'None, [], []))
+  ~throws "at least one constructor"
+
+// -- rejected: negative occurrence -----------------------------------------
+
+// `mk : (Bad -> Bad) -> Bad` gives a retract of the function space onto the
+// type, which is a straightforward contradiction.
+check:
+  let bad = TyApp(#'Bad, [])
+  check_spec(thy, DatatypeSpec(#'Bad, [],
+                               [Ctor(#'base, []),
+                                Ctor(#'mk, [Field(#'f, mk_fun(bad, bad))])]))
+  ~throws "cannot admit"
+check:
+  let bad = TyApp(#'Bad, [])
+  check_spec(thy, DatatypeSpec(#'Bad, [],
+                               [Ctor(#'base, []),
+                                Ctor(#'mk, [Field(#'f, mk_fun(bad, num))])]))
+  ~throws "cannot admit"
+
+// -- rejected: infinitary branching ----------------------------------------
+
+// `lim : (num -> Inf) -> Inf` is strictly positive but not finitary; without
+// an infinity axiom the induction scheme emitted here is not justified.
+check:
+  let inf = TyApp(#'Inf, [])
+  check_spec(thy, DatatypeSpec(#'Inf, [],
+                               [Ctor(#'zer, []),
+                                Ctor(#'lim, [Field(#'f, mk_fun(num, inf))])]))
+  ~throws "cannot admit"
+
+// -- rejected: nested occurrence -------------------------------------------
+
+// `node : List(Rose) -> Rose` is sound in principle, but the induction scheme
+// this version emits would not mention the elements of the list, so admitting
+// it would produce a *wrong* scheme rather than an unsound one.  Reject it
+// rather than emit something misleading.
+def rose_thy:
+  let (t, _) = datatype_axioms(thy, list_spec)
+  t
+check:
+  let rose = TyApp(#'Rose, [])
+  check_spec(rose_thy,
+             DatatypeSpec(#'Rose, [],
+                          [Ctor(#'leaf, []),
+                           Ctor(#'node, [Field(#'kids, TyApp(#'List, [rose]))])]))
+  ~throws "cannot admit"
+
+// -- rejected: recursion at the wrong parameters ---------------------------
+
+// `cons : a -> List(num) -> List(a)` is not a recursive occurrence of the type
+// being defined; it refers to a different instance and is not admissible here.
+check:
+  check_spec(thy, DatatypeSpec(#'List, [#'a],
+                               [Ctor(#'nil, []),
+                                Ctor(#'cons, [Field(#'head, A),
+                                              Field(#'tail, TyApp(#'List, [num]))])]))
+  ~throws "cannot admit"
+
+// -- rejected: malformed declarations --------------------------------------
+
+check:
+  check_spec(thy, DatatypeSpec(#'num, [], [Ctor(#'c, [])]))
+  ~throws "type constructor is already declared"
+check:
+  check_spec(thy, DatatypeSpec(#'T, [#'a, #'a], [Ctor(#'c, [])]))
+  ~throws "duplicate type parameter"
+check:
+  check_spec(thy, DatatypeSpec(#'T, [], [Ctor(#'c, []), Ctor(#'c, [])]))
+  ~throws "duplicate constructor"
+check:
+  check_spec(thy, DatatypeSpec(#'T, [],
+                               [Ctor(#'c, [Field(#'f, num), Field(#'f, num)])]))
+  ~throws "duplicate field"
+check:
+  // a constructor may not shadow an existing constant
+  check_spec(thy, DatatypeSpec(#'T, [], [Ctor(#'conj, [])]))
+  ~throws "already a constant"
+check:
+  // a field type mentioning an unbound type variable
+  check_spec(thy, DatatypeSpec(#'T, [], [Ctor(#'c, [Field(#'f, A)])]))
+  ~throws "unbound type variable"
+check:
+  // a field type mentioning an undeclared type constructor
+  check_spec(thy, DatatypeSpec(#'T, [],
+                               [Ctor(#'c, [Field(#'f, TyApp(#'nope, []))])]))
+  ~throws "undeclared type constructor"
+
+// -- nothing is added to the theory when the check fails -------------------
+
+check:
+  let before = thy
+  try:
+    datatype_axioms(before, DatatypeSpec(#'Empty, [],
+                                         [Ctor(#'e, [Field(#'r, TyApp(#'Empty, []))])]))
+    ~catch _: #void
+  [type_arity(thy, #'Empty), const_type(thy, #'e)]
+  ~is [#false, #false]

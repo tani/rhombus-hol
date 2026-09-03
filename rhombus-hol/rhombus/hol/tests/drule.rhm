@@ -1,0 +1,367 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/conv open
+  rhombus/hol/private/drule open
+
+def thy:
+  let t = new_type(base_theory(), #'num, 0)
+  let n = TyApp(#'num, [])
+  let t = new_constant(t, #'zero, n)
+  let t = new_constant(t, #'s, mk_fun(n, n))
+  let t = new_constant(t, #'P, mk_fun(n, bool))
+  new_constant(t, #'Q, mk_fun(n, bool))
+
+def num = TyApp(#'num, [])
+def zero = mk_const(#'zero, num)
+def sc = mk_const(#'s, mk_fun(num, num))
+def Pc = mk_const(#'P, mk_fun(num, bool))
+def Qc = mk_const(#'Q, mk_fun(num, bool))
+def p = mk_var(#'p, bool)
+def q = mk_var(#'q, bool)
+def r = mk_var(#'r, bool)
+def x = mk_var(#'x, num)
+def y = mk_var(#'y, num)
+
+fun P(t): mk_comb(Pc, t)
+fun Q(t): mk_comb(Qc, t)
+fun s(t): mk_comb(sc, t)
+
+// ==========================================================================
+// truth
+// ==========================================================================
+
+check TRUTH(thy).concl ~is tm_true
+check TRUTH(thy).hyps ~is []
+check show(EQT_INTRO(thy, ASSUME(thy, p)).concl) ~is "p <=> true"
+check EQT_INTRO(thy, ASSUME(thy, p)).hyps ~is [p]
+check:
+  EQT_ELIM(thy, EQT_INTRO(thy, ASSUME(thy, p))).concl
+  ~is p
+check EQT_ELIM(thy, TRUTH(thy)) ~throws "not an equation"
+
+// ==========================================================================
+// conjunction
+// ==========================================================================
+
+check:
+  show(CONJ(thy, ASSUME(thy, p), ASSUME(thy, q)).concl)
+  ~is "p and q"
+check CONJ(thy, ASSUME(thy, p), ASSUME(thy, q)).hyps ~is hyp_union([p], [q])
+check:
+  CONJUNCT1(thy, CONJ(thy, ASSUME(thy, p), ASSUME(thy, q))).concl
+  ~is p
+check:
+  CONJUNCT2(thy, CONJ(thy, ASSUME(thy, p), ASSUME(thy, q))).concl
+  ~is q
+check:
+  // elimination works on an assumed conjunction too, not just a built one
+  CONJUNCT1(thy, ASSUME(thy, mk_conj(P(x), Q(y)))).concl
+  ~is P(x)
+check CONJUNCT1(thy, ASSUME(thy, p)) ~throws "not a conjunction"
+check:
+  let th = ASSUME(thy, mk_conj(p, mk_conj(q, r)))
+  CONJUNCTS(thy, th).map(fun (t :: Thm): show(concl_of(t)))
+  ~is ["p", "q", "r"]
+check:
+  let ths = [ASSUME(thy, p), ASSUME(thy, q), ASSUME(thy, r)]
+  show(LIST_CONJ(thy, ths).concl)
+  ~is "p and q and r"
+check LIST_CONJ(thy, []) ~throws "empty list"
+
+// the round trip is the real test: build, take apart, rebuild
+check:
+  let th = ASSUME(thy, mk_conj(P(x), mk_conj(Q(x), P(y))))
+  show(LIST_CONJ(thy, CONJUNCTS(thy, th)).concl)
+  ~is "P(x) and Q(x) and P(y)"
+
+// ==========================================================================
+// implication
+// ==========================================================================
+
+check:
+  show(DISCH(thy, p, ASSUME(thy, q)).concl)
+  ~is "p ==> q"
+// discharging removes the assumption
+check DISCH(thy, p, ASSUME(thy, p)).hyps ~is []
+check DISCH(thy, p, ASSUME(thy, q)).hyps ~is [q]
+check:
+  // `|- p ==> p`, with no hypotheses: the first real theorem
+  show(DISCH(thy, p, ASSUME(thy, p)).concl)
+  ~is "p ==> p"
+
+check:
+  let ith = DISCH(thy, p, ASSUME(thy, q))
+  MP(thy, ith, ASSUME(thy, p)).concl
+  ~is q
+check MP(thy, ASSUME(thy, p), ASSUME(thy, p)) ~throws "not an implication"
+check:
+  MP(thy, DISCH(thy, p, ASSUME(thy, q)), ASSUME(thy, r))
+  ~throws "antecedent does not match"
+check UNDISCH(thy, DISCH(thy, p, ASSUME(thy, q))).hyps ~is hyp_union([p], [q])
+check:
+  let th = DISCH(thy, p, DISCH(thy, q, ASSUME(thy, r)))
+  UNDISCH_ALL(thy, th).concl
+  ~is r
+check:
+  let a = DISCH(thy, p, ASSUME(thy, q))
+  let b = DISCH(thy, q, ASSUME(thy, r))
+  show(IMP_TRANS(thy, a, b).concl)
+  ~is "p ==> r"
+check:
+  let th = ASSUME(thy, mk_conj(p, q))
+  show(DISCH_ALL(thy, th).concl)
+  ~is "p and q ==> p and q"
+
+// ==========================================================================
+// biconditional
+// ==========================================================================
+
+check:
+  let a = DISCH(thy, p, ASSUME(thy, q))
+  let b = DISCH(thy, q, ASSUME(thy, p))
+  show(IMP_ANTISYM_RULE(thy, a, b).concl)
+  ~is "p <=> q"
+// the premises here still carry `q` and `p` as hypotheses, so the result does
+check:
+  IMP_ANTISYM_RULE(thy, DISCH(thy, p, ASSUME(thy, q)),
+                   DISCH(thy, q, ASSUME(thy, p))).hyps
+  ~is hyp_union([p], [q])
+// with hypothesis-free premises the result is hypothesis-free
+check:
+  let refl_imp = DISCH(thy, p, ASSUME(thy, p))
+  let th = IMP_ANTISYM_RULE(thy, refl_imp, refl_imp)
+  [show(concl_of(th)), hyps_of(th)]
+  ~is ["p <=> p", []]
+check:
+  let (f, g) = EQ_IMP_RULE(thy, ASSUME(thy, mk_eq(p, q)))
+  [show(concl_of(f)), show(concl_of(g))]
+  ~is ["p ==> q", "q ==> p"]
+// the two are inverse
+check:
+  let th = ASSUME(thy, mk_eq(p, q))
+  let (f, g) = EQ_IMP_RULE(thy, th)
+  show(IMP_ANTISYM_RULE(thy, f, g).concl)
+  ~is "p <=> q"
+
+// ==========================================================================
+// universal quantification
+// ==========================================================================
+
+// The generalized variable must not be free in the hypotheses -- otherwise
+// `forall x. P x` would follow from the single instance `P x`.
+check:
+  GEN(thy, x, ASSUME(thy, P(x)))
+  ~throws "free in the hypotheses"
+// an unrelated hypothesis is carried through untouched
+check:
+  let th = GEN(thy, x, ADD_ASSUM(thy, p, REFL(thy, x)))
+  [show(concl_of(th)), hyps_of(th)]
+  ~is ["forall (x :: num): x === x", [p]]
+check:
+  let th = GEN(thy, x, REFL(thy, x))
+  show(th.concl)
+  ~is "forall (x :: num): x === x"
+check:
+  show(GENL(thy, [x, y], REFL(thy, x)).concl)
+  ~is "forall (x :: num, y :: num): x === x"
+
+check:
+  let th = GEN(thy, x, REFL(thy, x))
+  show(SPEC(thy, zero, th).concl)
+  ~is "zero === zero"
+check:
+  let th = GEN(thy, x, DISCH(thy, P(x), ASSUME(thy, P(x))))
+  show(SPEC(thy, zero, th).concl)
+  ~is "P(zero) ==> P(zero)"
+check SPEC(thy, zero, ASSUME(thy, p)) ~throws "not universally quantified"
+check:
+  let th = GEN(thy, x, REFL(thy, x))
+  SPEC(thy, p, th)
+  ~throws "wrong type"
+check:
+  let th = GENL(thy, [x, y], REFL(thy, x))
+  show(SPECL(thy, [zero, s(zero)], th).concl)
+  ~is "zero === zero"
+check:
+  // `forall x y. x === y ==> y === x`, then stripped back down
+  let body = DISCH(thy, mk_eq(x, y), SYM(thy, ASSUME(thy, mk_eq(x, y))))
+  let th = GENL(thy, [x, y], body)
+  show(SPEC_ALL(thy, th).concl)
+  ~is "x === y ==> y === x"
+
+// GEN then SPEC is the identity on the conclusion
+check:
+  SPEC(thy, x, GEN(thy, x, REFL(thy, x))).concl
+  ~is mk_eq(x, x)
+
+// GEN_ALL leaves variables that occur in the hypotheses alone
+check:
+  let th = ASSUME(thy, mk_conj(P(x), Q(y)))
+  show(GEN_ALL(thy, CONJUNCT1(thy, th)).concl)
+  ~is "P(x)"
+check:
+  show(GEN_ALL(thy, REFL(thy, x)).concl)
+  ~is "forall (x :: num): x === x"
+
+// ==========================================================================
+// disjunction
+// ==========================================================================
+
+check:
+  show(DISJ1(thy, ASSUME(thy, p), q).concl)
+  ~is "p or q"
+check:
+  show(DISJ2(thy, p, ASSUME(thy, q)).concl)
+  ~is "p or q"
+check DISJ1(thy, ASSUME(thy, p), q).hyps ~is [p]
+
+check:
+  let d = DISJ1(thy, ASSUME(thy, p), q)
+  let a = DISCH(thy, p, ASSUME(thy, r)) |> UNDISCH(thy, _)
+  let b = ADD_ASSUM(thy, q, ASSUME(thy, r))
+  DISJ_CASES(thy, d, a, b).concl
+  ~is r
+check:
+  // the two branches must prove the same thing
+  let d = DISJ1(thy, ASSUME(thy, p), q)
+  DISJ_CASES(thy, d, ASSUME(thy, r), ASSUME(thy, p))
+  ~throws "different things"
+check:
+  DISJ_CASES(thy, ASSUME(thy, p), ASSUME(thy, r), ASSUME(thy, r))
+  ~throws "not a disjunction"
+
+// or-introduction followed by case analysis discharges cleanly
+check:
+  let d = ASSUME(thy, mk_disj(p, q))
+  let a = ADD_ASSUM(thy, p, DISJ2(thy, q, ASSUME(thy, p)))
+  let b = ADD_ASSUM(thy, q, DISJ1(thy, ASSUME(thy, q), p))
+  show(DISJ_CASES(thy, d, a, b).concl)
+  ~is "q or p"
+
+// ==========================================================================
+// negation and falsity
+// ==========================================================================
+
+check:
+  show(NOT_ELIM(thy, ASSUME(thy, mk_neg(p))).concl)
+  ~is "p ==> false"
+check NOT_ELIM(thy, ASSUME(thy, p)) ~throws "not a negation"
+check:
+  let th = DISCH(thy, p, ASSUME(thy, tm_false))
+  show(NOT_INTRO(thy, th).concl)
+  ~is "not p"
+check:
+  NOT_INTRO(thy, DISCH(thy, p, ASSUME(thy, q)))
+  ~throws "not `false`"
+// the two are inverse
+check:
+  show(NOT_INTRO(thy, NOT_ELIM(thy, ASSUME(thy, mk_neg(p)))).concl)
+  ~is "not p"
+
+check CONTR(thy, P(zero), ASSUME(thy, tm_false)).concl ~is P(zero)
+check CONTR(thy, p, ASSUME(thy, q)) ~throws "not `false`"
+
+check:
+  show(EQF_INTRO(thy, ASSUME(thy, mk_neg(p))).concl)
+  ~is "p <=> false"
+check:
+  show(EQF_ELIM(thy, ASSUME(thy, mk_eq(p, tm_false))).concl)
+  ~is "not p"
+check:
+  show(EQF_ELIM(thy, EQF_INTRO(thy, ASSUME(thy, mk_neg(p)))).concl)
+  ~is "not p"
+check EQF_ELIM(thy, ASSUME(thy, mk_eq(p, q))) ~throws "not `false`"
+
+// classical reasoning: `not not p ==> p` needs BOOL_CASES
+check:
+  let nnp = ASSUME(thy, mk_neg(mk_neg(p)))
+  let contra = MP(thy, NOT_ELIM(thy, nnp), ASSUME(thy, mk_neg(p)))
+  show(CCONTR(thy, p, contra).concl)
+  ~is "p"
+check:
+  let nnp = ASSUME(thy, mk_neg(mk_neg(p)))
+  let contra = MP(thy, NOT_ELIM(thy, nnp), ASSUME(thy, mk_neg(p)))
+  show(DISCH_ALL(thy, CCONTR(thy, p, contra)).concl)
+  ~is "not (not p) ==> p"
+
+// excluded middle
+check:
+  let na = ASSUME(thy, mk_neg(mk_disj(p, mk_neg(p))))
+  let d1 = DISJ1(thy, ASSUME(thy, p), mk_neg(p))
+  let f1 = MP(thy, NOT_ELIM(thy, na), d1)
+  let np = NOT_INTRO(thy, DISCH(thy, p, f1))
+  let d2 = DISJ2(thy, p, np)
+  let f2 = MP(thy, NOT_ELIM(thy, na), d2)
+  show(CCONTR(thy, mk_disj(p, mk_neg(p)), f2).concl)
+  ~is "p or not p"
+
+// ==========================================================================
+// hypothesis management
+// ==========================================================================
+
+check ADD_ASSUM(thy, q, ASSUME(thy, p)).hyps ~is hyp_union([p], [q])
+check ADD_ASSUM(thy, q, ASSUME(thy, p)).concl ~is p
+check:
+  let a = ASSUME(thy, p)
+  let b = ASSUME(thy, mk_conj(p, q)) |> CONJUNCT2(thy, _)
+  PROVE_HYP(thy, a, b).concl
+  ~is q
+check:
+  // PROVE_HYP is a no-op when the hypothesis is not there
+  let a = ASSUME(thy, r)
+  PROVE_HYP(thy, a, ASSUME(thy, p)).hyps
+  ~is [p]
+
+// ==========================================================================
+// existential quantification
+// ==========================================================================
+
+check:
+  let target = mk_exists(x, P(x))
+  show(EXISTS(thy, target, zero, ASSUME(thy, P(zero))).concl)
+  ~is "exists (x :: num): P(x)"
+check:
+  let target = mk_exists(x, P(x))
+  EXISTS(thy, target, zero, ASSUME(thy, P(zero))).hyps
+  ~is [P(zero)]
+check:
+  EXISTS(thy, mk_exists(x, P(x)), zero, ASSUME(thy, Q(zero)))
+  ~throws "does not match"
+check EXISTS(thy, p, zero, ASSUME(thy, p)) ~throws "not existentially quantified"
+
+check:
+  // from `exists x. P x` and `P v |- exists x. P x`, conclude the same
+  let exth = ASSUME(thy, mk_exists(x, P(x)))
+  let v = mk_var(#'v, num)
+  let inner = EXISTS(thy, mk_exists(x, P(x)), v, ASSUME(thy, P(v)))
+  show(CHOOSE(thy, v, exth, inner).concl)
+  ~is "exists (x :: num): P(x)"
+check:
+  // the chosen variable must not escape into the conclusion
+  let exth = ASSUME(thy, mk_exists(x, P(x)))
+  let v = mk_var(#'v, num)
+  CHOOSE(thy, v, exth, ASSUME(thy, P(v)))
+  ~throws "free in the conclusion"
+
+// ==========================================================================
+// eta
+// ==========================================================================
+
+check:
+  let t = mk_abs(x, mk_comb(sc, x))
+  show((ETA_CONV(thy, t) :~ Thm).concl)
+  ~is "(fun (x :: num): s(x)) === s"
+check ETA_CONV(thy, mk_abs(x, x)) ~is #false
+check ETA_CONV(thy, s(zero)) ~is #false
+// eta does not apply when the bound variable occurs in the operator
+check:
+  let f = mk_var(#'f, mk_fun(num, num))
+  ETA_CONV(thy, mk_abs(x, mk_comb(mk_abs(y, x), x)))
+  ~is #false

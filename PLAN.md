@@ -322,7 +322,7 @@ replay していた。実際には越えられる。これで `emit_manifest` / 
 
 ### R5 — 性能（ドキュメントは完了）
 
-クリーンビルドからの全テストが 3 分 33 秒（863 tests）。証明は展開時に走るので、
+クリーンビルドからの全テストが 3 分 37 秒（870 tests）。証明は展開時に走るので、
 この大半は `raco make` の時間である。着手順（**まず計測**）:
 
 1. 書き換え内ループ — `ruledb.rhm` の `by_head` 索引はあるが `key` 事前フィルタは未実装。
@@ -519,7 +519,7 @@ fun lookup_shrink(name :: String) :: Function
 |---|---|---|
 | `type List('a)` | `type List(~a)` | `'` は syntax literal の開き括弧で字句解析できない |
 | `@rewrite_rule` | `theorem ~rewrite_rule name:` | `@` は at-記法として消え、別グループになる |
-| `theorem` + `proof` | `defn.sequence_macro` で後続グループを消費 | 2 つの別グループとして解析される |
+| `theorem` + `proof` | `expand.rhm` が本体走査で 1 段先読み | 2 つの別グループとして解析される。`defn.sequence_macro` で同じことを独立マクロとして書けることは実測で確認済み（§4「実マクロとして再実装する」参照）だが、`theorem` 自体は `HolState` を糸通す側なので、その独立マクロ化自体が今のところ不成立 |
 | `auto ~induct: xs ~using: [a]` | 単独なら可。複数指定は `auto(~induct: xs, ~using: [a, b])` | 2 つ目の `~kw:` が 1 つ目のブロックに入れ子になる |
 | `fun app(...)` | `function app(...)` | 通常の Rhombus `fun` と衝突させない。`function` は `rhombus` で未束縛 |
 | `and` / `or` / `not` | 命題専用の構文空間で定義 | `#lang rhombus` では未束縛なので衝突はしないが、優先順位制御とエラーメッセージのため分離する |
@@ -532,17 +532,27 @@ fun lookup_shrink(name :: String) :: Function
 
 1. **`import` の認識**は既知の修飾子リストを持たない（最長接頭辞方式）が、
    Rhombus の import 文法が変わればここが影響を受けうる。読めない形はエラーにしてある。
-2. **`module ~splice` 内の引用識別子のスコープ**（M9 初日に実測）。
+2. ~~**`module ~splice` 内の引用識別子のスコープ**~~ — この版の実装は `~splice` を
+   どこでも使っていない（`grep` で確認済み）。R3 の作り直しで `hol_theory`
+   サブモジュールは常時プレーンな `module ... ~lang rhombus:` で、複数箇所からの
+   合流も試みていない（試して不成立と確認したのは別の設計、§4 参照）。この項目は
+   古い記録で、今のコードには対応する懸念が存在しない。
 3. **書き換えの停止性** — タクティクごとの fuel/timeout は入れない方針。
    置換可能規則は `term_order` で下り方向にしか発火しないので発振しないが、
-   停止しない書き換え規則をユーザーが登録すると `raco make` が停止しない。
-   `mk_rule` の受け入れ条件を強めるのが正しい防ぎ方（fuel ではなく）。
+   `mk_rule` は「変数だけの左辺」「右辺の未束縛変数・型変数」「自明な等式」しか
+   弾かない。`f(x) === g(f(x))` のような非対称かつ非停止な規則は**現状のまま
+   通ってしまい**、`TOP_DEPTH_CONV` が無限に書き換え続けて `raco make` が
+   停止しなくなる。実際に確認していない（意図的に踏んでいない）が、
+   `mk_rule` のコードを読む限り防御が無いことは確認済み。
+   `mk_rule` の受け入れ条件を強めるのが正しい防ぎ方（fuel ではなく）— 未着手。
 4. ~~**`fun` の上書き**~~ — 解消。論理定義は `function` という別のキーワードになり、
    通常の Rhombus `fun` には一切介入しない。したがって「文法外なら素通し」という
    劣化許容規則も不要になり、`function` の文法違反は違反式を名指しするエラーになる
    （`decl_fun.rhm` の `no_result_type` / `bad_body` が固定している）。
-5. **束縛子の下での書き換え**（§2 末尾）。`ABS_CONV` 経由で開いて閉じる方針を
-   `tmatch` / `simp` でも貫くこと。
+5. ~~**束縛子の下での書き換え**~~ — 解消。`conv.rhm` の `SUB_CONV` が `Abs` に対して
+   `ABS_CONV` を呼ぶので、`TOP_DEPTH_CONV`（`simp_conv` が使う）は束縛子の中も
+   自然に降りる。`tmatch.rhm` の `term_match` も束縛変数捕獲を depth 引数で
+   チェック済み（`tests/conv.rhm` の `ABS_CONV` テストで固定）。
 
 ## 7. 参照したソフトウェア
 

@@ -122,9 +122,21 @@ Beyond the termination restrictions in @secref("termination"):
   importing compilation.}
 
  @item{@rhombus(check_property, ~datum) checks a universally quantified
-  equation over concrete types only.}
+  equation over concrete types only, and only over a type that some declared
+  datatype has registered a generator and a shrinker for; if none was, the
+  error surfaces at run time, when the property is actually checked, rather
+  than at compile time.}
 
  @item{The function body grammar has no arithmetic, no literals other than the
   Booleans, no @rhombus(let) and no lambda.}
+
+ @item{There is no fuel or timeout on rewriting, deliberately --- see
+  @secref("prover"). A rewrite rule that is not permutative and does not
+  terminate is not rejected: @rhombus(mk_rule)'s admission conditions catch a
+  variable left-hand side, an unconstrained variable or type variable on the
+  right, and a trivial equation, but nothing checks that the rule actually
+  makes progress. Such a rule sends simplification into an infinite loop, and
+  since simplification happens while a module compiles, that hangs
+  @tt{raco make} rather than failing it.}
 
 )

@@ -1,0 +1,59 @@
+# Rhombus/HOL
+
+Rhombus/HOL is a theorem prover embedded in Rhombus as `#lang rhombus/hol`:
+an LCF-style higher-order-logic kernel with an ACL2-style automatic prover on
+top, where a definition is simultaneously a logical declaration and
+executable Rhombus code.
+
+```rhombus
+#lang rhombus/hol
+
+type List(~a)
+| Nil()
+| Cons(head :: ~a, tail :: List(~a))
+
+function app(xs :: List(~a), ys :: List(~a)) :: List(~a):
+  match xs
+  | Nil(): ys
+  | Cons(x, rest): Cons(x, app(rest, ys))
+
+theorem ~rewrite_rule app_nil_r:
+  forall (xs :: List(~a)): app(xs, Nil()) === xs
+```
+
+That module exports a working `app` function, and it does not compile unless
+`app_nil_r` is proved. Proofs run while the module compiles, not when it is
+run: a failed proof, or a definition that cannot be shown to terminate, is a
+compile error with the goals left over.
+
+## Packages
+
+- `rhombus-hol-lib` — the kernel, prover, and `#lang rhombus/hol` implementation.
+- `rhombus-hol` — the documentation and test suite.
+
+## Building
+
+```sh
+raco pkg install --link ./rhombus-hol-lib ./rhombus-hol
+raco make rhombus-hol-lib/rhombus/hol.rkt
+raco test rhombus-hol/rhombus/hol/tests
+```
+
+## Documentation
+
+```sh
+raco setup --pkgs rhombus-hol
+```
+
+builds the manual at `rhombus-hol/rhombus/hol/doc/rhombus-hol/index.html`,
+which covers the declaration forms, the surface grammar, termination
+checking, the prover, and what the system does and does not trust.
+
+## Status
+
+Version 0.1. `PLAN.md` tracks what is implemented, what is deliberately out
+of scope, and open design questions.
+
+## License
+
+[0BSD](LICENSE).

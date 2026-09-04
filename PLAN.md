@@ -204,9 +204,13 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 
 ### 受け入れ状況（すべて仕様書のソースのまま）
 
-`tests/spec/` の 4 ファイルが仕様書そのもの:
+`tests/spec/` の 3 ファイルが仕様書そのもの:
 `list_proofs.rhm`（§4.1）、`tree_proofs.rhm`（§4.2、`import` で §4.1 を取り込む）、
-`test_run.rhm`（§4.3、素の `#lang rhombus`）、`properties.rhm`（§4.3 の `check_property`）。
+`test_run.rhm`（§4.3、素の `#lang rhombus`。`check_property` の生成器/縮小器が
+実行時レジストリ経由になったことで、§4.3 の `check_property` も
+仕様書どおりこのファイルに直接書けるようになった。以前は「型宣言と同じ
+モジュールでしか使えない」という制約のために別ファイル `properties.rhm` に
+分けていたが、その制約が無くなったので統合し、`properties.rhm` は削除した）。
 
 ### 旧・受け入れ状況
 
@@ -371,17 +375,69 @@ replay していた。実際には越えられる。これで `emit_manifest` / 
 - ユーザー自身のマクロが展開結果として `check_property` を生成できる
   （`tests/fixtures/check_property_composed.rhm` で固定）。
 
-移行で 1 つ罠を踏んだ: `gen_id`/`shrink_id`（`_hol_gen_Foo`/`_hol_shrink_Foo`）
-は非衛生的識別子で、「構築に使う context 構文オブジェクトがユーザー自身の
-書いたトークンであること」に依存している。旧設計では `check_property` の
-発行が `module_block` **自身の 1 回の展開**の一部だったので、
-`head_term(d.form)`（`check_property` という**リテラル語**）を context に
-使っても、`type` 側の定義（同じく `module_block` の展開由来）と同じ扱いに
-なっていた。`check_property` を**別の**マクロ展開に切り出すと、その
-リテラル語は「このマクロ定義自身が書いたテンプレート語」になり、
+移行で 1 つ罠を踏んだ（当時の記録。**この節の仕組み自体は下の「実行時
+レジストリ」節で置き換え済み**）: `gen_id`/`shrink_id`（`_hol_gen_Foo`/
+`_hol_shrink_Foo`）は非衛生的識別子で、「構築に使う context 構文オブジェクト
+がユーザー自身の書いたトークンであること」に依存していた。旧設計では
+`check_property` の発行が `module_block` **自身の 1 回の展開**の一部だった
+ので、`head_term(d.form)`（`check_property` という**リテラル語**）を
+context に使っても、`type` 側の定義（同じく `module_block` の展開由来）と
+同じ扱いになっていた。`check_property` を**別の**マクロ展開に切り出すと、
+その リテラル語は「このマクロ定義自身が書いたテンプレート語」になり、
 `type` 側の定義とは違う導入スコープを持つ ── 綴りは同じでも別の束縛になる。
-直したのは、context に `check_property` という語ではなく、性質の名前
-（`$rest` から捕捉した、正真正銘ユーザーが書いたトークン）を使うこと。
+その場しのぎの直しは、context に `check_property` という語ではなく、
+性質の名前（`$rest` から捕捉した、正真正銘ユーザーが書いたトークン）を
+使うことだった。
+
+#### 生成器・縮小器を非衛生的識別子から実行時レジストリへ（密結合 → 疎結合）
+
+上の「その場しのぎの直し」は、依然として `check_property` と `type` の間に
+**命名規則という暗黙の契約**を残していた。加えて、`type` は
+`gen_id(at, Syntax.unwrap(name))` の識別子をわざわざ `export:` していた
+（他モジュールの `check_property` が参照できるように）。これを、
+`qc.rhm` に持たせた実行時レジストリに置き換えた:
+
+```rhombus
+fun register_gen(name :: String, build :: Function) :: Void
+fun register_shrink(name :: String, shrink :: Function) :: Void
+fun lookup_gen(name :: String) :: Function
+fun lookup_shrink(name :: String) :: Function
+```
+
+`type` は生成器・縮小器を `_hol_gen_Foo` という**当てずっぽうの名前**で
+束縛する代わりに、モジュールが実行されたときに
+`_hol_qc.register_gen("Foo", fun (...): ...)` と**明示的に登録**する。
+`check_property` は `Syntax.make_id` を一切使わず、
+`_hol_qc.lookup_gen("Foo")` を呼ぶだけになった。
+
+これは property check が**実行時**に走る（コンパイル時に評価すると
+定義の二重実装になるので意図的にそうなっている）という既存の設計を
+利用している ── `HolState` の糸通し（コンパイル時 = phase 1、マクロ間で
+共有できないと確認済み）とは別の制約空間なので、可変マップで問題なく
+共有できる。
+
+得られたもの:
+
+- **非衛生的識別子の脆さが消えた。** コンテキスト構文オブジェクトの
+  選択ミスというクラスのバグ（上で踏んだ罠）が構造的に無くなった。
+  `gen_id`/`shrink_id`/`ctx` 引数は全て削除。
+- **`check_property` が型の宣言モジュールを `import: ... open` する必要すら
+  無くなった。** 生成器の解決は実行時の名前引きなので、宣言モジュールが
+  **推移的に**（別の import 経由で間接的に）取り込まれてさえいれば、
+  直接 import していなくても解決できることを実測で確認した。
+  §4.3 の `check_property`（`tests/spec/properties.rhm` に分離していたもの）
+  はこれにより仕様書どおり `test_run.rhm`（素の `#lang rhombus`）に直接
+  書けるようになったので、統合して `properties.rhm` を削除した。
+- **拡張性。** `rhombus/hol` の `type` 以外の任意の Rhombus 型にも、
+  誰かが `_hol_qc.register_gen(...)` すれば `check_property` から使える
+  （今回は未検証・未使用だが、経路としては開いている）。
+
+トレードオフ: 「型に生成器が無い」が実行時エラーになる
+（`error(~who: #'check_property, "no generator registered for this type", ...)`）。
+コンパイル時に検出したいなら、`check_property` 展開時に
+「その型に対応する `type` 宣言が事前に処理されたか」を確認するチェックが
+別途要るが、それは静的な話であって、レジストリの疎結合設計とは独立の話。
+未着手。
 
 **`type`/`function`/`theorem`/`disable_rules`/`enable_rules`/`declare`/`expect`
 は依然としてスキャン方式のまま。** これらは `driver.rhm` の `HolState` を

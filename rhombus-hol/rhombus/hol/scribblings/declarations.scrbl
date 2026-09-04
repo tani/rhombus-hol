@@ -238,9 +238,19 @@ the cheap check you run while you are still working out what is true.
 )
 
 The binder types must be concrete --- a generator cannot be built for a type
-variable. Generators and shrinkers are emitted alongside each datatype
-declaration, so any declared datatype can be sampled, and a counterexample is
-shrunk before it is reported.
+variable. A generator and a shrinker are registered alongside each datatype
+declaration, under the type's own name, in a run-time registry that
+@rhombus(check_property, ~datum) draws from; any declared datatype can be
+sampled, and a counterexample is shrunk before it is reported.
+
+Because the registry is keyed by name rather than by an identifier this
+module would have to import, a type need not be declared in the same module
+as the @rhombus(check_property, ~datum) that samples it, or even be imported
+directly --- being pulled in transitively, through some other import, is
+enough. @rhombus(check_property, ~datum) can equally be written in an
+ordinary @rhombuslangname(rhombus) module that never declares
+@rhombuslangname(rhombus/hol) as its language at all, as long as it imports
+@rhombus(check_property) and the types it needs.
 
 @rhombus(~samples) is how many values to try, @rhombus(~size) bounds how deep a
 generated value can get. The declaration's value is the outcome, so a test can

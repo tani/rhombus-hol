@@ -78,62 +78,68 @@ meta:
   // Rhombus functions over the emitted classes -- the property is checked by
   // running the real code, which is the whole point of doing it at runtime.
   //
-  // Their names take their lexical context from the user's own declaration
-  // rather than from this module, so that they are ordinary module-level names
-  // that can be exported and imported.  Were they macro-introduced, a property
-  // could only draw from datatypes declared in its own module.
-  fun gen_id(ctx :: Syntax, n :: Symbol) :: Syntax:
-    Syntax.make_id("_hol_gen_" ++ to_string(n), ctx)
+  // They reach `check_property` through `qc.rhm`'s registry rather than
+  // through a name it has to guess: `type` registers its generator and
+  // shrinker under the type's own name as an ordinary run-time effect, when
+  // the type's own module is instantiated.  That happens automatically for a
+  // datatype declared in another module too, since instantiating an import
+  // runs its top-level effects before this module's own body -- no export of
+  // the generator or shrinker is needed, because nothing outside this file
+  // ever refers to one by name.
+  //
+  // A name has to travel as a plain string, not a `Symbol`: a symbol written
+  // `#'foo` cannot appear inside a syntax template, the quote would close it.
 
-  fun shrink_id(ctx :: Syntax, n :: Symbol) :: Syntax:
-    Syntax.make_id("_hol_shrink_" ++ to_string(n), ctx)
+  fun type_name_str(n :: Symbol) :: Syntax:
+    Syntax.make(to_string(n), id_ctx)
 
   fun param_gen_id(p :: Symbol) :: Syntax:
     Syntax.make_id("_hol_g_" ++ to_string(p), id_ctx)
 
   // A generator expression for a type: a function from a size to a value.
-  fun gen_expr(ctx :: Syntax, ty) :: Syntax:
+  fun gen_expr(ty) :: Syntax:
     match ty
     | TyVar(a): param_gen_id(a)
     | TyApp(n, args):
-        let g = gen_id(ctx, n)
-        let [sub, ...] = args.map(fun (t): gen_expr(ctx, t))
+        let nm = type_name_str(n)
+        let [sub, ...] = args.map(fun (t): gen_expr(t))
         // Parenthesised: a `fun ...:` block cannot sit in application position
         // or before a comma without one.
-        '(fun (_hol_s): $g(_hol_s, $sub, ...))'
+        '(fun (_hol_s): _hol_qc.lookup_gen($nm)(_hol_s, $sub, ...))'
 
-  fun shrink_expr(ctx :: Syntax, ty, at :: Syntax) :: Syntax:
+  fun shrink_expr(ty, at :: Syntax) :: Syntax:
     match ty
-    | TyApp(n, _): shrink_id(ctx, n)
+    | TyApp(n, _): '_hol_qc.lookup_shrink($(type_name_str(n)))'
     | ~else:
         error(~who: #'check_property,
               "cannot shrink a value of variable type",
               error.val(~label: "in", to_string(at)))
 
-  fun emit_generator(ctx :: Syntax, name :: Syntax, params :: List,
-                     ctors :: List) :: Syntax:
-    let g = gen_id(ctx, Syntax.unwrap(name))
+  fun emit_generator(name :: Syntax, params :: List, ctors :: List) :: Syntax:
+    let nm = type_name_str(Syntax.unwrap(name))
     let [pg, ...] = params.map(fun (p :: Symbol): param_gen_id(p))
     let base = ctors.filter(~keep: fun (c :: List): !(c[2] :~ Boolean))
-    let [b, ...] = base.map(fun (c :: List): ctor_builder(ctx, c))
-    let [a, ...] = ctors.map(fun (c :: List): ctor_builder(ctx, c))
-    'fun $g(_hol_sz, $pg, ...):
-       _hol_qc.pick(_hol_sz, [$b, ...], [$a, ...])'
+    let [b, ...] = base.map(ctor_builder)
+    let [a, ...] = ctors.map(ctor_builder)
+    let build = 'fun (_hol_sz, $pg, ...):
+                   _hol_qc.pick(_hol_sz, [$b, ...], [$a, ...])'
+    '_hol_qc.register_gen($nm, $build)'
 
   // `[ctor_id, [field_type, ...], recursive?]`
-  fun ctor_builder(ctx :: Syntax, c :: List) :: Syntax:
+  fun ctor_builder(c :: List) :: Syntax:
     let cname = c[0] :~ Syntax
     let ftys :~ List = c[1]
-    let [arg, ...] = ftys.map(fun (t): '$(gen_expr(ctx, t))(_hol_sz - 1)')
+    let [arg, ...] = ftys.map(fun (t): '$(gen_expr(t))(_hol_sz - 1)')
     'fun (): $cname($arg, ...)'
 
-  fun emit_shrinker(ctx :: Syntax, name :: Syntax, ctors :: List) :: Syntax:
-    let sh = shrink_id(ctx, Syntax.unwrap(name))
+  fun emit_shrinker(name :: Syntax, ctors :: List) :: Syntax:
+    let nm = type_name_str(Syntax.unwrap(name))
     let [clause, ...] = ctors.map(fun (c :: List): shrink_clause(name, c))
-    'fun $sh(_hol_v):
-       match _hol_v
-       | $clause
-       | ...'
+    let build = 'fun (_hol_v):
+                   match _hol_v
+                   | $clause
+                   | ...'
+    '_hol_qc.register_shrink($nm, $build)'
 
   // The classic shrink for an algebraic value: its recursive subterms.
   fun shrink_clause(tname :: Syntax, c :: List) :: Syntax:
@@ -165,25 +171,29 @@ meta:
 
   fun emit_property_from(name :: Syntax, samples, binders :: List,
                          lhs :: Syntax, rhs :: Syntax, size,
-                         ctx :: Syntax, at :: Syntax) :: Syntax:
+                         at :: Syntax) :: Syntax:
     let [v, ...] = binders.map(fun (b :: List): b[0] :~ Syntax)
-    let [g, ...] = binders.map(fun (b :: List): gen_expr(ctx, b[1]))
-    let [sh, ...] = binders.map(fun (b :: List): shrink_expr(ctx, b[1], at))
+    let [g, ...] = binders.map(fun (b :: List): gen_expr(b[1]))
+    let [sh, ...] = binders.map(fun (b :: List): shrink_expr(b[1], at))
     let prop = 'fun ($v, ...): ($lhs) == ($rhs)'
     let count = Syntax.make(samples, id_ctx)
     let sz = Syntax.make(size, id_ctx)
-    // `check_property` imports `qc` for itself rather than relying on
-    // `module_block`'s own copy: the two are now separate macro expansions,
-    // so an identifier introduced by one is not the same binding as the same
-    // spelling introduced by the other, however identical they look here.
-    'import: rhombus/hol/private/qc as _hol_property_qc
+    // `check_property` imports `qc` for itself, as `_hol_qc` -- the same
+    // spelling `gen_expr`/`shrink_expr` write, and this is what makes the two
+    // resolve to the same binding.  `check_property` is a separate macro
+    // expansion from `type`'s, so an identifier introduced by one is never the
+    // same binding as the same spelling introduced by the other; what makes
+    // this pair line up is that both the import and the references it
+    // supports are produced as part of *this one* expansion, regardless of
+    // which file's function assembled them.
+    'import: rhombus/hol/private/qc as _hol_qc
      def $name:
-       _hol_property_qc.run(Syntax.unwrap('$name'),
-                            ~samples: $count,
-                            ~size: $sz,
-                            ~gens: [$g, ...],
-                            ~shrinks: [$sh, ...],
-                            ~prop: $prop)'
+       _hol_qc.run(Syntax.unwrap('$name'),
+                   ~samples: $count,
+                   ~size: $sz,
+                   ~gens: [$g, ...],
+                   ~shrinks: [$sh, ...],
+                   ~prop: $prop)'
 
   // -- functions -------------------------------------------------------------
 
@@ -263,13 +273,8 @@ meta:
         let at = head_term(d.form)
         let form = d.form
         values([emit_type(name, ctors :~ List),
-                emit_generator(at, name, params :~ List, gen :~ List),
-                emit_shrinker(at, name, gen :~ List),
-                // Exported so that a property in an importing module can draw
-                // from this datatype.
-                'export:
-                   $(gen_id(at, Syntax.unwrap(name)))
-                   $(shrink_id(at, Syntax.unwrap(name)))'],
+                emit_generator(name, params :~ List, gen :~ List),
+                emit_shrinker(name, gen :~ List)],
                ['def $nxt = _hol_driver.add_type($cur, '$form', '$at')'],
                n + 1)
     | #'function:
@@ -341,21 +346,11 @@ meta:
 // `emit_one`) is what reaches it: Rhombus's own expansion discovers this
 // binding exactly as it would for `fun` or `class`, including when the use
 // arrives via a macro of the user's own.
-//
-// `gen_id`/`shrink_id` build the non-hygienic names `_hol_gen_Foo`/
-// `_hol_shrink_Foo` from a *context* syntax object, and that context must be
-// an identifier the user actually wrote -- one carrying this module's own
-// scope, not this macro's.  `head_term(whole)` would instead be the literal
-// `check_property` spelled in *this template*, which carries this expansion's
-// own scope and would build a name that does not match the one `type`
-// declared.  The property's own name, `name` below, is genuine user syntax
-// (captured through `$rest`), so it is used as the context instead.
 defn.macro 'check_property $rest ...':
   let whole = 'check_property $rest ...'
   let [name, samples, binders, lhs, rhs, size] = elab.check_property_shape(whole)
   emit_property_from(name :~ Syntax, samples, binders :~ List,
-                     lhs :~ Syntax, rhs :~ Syntax, size,
-                     name :~ Syntax, whole)
+                     lhs :~ Syntax, rhs :~ Syntax, size, whole)
 
 // Every `#lang rhombus/hol` module carries its theory in a `hol_theory`
 // submodule: the whole logical chain, at the submodule's phase 0.

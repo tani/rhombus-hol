@@ -9,7 +9,12 @@
 // drift the one-parser rule exists to prevent.
 //
 // Generators and shrinkers are emitted per datatype by `module_block.rhm`, from
-// the same declaration the logic was built from.
+// the same declaration the logic was built from.  They reach `check_property`
+// through the registry below rather than through a guessed name: `type`
+// registers a generator and a shrinker under the type's own name when its
+// module runs, and `check_property` looks them up under the same name.  The
+// two never need to agree on a naming convention, only on the type's name --
+// which is why this file, not `module_block.rhm`, is where they meet.
 
 import:
   lib("racket/base.rkt") as rb
@@ -21,6 +26,48 @@ export:
   pick
   run
   report
+  register_gen
+  register_shrink
+  lookup_gen
+  lookup_shrink
+
+// -- the registry -------------------------------------------------------------
+//
+// Keyed by the type's name as a string (not a `Symbol`): a name built inside a
+// syntax template has to travel as a plain datum, and a symbol written as
+// `#'foo` cannot appear inside one -- the quote would close the template.
+// Registration and lookup both convert back to a Rhombus value at the ends, so
+// this is invisible outside this file.
+//
+// A generator is registered as a function of a size and one generator per type
+// parameter, e.g. `List`'s takes a size and a generator for its element type;
+// `Nat`'s takes only a size.  A shrinker takes a value of the type and returns
+// smaller candidates; it does not need composing with sub-shrinkers, since
+// shrinking recurses on the value's own structure.
+def _gens :: MutableMap = MutableMap()
+def _shrinks :: MutableMap = MutableMap()
+
+fun register_gen(name :: String, build :: Function) :: Void:
+  _gens.set(name, build)
+
+fun register_shrink(name :: String, shrink :: Function) :: Void:
+  _shrinks.set(name, shrink)
+
+fun lookup_gen(name :: String) :: Function:
+  match _gens.get(name, #false)
+  | #false:
+      error(~who: #'check_property,
+            "no generator registered for this type",
+            error.val(~label: "type", name))
+  | f: f :~ Function
+
+fun lookup_shrink(name :: String) :: Function:
+  match _shrinks.get(name, #false)
+  | #false:
+      error(~who: #'check_property,
+            "no shrinker registered for this type",
+            error.val(~label: "type", name))
+  | f: f :~ Function
 
 class.together:
   class QCResult():

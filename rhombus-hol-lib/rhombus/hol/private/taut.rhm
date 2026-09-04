@@ -1,6 +1,6 @@
 #lang rhombus/static
 
-// Propositional cleanup rules.
+// Propositional and conditional cleanup rules.
 //
 // The simplifier normalises a goal by rewriting, and `refl_conv` turns
 // `a === a` into `true`.  That is not enough on its own: a goal about a
@@ -24,8 +24,11 @@ import:
 
 export:
   tautologies
+  conditionals
+  NOT_TRUE_EQ_FALSE
 
 def p :: FVar = mk_var(#'p, bool)
+def tyA :: HType = TyVar(#'a)
 
 // `|- forall p. lhs <=> rhs`, from a proof each way.
 fun iff_rule(thy :: Theory, lhs :: Term, rhs :: Term,
@@ -92,3 +95,73 @@ fun tautologies(thy :: Theory) :: List.of(Thm):
    or_tp, or_pt, or_fp, or_pf,
    not_t, not_f,
    imp_tp, imp_pt, imp_fp]
+
+// -- the conditional ---------------------------------------------------------
+//
+// `if` is not primitive: `cond` is defined through choice, as
+//
+//   cond t t1 t2 = @x. (t = true ==> x = t1) and (t = false ==> x = t2)
+//
+// so `if true | a | b === a` has to be *derived* before the rewriter can
+// simplify a conditional at all.  Termination obligations are the reason this
+// matters: a measure argument for a definition written with `if` is stated
+// under the branch condition, and the waterfall cannot discharge it without
+// being able to collapse the conditional in the first place.
+
+// `|- ~(true = false)`.  Everything about `cond` rests on the two branch
+// conditions being exclusive, and this is where that fact enters.
+fun NOT_TRUE_EQ_FALSE(thy :: Theory) :: Thm:
+  let tf = mk_eq(tm_true, tm_false)
+  NOT_INTRO(thy, DISCH(thy, tf, EQ_MP(ASSUME(thy, tf), TRUTH(thy))))
+
+// `|- false` from an assumption that the branch condition is the other
+// literal.  `flipped` says the assumption reads `false = true`, which needs a
+// `SYM` before it lines up with `NOT_TRUE_EQ_FALSE`'s orientation.
+fun absurd_branch(thy :: Theory, flipped :: Boolean) :: Thm:
+  let asm = (if flipped | mk_eq(tm_false, tm_true) | mk_eq(tm_true, tm_false))
+  let as_th = ASSUME(thy, asm)
+  EQ_MP((if flipped | SYM(thy, as_th) | as_th), TRUTH(thy))
+
+// `|- forall t1 t2. (if c | t1 | t2) === t_i`, for `c` the literal `which`.
+//
+// The shape is: instantiate the choice axiom at the conditional's own
+// predicate, show the chosen branch satisfies it, and read the equation back
+// out of the surviving conjunct.
+fun cond_rule(thy :: Theory, which :: Boolean) :: Thm:
+  let t1 :: FVar = mk_var(#'t1, tyA)
+  let t2 :: FVar = mk_var(#'t2, tyA)
+  let xa :: FVar = mk_var(#'x, tyA)
+  let c = (if which | tm_true | tm_false)
+  let pick = (if which | t1 | t2)
+
+  fun body_at(u :: Term) :: Term:
+    mk_conj(mk_imp(mk_eq(c, tm_true), mk_eq(u, t1)),
+            mk_imp(mk_eq(c, tm_false), mk_eq(u, t2)))
+
+  let sel = mk_select(xa, body_at(xa))
+  let bigP = (match sel | Comb(_, a): a)
+
+  // `|- cond c t1 t2 = @x. ...`
+  let unf = unfold_def(thy, base_defs(c_cond), [c, t1, t2])
+
+  // `|- body(pick)`: one conjunct is reflexivity, the other is vacuous
+  // because its branch condition contradicts `c`.
+  let hit = DISCH(thy, mk_eq(c, c), REFL(thy, pick))
+  let miss:
+    let other = (if which | tm_false | tm_true)
+    DISCH(thy, mk_eq(c, other),
+          CONTR(thy, mk_eq(pick, (if which | t2 | t1)),
+                absurd_branch(thy, !which)))
+  let sat = (if which | CONJ(thy, hit, miss) | CONJ(thy, miss, hit))
+
+  // choice: what the chosen branch satisfies, the choice term satisfies too
+  let chosen = MP(thy,
+                  BETA_RULE(thy, SPECL(thy, [bigP, pick],
+                                       base_axiom(#'SELECT_AX))),
+                  sat)
+  let branch = (if which | CONJUNCT1(thy, chosen) | CONJUNCT2(thy, chosen))
+  let eq = TRANS(unf, MP(thy, branch, REFL(thy, c)))
+  GENL(thy, [t1, t2], eq)
+
+fun conditionals(thy :: Theory) :: List.of(Thm):
+  [cond_rule(thy, #true), cond_rule(thy, #false)]

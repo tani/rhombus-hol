@@ -1,0 +1,83 @@
+#lang rhombus/static
+
+// The structural subterm relation generated for each datatype: the order a
+// `~measure` decreases in.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/datatype open
+  rhombus/hol/private/recdef open
+  rhombus/hol/private/subterm open
+
+def tya = TyVar(#'a)
+
+def nat:
+  DatatypeSpec(#'Nat, [],
+               [Ctor(#'zero, []),
+                Ctor(#'succ, [Field(#'pred, TyApp(#'Nat, []))])])
+def lst:
+  DatatypeSpec(#'List, [#'a],
+               [Ctor(#'Nil, []),
+                Ctor(#'Cons, [Field(#'head, tya),
+                              Field(#'tail, TyApp(#'List, [tya]))])])
+def tree:
+  let t = TyApp(#'Tree, [tya])
+  DatatypeSpec(#'Tree, [#'a],
+               [Ctor(#'Leaf, []),
+                Ctor(#'Node, [Field(#'l, t), Field(#'v, tya), Field(#'r, t)])])
+// No recursive field, so no order to speak of.
+def color:
+  DatatypeSpec(#'Color, [], [Ctor(#'red, []), Ctor(#'blue, [])])
+
+fun install(spec :: DatatypeSpec) :: FunInfo:
+  let (thy, _) = datatype_axioms(base_theory(), spec)
+  let (_, info) = install_function(thy, subterm_spec(spec) :~ FunSpec,
+                                   {spec.name: spec})
+  info
+
+fun equations(spec :: DatatypeSpec) :: List.of(String):
+  install(spec).equations.map(fun (t :: Thm): show(concl_of(t)))
+
+// -- a datatype with no recursion has no subterm relation --------------------
+
+check subterm_spec(color) ~is #false
+check subterm_name(nat) ~is #'Nat_lt
+
+// -- `Nat_lt` is `<` ---------------------------------------------------------
+
+check:
+  equations(nat)
+  ~is ["forall (x :: Nat): Nat_lt(x, zero) <=> false",
+       "forall (x :: Nat, y :: Nat): Nat_lt(x, succ(y)) <=> x === y or Nat_lt(x, y)"]
+
+// A non-recursive field contributes nothing: `Cons`'s head is not smaller
+// than the list, it is not even the same type.
+
+check:
+  equations(lst)
+  ~is ["forall (x :: List('a)): List_lt(x, Nil) <=> false",
+       "forall (x :: List('a), y :: 'a, z :: List('a)):"
+         ++ " List_lt(x, Cons(y, z)) <=> x === z or List_lt(x, z)"]
+
+// Both children of a `Node`, and the relation is generated for a datatype
+// that branches, not just for a linear one.
+
+check:
+  equations(tree)[1]
+  ~is "forall (x :: Tree('a), y :: Tree('a), z :: 'a, u :: Tree('a)):"
+        ++ " Tree_lt(x, Node(y, z, u))"
+        ++ " <=> x === y or (Tree_lt(x, y) or (x === u or Tree_lt(x, u)))"
+
+// -- it is an ordinary definition, so it descends structurally ---------------
+//
+// This is what makes the relation admissible without any new postulate: it
+// goes through `install_function` like any user definition, and its own
+// termination is the plain structural one.
+
+check install(nat).recinfo.method ~is #'structural
+check install(nat).recinfo.positions ~is [1]
+check install(tree).recinfo.positions ~is [1]

@@ -7,29 +7,54 @@
 // the position the prover should induct on.  Computing it twice would let the
 // two drift apart, so it is computed once, here.
 //
-// v0.1 checks structural descent only.  That is purely syntactic and
-// generates no proof obligations, and it covers every function in the
-// specification's examples.  Measure-based termination lives in `measure.rhm`
-// and discharges its obligations through the waterfall.
+// Two methods, tried in that order:
+//
+//   structural  one argument is a proper constructor subterm of the
+//               corresponding pattern at every recursive call.  Purely
+//               syntactic, no proof obligations.
+//
+//   measure     the author supplied `~measure(e)`, and `e` decreases in the
+//               subterm order of its own type at every recursive call.  That
+//               is a real theorem, one per call site, and it is discharged
+//               through the waterfall by a callback the caller supplies.
+//
+// The callback is why this module does not import the prover: `recdef.rhm`
+// sits below `waterfall.rhm`, so the obligation has to travel out as a term
+// and the verdict back as a message.
 
 import:
   "htype.rhm" open
   "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
   "printer.rhm" open
+  "bool.rhm" open
 
 export:
   RecursionInfo
   CallSite
+  Measure
   check_termination
   descends_at
+  measure_positions
 
 class CallSite(args :: List.of(Term))
 
-class RecursionInfo(// argument positions that strictly decrease; empty for a
+class RecursionInfo(// argument positions that strictly decrease, or -- for a
+                    // measure -- that the measure reads; empty for a
                     // non-recursive definition
                     positions :: List.of(Int),
-                    method :: Symbol,          // #'none | #'structural
+                    method :: Symbol,          // #'none | #'structural | #'measure
                     sites :: List.of(CallSite))
+
+// `term` is `fun (p1, ..., pn): e`, an abstraction over the parameters, so
+// that instantiating it at a clause's patterns or at a call's arguments is
+// just application -- no substitution and no capture to worry about.
+//
+// `discharge` returns `#false` when it proved the obligation, and otherwise a
+// message describing what was left over.
+class Measure(term :: Term,
+              discharge :: Function.of_arity(1))
 
 // `arg` is a proper constructor-subterm of `pat`: `pat` is `C(v0, ..., vk)`
 // and `arg` is one of the `vi`, at the same type.
@@ -48,7 +73,7 @@ fun descends_at(pat :: Term, arg :: Term) :: Boolean:
       | ~else: #false
 
 // Look for one argument position that descends at every recursive call in
-// every clause.
+// every clause; failing that, check the measure if there is one.
 //
 // The clauses arrive as `[patterns, body]` pairs rather than as the
 // `FunSpec` that `recdef.rhm` owns: the induction-scheme generator needs this
@@ -58,26 +83,32 @@ fun check_termination(who :: Symbol,
                       name :: Symbol,
                       arity :: Int,
                       clauses :: List,
-                      fn :: Term) :: RecursionInfo:
+                      fn :: Term,
+                      ~measure: measure :: maybe(Measure) = #false)
+     :: RecursionInfo:
   // Collect every recursive call together with the clause patterns it sits
-  // under, so that a failure can point at the offending call.
+  // under and the branch conditions guarding it, so that a failure can point
+  // at the offending call and a measure obligation can assume its context.
   let all_sites = for values(acc :~ List = []) ([pats, rhs] in clauses):
-                    let calls = calls_in(fn, arity, rhs)
-                    acc ++ calls.map(fun (args): [pats, args])
+                    let calls = calls_in(who, name, fn, arity, rhs)
+                    acc ++ calls.map(fun ([conds, args]): [pats, conds, args])
   cond
   | all_sites.length() == 0:
       RecursionInfo([], #'none, [])
   | ~else:
+      let sites = all_sites.map(fun ([_, _, args]): CallSite(args :~ List))
       let good = for values(acc :~ List = []) (i in List.iota(arity)):
-                   let ok = for all ([pats, args] in all_sites):
+                   let ok = for all ([pats, _, args] in all_sites):
                               descends_at((pats :~ List)[i], (args :~ List)[i])
                    (if ok | acc ++ [i] | acc)
       cond
-      | good.length() > 0:
-          RecursionInfo(good, #'structural,
-                        all_sites.map(fun ([_, args]): CallSite(args)))
+      | good.length() > 0: RecursionInfo(good, #'structural, sites)
+      | measure:
+          let m :~ Measure = measure
+          check_measure(who, name, arity, fn, m, all_sites)
+          RecursionInfo(measure_positions(arity, m.term), #'measure, sites)
       | ~else:
-          let [pats, args] = all_sites[0]
+          let [pats, _, args] = all_sites[0]
           error(~who: who,
                 "cannot see that the definition terminates",
                 error.val(~label: "name", name),
@@ -88,17 +119,149 @@ fun check_termination(who :: Symbol,
                 error.val(~label: "hint",
                           "no argument position is a strict constructor "
                             ++ "subterm of the corresponding pattern in every "
-                            ++ "recursive call"))
+                            ++ "recursive call; give the definition a "
+                            ++ "`~measure(...)` if it terminates for another "
+                            ++ "reason"))
 
-fun calls_in(fn :: Term, arity :: Int, t :: Term) :: List.of(List.of(Term)):
-  fun walk(t :: Term, acc :~ List) :~ List:
+// -- the measure -------------------------------------------------------------
+
+// The argument positions the measure actually reads.  Only a heuristic: it
+// tells the prover which variable to induct on when reasoning about calls to
+// this function, and a wrong guess costs time, not soundness.
+fun measure_positions(arity :: Int, m :: Term) :: List.of(Int):
+  let (params, body) = peel_params(arity, m)
+  for values(acc :~ List = []) (v in params, i in List.iota(arity)):
+    (if vfree_in(v, body) | acc ++ [i] | acc)
+
+// Open the measure's `arity` leading binders into fresh variables.
+fun peel_params(arity :: Int, m :: Term) :: values(List.of(FVar), Term):
+  recur loop (t :~ Term = m, k = arity, acc :~ List = []):
+    cond
+    | k == 0: values(acc, t)
+    | ~else:
+        let v = variant(acc.map(fun (x :: FVar): x :~ Term) ++ [t],
+                        mk_var(#'p, (t :~ Abs).arg_ty))
+        loop(open_abs(v, t), k - 1, acc ++ [v])
+
+// `m` applied to `args`, beta-reduced.  The measure is an abstraction over
+// exactly the parameters, so this is a total operation with no residue.
+fun measure_at(m :: Term, args :: List.of(Term)) :: Term:
+  recur loop (t :~ Term = list_mk_comb(m, args)):
+    cond
+    | is_beta_redex(t): loop(beta_reduce(t))
+    | ~else:
+        match t
+        | Comb(f, x) when is_beta_redex(f): loop(mk_comb(loop(f), x))
+        | ~else: t
+
+// One obligation per recursive call: under the branch conditions that reach
+// it, the measure of the arguments is below the measure of the patterns.
+//
+// Well-foundedness is not re-argued here.  `T_lt` is the structural subterm
+// relation of a declared datatype, and the datatype's induction axiom is
+// exactly the statement that it has no infinite descending chains; see
+// `subterm.rhm`.
+fun check_measure(who :: Symbol, name :: Symbol, arity :: Int, fn :: Term,
+                  measure :: Measure, all_sites :: List) :: Void:
+  let mty = measure_type(who, name, arity, measure.term)
+  let tyname = (match mty
+                | TyApp(n, _) when n != ty_fun && n != ty_bool: n
+                | ~else:
+                    error(~who: who,
+                          "a measure must land in a declared datatype",
+                          error.val(~label: "name", name),
+                          error.val(~label: "measure type",
+                                    type_to_string(mty))))
+  let relname = subterm_relation_name(tyname)
+  let rel = mk_const(relname, mk_fun(mty, mk_fun(mty, bool)))
+  for ([pats, conds, args] in all_sites):
+    let pats :~ List = pats
+    let args :~ List = args
+    // The obligation would mention `fn`, which is not a constant yet.
+    for (a in args):
+      when mentions(fn, a)
+      | error(~who: who,
+              "a recursive call inside the arguments of another",
+              error.val(~label: "name", name),
+              error.val(~label: "recursive call",
+                        show(list_mk_comb(fn, args))),
+              error.val(~label: "hint",
+                        "this version cannot state a measure obligation for "
+                          ++ "nested recursion"))
+    let core = list_mk_comb(rel, [measure_at(measure.term, args),
+                                  measure_at(measure.term, pats)])
+    let guarded = for values(acc :~ Term = core) (c in (conds :~ List).reverse()):
+                    mk_imp(c, acc)
+    let obligation = mk_forall_list(free_vars(guarded), guarded)
+    match measure.discharge(obligation)
+    | #false: #void
+    | residue:
+        error(~who: who,
+              "cannot see that the measure decreases",
+              error.val(~label: "name", name),
+              error.val(~label: "clause",
+                        show(list_mk_comb(fn, pats))),
+              error.val(~label: "recursive call",
+                        show(list_mk_comb(fn, args))),
+              error.val(~label: "obligation", show(obligation)),
+              error.val(~label: "residue", residue))
+
+// The measure's result type, checking on the way that it really is an
+// abstraction over every parameter.
+fun measure_type(who :: Symbol, name :: Symbol, arity :: Int,
+                 m :: Term) :: HType:
+  recur loop (ty :~ HType = type_of(m), k = arity):
+    cond
+    | k == 0: ty
+    | is_fun(ty):
+        let (_, r) = dest_fun(ty)
+        loop(r, k - 1)
+    | ~else:
+        error(~who: who, "the measure does not take every parameter",
+              error.val(~label: "name", name))
+
+fun mentions(fn :: Term, t :: Term) :: Boolean:
+  cond
+  | t == fn: #true
+  | ~else:
+      match t
+      | Comb(f, x): mentions(fn, f) || mentions(fn, x)
+      | Abs(_, b): mentions(fn, b)
+      | ~else: #false
+
+// -- finding the recursive calls ---------------------------------------------
+
+// Every application of `fn` to a full argument list inside `t`, paired with
+// the branch conditions that reach it.
+//
+// Descending into `if c | a | b` adds `c` on the way into `a` and `not c` on
+// the way into `b`.  Without that, a definition whose recursion is guarded --
+// which is most of what a measure is for -- would have to prove its measure
+// decreases even down the branch that is never taken.
+fun calls_in(who :: Symbol, name :: Symbol, fn :: Term, arity :: Int,
+             t :: Term) :: List:
+  fun walk(t :: Term, conds :~ List, under_binder :: Boolean,
+           acc :~ List) :~ List:
     let acc2:
       let (head, args) = strip_comb(t)
       cond
-      | head == fn && args.length() == arity: acc ++ [args]
+      | head == fn && args.length() == arity:
+          when under_binder
+          | error(~who: who, "a recursive call under a binder",
+                  error.val(~label: "name", name),
+                  error.val(~label: "recursive call",
+                            show(list_mk_comb(fn, args))))
+          acc ++ [[conds, args]]
       | ~else: acc
-    match t
-    | Comb(f, x): walk(x, walk(f, acc2))
-    | Abs(_, b): walk(b, acc2)
-    | ~else: acc2
-  walk(t, [])
+    match dest_cond(t)
+    | [c, a, b]:
+        let acc3 = walk(c, conds, under_binder, acc2)
+        let acc4 = walk(a, conds ++ [c], under_binder, acc3)
+        walk(b, conds ++ [mk_neg(c)], under_binder, acc4)
+    | ~else:
+        match t
+        | Comb(f, x):
+            walk(x, conds, under_binder, walk(f, conds, under_binder, acc2))
+        | Abs(_, b): walk(b, conds, #true, acc2)
+        | ~else: acc2
+  walk(t, [], #false, [])

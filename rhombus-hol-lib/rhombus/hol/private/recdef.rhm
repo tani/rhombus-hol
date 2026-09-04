@@ -35,10 +35,14 @@ export:
 // `f(pats...) === rhs`.  The variables are those bound by the patterns.
 class DefClause(pats :: List.of(Term), rhs :: Term)
 
+// `measure` is the author's `~measure(e)`, as an abstraction over the
+// parameters; `#false` when they gave none and the definition has to descend
+// structurally.
 class FunSpec(name :: Symbol,
               arg_types :: List.of(HType),
               ret_type :: HType,
-              clauses :: List.of(DefClause))
+              clauses :: List.of(DefClause),
+              measure :: maybe(Term) = #false)
 
 class FunInfo(spec :: FunSpec,
               fn :: Term,                  // the declared constant
@@ -112,9 +116,13 @@ fun recursive_calls(fn :: Term, arity :: Int, t :: Term) :: List.of(List.of(Term
 
 // `dts` maps a type constructor name to its datatype declaration, so that
 // exhaustiveness can be checked against the real constructor list.
+// `discharge` proves a measure obligation, returning `#false` on success and
+// a residue message otherwise.  It is a callback because the prover is built
+// on top of this module, not below it.
 fun install_function(thy :: Theory,
                      spec :: FunSpec,
-                     dts :: Map.of(Symbol, DatatypeSpec))
+                     dts :: Map.of(Symbol, DatatypeSpec),
+                     ~discharge: discharge :: maybe(Function.of_arity(1)) = #false)
      :: values(Theory, FunInfo):
   let who = #'function
   let fty = fun_type(spec)
@@ -158,10 +166,20 @@ fun install_function(thy :: Theory,
 
   // -- termination
   let fn_placeholder = mk_const(spec.name, fty)
+  let measure:
+    match spec.measure
+    | #false: #false
+    | m:
+        unless discharge
+        | error(~who: who,
+                "a measure needs a prover to discharge its obligations",
+                error.val(~label: "name", spec.name))
+        Measure(m :~ Term, discharge :~ Function)
   let recinfo = check_termination(
     who, spec.name, arity,
     spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
-    fn_placeholder)
+    fn_placeholder,
+    ~measure: measure)
 
   // -- only now is anything added to the theory
   let thy2 = new_constant(thy, spec.name, fty)

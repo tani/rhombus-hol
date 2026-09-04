@@ -20,6 +20,7 @@ import:
   "kernel.rhm" open
   "datatype.rhm" open
   "recdef.rhm" open
+  "bool.rhm" open
 
 export:
   parse_type
@@ -51,6 +52,11 @@ fun parse_type(stx :: Syntax, params :: List.of(Symbol)) :: HType:
   | '$(id :: Identifier)($arg, ...)':
       TyApp(Syntax.unwrap(id),
             [parse_type(arg, params), ...])
+  | 'Boolean':
+      // Spelled as Rhombus spells it: a function's parameter annotations are
+      // erased on the way to the executable half, but its `if` conditions are
+      // not, so the two halves have to agree on what a Boolean is.
+      bool
   | '$(id :: Identifier)':
       TyApp(Syntax.unwrap(id), [])
   | ~else:
@@ -155,23 +161,37 @@ export:
   function_decl_shape
   parse_function_decl
 
-// `[name, [param, ...], body]`.  Raises, with the offending syntax, when the
-// declaration is not one this version can admit.
-fun function_decl_shape(stx :: Syntax) :: List:
+// A declaration split into its parts: `[name, [param, ...], result_type,
+// measure_or_false, body]`.  One matcher, used by both halves -- the executable
+// code generator wants the names and the body, the logical elaborator wants the
+// types and the measure, and neither should re-parse the declaration for
+// itself.
+//
+// Raises, with the offending syntax, when the declaration is not one this
+// version can admit.
+fun function_parts(stx :: Syntax) :: List:
   match stx
   | 'function $(name :: Identifier)($param, ...) $rest ...':
-      let (rty, body) = split_signature('$rest ...', stx)
-      [name, [param_name(param), ...], body]
+      let [rty, measure, body] = split_signature('$rest ...', stx)
+      [name, [param, ...], rty, measure, body]
   | ~else:
       syntax_error(#'function,
                    "expected `function name(param :: Type, ...) :: Type: body`",
                    stx)
 
-fun split_signature(rest :: Syntax, at :: Syntax) :: values(Syntax, Syntax):
+// `:: Type: body`, or `:: Type ~measure(e): body`.
+fun split_signature(rest :: Syntax, at :: Syntax) :: List:
   match rest
-  | ':: $ty ...: $body; ...': values('$ty ...', '$body; ...')
+  | ':: $ty ... ~measure($m): $body; ...': ['$ty ...', m, '$body; ...']
+  | ':: $ty ...: $body; ...': ['$ty ...', #false, '$body; ...']
   | ~else:
       syntax_error(#'function, "a function needs a result type", at)
+
+// `[name, [param, ...], body]`, the executable half's view.
+fun function_decl_shape(stx :: Syntax) :: List:
+  let [name, params, _, _, body] = function_parts(stx)
+  let ps :~ List = params
+  [name, ps.map(param_name), body]
 
 fun param_name(p :: Syntax) :: Syntax:
   match p
@@ -183,13 +203,11 @@ fun param_name(p :: Syntax) :: Syntax:
 // -- the logical meaning -----------------------------------------------------
 
 // Signature pieces: `[name, [[param_id, HType], ...], HType]`.
-fun fun_signature(stx :: Syntax, params :: List.of(Symbol)) :: List:
-  match stx
-  | 'function $(name :: Identifier)($param, ...) :: $rty ...: $_; ...':
-      [Syntax.unwrap(name),
-       [param_binding(param, params), ...],
-       parse_type('$rty ...', params)]
-  | ~else: syntax_error(#'function, "malformed function signature", stx)
+fun fun_signature(parts :: List, params :: List.of(Symbol)) :: List:
+  let [name, ps, rty, _, _] = parts
+  [Syntax.unwrap(name :~ Syntax),
+   (ps :~ List).map(fun (p :: Syntax): param_binding(p, params)),
+   parse_type(rty :~ Syntax, params)]
 
 fun param_binding(p :: Syntax, params :: List.of(Symbol)) :: List:
   match p
@@ -229,28 +247,19 @@ fun const_instance(thy :: Theory, name :: Symbol,
       syntax_error(#'function, "constant is applied at a type it does not have", at)
   | sub: type_subst(sub, gty)
 
+// A function body is read by the same precedence parser as a proposition,
+// in `#'expr` mode.  One parser, because the alternative -- a second,
+// simpler walker for bodies -- is what let `if` be a special case here and
+// not there.
+//
+// The spellings differ between the modes and that is deliberate.  A body is
+// emitted as Rhombus *verbatim*, so every operator a body may use has to
+// already mean the right thing in Rhombus: `&&`, `||`, `!`, `==`, `#true`,
+// `#false`, `if`.  A proposition is never emitted, so it uses the logical
+// spellings `and`, `or`, `not`, `===`.
 fun elab_expr(thy :: Theory, self_name :: Symbol, self :: Term,
               env :: Map.of(Symbol, Term), e :: Syntax) :: Term:
-  match e
-  | '$(id :: Identifier)($arg, ...)':
-      let n = Syntax.unwrap(id)
-      let as_ = [elab_expr(thy, self_name, self, env, arg), ...]
-      cond
-      | n == self_name: list_mk_comb(self, as_)
-      | ~else: list_mk_comb(mk_const(n, const_instance(thy, n, as_, e)), as_)
-  | '$(id :: Identifier)':
-      let n = Syntax.unwrap(id)
-      match env.get(n, #false)
-      | #false:
-          cond
-          | n == self_name: self
-          | ~else: mk_const(n, const_instance(thy, n, [], e))
-      | v: v
-  | ~else:
-      syntax_error(#'function,
-                   "this version admits only variables and named applications "
-                     ++ "in a function body",
-                   e)
+  parse_group(PEnv(thy, [], env, #'expr, self_name, self), e)
 
 // -- clauses -----------------------------------------------------------------
 
@@ -283,7 +292,9 @@ fun peel_fun(ty :: HType, n :: Int) :: values(List.of(HType), HType):
 
 fun parse_function_decl(thy :: Theory, stx :: Syntax) :: FunSpec:
   let tyvars = collect_type_vars(stx)
-  let [name0, bindings0, rty0] = fun_signature(stx, tyvars)
+  let parts = function_parts(stx)
+  let [_, _, _, measure_stx, body] = parts
+  let [name0, bindings0, rty0] = fun_signature(parts, tyvars)
   let name :~ Symbol = name0
   let bindings :~ List = bindings0
   let rty :~ HType = rty0
@@ -292,24 +303,28 @@ fun parse_function_decl(thy :: Theory, stx :: Syntax) :: FunSpec:
   let self = mk_const(name, fty)
   let pvars = for List (b in bindings): mk_var((b :~ List)[0], (b :~ List)[1])
   let env0 = for values(m :~ Map = {}) (v in pvars): m ++ {(v :~ FVar).name: v}
-  let body = fun_body(stx)
-  match body
-  | 'match $(sv :: Identifier)
-     | $c
-     | ...':
-      let sname = Syntax.unwrap(sv)
-      let col = index_of_param(pvars, sname, stx)
-      let clauses = [parse_clause(thy, name, self, pvars, col, env0, c), ...]
-      FunSpec(name, arg_tys, rty, clauses)
-  | ~else:
-      let rhs = elab_expr(thy, name, self, env0, body)
-      FunSpec(name, arg_tys, rty,
-              [DefClause(pvars.map(fun (v :: FVar): v :~ Term), rhs)])
-
-fun fun_body(stx :: Syntax) :: Syntax:
-  match stx
-  | 'function $_ ... : $b; ...': '$b; ...'
-  | ~else: syntax_error(#'function, "malformed function body", stx)
+  // The measure sees the parameters and nothing else, and it must not mention
+  // the function being defined: it is what justifies the definition, so it
+  // cannot depend on it.
+  let measure:
+    match measure_stx
+    | #false: #false
+    | ms:
+        let e = parse_group(PEnv(thy, tyvars, env0, #'expr, #false, #false),
+                            ms :~ Syntax)
+        list_mk_abs(pvars, e)
+  let clauses:
+    match body :~ Syntax
+    | 'match $(sv :: Identifier)
+       | $c
+       | ...':
+        let sname = Syntax.unwrap(sv)
+        let col = index_of_param(pvars, sname, stx)
+        [parse_clause(thy, name, self, pvars, col, env0, c), ...]
+    | ~else:
+        [DefClause(pvars.map(fun (v :: FVar): v :~ Term),
+                   elab_expr(thy, name, self, env0, body :~ Syntax))]
+  FunSpec(name, arg_tys, rty, clauses, measure)
 
 fun index_of_param(pvars :: List.of(FVar), n :: Symbol, at :: Syntax) :: Int:
   recur loop (i = 0):
@@ -352,9 +367,6 @@ fun clause_parts(c :: Syntax) :: values(Symbol, List.of(Syntax), Syntax):
 // The levels must match `printer.rhm`'s, or a residue printed for the user
 // would not read back as the same proposition.
 
-import:
-  "bool.rhm" open
-
 export:
   parse_prop
   parse_theorem_statement
@@ -372,29 +384,57 @@ def prec_eq = 70
 //
 // Matched by literal pattern rather than by unwrapping: `Syntax.unwrap` on an
 // operator term gives the tagged datum, not the operator's name.
-fun infix_info(t :: Syntax) :: maybe(List):
-  match t
-  | '===': [prec_eq, #false, mk_eq]
-  | '<=>': [prec_iff, #false, mk_eq]
-  | '==>': [prec_imp, #true, mk_imp]
-  | 'and': [prec_and, #false, mk_conj]
-  | 'or': [prec_or, #false, mk_disj]
-  | ~else: #false
+//
+// The two tables share their levels, so `a == b && c` and `a === b and c`
+// group the same way.  The expression levels also agree with Rhombus's own,
+// which they must: the body is emitted verbatim, so a disagreement would make
+// the logical and the executable readings of one source differ.
+fun infix_info(mode :: Symbol, t :: Syntax) :: maybe(List):
+  cond
+  | mode == #'prop:
+      match t
+      | '===': [prec_eq, #false, mk_eq]
+      | '<=>': [prec_iff, #false, mk_eq]
+      | '==>': [prec_imp, #true, mk_imp]
+      | 'and': [prec_and, #false, mk_conj]
+      | 'or': [prec_or, #false, mk_disj]
+      | ~else: #false
+  | ~else:
+      match t
+      | '==': [prec_eq, #false, mk_eq]
+      | '&&': [prec_and, #false, mk_conj]
+      | '||': [prec_or, #false, mk_disj]
+      | ~else: #false
 
-class PEnv(thy :: Theory, tyvars :: List.of(Symbol), vars :: Map.of(Symbol, Term))
+// `self_name` and `self` are the definition being elaborated, so that a
+// recursive call resolves before the constant exists in the theory.  In
+// `#'prop` mode there is no such definition and both are `#false`.
+class PEnv(thy :: Theory,
+           tyvars :: List.of(Symbol),
+           vars :: Map.of(Symbol, Term),
+           mode :: Symbol,
+           self_name :: maybe(Symbol),
+           self :: maybe(Term)):
+  property who :: Symbol: (if mode == #'prop | #'theorem | #'function)
 
 fun parse_prop(thy :: Theory, tyvars :: List.of(Symbol),
                vars :: Map.of(Symbol, Term), stx :: Syntax) :: Term:
-  let ts = group_terms(stx)
-  let (t, rest) = parse_at(PEnv(thy, tyvars, vars), ts, 0)
+  parse_group(PEnv(thy, tyvars, vars, #'prop, #false, #false), stx)
+
+fun parse_group(env :: PEnv, stx :: Syntax) :: Term:
+  let ts = group_terms(env, stx)
+  let (t, rest) = parse_at(env, ts, 0)
   unless rest.length() == 0
-  | syntax_error(#'theorem, "unexpected text after a proposition", stx)
+  | syntax_error(env.who, "unexpected text after an expression", stx)
   t
 
-fun group_terms(stx :: Syntax) :: List.of(Syntax):
+fun sub_env(env :: PEnv, vars :: Map.of(Symbol, Term)) :: PEnv:
+  PEnv(env.thy, env.tyvars, vars, env.mode, env.self_name, env.self)
+
+fun group_terms(env :: PEnv, stx :: Syntax) :: List.of(Syntax):
   match stx
   | '$t ...': [t, ...]
-  | ~else: syntax_error(#'theorem, "not a proposition", stx)
+  | ~else: syntax_error(env.who, not_admitted(env), stx)
 
 fun parse_at(env :: PEnv, ts :: List.of(Syntax), min_prec :: Int)
      :: values(Term, List.of(Syntax)):
@@ -406,7 +446,7 @@ fun climb(env :: PEnv, left :: Term, ts :: List.of(Syntax), min_prec :: Int)
   match ts
   | []: values(left, ts)
   | List.cons(op, rest):
-      match infix_info(op)
+      match infix_info(env.mode, op)
       | #false: values(left, ts)
       | [prec, right_assoc, build]:
           let prec :~ Int = prec
@@ -420,18 +460,51 @@ fun climb(env :: PEnv, left :: Term, ts :: List.of(Syntax), min_prec :: Int)
 fun parse_prefix(env :: PEnv, ts :: List.of(Syntax))
      :: values(Term, List.of(Syntax)):
   match ts
-  | []: error(~who: #'theorem, "proposition ended early")
+  | []: error(~who: env.who, "expression ended early")
   | List.cons(t, rest):
       match t
+      | '#true': values(tm_true, rest)
+      | '#false': values(tm_false, rest)
+      | '!' when env.mode == #'expr:
+          let (inner, rest2) = parse_at(env, rest, prec_not + 1)
+          values(mk_neg(inner), rest2)
       | '$(id :: Identifier)':
           match Syntax.unwrap(id)
-          | #'not:
+          | #'not when env.mode == #'prop:
               let (inner, rest2) = parse_at(env, rest, prec_not + 1)
               values(mk_neg(inner), rest2)
-          | #'forall: parse_quantifier(env, #'forall, ts)
-          | #'exists: parse_quantifier(env, #'exists, ts)
+          | #'if: parse_conditional(env, ts)
+          | #'forall when env.mode == #'prop: parse_quantifier(env, #'forall, ts)
+          | #'exists when env.mode == #'prop: parse_quantifier(env, #'exists, ts)
           | ~else: parse_application(env, t, rest)
       | ~else: parse_application(env, t, rest)
+
+// `if c | a | b`.  The alternatives close the group, so like a quantifier this
+// consumes everything that is left.
+//
+// Both branches are elaborated even though only one will run: `cond` is a
+// total function of three arguments, and the termination checker reads the
+// recursive calls out of both.
+fun parse_conditional(env :: PEnv, ts :: List.of(Syntax))
+     :: values(Term, List.of(Syntax)):
+  let [t, ...] = ts
+  let whole = '$t ...'
+  match whole
+  | 'if $c ...
+     | $a; ...
+     | $b; ...':
+      let ct = parse_group(env, '$c ...')
+      unless type_of(ct) == bool
+      | syntax_error(env.who, "the condition of an `if` must be a Boolean",
+                     '$c ...')
+      let at = parse_group(env, '$a; ...')
+      let bt = parse_group(env, '$b; ...')
+      unless type_of(at) == type_of(bt)
+      | syntax_error(env.who, "the two branches of an `if` have different types",
+                     whole)
+      values(mk_cond(ct, at, bt), [])
+  | ~else:
+      syntax_error(env.who, "an `if` needs a condition and two branches", whole)
 
 // `forall (x :: T, ...): body`.  The body extends as far right as it can, so a
 // quantifier always swallows the rest of the sequence -- which is why this
@@ -447,14 +520,14 @@ fun parse_quantifier(env :: PEnv, which :: Symbol, ts :: List.of(Syntax))
     | 'forall ($b, ...) $more ...': values([b, ...], '$more ...')
     | 'exists ($b, ...) $more ...': values([b, ...], '$more ...')
     | ~else:
-        syntax_error(#'theorem,
+        syntax_error(env.who,
                      "a quantifier needs a parenthesised binder list and a body",
                      whole)
   let bs :~ List = binders
   let vs = for List (b in bs): binder_var(env, b)
   let vars2 = for values(m :~ Map = env.vars) (v in vs):
                 m ++ {(v :~ FVar).name: v :~ Term}
-  let body = parse_prop(env.thy, env.tyvars, vars2, body_stx)
+  let body = parse_group(sub_env(env, vars2), body_stx)
   let build = (if which == #'forall | mk_forall | mk_exists)
   values(for values(acc :~ Term = body) (v in vs.reverse()): build(v, acc), [])
 
@@ -462,22 +535,33 @@ fun binder_var(env :: PEnv, b :: Syntax) :: FVar:
   match b
   | '$(n :: Identifier) :: $ty ...':
       mk_var(Syntax.unwrap(n), parse_type('$ty ...', env.tyvars))
-  | ~else: syntax_error(#'theorem, "a binder needs a name and a type", b)
+  | ~else: syntax_error(env.who, "a binder needs a name and a type", b)
 
 fun parse_application(env :: PEnv, t :: Syntax, rest :: List.of(Syntax))
      :: values(Term, List.of(Syntax)):
   match t
   | '($g)':
-      values(parse_prop(env.thy, env.tyvars, env.vars, g), rest)
+      values(parse_group(env, g), rest)
   | '$(id :: Identifier)':
       let n = Syntax.unwrap(id)
       match rest
       | List.cons(args, more) when is_parens(args):
-          let as_ = for List (a in paren_groups(args)):
-                      parse_prop(env.thy, env.tyvars, env.vars, a)
+          let as_ = for List (a in paren_groups(args)): parse_group(env, a)
           values(apply_named(env, n, as_, t), more)
       | ~else: values(lookup_atom(env, n, t), rest)
-  | ~else: syntax_error(#'theorem, "not a proposition", t)
+  | ~else: syntax_error(env.who, not_admitted(env), t)
+
+// What the grammar admits, said in the terms of whichever mode is running.
+// A body that falls outside it is a compile error, so the message is the only
+// guidance the author gets.
+fun not_admitted(env :: PEnv) :: String:
+  cond
+  | env.mode == #'prop:
+      "a proposition admits variables, named applications, `not`, `and`, "
+        ++ "`or`, `===`, `<=>`, `==>`, `forall`, `exists` and `if`"
+  | ~else:
+      "this version admits only variables, named applications, `if`, and the "
+        ++ "Boolean operators `!`, `&&`, `||` and `==` in a function body"
 
 fun is_parens(t :: Syntax) :: Boolean:
   match t
@@ -491,13 +575,20 @@ fun paren_groups(t :: Syntax) :: List.of(Syntax):
 
 fun lookup_atom(env :: PEnv, n :: Symbol, at :: Syntax) :: Term:
   match env.vars.get(n, #false)
-  | #false: mk_const(n, const_instance(env.thy, n, [], at))
+  | #false:
+      cond
+      | n == env.self_name: env.self :~ Term
+      | ~else: mk_const(n, const_instance(env.thy, n, [], at))
   | v: v
 
 fun apply_named(env :: PEnv, n :: Symbol, args :: List.of(Term),
                 at :: Syntax) :: Term:
   match env.vars.get(n, #false)
-  | #false: list_mk_comb(mk_const(n, const_instance(env.thy, n, args, at)), args)
+  | #false:
+      cond
+      | n == env.self_name: list_mk_comb(env.self :~ Term, args)
+      | ~else:
+          list_mk_comb(mk_const(n, const_instance(env.thy, n, args, at)), args)
   | v: list_mk_comb(v, args)
 
 // The statement, plus the names of its leading universal binders -- the prover

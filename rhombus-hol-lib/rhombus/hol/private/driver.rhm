@@ -22,6 +22,7 @@ import:
   "bool.rhm" open
   "datatype.rhm" open
   "recdef.rhm" open
+  "subterm.rhm" open
   "ruledb.rhm" open
   "taut.rhm" open
   "waterfall.rhm" open
@@ -87,6 +88,10 @@ fun initial_state() :: HolState:
   // finished proof can look stuck at `true and true`.
   let db = for values(d :~ RuleDB = empty_db) (th in tautologies(thy)):
              add_thm(thy, d, #'propositional, th)
+  // The two `if` rules are separate so that `disable_rules [conditional]` can
+  // turn them off without also losing propositional cleanup.
+  let db = for values(d :~ RuleDB = db) (th in conditionals(thy)):
+             add_thm(thy, d, #'conditional, th)
   HolState(thy, db, {}, {}, {}, [])
 
 fun declared_names(st :: HolState) :: List.of(Symbol):
@@ -108,8 +113,38 @@ fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   // is what makes `match`-defined functions simplify.
   let db2 = for values(d :~ RuleDB = st.db) (th in datatype_rules(thms)):
               add_thm(thy2, d, spec.name, th)
-  HolState(thy2, db2, st.dts ++ {spec.name: thms}, st.funs, st.thms,
-           st.names ++ [spec.name])
+  add_subterm_relation(
+    HolState(thy2, db2, st.dts ++ {spec.name: thms}, st.funs, st.thms,
+             st.names ++ [spec.name]),
+    spec, at)
+
+// Every recursive datatype brings its structural subterm relation with it, so
+// that a `~measure` into it has an order to decrease in.  It is an ordinary
+// definition installed through the ordinary seam -- see `subterm.rhm` for why
+// that is the whole soundness argument -- and its equations join the rule
+// database under their own name, so `disable_rules [Nat_lt]` reaches them
+// without touching the datatype's own rules.
+fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
+                         at :: Syntax) :: HolState:
+  match subterm_spec(spec)
+  | #false: st
+  | fs:
+      let fs :~ FunSpec = fs
+      when const_type(st.thy, fs.name) != #false
+      | hol_error(#'type,
+                  "the name of this datatype's subterm relation, "
+                    ++ to_string(fs.name)
+                    ++ ", is already taken",
+                  at)
+      let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.dts):
+                       m ++ {n: (thms :~ DatatypeThms).spec}
+      let (thy2, info0) = try:
+                            install_function(st.thy, fs, dt_specs)
+                            ~catch e :: Exn.Fail: hol_reraise(e, at)
+      let info :~ FunInfo = info0
+      let db2 = add_thms(thy2, st.db, fs.name, info.equations)
+      HolState(thy2, db2, st.dts, st.funs ++ {fs.name: info}, st.thms,
+               st.names ++ [fs.name])
 
 // -- function ----------------------------------------------------------------
 
@@ -120,7 +155,8 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
   let (thy2, info0) = try:
-                        install_function(st.thy, spec, dt_specs)
+                        install_function(st.thy, spec, dt_specs,
+                                         ~discharge: discharger(st))
                         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let info :~ FunInfo = info0
   // The defining equations become rewrite rules straight away: that is what
@@ -128,6 +164,17 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   let db2 = add_thms(thy2, st.db, spec.name, info.equations)
   HolState(thy2, db2, st.dts, st.funs ++ {spec.name: info}, st.thms,
            st.names ++ [spec.name])
+
+// Discharge a termination obligation against the state as it stands -- which
+// is to say, without the function being defined.  That is not a limitation to
+// work around but the point: a measure that needed the definition it justifies
+// would justify nothing.
+fun discharger(st :: HolState) :: Function:
+  fun (obligation :: Term) :: maybe(String):
+    let (th, node) = prove(state_context(st), obligation)
+    match th
+    | #false: residue_message(#'measure, node)
+    | _: #false
 
 // -- theorem -----------------------------------------------------------------
 

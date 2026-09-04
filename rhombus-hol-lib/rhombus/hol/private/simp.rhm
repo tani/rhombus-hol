@@ -5,6 +5,15 @@
 // Rewrite the conclusion to a normal form with the rule database, with the
 // goal's own assumptions thrown in as rules.  If it reaches `true` the goal is
 // closed; otherwise the simplified goal replaces the original.
+//
+// The assumptions are simplified too, and that is not symmetry for its own
+// sake.  An assumption is only a rewrite rule for the conclusion, which says
+// nothing when the assumption is `not nul(zero)`: as a rule it rewrites the
+// phrase `not nul(zero)`, which does not occur.  Reduced, it is `not true`,
+// that is `false`, and the goal is closed whatever its conclusion.  Guarded
+// recursion produces exactly that shape -- one branch condition per obligation,
+// most of them contradictory in most cases -- so measure-based termination
+// depends on this.
 
 import:
   "term.rhm" open
@@ -29,7 +38,53 @@ fun with_assumptions(thy :: Theory, db :: RuleDB,
   for values(d :~ RuleDB = db) (a in asms):
     add_thm(thy, d, #'assumption, ASSUME(thy, a))
 
+// `|- a === a'` for each assumption, or `#false` when none of them moved.
+//
+// Each is simplified against the database plus the assumptions *before* it.
+// Using all of them would let an assumption rewrite itself to `true`, which
+// discards it, and would let two assumptions rewrite each other without end.
+fun simplify_asms(thy :: Theory, db :: RuleDB,
+                  asms :: List.of(Term)) :: maybe(List.of(Thm)):
+  recur loop (i = 0, seen :~ List = [], acc :~ List = [], changed = #false):
+    cond
+    | i >= asms.length(): (if changed | acc | #false)
+    | ~else:
+        let a = asms[i]
+        match simp_conv(with_assumptions(thy, db, seen))(thy, a)
+        | #false: loop(i + 1, seen ++ [a], acc ++ [REFL(thy, a)], changed)
+        | eq :~ Thm:
+            loop(i + 1, seen ++ [a], acc ++ [eq], changed || rhs_of(eq) != a)
+
 fun simplify_goal(thy :: Theory, db :: RuleDB, g :: Goal) :: maybe(Step):
+  match simplify_asms(thy, db, g.asms)
+  | #false: simplify_concl(thy, db, g)
+  | eqs: rebuild_asms(thy, db, g, eqs :~ List)
+
+// One assumption reduced to `false` closes the goal; otherwise the goal is
+// replaced by the one with reduced assumptions.
+//
+// Going back the other way is `PROVE_HYP`: from `|- a === a'` and `a` we get
+// `a |- a'`, which trades the new hypothesis for the old one in the theorem
+// the subgoal returns.
+fun rebuild_asms(thy :: Theory, db :: RuleDB, g :: Goal,
+                 eqs :: List.of(Thm)) :: maybe(Step):
+  let bridges = for List (eq in eqs, a in g.asms):
+                  EQ_MP(eq, ASSUME(thy, a))
+  recur find (i = 0):
+    cond
+    | i >= eqs.length():
+        let asms2 = eqs.map(rhs_of)
+        let sub = note(Goal(asms2, g.concl, g.trail), "simplification")
+        Step([sub],
+             fun (ths :: List.of(Thm)):
+               for values(th :~ Thm = ths[0]) (b in bridges):
+                 PROVE_HYP(thy, b, th))
+    | rhs_of(eqs[i]) == tm_false:
+        let contra = bridges[i]
+        Step([], fun (_ :: List.of(Thm)): CONTR(thy, g.concl, contra))
+    | ~else: find(i + 1)
+
+fun simplify_concl(thy :: Theory, db :: RuleDB, g :: Goal) :: maybe(Step):
   let db2 = with_assumptions(thy, db, g.asms)
   match simp_conv(db2)(thy, g.concl)
   | #false: #false

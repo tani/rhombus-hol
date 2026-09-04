@@ -1,0 +1,85 @@
+#lang rhombus/static
+
+// The structural subterm relation of a datatype.
+//
+// Measure-based termination needs a well-founded order to measure into, and
+// this is where one comes from.  Every declared datatype gets a relation
+//
+//   T_lt : T -> T -> bool     "the first is a proper subterm of the second"
+//
+// defined by recursion on its second argument.  For `Nat` that relation is
+// exactly `<`, which is why a measure into `Nat` reads the way one expects.
+//
+// Two things make this the right order to use:
+//
+//  * It is *derived, not postulated.*  `subterm_spec` builds an ordinary
+//    clausal definition and hands it to `install_function`, so the relation
+//    arrives through the same seam as any user function -- structurally
+//    terminating, exhaustive, non-overlapping -- and adds no axiom of its own
+//    beyond the definitional ones every function adds.
+//
+//  * It is *well-founded by the datatype's own induction principle.*  A
+//    descending chain would be an infinitely deep term, and the induction
+//    axiom in `DatatypeThms` says there are none.  That is the argument
+//    `terminate.rhm` relies on when it accepts a measure, and it is why the
+//    measure must land in a declared datatype rather than in an arbitrary
+//    type with a user-supplied relation.
+
+import:
+  "htype.rhm" open
+  "names.rhm" open
+  "term.rhm" open
+  "bool.rhm" open
+  "kernel.rhm" open
+  "datatype.rhm" open
+  "recdef.rhm" open
+
+export:
+  subterm_name
+  subterm_spec
+
+fun subterm_name(spec :: DatatypeSpec) :: Symbol:
+  subterm_relation_name(spec.name)
+
+fun self_type(spec :: DatatypeSpec) :: HType:
+  TyApp(spec.name, spec.params.map(fun (p :: Symbol): TyVar(p) :~ HType))
+
+// `#false` for a datatype with no recursive field: its subterm relation is
+// empty, so a measure into it could never decrease and generating the
+// definition would only add a constant nobody can use.
+fun subterm_spec(spec :: DatatypeSpec) :: maybe(FunSpec):
+  let self = self_type(spec)
+  let recursive = for any (c in spec.ctors):
+                    for any (f in (c :~ Ctor).fields): is_recursive_field(spec, f)
+  cond
+  | !recursive: #false
+  | ~else:
+      let x = mk_var(#'x0, self)
+      let clauses = for List (c in spec.ctors): subterm_clause(spec, self, x, c)
+      FunSpec(subterm_name(spec), [self, self], bool, clauses)
+
+// `T_lt(x0, C(x1, ..., xk)) === (x0 === xi) or T_lt(x0, xi) or ...`, over the
+// recursive fields `xi` only -- "equal to a child, or below one".
+//
+// The pattern variables are generated rather than taken from the field names,
+// because a field named `x0` would collide with the first argument and
+// `install_function` would reject the clause as having a repeated variable.
+fun subterm_clause(spec :: DatatypeSpec, self :: HType,
+                   x :: FVar, c :: Ctor) :: DefClause:
+  let vars = for List (f in c.fields, i in List.iota(c.fields.length())):
+               mk_var(Symbol.from_string("x" ++ to_string(i + 1)), (f :~ Field).ty)
+  let pat = list_mk_comb(mk_const(c.name, ctor_type(spec, c)),
+                         vars.map(fun (v :: FVar): v :~ Term))
+  let rel = mk_const(subterm_name(spec), mk_fun(self, mk_fun(self, bool)))
+  let below = for values(acc :~ List = []) (v in vars, f in c.fields):
+                cond
+                | is_recursive_field(spec, f):
+                    acc ++ [mk_eq(x, v), list_mk_comb(rel, [x :~ Term, v :~ Term])]
+                | ~else: acc
+  DefClause([x :~ Term, pat], disjoin(below))
+
+fun disjoin(ds :: List.of(Term)) :: Term:
+  match ds
+  | []: tm_false
+  | [d]: d
+  | List.cons(d, more): mk_disj(d, disjoin(more))

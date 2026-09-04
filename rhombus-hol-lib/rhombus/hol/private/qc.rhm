@@ -1,0 +1,106 @@
+#lang rhombus/static
+
+// Random property checking.
+//
+// This runs at *runtime*, not at compile time, and that is the point: the
+// property has to be evaluated by the executable code `type` and `fun` emitted,
+// and that code does not exist until the module runs.  Checking it at compile
+// time would mean a second interpreter for the same definitions -- exactly the
+// drift the one-parser rule exists to prevent.
+//
+// Generators and shrinkers are emitted per datatype by `module_block.rhm`, from
+// the same declaration the logic was built from.
+
+import:
+  lib("racket/base.rkt") as rb
+
+export:
+  QCResult
+  QCPassed
+  QCFailed
+  pick
+  run
+  report
+
+class.together:
+  class QCResult():
+    nonfinal
+  class QCPassed(samples :: Int):
+    extends QCResult
+  class QCFailed(inputs :: List, seed :: Int, shrinks :: Int):
+    extends QCResult
+
+// Seeded so that a reported counterexample can be reproduced: the seed goes
+// into the failure report, and re-running with it gives the same inputs.
+fun set_seed(seed :: Int) :: Void:
+  rb.#{random-seed}(seed)
+
+fun rand(n :: PosInt) :: Int:
+  math.random(n)
+
+// Choose a constructor to build.  At size zero only the non-recursive ones are
+// available -- the positivity check guarantees there is at least one, which is
+// what makes generation terminate.
+fun pick(size :: Int, base :: List, all_of :: List):
+  let choices :~ List = (if size <= 0 || all_of.length() == 0 | base | all_of)
+  let f = choices[rand(choices.length())]
+  (f :~ Function)()
+
+// `gens` build one input each from a size; `prop` is the property; `shrinks`
+// produce smaller candidates for one input.
+fun run(name :: Symbol,
+        ~samples: samples :: Int = 100,
+        ~size: size :: Int = 6,
+        ~seed: seed :: Int = 20240904,
+        ~gens: gens :: List,
+        ~shrinks: shrinks :: List,
+        ~prop: prop :: Function) :: QCResult:
+  set_seed(seed)
+  recur loop (i = 0):
+    cond
+    | i >= samples: QCPassed(samples)
+    | ~else:
+        let inputs = for List (g in gens): (g :~ Function)(1 + (i mod size))
+        cond
+        | holds(prop, inputs): loop(i + 1)
+        | ~else:
+            let (small, n) = shrink(prop, shrinks, inputs)
+            QCFailed(small, seed, n)
+
+fun holds(prop :: Function, inputs :: List) :: Boolean:
+  prop(& inputs)
+
+// Greedy, type-directed shrinking: replace one input at a time by a smaller
+// candidate, keeping the first replacement that still falsifies the property,
+// until nothing smaller does.
+fun shrink(prop :: Function, shrinks :: List, inputs :: List)
+     :: values(List, Int):
+  recur loop (cur :~ List = inputs, n = 0):
+    match smaller(prop, shrinks, cur)
+    | #false: values(cur, n)
+    | next: loop(next :~ List, n + 1)
+
+fun smaller(prop :: Function, shrinks :: List, inputs :: List) :: maybe(List):
+  recur outer (i = 0):
+    cond
+    | i >= inputs.length(): #false
+    | ~else:
+        let candidates :~ List = ((shrinks[i] :~ Function)(inputs[i]) :~ List)
+        recur inner (j = 0):
+          cond
+          | j >= candidates.length(): outer(i + 1)
+          | ~else:
+              let next = replace_at(inputs, i, candidates[j])
+              (if !holds(prop, next) | next | inner(j + 1))
+
+fun replace_at(l :: List, i :: Int, v) :: List:
+  for List (x in l, k in List.iota(l.length())): (if k == i | v | x)
+
+fun report(name :: Symbol, r :: QCResult) :~ String:
+  match r
+  | QCPassed(n): to_string(name) ++ ": passed " ++ to_string(n) ++ " samples"
+  | QCFailed(inputs, seed, n):
+      to_string(name) ++ ": counterexample found\n"
+        ++ "  inputs: " ++ to_string(inputs) ++ "\n"
+        ++ "  seed: " ++ to_string(seed)
+        ++ ", shrinks: " ++ to_string(n)

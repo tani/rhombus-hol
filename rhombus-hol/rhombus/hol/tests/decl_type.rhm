@@ -1,0 +1,60 @@
+#lang rhombus/static
+
+// R1b: `type` emits executable Rhombus classes and, from the same parse,
+// registers the datatype with the kernel.
+
+import:
+  "fixtures/types_ok.rhm" as t
+
+// A `ModulePath` literal cannot be built from a runtime string, so the
+// fixtures are named explicitly.
+fun load(mp :: ModulePath):
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }: Evaluator.instantiate(mp)
+
+fun bad(which :: Symbol):
+  match which
+  | #'empty: load(ModulePath'lib("rhombus/hol/tests/fixtures/type_empty.rhm")')
+  | #'negative: load(ModulePath'lib("rhombus/hol/tests/fixtures/type_negative.rhm")')
+
+// -- the executable half -----------------------------------------------------
+
+check t.sample ~is t.Cons(1, t.Cons(2, t.Nil()))
+check t.sample is_a t.List ~is #true
+check t.Nil() is_a t.List ~is #true
+check 5 is_a t.List ~is #false
+check:
+  match t.sample
+  | t.Nil(): "empty"
+  | t.Cons(h, _): "head " ++ to_string(h)
+  ~is "head 1"
+check:
+  // the classes are ordinary Rhombus classes, so nesting and recursion work
+  match t.Cons(1, t.Nil())
+  | t.Cons(_, t.Nil()): "one"
+  | ~else: "other"
+  ~is "one"
+check t.succ(t.succ(t.zero())) ~is t.succ(t.succ(t.zero()))
+
+// A `type` with no parameters gets a plain interface, one with parameters gets
+// the same -- the parameter is erased, because Rhombus has no parametric
+// polymorphism to erase it *to*, and the logical side has already checked the
+// types.
+check t.Cons("a string", t.Nil()) is_a t.List ~is #true
+
+// -- the logical half --------------------------------------------------------
+//
+// `types_ok.rhm` asserts `expect [List, Nat, Tree]` at phase 1, so the fact
+// that it compiled is the assertion that all three were registered, in order.
+
+check t.sample is_a t.List ~is #true
+
+// -- rejections carry the user's source location -----------------------------
+
+check bad(#'empty) ~throws "the type would be empty"
+check bad(#'empty) ~throws "type_empty.rhm:7"
+check bad(#'negative) ~throws "cannot admit"
+check bad(#'negative) ~throws "type_negative.rhm:13"
+// the message is not doubled: `raise-syntax-error` adds its own `who`, so the
+// caught one is stripped
+check bad(#'empty) ~throws "0: type: every constructor"

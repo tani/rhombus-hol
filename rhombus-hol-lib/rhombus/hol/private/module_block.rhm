@@ -2,21 +2,338 @@
 
 // The `#%module_block` of `#lang rhombus/hol`.
 //
-// Proof obligations are discharged eagerly, inside the `theorem` form, so this
-// hook is *not* where proving happens.  It exists to seed the per-module HOL
-// state and to report end-of-module diagnostics.
+// It hands the module body to `expand.rhm` for recognition, then emits, for
+// each declaration, the runtime code and one step of the compile-time state.
+//
+// The state is threaded as ordinary phase-1 definitions *in the user's
+// module* -- `_hol_st0`, `_hol_st1`, ... -- rather than as compile-time state
+// belonging to this macro.  `raco make` compiles many modules in one process,
+// so macro-level state would be shared between them; per-module phase-1
+// definitions cannot be.  Every generated identifier comes out of a single
+// expansion of this one macro, so they share an introduction scope, refer to
+// each other with no name surgery, and cannot be captured by user code.
+//
+// All syntax templates live here.  A template built in a phase-0 helper module
+// loses its bindings on the way out of a phase-1 macro -- `'def x = 1'`
+// written there and returned from a macro reports `def: unbound identifier` --
+// so `expand.rhm` and `elab.rhm` analyse, and this module emits.
 
 import:
+  rhombus/meta open
   meta:
-    "kernel.rhm" as kernel
+    "htype.rhm" open
+    "expand.rhm" as expand
 
 export:
   module_block
 
+meta:
+  // Any literal from this module will do as a lexical context: what matters is
+  // that all the generated identifiers share one, and that the expander's
+  // introduction scope lands on them alike.
+  def id_ctx :: Syntax = 'hol_state'
+
+  fun st(n :: Int) :: Syntax:
+    Syntax.make_id("_hol_st" ++ to_string(n), id_ctx)
+
+  // -- datatypes -------------------------------------------------------------
+
+  // `class.together` so that a datatype can refer to itself, and an
+  // `interface` rather than a base class as the sum: an interface carries no
+  // fields and imposes no field order on the variants.
+  //
+  // Field annotations are dropped -- that is the type erasure.  Rhombus has no
+  // parametric polymorphism, so `List(~a)` has nothing to erase *to*, and the
+  // logical side has already checked the types.
+  fun emit_type(name :: Syntax, ctors :: List) :: Syntax:
+    let [variant, ...] = ctors.map(fun (c :: List): emit_variant(name, c))
+    'class.together:
+       interface $name
+       $variant
+       ...'
+
+  fun emit_variant(iface :: Syntax, c :: List) :: Syntax:
+    let [cname, fields] = c
+    let fs :~ List = fields
+    let [f, ...] = fs
+    'class $cname($f, ...):
+       implements $iface'
+
+  // -- generators and shrinkers ----------------------------------------------
+  //
+  // Emitted alongside a datatype, from the same declaration, so that
+  // `check_property` has something to draw values from.  They are ordinary
+  // Rhombus functions over the emitted classes -- the property is checked by
+  // running the real code, which is the whole point of doing it at runtime.
+  //
+  // Their names take their lexical context from the user's own declaration
+  // rather than from this module, so that they are ordinary module-level names
+  // that can be exported and imported.  Were they macro-introduced, a property
+  // could only draw from datatypes declared in its own module.
+  fun gen_id(ctx :: Syntax, n :: Symbol) :: Syntax:
+    Syntax.make_id("_hol_gen_" ++ to_string(n), ctx)
+
+  fun shrink_id(ctx :: Syntax, n :: Symbol) :: Syntax:
+    Syntax.make_id("_hol_shrink_" ++ to_string(n), ctx)
+
+  fun param_gen_id(p :: Symbol) :: Syntax:
+    Syntax.make_id("_hol_g_" ++ to_string(p), id_ctx)
+
+  // A generator expression for a type: a function from a size to a value.
+  fun gen_expr(ctx :: Syntax, ty) :: Syntax:
+    match ty
+    | TyVar(a): param_gen_id(a)
+    | TyApp(n, args):
+        let g = gen_id(ctx, n)
+        let [sub, ...] = args.map(fun (t): gen_expr(ctx, t))
+        // Parenthesised: a `fun ...:` block cannot sit in application position
+        // or before a comma without one.
+        '(fun (_hol_s): $g(_hol_s, $sub, ...))'
+
+  fun shrink_expr(ctx :: Syntax, ty, at :: Syntax) :: Syntax:
+    match ty
+    | TyApp(n, _): shrink_id(ctx, n)
+    | ~else:
+        error(~who: #'check_property,
+              "cannot shrink a value of variable type",
+              error.val(~label: "in", to_string(at)))
+
+  fun emit_generator(ctx :: Syntax, name :: Syntax, params :: List,
+                     ctors :: List) :: Syntax:
+    let g = gen_id(ctx, Syntax.unwrap(name))
+    let [pg, ...] = params.map(fun (p :: Symbol): param_gen_id(p))
+    let base = ctors.filter(~keep: fun (c :: List): !(c[2] :~ Boolean))
+    let [b, ...] = base.map(fun (c :: List): ctor_builder(ctx, c))
+    let [a, ...] = ctors.map(fun (c :: List): ctor_builder(ctx, c))
+    'fun $g(_hol_sz, $pg, ...):
+       _hol_qc.pick(_hol_sz, [$b, ...], [$a, ...])'
+
+  // `[ctor_id, [field_type, ...], recursive?]`
+  fun ctor_builder(ctx :: Syntax, c :: List) :: Syntax:
+    let cname = c[0] :~ Syntax
+    let ftys :~ List = c[1]
+    let [arg, ...] = ftys.map(fun (t): '$(gen_expr(ctx, t))(_hol_sz - 1)')
+    'fun (): $cname($arg, ...)'
+
+  fun emit_shrinker(ctx :: Syntax, name :: Syntax, ctors :: List) :: Syntax:
+    let sh = shrink_id(ctx, Syntax.unwrap(name))
+    let [clause, ...] = ctors.map(fun (c :: List): shrink_clause(name, c))
+    'fun $sh(_hol_v):
+       match _hol_v
+       | $clause
+       | ...'
+
+  // The classic shrink for an algebraic value: its recursive subterms.
+  fun shrink_clause(tname :: Syntax, c :: List) :: Syntax:
+    let cname = c[0] :~ Syntax
+    let ftys :~ List = c[1]
+    let n = ftys.length()
+    let vs = for List (i in List.iota(n)):
+               Syntax.make_id("_hol_f" ++ to_string(i), id_ctx)
+    let [v, ...] = vs
+    let keep = for values(acc :~ List = []) (t in ftys, vv in vs):
+                 (if same_type_name(t, tname) | acc ++ [vv] | acc)
+    let [k, ...] = keep
+    '$cname($v, ...): [$k, ...]'
+
+  fun same_type_name(ty, tname :: Syntax) :: Boolean:
+    match ty
+    | TyApp(n, _): n == Syntax.unwrap(tname)
+    | ~else: #false
+
+  // -- check_property --------------------------------------------------------
+
+  fun emit_property(d :: expand.Decl) :: Syntax:
+    let [name, samples, binders, lhs, rhs, size] = d.parts
+    let bs :~ List = binders
+    let [v, ...] = bs.map(fun (b :: List): b[0] :~ Syntax)
+    let ctx = head_term(d.form)
+    let [g, ...] = bs.map(fun (b :: List): gen_expr(ctx, b[1]))
+    let [sh, ...] = bs.map(fun (b :: List): shrink_expr(ctx, b[1], d.form))
+    let prop = 'fun ($v, ...): ($lhs) == ($rhs)'
+    let count = Syntax.make(samples, id_ctx)
+    let sz = Syntax.make(size, id_ctx)
+    'def $name:
+       _hol_qc.run(Syntax.unwrap('$name'),
+                   ~samples: $count,
+                   ~size: $sz,
+                   ~gens: [$g, ...],
+                   ~shrinks: [$sh, ...],
+                   ~prop: $prop)'
+
+  // -- functions -------------------------------------------------------------
+
+  // The executable meaning: the surface code with its annotations removed.
+  //
+  // Not a second translation that could drift from the logical one.  The
+  // surface *is* Rhombus; the only difference is the types.  What makes
+  // Rhombus's first-match `match` agree with the unordered clausal equations is
+  // the exhaustiveness and non-overlap `recdef.rhm` checks before installing
+  // anything.
+  fun emit_function(name :: Syntax, params :: List, body :: Syntax) :: Syntax:
+    let [p, ...] = params
+    'fun $name($p, ...):
+       $body'
+
+  // -- rule control ----------------------------------------------------------
+
+  fun rule_step(d :: expand.Decl, n :: Int, cur :: Syntax, nxt :: Syntax,
+                on :: Boolean) :: values(List.of(Syntax), Int):
+    let [names] = d.parts
+    let ns :~ List = names
+    let [nm, ...] = ns
+    let flag = (if on | '#true' | '#false')
+    values(['meta def $nxt
+               = _hol_driver.set_rules($cur, $flag,
+                                       [Syntax.unwrap('$nm'), ...])'],
+           n + 1)
+
+  // -- diagnostics -----------------------------------------------------------
+
+  // `raise-syntax-error` reports the location of the syntax object it is
+  // given, and a *group* built by a template carries the template's location,
+  // not the user's.  The head term still carries the user's.
+  fun head_term(form :: Syntax) :: Syntax:
+    match form
+    | '$head $_ ...': head
+    | ~else: form
+
+  // -- one declaration -------------------------------------------------------
+
+  fun emit_one(d :: expand.Decl, n :: Int) :: values(List.of(Syntax), Int):
+    let cur = st(n)
+    let nxt = st(n + 1)
+    match d.kind
+    | #'other: values([d.form], n)
+    | #'type:
+        let [name, ctors, params, gen] = d.parts
+        let at = head_term(d.form)
+        let form = d.form
+        values([emit_type(name, ctors :~ List),
+                emit_generator(at, name, params :~ List, gen :~ List),
+                emit_shrinker(at, name, gen :~ List),
+                // Exported so that a property in an importing module can draw
+                // from this datatype.
+                'export:
+                   $(gen_id(at, Syntax.unwrap(name)))
+                   $(shrink_id(at, Syntax.unwrap(name)))',
+                'meta def $nxt = _hol_driver.add_type($cur, '$form', '$at')'],
+               n + 1)
+    | #'function:
+        let [name, params, body] = d.parts
+        let at = head_term(d.form)
+        let form = d.form
+        values([emit_function(name, params :~ List, body),
+                'meta def $nxt = _hol_driver.add_function($cur, '$form', '$at')'],
+               n + 1)
+    | #'theorem:
+        // A theorem emits no runtime code: it is a claim about the logic, and
+        // the proof runs at phase 1 while the module is compiled.
+        //
+        // The `proof:` clause is optional, and the two cases need separate
+        // templates: a nested syntax literal can only be written inside one,
+        // not built up as a value beforehand.
+        let [name, attrs, stmt, tactic] = d.parts
+        let at = head_term(d.form)
+        let as_ :~ List = attrs
+        let [a, ...] = as_
+        match tactic
+        | #false:
+            values(['meta def $nxt
+                       = _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
+                                                 [Syntax.unwrap('$a'), ...],
+                                                 '$stmt', #false, '$at')'],
+                   n + 1)
+        | tac:
+            values(['meta def $nxt
+                       = _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
+                                                 [Syntax.unwrap('$a'), ...],
+                                                 '$stmt', '$tac', '$at')'],
+                   n + 1)
+    | #'check_property:
+        // No logical step: a property is checked by running the emitted code,
+        // and its value is the outcome, so a test can assert on it.
+        values([emit_property(d)], n)
+    | #'use_theory:
+        // One line brings in both halves: the ordinary Rhombus import, so the
+        // functions can be called, and the manifest, so the logic can be
+        // replayed.  Interposing on `import` itself would mean reproducing its
+        // whole grammar, and getting that wrong would break ordinary imports.
+        let [path] = d.parts
+        let at = head_term(d.form)
+        let alias = Syntax.make_id("_hol_theory" ++ to_string(n), id_ctx)
+        values(['import: $path open',
+                'import: meta: $path!hol_manifest as $alias',
+                'meta def $nxt
+                   = _hol_driver.replay($cur, $(alias).hol_decls, '$at')'],
+               n + 1)
+    | #'disable_rules: rule_step(d, n, cur, nxt, #false)
+    | #'enable_rules: rule_step(d, n, cur, nxt, #true)
+    | #'declare:
+        let [name] = d.parts
+        values(['meta def $nxt = _hol_driver.note_decl($cur, Syntax.unwrap('$name'))'],
+               n + 1)
+    | #'expect:
+        let [names] = d.parts
+        let ns :~ List = names
+        let [nm, ...] = ns
+        let at = head_term(d.form)
+        values(['meta def $nxt
+                   = _hol_driver.expect_declared($cur,
+                                                 [Syntax.unwrap('$nm'), ...],
+                                                 ~at: '$at')'],
+               n + 1)
+
+  // -- the whole body --------------------------------------------------------
+
+  fun emit_all(decls :: List.of(expand.Decl)) :: List.of(Syntax):
+    let (out, _) = for values(acc :~ List = [], n = 0) (d in decls):
+                     let (forms, n2) = emit_one(d, n)
+                     values(acc ++ forms, n2)
+    out ++ [emit_manifest(decls)]
+
+  // Every `#lang rhombus/hol` module publishes a manifest, even an empty one,
+  // so that an importer can reference it unconditionally.
+  //
+  // The submodule is plain `rhombus`: were it to inherit `rhombus/hol`, this
+  // very `#%module_block` would process its body.
+  fun emit_manifest(decls :: List.of(expand.Decl)) :: Syntax:
+    let items = for values(acc :~ List = []) (d in decls):
+                  match manifest_item(d)
+                  | #false: acc
+                  | i: acc ++ [i]
+    let [item, ...] = items
+    'module hol_manifest ~lang rhombus:
+       export: hol_decls
+       def hol_decls = [$item, ...]'
+
+  // What a module publishes: its declarations in order, with theorems reduced
+  // to their statements.
+  //
+  // Types and functions are *replayed* by the importer -- re-running
+  // `datatype_axioms` and `install_function` needs no trust, since neither
+  // searches for a proof.  Only theorems cross on trust, through the kernel's
+  // `import_theorem`.
+  //
+  // The kind is a string rather than a symbol because `#'type` cannot be
+  // written inside a syntax template: its quote would close the template.
+  fun manifest_item(d :: expand.Decl) :: maybe(Syntax):
+    let form = d.form
+    match d.kind
+    | #'type: '["type", '$form']'
+    | #'function: '["function", '$form']'
+    | #'theorem:
+        let [name, attrs, stmt, _] = d.parts
+        let as_ :~ List = attrs
+        let [a, ...] = as_
+        '["theorem", '$name', '$stmt', ['$a', ...]]'
+    | ~else: #false
+
 decl.macro 'module_block: $form; ...':
-  // M0: pass-through.  The `meta:` import above is deliberate -- it proves the
-  // language layer can pull the (phase-0-written) kernel in at phase 1.
-  let _ = kernel.hol_version
+  let [out, ...] = emit_all(expand.plan_body([form, ...]))
   '#%module_block:
-     $form
+     import: rhombus/hol/private/qc as _hol_qc
+     import: meta: rhombus/hol/private/driver as _hol_driver
+     meta def $(st(0)) = _hol_driver.initial_state()
+     $out
      ...'

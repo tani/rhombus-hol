@@ -1,0 +1,78 @@
+#lang rhombus/static
+
+// R4: `check_property`.
+//
+// Checking runs at *runtime*, in the emitted code, not at compile time.  The
+// property has to be evaluated by the executable definitions `type` and `fun`
+// produced, and those do not exist until the module runs -- checking it at
+// compile time would mean a second interpreter for the same definitions, which
+// is exactly the drift the one-parser rule exists to prevent.
+//
+// A `check_property` declaration is a definition whose value is the outcome, so
+// a test can assert on it instead of reading printed output.
+
+import:
+  rhombus/hol/private/qc open
+  "fixtures/qc_local.rhm" as q
+
+// -- a true property passes --------------------------------------------------
+
+check q.plus_comm_holds ~matches QCPassed(150)
+check:
+  match q.plus_comm_holds
+  | QCPassed(n): n
+  | ~else: -1
+  ~is 150
+
+// -- a false one is caught, with a reproducible seed -------------------------
+
+check q.plus_wrong ~matches QCFailed(_, _, _)
+check q.big_wrong ~matches QCFailed(_, _, _)
+check:
+  match q.plus_wrong
+  | QCFailed(_, seed, _): seed
+  | ~else: -1
+  ~is 20240904
+
+// -- shrinking gets to a minimal counterexample ------------------------------
+//
+// `length(xs) === zero()` is false for any non-empty list, so the smallest
+// counterexample is a one-element list.  The generator starts larger than
+// that, so the shrinker has work to do.
+
+check:
+  match q.big_wrong
+  | QCFailed(inputs, _, _): inputs.length()
+  | ~else: -1
+  ~is 1
+check:
+  // one element, and its tail is empty -- nothing smaller falsifies it
+  match q.big_wrong
+  | QCFailed([q.Cons(_, q.Nil())], _, _): "minimal"
+  | QCFailed(other, _, _): "not minimal: " ++ to_string(other)
+  | ~else: "passed"
+  ~is "minimal"
+check:
+  match q.big_wrong
+  | QCFailed(_, _, shrinks): shrinks > 0
+  | ~else: #false
+  ~is #true
+
+// -- the report is legible ---------------------------------------------------
+
+check report(#'plus_comm_holds, q.plus_comm_holds) ~is "plus_comm_holds: passed 150 samples"
+check:
+  report(#'plus_wrong, q.plus_wrong).contains("counterexample found")
+  ~is #true
+check:
+  report(#'plus_wrong, q.plus_wrong).contains("seed: 20240904")
+  ~is #true
+
+// -- the runtime pieces on their own -----------------------------------------
+
+check:
+  // `pick` uses only the non-recursive constructors at size zero, which is
+  // what makes generation terminate -- the positivity check guarantees there
+  // is at least one.
+  pick(0, [fun (): "base"], [fun (): "base", fun (): "recursive"])
+  ~is "base"

@@ -1,0 +1,94 @@
+#lang rhombus/static
+
+// Propositional cleanup rules.
+//
+// The simplifier normalises a goal by rewriting, and `refl_conv` turns
+// `a === a` into `true`.  That is not enough on its own: a goal about a
+// constructor becomes `x === x and y === y` via injectivity, which reduces to
+// `true and true` -- and without a rule for that, a finished proof looks
+// stuck.
+//
+// These are derived, not postulated.  Each one is a short two-directional
+// argument closed with `IMP_ANTISYM_RULE`, so nothing here widens the trusted
+// base.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
+  "printer.rhm" open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+
+export:
+  tautologies
+
+def p :: FVar = mk_var(#'p, bool)
+
+// `|- forall p. lhs <=> rhs`, from a proof each way.
+fun iff_rule(thy :: Theory, lhs :: Term, rhs :: Term,
+             fwd :: Thm, bwd :: Thm) :: Thm:
+  GEN(thy, p, IMP_ANTISYM_RULE(thy, DISCH(thy, lhs, fwd), DISCH(thy, rhs, bwd)))
+
+fun tautologies(thy :: Theory) :: List.of(Thm):
+  let tt = tm_true
+  let ff = tm_false
+  let truth = TRUTH(thy)
+
+  // conjunction
+  let and_tp = iff_rule(thy, mk_conj(tt, p), p,
+                        CONJUNCT2(thy, ASSUME(thy, mk_conj(tt, p))),
+                        CONJ(thy, truth, ASSUME(thy, p)))
+  let and_pt = iff_rule(thy, mk_conj(p, tt), p,
+                        CONJUNCT1(thy, ASSUME(thy, mk_conj(p, tt))),
+                        CONJ(thy, ASSUME(thy, p), truth))
+  let and_fp = iff_rule(thy, mk_conj(ff, p), ff,
+                        CONJUNCT1(thy, ASSUME(thy, mk_conj(ff, p))),
+                        CONTR(thy, mk_conj(ff, p), ASSUME(thy, ff)))
+  let and_pf = iff_rule(thy, mk_conj(p, ff), ff,
+                        CONJUNCT2(thy, ASSUME(thy, mk_conj(p, ff))),
+                        CONTR(thy, mk_conj(p, ff), ASSUME(thy, ff)))
+
+  // disjunction
+  let or_tp = iff_rule(thy, mk_disj(tt, p), tt,
+                       truth,
+                       DISJ1(thy, truth, p))
+  let or_pt = iff_rule(thy, mk_disj(p, tt), tt,
+                       truth,
+                       DISJ2(thy, p, truth))
+  let or_fp = iff_rule(thy, mk_disj(ff, p), p,
+                       DISJ_CASES(thy, ASSUME(thy, mk_disj(ff, p)),
+                                  CONTR(thy, p, ASSUME(thy, ff)),
+                                  ASSUME(thy, p)),
+                       DISJ2(thy, ff, ASSUME(thy, p)))
+  let or_pf = iff_rule(thy, mk_disj(p, ff), p,
+                       DISJ_CASES(thy, ASSUME(thy, mk_disj(p, ff)),
+                                  ASSUME(thy, p),
+                                  CONTR(thy, p, ASSUME(thy, ff))),
+                       DISJ1(thy, ASSUME(thy, p), ff))
+
+  // negation
+  let not_t = iff_rule(thy, mk_neg(tt), ff,
+                       MP(thy, NOT_ELIM(thy, ASSUME(thy, mk_neg(tt))), truth),
+                       CONTR(thy, mk_neg(tt), ASSUME(thy, ff)))
+  let not_f = iff_rule(thy, mk_neg(ff), tt,
+                       truth,
+                       NOT_INTRO(thy, DISCH(thy, ff, ASSUME(thy, ff))))
+
+  // implication
+  let imp_tp = iff_rule(thy, mk_imp(tt, p), p,
+                        MP(thy, ASSUME(thy, mk_imp(tt, p)), truth),
+                        DISCH(thy, tt, ASSUME(thy, p)))
+  let imp_pt = iff_rule(thy, mk_imp(p, tt), tt,
+                        truth,
+                        DISCH(thy, p, truth))
+  let imp_fp = iff_rule(thy, mk_imp(ff, p), tt,
+                        truth,
+                        DISCH(thy, ff, CONTR(thy, p, ASSUME(thy, ff))))
+
+  [and_tp, and_pt, and_fp, and_pf,
+   or_tp, or_pt, or_fp, or_pf,
+   not_t, not_f,
+   imp_tp, imp_pt, imp_fp]

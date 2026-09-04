@@ -1,0 +1,610 @@
+#lang rhombus/static
+
+// Reading the surface syntax into the logical world.
+//
+// This module only *analyses*: syntax in, kernel-level data out.  It builds no
+// templates, because a syntax template created at phase 0 loses its bindings
+// on the way out of a phase-1 macro -- `'def x = 1'` written here and returned
+// from a macro reports `def: unbound identifier`.  Emission therefore lives in
+// `module_block.rhm`; see the note at the top of `expand.rhm`.
+//
+// Everything here is called twice: once at expansion time, so that the runtime
+// code can be generated, and once at phase 1, so that the logical declaration
+// can be made.  Both go through the same functions on the same syntax, so the
+// two views of a declaration cannot drift apart.
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "kernel.rhm" open
+  "datatype.rhm" open
+  "recdef.rhm" open
+
+export:
+  parse_type
+  parse_type_decl
+  type_decl_shape
+  decl_name
+  syntax_error
+
+// `~a` reads as the keyword `#:a`; the logical side wants the plain symbol.
+fun keyword_symbol(k :: Syntax) :: Symbol:
+  Symbol.from_string(to_string(Syntax.unwrap(k)))
+
+fun syntax_error(who :: Symbol, message :: String, at :: Syntax):
+  error(~who: who, message, error.val(~label: "in", to_string(at)))
+
+// -- types -------------------------------------------------------------------
+//
+// A type variable is written `~a`, which shrubbery reads as the keyword
+// `#:a`.  The specification writes `'a`, but `'` opens a syntax literal, so
+// `type List('a)` cannot be lexed at all.
+
+fun parse_type(stx :: Syntax, params :: List.of(Symbol)) :: HType:
+  match stx
+  | '$(k :: Keyword)':
+      let n = keyword_symbol(k)
+      unless params.contains(n)
+      | syntax_error(#'type, "unbound type variable", stx)
+      TyVar(n)
+  | '$(id :: Identifier)($arg, ...)':
+      TyApp(Syntax.unwrap(id),
+            [parse_type(arg, params), ...])
+  | '$(id :: Identifier)':
+      TyApp(Syntax.unwrap(id), [])
+  | ~else:
+      syntax_error(#'type, "not a type", stx)
+
+// -- datatype declarations ---------------------------------------------------
+
+// The name a declaration introduces, for diagnostics and ordering.
+fun decl_name(stx :: Syntax) :: Symbol:
+  match stx
+  | 'type $(id :: Identifier) $_ ...': Syntax.unwrap(id)
+  | 'function $(id :: Identifier) $_ ...': Syntax.unwrap(id)
+  | ~else: #'unknown
+
+fun parse_type_decl(stx :: Syntax) :: DatatypeSpec:
+  match stx
+  | 'type $(name :: Identifier)($param, ...)
+     | $ctor
+     | ...':
+      let params = [parse_param(param), ...]
+      DatatypeSpec(Syntax.unwrap(name), params,
+                   [parse_ctor(ctor, params), ...])
+  | 'type $(name :: Identifier)
+     | $ctor
+     | ...':
+      DatatypeSpec(Syntax.unwrap(name), [], [parse_ctor(ctor, []), ...])
+  | ~else:
+      syntax_error(#'type, "malformed datatype declaration", stx)
+
+fun parse_param(stx :: Syntax) :: Symbol:
+  match stx
+  | '$(k :: Keyword)': keyword_symbol(k)
+  | ~else:
+      syntax_error(#'type,
+                   "a type parameter is written `~a`, not a plain name", stx)
+
+fun parse_ctor(stx :: Syntax, params :: List.of(Symbol)) :: Ctor:
+  match stx
+  | '$(name :: Identifier)($field, ...)':
+      Ctor(Syntax.unwrap(name), [parse_field(field, params), ...])
+  | '$(name :: Identifier)':
+      Ctor(Syntax.unwrap(name), [])
+  | ~else:
+      syntax_error(#'type, "malformed constructor", stx)
+
+fun parse_field(stx :: Syntax, params :: List.of(Symbol)) :: Field:
+  match stx
+  | '$(name :: Identifier) :: $ty ...':
+      Field(Syntax.unwrap(name), parse_type('$ty ...', params))
+  | ~else:
+      syntax_error(#'type,
+                   "a constructor field needs a name and a type", stx)
+
+// The identifiers a datatype declaration introduces, as syntax rather than as
+// symbols: `[name, [[ctor, [field, ...]], ...]]`.
+//
+// Emission needs the user's own identifiers, not reconstructed ones.  A name
+// built with `Syntax.make_id` would carry the macro's scopes, and then a
+// `Cons(...)` the user writes would not refer to the class we generated.
+fun type_decl_shape(stx :: Syntax) :: List:
+  fun ctor_shape(c :: Syntax) :: List:
+    match c
+    | '$(name :: Identifier)($field, ...)': [name, [field_name(field), ...]]
+    | '$(name :: Identifier)': [name, []]
+    | ~else: syntax_error(#'type, "malformed constructor", c)
+  fun field_name(f :: Syntax) :: Syntax:
+    match f
+    | '$(name :: Identifier) :: $_ ...': name
+    | ~else: syntax_error(#'type, "malformed constructor field", f)
+  match stx
+  | 'type $(name :: Identifier)($_, ...)
+     | $ctor
+     | ...':
+      [name, [ctor_shape(ctor), ...]]
+  | 'type $(name :: Identifier)
+     | $ctor
+     | ...':
+      [name, [ctor_shape(ctor), ...]]
+  | ~else: syntax_error(#'type, "malformed datatype declaration", stx)
+
+// ============================================================================
+// Function declarations
+// ============================================================================
+//
+// The admissible shape is exactly what `recdef.rhm` can install:
+//
+//   function f(p1 :: T1, ..., pn :: Tn) :: T:
+//     match pi
+//     | C(v, ...): <expr>
+//     | ...
+//
+// possibly with nested `match`es on further arguments, or a single-clause body
+// with no `match` at all.
+//
+// The keyword is `function`, not `fun`.  Intercepting `fun` would mean deciding
+// from the shape alone whether an ordinary Rhombus definition was meant to be a
+// logical one -- and getting that wrong silently strips its annotations.  With
+// a separate keyword the intent is explicit, so anything outside the grammar is
+// an error naming the offending expression rather than a silent pass-through.
+
+export:
+  function_decl_shape
+  parse_function_decl
+
+// `[name, [param, ...], body]`.  Raises, with the offending syntax, when the
+// declaration is not one this version can admit.
+fun function_decl_shape(stx :: Syntax) :: List:
+  match stx
+  | 'function $(name :: Identifier)($param, ...) $rest ...':
+      let (rty, body) = split_signature('$rest ...', stx)
+      [name, [param_name(param), ...], body]
+  | ~else:
+      syntax_error(#'function,
+                   "expected `function name(param :: Type, ...) :: Type: body`",
+                   stx)
+
+fun split_signature(rest :: Syntax, at :: Syntax) :: values(Syntax, Syntax):
+  match rest
+  | ':: $ty ...: $body; ...': values('$ty ...', '$body; ...')
+  | ~else:
+      syntax_error(#'function, "a function needs a result type", at)
+
+fun param_name(p :: Syntax) :: Syntax:
+  match p
+  | '$(n :: Identifier) :: $_ ...': n
+  | ~else:
+      syntax_error(#'function,
+                   "a parameter needs a name and a type", p)
+
+// -- the logical meaning -----------------------------------------------------
+
+// Signature pieces: `[name, [[param_id, HType], ...], HType]`.
+fun fun_signature(stx :: Syntax, params :: List.of(Symbol)) :: List:
+  match stx
+  | 'function $(name :: Identifier)($param, ...) :: $rty ...: $_; ...':
+      [Syntax.unwrap(name),
+       [param_binding(param, params), ...],
+       parse_type('$rty ...', params)]
+  | ~else: syntax_error(#'function, "malformed function signature", stx)
+
+fun param_binding(p :: Syntax, params :: List.of(Symbol)) :: List:
+  match p
+  | '$(n :: Identifier) :: $ty ...': [Syntax.unwrap(n), parse_type('$ty ...', params)]
+  | ~else: syntax_error(#'function, "a parameter needs a name and a type", p)
+
+// The type variables a declaration mentions, so that `~a` resolves.  A
+// function is implicitly polymorphic in every type variable it uses.
+//
+// Scanning the unwrapped datum rather than the syntax keeps this to one short
+// walk: `~a` is a keyword wherever it appears.
+fun collect_type_vars(stx :: Syntax) :: List.of(Symbol):
+  fun walk(d, acc :~ List) :~ List:
+    cond
+    | d is_a Keyword:
+        let n = Symbol.from_string(to_string(d))
+        (if acc.contains(n) | acc | acc ++ [n])
+    | d is_a List:
+        let items :~ List = d
+        for values(a :~ List = acc) (i in items): walk(i, a)
+    | ~else: acc
+  walk(Syntax.unwrap_all(stx), [])
+
+// -- expressions -------------------------------------------------------------
+
+// The instance of a constant's generic type at which it is being applied.
+fun const_instance(thy :: Theory, name :: Symbol,
+                   args :: List.of(Term), at :: Syntax) :: HType:
+  let gty = (match const_type(thy, name)
+             | #false: syntax_error(#'function, "unknown constant", at)
+             | t: t)
+  let res = TyVar(#'_result)
+  let want = for values(ty :~ HType = res) (a in args.reverse()):
+               mk_fun(type_of(a), ty)
+  match type_unify(gty, want, {})
+  | #false:
+      syntax_error(#'function, "constant is applied at a type it does not have", at)
+  | sub: type_subst(sub, gty)
+
+fun elab_expr(thy :: Theory, self_name :: Symbol, self :: Term,
+              env :: Map.of(Symbol, Term), e :: Syntax) :: Term:
+  match e
+  | '$(id :: Identifier)($arg, ...)':
+      let n = Syntax.unwrap(id)
+      let as_ = [elab_expr(thy, self_name, self, env, arg), ...]
+      cond
+      | n == self_name: list_mk_comb(self, as_)
+      | ~else: list_mk_comb(mk_const(n, const_instance(thy, n, as_, e)), as_)
+  | '$(id :: Identifier)':
+      let n = Syntax.unwrap(id)
+      match env.get(n, #false)
+      | #false:
+          cond
+          | n == self_name: self
+          | ~else: mk_const(n, const_instance(thy, n, [], e))
+      | v: v
+  | ~else:
+      syntax_error(#'function,
+                   "this version admits only variables and named applications "
+                     ++ "in a function body",
+                   e)
+
+// -- clauses -----------------------------------------------------------------
+
+// `C(v, ...)` as a pattern term, plus the variables it binds, at the type the
+// scrutinee actually has.
+fun ctor_pattern(thy :: Theory, cname :: Symbol, vids :: List.of(Syntax),
+                 scrut_ty :: HType, at :: Syntax) :: values(Term, List.of(FVar)):
+  let gty = (match const_type(thy, cname)
+             | #false: syntax_error(#'function, "unknown constructor", at)
+             | t: t)
+  let (doms, res) = peel_fun(gty, vids.length())
+  let tyin = (match type_match(res, scrut_ty, {})
+              | #false:
+                  syntax_error(#'function,
+                               "constructor does not build the matched type", at)
+              | m: m)
+  let vars = for List (v in vids, d in doms):
+               mk_var(Syntax.unwrap(v), type_subst(tyin, d))
+  values(list_mk_comb(mk_const(cname, type_subst(tyin, gty)),
+                      vars.map(fun (v :: FVar): v :~ Term)),
+         vars)
+
+fun peel_fun(ty :: HType, n :: Int) :: values(List.of(HType), HType):
+  recur loop (ty :~ HType = ty, k = n, acc :~ List = []):
+    cond
+    | k == 0: values(acc, ty)
+    | ~else:
+        let (d, r) = dest_fun(ty)
+        loop(r, k - 1, acc ++ [d])
+
+fun parse_function_decl(thy :: Theory, stx :: Syntax) :: FunSpec:
+  let tyvars = collect_type_vars(stx)
+  let [name0, bindings0, rty0] = fun_signature(stx, tyvars)
+  let name :~ Symbol = name0
+  let bindings :~ List = bindings0
+  let rty :~ HType = rty0
+  let arg_tys :~ List = bindings.map(fun (b :: List): b[1] :~ HType)
+  let fty = for values(t :~ HType = rty) (a in arg_tys.reverse()): mk_fun(a, t)
+  let self = mk_const(name, fty)
+  let pvars = for List (b in bindings): mk_var((b :~ List)[0], (b :~ List)[1])
+  let env0 = for values(m :~ Map = {}) (v in pvars): m ++ {(v :~ FVar).name: v}
+  let body = fun_body(stx)
+  match body
+  | 'match $(sv :: Identifier)
+     | $c
+     | ...':
+      let sname = Syntax.unwrap(sv)
+      let col = index_of_param(pvars, sname, stx)
+      let clauses = [parse_clause(thy, name, self, pvars, col, env0, c), ...]
+      FunSpec(name, arg_tys, rty, clauses)
+  | ~else:
+      let rhs = elab_expr(thy, name, self, env0, body)
+      FunSpec(name, arg_tys, rty,
+              [DefClause(pvars.map(fun (v :: FVar): v :~ Term), rhs)])
+
+fun fun_body(stx :: Syntax) :: Syntax:
+  match stx
+  | 'function $_ ... : $b; ...': '$b; ...'
+  | ~else: syntax_error(#'function, "malformed function body", stx)
+
+fun index_of_param(pvars :: List.of(FVar), n :: Symbol, at :: Syntax) :: Int:
+  recur loop (i = 0):
+    cond
+    | i >= pvars.length():
+        syntax_error(#'function, "the matched name is not a parameter", at)
+    | (pvars[i] :~ FVar).name == n: i
+    | ~else: loop(i + 1)
+
+fun parse_clause(thy :: Theory, self_name :: Symbol, self :: Term,
+                 pvars :: List.of(FVar), col :: Int,
+                 env0 :: Map.of(Symbol, Term), c :: Syntax) :: DefClause:
+  let (cname, vids, body) = clause_parts(c)
+  let scrut_ty = (pvars[col] :~ FVar).ty
+  let (pat, bound) = ctor_pattern(thy, cname, vids, scrut_ty, c)
+  let env = for values(m :~ Map = env0) (v in bound):
+              m ++ {(v :~ FVar).name: v :~ Term}
+  let pats = for List (v in pvars, i in List.iota(pvars.length())):
+               (if i == col | pat | (v :~ Term))
+  DefClause(pats, elab_expr(thy, self_name, self, env, body))
+
+fun clause_parts(c :: Syntax) :: values(Symbol, List.of(Syntax), Syntax):
+  match c
+  | '$(cname :: Identifier)($v, ...): $body; ...':
+      values(Syntax.unwrap(cname), [v, ...], '$body; ...')
+  | '$(cname :: Identifier): $body; ...':
+      values(Syntax.unwrap(cname), [], '$body; ...')
+  | ~else: syntax_error(#'function, "malformed match clause", c)
+
+// ============================================================================
+// Propositions
+// ============================================================================
+//
+// A hand-written precedence parser rather than a `space.enforest` space.
+// Shrubbery does not know precedence -- it hands back a flat sequence of terms
+// in a group -- so something has to climb precedences either way, and the
+// proposition grammar is fixed and small.  What `space.enforest` would buy is
+// user extensibility, which v0.1 does not need.
+//
+// The levels must match `printer.rhm`'s, or a residue printed for the user
+// would not read back as the same proposition.
+
+import:
+  "bool.rhm" open
+
+export:
+  parse_prop
+  parse_theorem_statement
+  parse_tactic
+  collect_type_vars
+
+def prec_iff = 20
+def prec_imp = 30
+def prec_or = 40
+def prec_and = 50
+def prec_not = 60
+def prec_eq = 70
+
+// An infix connective: `[precedence, right_associative, build]`.
+//
+// Matched by literal pattern rather than by unwrapping: `Syntax.unwrap` on an
+// operator term gives the tagged datum, not the operator's name.
+fun infix_info(t :: Syntax) :: maybe(List):
+  match t
+  | '===': [prec_eq, #false, mk_eq]
+  | '<=>': [prec_iff, #false, mk_eq]
+  | '==>': [prec_imp, #true, mk_imp]
+  | 'and': [prec_and, #false, mk_conj]
+  | 'or': [prec_or, #false, mk_disj]
+  | ~else: #false
+
+class PEnv(thy :: Theory, tyvars :: List.of(Symbol), vars :: Map.of(Symbol, Term))
+
+fun parse_prop(thy :: Theory, tyvars :: List.of(Symbol),
+               vars :: Map.of(Symbol, Term), stx :: Syntax) :: Term:
+  let ts = group_terms(stx)
+  let (t, rest) = parse_at(PEnv(thy, tyvars, vars), ts, 0)
+  unless rest.length() == 0
+  | syntax_error(#'theorem, "unexpected text after a proposition", stx)
+  t
+
+fun group_terms(stx :: Syntax) :: List.of(Syntax):
+  match stx
+  | '$t ...': [t, ...]
+  | ~else: syntax_error(#'theorem, "not a proposition", stx)
+
+fun parse_at(env :: PEnv, ts :: List.of(Syntax), min_prec :: Int)
+     :: values(Term, List.of(Syntax)):
+  let (left, rest) = parse_prefix(env, ts)
+  climb(env, left, rest, min_prec)
+
+fun climb(env :: PEnv, left :: Term, ts :: List.of(Syntax), min_prec :: Int)
+     :: values(Term, List.of(Syntax)):
+  match ts
+  | []: values(left, ts)
+  | List.cons(op, rest):
+      match infix_info(op)
+      | #false: values(left, ts)
+      | [prec, right_assoc, build]:
+          let prec :~ Int = prec
+          cond
+          | prec < min_prec: values(left, ts)
+          | ~else:
+              let next_min = (if right_assoc | prec | prec + 1)
+              let (right, rest2) = parse_at(env, rest, next_min)
+              climb(env, build(left, right), rest2, min_prec)
+
+fun parse_prefix(env :: PEnv, ts :: List.of(Syntax))
+     :: values(Term, List.of(Syntax)):
+  match ts
+  | []: error(~who: #'theorem, "proposition ended early")
+  | List.cons(t, rest):
+      match t
+      | '$(id :: Identifier)':
+          match Syntax.unwrap(id)
+          | #'not:
+              let (inner, rest2) = parse_at(env, rest, prec_not + 1)
+              values(mk_neg(inner), rest2)
+          | #'forall: parse_quantifier(env, #'forall, ts)
+          | #'exists: parse_quantifier(env, #'exists, ts)
+          | ~else: parse_application(env, t, rest)
+      | ~else: parse_application(env, t, rest)
+
+// `forall (x :: T, ...): body`.  The body extends as far right as it can, so a
+// quantifier always swallows the rest of the sequence -- which is why this
+// matches the reassembled group rather than picking terms off one at a time.
+fun parse_quantifier(env :: PEnv, which :: Symbol, ts :: List.of(Syntax))
+     :: values(Term, List.of(Syntax)):
+  let [t, ...] = ts
+  let whole = '$t ...'
+  let (binders, body_stx):
+    match whole
+    | 'forall ($b, ...): $g; ...': values([b, ...], '$g; ...')
+    | 'exists ($b, ...): $g; ...': values([b, ...], '$g; ...')
+    | 'forall ($b, ...) $more ...': values([b, ...], '$more ...')
+    | 'exists ($b, ...) $more ...': values([b, ...], '$more ...')
+    | ~else:
+        syntax_error(#'theorem,
+                     "a quantifier needs a parenthesised binder list and a body",
+                     whole)
+  let bs :~ List = binders
+  let vs = for List (b in bs): binder_var(env, b)
+  let vars2 = for values(m :~ Map = env.vars) (v in vs):
+                m ++ {(v :~ FVar).name: v :~ Term}
+  let body = parse_prop(env.thy, env.tyvars, vars2, body_stx)
+  let build = (if which == #'forall | mk_forall | mk_exists)
+  values(for values(acc :~ Term = body) (v in vs.reverse()): build(v, acc), [])
+
+fun binder_var(env :: PEnv, b :: Syntax) :: FVar:
+  match b
+  | '$(n :: Identifier) :: $ty ...':
+      mk_var(Syntax.unwrap(n), parse_type('$ty ...', env.tyvars))
+  | ~else: syntax_error(#'theorem, "a binder needs a name and a type", b)
+
+fun parse_application(env :: PEnv, t :: Syntax, rest :: List.of(Syntax))
+     :: values(Term, List.of(Syntax)):
+  match t
+  | '($g)':
+      values(parse_prop(env.thy, env.tyvars, env.vars, g), rest)
+  | '$(id :: Identifier)':
+      let n = Syntax.unwrap(id)
+      match rest
+      | List.cons(args, more) when is_parens(args):
+          let as_ = for List (a in paren_groups(args)):
+                      parse_prop(env.thy, env.tyvars, env.vars, a)
+          values(apply_named(env, n, as_, t), more)
+      | ~else: values(lookup_atom(env, n, t), rest)
+  | ~else: syntax_error(#'theorem, "not a proposition", t)
+
+fun is_parens(t :: Syntax) :: Boolean:
+  match t
+  | '($_, ...)': #true
+  | ~else: #false
+
+fun paren_groups(t :: Syntax) :: List.of(Syntax):
+  match t
+  | '($g, ...)': [g, ...]
+  | ~else: []
+
+fun lookup_atom(env :: PEnv, n :: Symbol, at :: Syntax) :: Term:
+  match env.vars.get(n, #false)
+  | #false: mk_const(n, const_instance(env.thy, n, [], at))
+  | v: v
+
+fun apply_named(env :: PEnv, n :: Symbol, args :: List.of(Term),
+                at :: Syntax) :: Term:
+  match env.vars.get(n, #false)
+  | #false: list_mk_comb(mk_const(n, const_instance(env.thy, n, args, at)), args)
+  | v: list_mk_comb(v, args)
+
+// The statement, plus the names of its leading universal binders -- the prover
+// needs them for `~induct:` and for readable residues, because a locally
+// nameless term does not carry them.
+fun parse_theorem_statement(thy :: Theory, stx :: Syntax)
+     :: values(Term, List.of(Symbol)):
+  let tyvars = collect_type_vars(stx)
+  values(parse_prop(thy, tyvars, {}, stx), leading_binder_names(stx))
+
+fun leading_binder_names(stx :: Syntax) :: List.of(Symbol):
+  match stx
+  | 'forall ($b, ...): $g; ...':
+      let here = for List (bb in [b, ...]): binder_name(bb)
+      here ++ leading_binder_names('$g; ...')
+  | 'forall ($b, ...) $rest ...':
+      let here = for List (bb in [b, ...]): binder_name(bb)
+      here ++ leading_binder_names('$rest ...')
+  | ~else: []
+
+fun binder_name(b :: Syntax) :: Symbol:
+  match b
+  | '$(n :: Identifier) :: $_ ...': Syntax.unwrap(n)
+  | ~else: #'unknown
+
+// ============================================================================
+// Tactics
+// ============================================================================
+//
+// `auto`, `auto ~induct: x`, or `auto(~induct: x, ~using: [a, b])`.  The
+// parenthesised form exists because two `~kw:` blocks written in sequence
+// mis-nest: shrubbery reads `auto ~induct: xs ~using: [a]` as `~using:` inside
+// the `~induct:` block.
+//
+// Returns `[induct_name_or_false, [using_name, ...]]`.
+fun parse_tactic(stx :: maybe(Syntax)) :: List:
+  match stx
+  | #false: [#false, []]
+  | s :~ Syntax:
+      match s
+      | 'auto': [#false, []]
+      | 'auto ~induct: $(n :: Identifier)': [Syntax.unwrap(n), []]
+      | 'auto ($opt, ...)': tactic_options([opt, ...], s)
+      | 'auto: $g; ...': tactic_options(['$g; ...'], s)
+      | ~else:
+          syntax_error(#'proof,
+                       "this version understands `auto`, `auto ~induct: x`, "
+                         ++ "and `auto(~induct: x, ~using: [t, ...])`",
+                       s)
+
+fun tactic_options(opts :: List.of(Syntax), at :: Syntax) :: List:
+  for values(acc :~ List = [#false, []]) (o in opts):
+    match o
+    | '~induct: $(n :: Identifier)': [Syntax.unwrap(n), acc[1]]
+    | '~using: [$(u :: Identifier), ...]': [acc[0], (acc[1] :~ List) ++ [Syntax.unwrap(u), ...]]
+    | ~else: syntax_error(#'proof, "unknown proof option", o)
+
+// ============================================================================
+// check_property
+// ============================================================================
+//
+//   check_property name(~samples: 200):
+//     forall (xs :: List(Nat), ys :: List(Nat)):
+//       rev(app(xs, ys)) === app(rev(xs), rev(ys))
+//
+// The options are parenthesised for the same reason the proof options are: two
+// `~kw:` blocks written in sequence mis-nest.
+//
+// Returns `[name, samples, [[binder_id, HType], ...], lhs_syntax, rhs_syntax]`.
+// The two sides stay as syntax: they are evaluated by the *emitted* Rhombus
+// code, so they must reach it as source.
+
+export:
+  check_property_shape
+
+fun check_property_shape(stx :: Syntax) :: List:
+  let (name, opts, body):
+    match stx
+    | 'check_property $(n :: Identifier)($o, ...): $g; ...':
+        values(n, [o, ...], '$g; ...')
+    | 'check_property $(n :: Identifier): $g; ...':
+        values(n, [], '$g; ...')
+    | ~else:
+        syntax_error(#'check_property, "malformed property declaration", stx)
+  let [samples, size] = property_options(opts, stx)
+  match body
+  | 'forall ($b, ...): $lhs ... === $rhs ...':
+      [name, samples, [property_binder(b), ...], '$lhs ...', '$rhs ...', size]
+  | ~else:
+      syntax_error(#'check_property,
+                   "this version checks a universally quantified equation, "
+                     ++ "written `forall (x :: T, ...): lhs === rhs`",
+                   body)
+
+// `[samples, size]`.  `~size` bounds how big a generated value can get; the
+// generator halves it at each recursive field, so it is a depth, not a count.
+fun property_options(opts :: List.of(Syntax), at :: Syntax) :: List:
+  for values(acc :~ List = [100, 6]) (o in opts):
+    match o
+    | '~samples: $(n :: Int)': [Syntax.unwrap(n), acc[1]]
+    | '~size: $(n :: Int)': [acc[0], Syntax.unwrap(n)]
+    | ~else: syntax_error(#'check_property, "unknown option", o)
+
+// The type must be concrete: a generator cannot be built for a type variable.
+fun property_binder(b :: Syntax) :: List:
+  match b
+  | '$(n :: Identifier) :: $ty ...': [n, parse_type('$ty ...', [])]
+  | ~else:
+      syntax_error(#'check_property,
+                   "a property binder needs a name and a concrete type", b)

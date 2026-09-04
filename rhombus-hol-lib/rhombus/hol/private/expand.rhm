@@ -1,0 +1,138 @@
+#lang rhombus/static
+
+// Recognising the declaration forms in a `#lang rhombus/hol` module body.
+//
+// This module only *classifies*: it says which groups are declarations, what
+// their pieces are, and in what order they thread state.  Turning that into
+// syntax is `module_block.rhm`'s job, because a syntax template built here
+// would carry this module's phase-0 bindings and lose them on the way to the
+// user's module -- a literal `'def x = 1'` created at phase 0 and returned
+// from a phase-1 macro reports `def: unbound identifier`.
+//
+// Keeping recognition separate also keeps it testable as an ordinary phase-0
+// function, which matters: the tricky parts -- pairing a `theorem` with an
+// optional following `proof:`, and descending into `disable_rules` blocks --
+// live here.
+
+import:
+  "htype.rhm" open
+  "datatype.rhm" open
+  "elab.rhm" as elab
+
+export:
+  Decl
+  plan_body
+  declaration_heads
+
+// `kind` selects the template `module_block.rhm` will use; `parts` carries
+// the pieces it needs, as syntax taken from the user's own source.
+class Decl(kind :: Symbol,
+           form :: Syntax,
+           parts :: List)
+
+// The heads this language claims.  Anything else is passed through untouched,
+// so ordinary Rhombus definitions keep working.
+def declaration_heads :: List.of(Symbol) = [#'type, #'function, #'theorem, #'proof,
+                                            #'disable_rules, #'enable_rules,
+                                            #'use_theory, #'check_property,
+                                            #'declare, #'expect]
+
+fun head_of(form :: Syntax) :: maybe(Symbol):
+  match form
+  | '$(id :: Identifier) $_ ...':
+      let n = Syntax.unwrap(id)
+      (if declaration_heads.contains(n) | n | #false)
+  | ~else: #false
+
+// `theorem` and its `proof:` are two separate groups -- shrubbery ends the
+// group at the newline -- so the walk has to look ahead by one.  `proof:` is
+// optional: without it the proof is `auto`, which is what most of the
+// specification's theorems need now that the induction variable is chosen
+// automatically.
+fun plan_body(forms :: List.of(Syntax)) :: List.of(Decl):
+  recur loop (fs :~ List = forms, acc :~ List = []):
+    match fs
+    | []: acc
+    | List.cons(form, rest):
+        match theorem_parts(form)
+        | #false: loop(rest, acc ++ [plan_one(form)])
+        | [name, attrs, stmt]:
+            let (tactic, rest2):
+              match rest
+              | List.cons(nxt, more) when proof_tactic(nxt) != #false:
+                  values(proof_tactic(nxt), more)
+              | ~else: values(#false, rest)
+            loop(rest2, acc ++ [Decl(#'theorem, form, [name, attrs, stmt, tactic])])
+
+// `theorem ~rewrite_rule name: <prop>`, or `#false` if this is not one.
+fun theorem_parts(form :: Syntax) :: maybe(List):
+  match form
+  | 'theorem $(attr :: Keyword) ... $(name :: Identifier): $g; ...':
+      [name, [attr, ...], '$g; ...']
+  | ~else: #false
+
+fun proof_tactic(form :: Syntax) :: maybe(Syntax):
+  match form
+  | 'proof: $g; ...': '$g; ...'
+  | ~else: #false
+
+fun plan_one(form :: Syntax) :: Decl:
+  match head_of(form)
+  | #'type:
+      // The pieces emission needs are the user's own identifiers; the logical
+      // side re-parses the whole form at phase 1.
+      // Three views of the same declaration, all from one parse: the
+      // identifiers the classes need, the field types the generators need, and
+      // the parameter list.
+      let [name, ctors] = elab.type_decl_shape(form)
+      let spec = elab.parse_type_decl(form)
+      let self = TyApp(spec.name, spec.params.map(fun (q :: Symbol): TyVar(q)))
+      let cs :~ List = ctors
+      let gen = for List (c in cs, sc in spec.ctors):
+                  let tys = (sc :~ Ctor).fields.map(fun (f :: Field): f.ty)
+                  [(c :~ List)[0], tys,
+                   for any (t in tys): t == self]
+      Decl(#'type, form, [name, ctors, spec.params, gen])
+  | #'function:
+      // `function` says the definition is meant to be logical, so a body
+      // outside the grammar is an error naming the offending expression --
+      // not a silent pass-through.  Ordinary Rhombus `fun` is untouched.
+      let [name, params, body] = elab.function_decl_shape(form)
+      Decl(#'function, form, [name, params, body])
+  | #'declare:
+      match form
+      | 'declare $(name :: Identifier)': Decl(#'declare, form, [name])
+      | ~else:
+          error(~who: #'declare, "expected a single name",
+                error.val(~label: "form", to_string(form)))
+  | #'expect:
+      match form
+      | 'expect [$name, ...]': Decl(#'expect, form, [[name, ...]])
+      | ~else:
+          error(~who: #'expect, "expected a bracketed list of names",
+                error.val(~label: "form", to_string(form)))
+  | #'proof:
+      syntax_error_here(#'proof, "a `proof:` with no `theorem` before it", form)
+  | #'check_property:
+      let parts = elab.check_property_shape(form)
+      // The datatype spec is needed to build a generator, so carry it along.
+      Decl(#'check_property, form, parts)
+  | #'use_theory:
+      match form
+      | 'use_theory $(path :: String)': Decl(#'use_theory, form, [path])
+      | ~else:
+          syntax_error_here(#'use_theory,
+                            "expected a module path in quotes", form)
+  | #'disable_rules: rule_control(#'disable_rules, form)
+  | #'enable_rules: rule_control(#'enable_rules, form)
+  | ~else: Decl(#'other, form, [])
+
+fun rule_control(kind :: Symbol, form :: Syntax) :: Decl:
+  match form
+  | 'disable_rules [$(n :: Identifier), ...]': Decl(kind, form, [[n, ...]])
+  | 'enable_rules [$(n :: Identifier), ...]': Decl(kind, form, [[n, ...]])
+  | ~else:
+      syntax_error_here(kind, "expected a bracketed list of rule names", form)
+
+fun syntax_error_here(who :: Symbol, message :: String, at :: Syntax):
+  error(~who: who, message, error.val(~label: "in", to_string(at)))

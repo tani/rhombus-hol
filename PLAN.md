@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装状況と再開計画
 
-最終更新: M8 完了（論理コア）。`raco test rhombus-hol/rhombus/hol/tests` → 724 tests passed
+最終更新: R1〜R4 完了。`raco test rhombus-hol/rhombus/hol/tests` → 814 tests passed
 
 ---
 
@@ -152,6 +152,19 @@ class Abs(arg_ty :: HType, body :: Term)  // 束縛変数名を持たない
 **この節のテストを緩めないこと** — それぞれが実際に通った攻撃に対応している。
 
 
+### マクロ層を書くときの注意（R1 で判明したこと）
+
+| 症状 | 原因と対処 |
+|---|---|
+| マクロが返した構文で `def: unbound identifier` | **phase-0 モジュールで作った構文リテラルは、`meta:` import 越しにマクロ出力として使うと束縛を失う。** テンプレートはマクロモジュール（`#lang rhombus/and_meta`）に置くこと。`expand.rhm` / `elab.rhm` は解析だけを担い、生成は `module_block.rhm` が行う。 |
+| エラーにファイル・行が出ない | `raise-syntax-error` に渡す構文が**グループ**だとテンプレート側の位置になる。宣言の**先頭の項**（`head_term`）を渡す。 |
+| `type: type: ...` と who が二重になる | 捕まえた例外のメッセージは既に `who: ` 前置を持ち、`raise-syntax-error` も付ける。`strip_who` で剥がす。 |
+| `$alias.field` がマクロ実行時に評価される | `$` が `alias.field` 全体を取る。`$(alias).field` と括る。 |
+| `fun (...): ...` を引数やリスト要素に置くと構文エラー | ブロックが後続を飲む。`(fun (...): ...)` と括る。 |
+| `Syntax.make_id` が `maybe(Term)` で落ちる | コンテキストは**項**でなければならない。グループは渡せない。 |
+| テンプレート内に `#'sym` が書けない | `'` がテンプレートを閉じる。文字列を使うか、識別子を渡して受け側で `Syntax.unwrap` する。 |
+| 生成した名前を別モジュールから参照したい | 衛生的な名前（`id_ctx` 由来）は import 越しに見えない。**ユーザーの宣言の構文をコンテキストにして** `Syntax.make_id` し、`export:` も生成する（生成器・縮小器がこれ）。 |
+
 ### 書き換え器を書くときの注意（M6 で効いてくる）
 
 De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
@@ -181,12 +194,21 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 | M6 | `tmatch` `ruledb` `simp`：一階マッチ、規則 DB、順序付き書き換え | `ruledb` |
 | M7 | `goal` `induct` `waterfall` | **`spec_4_1`** |
 | M8 | `general`（一般化）`destruct`（デストラクタ除去） | **`spec_4_2`** `destruct` |
+| R1 | 表層構文層。`expand` `elab` `driver` `taut` `module_block` | `lang_state` `decl_type` `decl_fun` `decl_theorem` |
+| R3 | モジュール間伝播。`use_theory` + マニフェストサブモジュール | `import_theory` |
+| R4 | `check_property`。`qc` + 型ごとの生成器・縮小器 | `qc` |
 
 共有フィクスチャ `tests/spec_prelude.rhm` が `Nat` / `List` / `Tree` と
 `plus` `app` `rev` `length` `size` `flatten` を組み立てる。M5 以降のテストは
 すべてこれを使うので、同じ対象について議論している。
 
-### 受け入れ状況
+### 受け入れ状況（すべて仕様書のソースのまま）
+
+`tests/spec/` の 4 ファイルが仕様書そのもの:
+`list_proofs.rhm`（§4.1）、`tree_proofs.rhm`（§4.2、`use_theory` で §4.1 を取り込む）、
+`test_run.rhm`（§4.3、素の `#lang rhombus`）、`properties.rhm`（§4.3 の `check_property`）。
+
+### 旧・受け入れ状況
 
 - **仕様書 §4.1**: `app_nil_r` `app_assoc` `rev_app_distr` `rev_involutive`
   すべてカーネル定理として証明済み。誤った予想（`rev(app(xs,ys)) === app(rev(xs),rev(ys))`）は
@@ -219,66 +241,31 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 
 ## 4. 残りの作業
 
-### R1 — 表層構文層（旧 M5 の後半 + 旧 M6 の一部）
+R1・R3・R4 は完了。残るのは R2 と R5。
 
-論理コアは完成しているが、**`#lang rhombus/hol` のマクロ層はまだ無い**。
-現在テストは phase-0 の API を直接叩いている。残っているのは:
-
-- `private/hexp.rhm` — 中間 AST（`HVar` `HLit` `HApp` `HIf` `HMatch` `HLet` `HCase`）。
-  **唯一の意味の源**。
-- `private/elab.rhm` — `parse_hexp : Syntax -> HExp`（ホワイトリストの門）と
-  `to_term`。表層の `fun` 本体から `recdef.rhm` の `DefClause` を作る。
-- `private/emit.rhm` — `to_rhombus : HExp -> Syntax`。型消去して実行可能コードを出す。
-- 命題パーサ。`space.enforest` ではなく**手書きの Pratt パーサ**を推奨:
-  shrubbery は優先順位を知らずグループを平坦に返すので、命題の文法は固定で小さく、
-  80 行程度で書ける。`space.enforest` が買うのはユーザー拡張性で、v0.1 には要らない。
-  優先順位は `printer.rhm` の定数（`=== 70 / not 60 / and 50 / or 40 / ==> 30 / <=> 20 / 量化子 10`）に合わせること。
-- `private/decl_type.rhm` `decl_fun.rhm` `decl_theorem.rhm` `decl_rules.rhm`。
-  `theorem` は **`defn.sequence_macro`**（後続の `proof:` グループを消費）。
-  `theorem ~rewrite_rule name:` の属性、`~induct:` は `prove` の `~names:` に
-  表層の束縛子名を渡すこと。
-- `space.transform hol_rule` + `bridge_definer`（規則の名前引き）。
-  雛形は `/Users/tani/Documents/rhombus/rhombus/rhombus/tests/space-lookup.rhm:1-55`。
-
-**着手順の推奨**: `hexp` → `elab`（`to_term` だけ）→ `decl_type`/`decl_fun` →
-命題パーサ → `decl_theorem`。`emit` は最後でよい。
-
-### R2 — 測度による停止性（旧 M8 の一部、意図的に未着手）
+### R2 — 測度による停止性（意図的に未着手）
 
 構造的降下だけを実装した。測度版を入れるには先に 3 つ必要で、それらが揃うまでは
 書いても動かせない:
 
 1. **`if` の書き換え規則**（`if true | a | b === a` など）。`cond` は `select` で
-   定義されているので、`bool.rhm` に導出定理として足す必要がある。
+   定義されているので `bool.rhm` に導出定理として足す必要がある。
+   *（R1 で `taut.rhm` に and/or/not/==> の整理規則を導出したので、その隣に置ける。）*
 2. **論理側の順序関係**（`lt`）とその補題。`lt(n, succ(n))` すら帰納法が要る。
 3. **`recdef` のパターン制限の緩和**。現在は「構築子でマッチする引数は 1 列だけ・
    1 段だけ」なので、構造的降下では足りないが測度では通る関数が事実上書けない。
 
-義務の生成と Waterfall への流し込み自体は `terminate.rhm` の
-`check_termination` と同じ形で書ける。
+義務の生成と Waterfall への流し込み自体は `terminate.rhm` の `check_termination`
+と同じ形で書ける。
 
-### R3 — モジュール間の理論伝播（旧 M9）
+### R5 — 性能とドキュメント
 
-設計は §6.3（下）のまま。`Thm` 値は位相をまたげないので、マニフェストは
-**言明（`Term`）と出自**を持ち、カーネルの `import_theorem` が読み込む。
-`Term` を構文として書き出す `to_syntax : Term -> Syntax` が必要。
+クリーンビルドからの全テストが 2 分 19 秒（814 tests）。証明は展開時に走るので、
+この大半は `raco make` の時間である。着手順（**まず計測**）:
 
-> **初日にやること**: `module ~splice` 内の引用識別子のスコープ保存を
-> 2 モジュールテストで実測する（仮定しない）。`import` 介在が脆いと分かった場合の
-> 逃げ道として、明示の `use_theory "a.rhm"` を常設し文書化する。
-
-### R4 — `check_property`（旧 M10）
-
-**コンパイル時ではなく、生成した `module test:` ブロック内で実行時に走らせる。**
-性質は生成された実行コードで評価されるべきで、それはコンパイル時には存在しない。
-生成器は `type` 宣言から導出、乱数は `rhombus/random` を明示シードで、縮小は型駆動。
-
-### R5 — 性能とドキュメント（旧 M11）
-
-着手順（**まず計測**）:
-1. 書き換え内ループ — `ruledb.rhm` の `by_head` 索引はあるが、`key` 事前フィルタは未実装。
+1. 書き換え内ループ — `ruledb.rhm` の `by_head` 索引はあるが `key` 事前フィルタは未実装。
 2. `check_term` は `REFL`/`ASSUME`/`BETA`/`INST` が毎回呼び、束縛子環境を伸ばしながら
-   全域を歩く。検査済み項のメモ化が効くかもしれない（未計測）。
+   項全域を歩く。検査済み項のメモ化が効くかもしれない（未計測）。
 3. 代入と具体化 — 自由変数集合をノードにキャッシュし、触れない部分項は `===` で短絡。
 4. 項の等価性 — 構造ハッシュを `Int` でキャッシュ。ハッシュコンスするなら
    `Map.by(===)` を子リストで引くのは**不可**（リストの `===` は要素同一性ではない）。
@@ -289,6 +276,20 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 7. 書き換え器では例外ベースの `ORELSEC` を避ける — `conv.rhm` は既に `maybe(Thm)` を
    返す設計。この方針を崩さないこと。
 
+ドキュメント（scribblings）は雛形のみ。`rhombus-csv` の scribblings を参考にする。
+
+### v0.1 で残っている制限（文書化すべきもの）
+
+- `type` / `function` / `theorem` は `#%module_block` が認識する形式なので、ユーザー定義
+  マクロの中や `block:` の中には書けない。
+- `function` の本体は `match` / 変数 / 名前付き適用のみ。`if` / `let` / 演算子 /
+  リテラルは文法外で、**コンパイルエラー**になる（違反した式を名指しする）。
+- `recdef` は構築子でマッチする引数 1 列・1 段のみ。
+- `import` への介在はせず `use_theory "path.rhm"` を使う。これは通常の import と
+  マニフェストの両方を行う。
+- `check_property` は `forall (x :: T, ...): lhs === rhs` の形のみ。型は具体型で
+  なければならない（型変数の生成器は作れない）。
+
 ## 5. 表層構文の確定事項（shrubbery で字句検証済み）
 
 | 仕様書 | 採用する綴り | 理由 |
@@ -297,6 +298,7 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 | `@rewrite_rule` | `theorem ~rewrite_rule name:` | `@` は at-記法として消え、別グループになる |
 | `theorem` + `proof` | `defn.sequence_macro` で後続グループを消費 | 2 つの別グループとして解析される |
 | `auto ~induct: xs ~using: [a]` | 単独なら可。複数指定は `auto(~induct: xs, ~using: [a, b])` | 2 つ目の `~kw:` が 1 つ目のブロックに入れ子になる |
+| `fun app(...)` | `function app(...)` | 通常の Rhombus `fun` と衝突させない。`function` は `rhombus` で未束縛 |
 | `and` / `or` / `not` | 命題専用の構文空間で定義 | `#lang rhombus` では未束縛なので衝突はしないが、優先順位制御とエラーメッセージのため分離する |
 
 そのまま使えることを確認済み: `a === b`、`p ==> q`、`forall (x :: Ty): P`。
@@ -311,7 +313,9 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
    置換可能規則は `term_order` で下り方向にしか発火しないので発振しないが、
    停止しない書き換え規則をユーザーが登録すると `raco make` が停止しない。
    `mk_rule` の受け入れ条件を強めるのが正しい防ぎ方（fuel ではなく）。
-4. **`fun` の上書き** が最もユーザーから見えるリスク。劣化許容規則が安全弁で、
-   `fun_opaque.rhm`（M5）が絶対に退行させてはならないテスト。
+4. ~~**`fun` の上書き**~~ — 解消。論理定義は `function` という別のキーワードになり、
+   通常の Rhombus `fun` には一切介入しない。したがって「文法外なら素通し」という
+   劣化許容規則も不要になり、`function` の文法違反は違反式を名指しするエラーになる
+   （`decl_fun.rhm` の `no_result_type` / `bad_body` が固定している）。
 5. **束縛子の下での書き換え**（§2 末尾）。`ABS_CONV` 経由で開いて閉じる方針を
    `tmatch` / `simp` でも貫くこと。

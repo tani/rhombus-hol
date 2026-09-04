@@ -1,0 +1,232 @@
+#lang rhombus/static
+
+// The glue the generated phase-1 code calls.
+//
+// A `#lang rhombus/hol` module's declarations thread a `HolState` through the
+// module body: `#%module_block` emits `meta def _hol_st0 = initial_state()`
+// and then one `meta def _hol_stN = <step>(_hol_stN-1, ...)` per declaration.
+// So the state is an ordinary phase-1 definition *in the user's module*, not
+// compile-time state belonging to the macro, which is what keeps two modules
+// compiled in one `raco make` from sharing it.
+//
+// Each step re-parses the user's own syntax rather than receiving a
+// pre-digested value: the same `elab` functions run at expansion time, to
+// generate the runtime code, and again here, to make the logical
+// declaration.  One parser, so the two views cannot drift.
+
+import:
+  lib("racket/base.rkt") as rb
+  "htype.rhm" open
+  "term.rhm" open
+  "kernel.rhm" open
+  "bool.rhm" open
+  "datatype.rhm" open
+  "recdef.rhm" open
+  "ruledb.rhm" open
+  "taut.rhm" open
+  "waterfall.rhm" open
+  "elab.rhm" as elab
+
+export:
+  hol_error
+  hol_reraise
+  HolState
+  initial_state
+  state_context
+  declared_names
+  add_type
+  add_function
+  add_theorem
+  set_rules
+  replay
+  note_decl
+  expect_declared
+
+// Failures reported from here happen while the user's module is being visited
+// at phase 1, not inside a macro transformer, so `syntax_meta.error` is not
+// available -- it is bound only in meta contexts.  Raising a syntax error with
+// the offending form attached is what gets the user a line number rather than
+// just a module name.
+//
+// Pass the *head term* of a declaration, not the whole group: a group built by
+// a template carries the template's location, and the head still carries the
+// user's.
+fun hol_error(who :: Symbol, message :: String, at :: Syntax):
+  rb.#{raise-syntax-error}(who, message, at)
+
+// Re-raise a failure from the logical layer at the user's source location.
+//
+// The caught message already begins with its own `who: ` prefix, and
+// `raise-syntax-error` adds one of its own taken from the form -- so the
+// prefix has to be stripped or the reader sees `type: type: ...`.
+fun hol_reraise(e :: Exn.Fail, at :: Syntax):
+  rb.#{raise-syntax-error}(#false, strip_who(e.message), at)
+
+fun strip_who(msg :: String) :~ String:
+  match msg.find(": ")
+  | #false: msg
+  | i:
+      let head = msg.substring(0 .. i)
+      // Only a bare word is a `who` prefix; anything with a space in it is
+      // already part of the message.
+      (if head.contains(" ") || head.contains("\n")
+       | msg
+       | msg.substring((i + 2) .. msg.length()))
+
+class HolState(thy :: Theory,
+               db :: RuleDB,
+               dts :: Map.of(Symbol, DatatypeThms),
+               funs :: Map.of(Symbol, FunInfo),
+               thms :: Map.of(Symbol, Thm),
+               // declaration order, for diagnostics
+               names :: List.of(Symbol))
+
+fun initial_state() :: HolState:
+  let thy = base_theory()
+  // Propositional cleanup is in the database from the start: without it a
+  // finished proof can look stuck at `true and true`.
+  let db = for values(d :~ RuleDB = empty_db) (th in tautologies(thy)):
+             add_thm(thy, d, #'propositional, th)
+  HolState(thy, db, {}, {}, {}, [])
+
+fun declared_names(st :: HolState) :: List.of(Symbol):
+  st.names
+
+// The prover context for the state as it currently stands.
+fun state_context(st :: HolState) :: Context:
+  mk_context(st.thy, ~rules: st.db, ~datatypes: st.dts, ~functions: st.funs)
+
+// -- type --------------------------------------------------------------------
+
+fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
+  let spec = elab.parse_type_decl(form)
+  let (thy2, thms) = try:
+                       datatype_axioms(st.thy, spec)
+                       ~catch e :: Exn.Fail: hol_reraise(e, at)
+  // Every equation the datatype brings -- injectivity, distinctness,
+  // discriminators, selectors -- goes straight into the rule database, which
+  // is what makes `match`-defined functions simplify.
+  let db2 = for values(d :~ RuleDB = st.db) (th in datatype_rules(thms)):
+              add_thm(thy2, d, spec.name, th)
+  HolState(thy2, db2, st.dts ++ {spec.name: thms}, st.funs, st.thms,
+           st.names ++ [spec.name])
+
+// -- function ----------------------------------------------------------------
+
+fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
+  let spec :~ FunSpec = try:
+                          elab.parse_function_decl(st.thy, form)
+                          ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.dts):
+                   m ++ {n: (thms :~ DatatypeThms).spec}
+  let (thy2, info0) = try:
+                        install_function(st.thy, spec, dt_specs)
+                        ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let info :~ FunInfo = info0
+  // The defining equations become rewrite rules straight away: that is what
+  // makes a `match`-defined function compute during simplification.
+  let db2 = add_thms(thy2, st.db, spec.name, info.equations)
+  HolState(thy2, db2, st.dts, st.funs ++ {spec.name: info}, st.thms,
+           st.names ++ [spec.name])
+
+// -- theorem -----------------------------------------------------------------
+
+// `attrs` arrive as keywords -- `~rewrite_rule` reads as `#:rewrite_rule` --
+// so they are normalised to symbols here rather than at every use.
+fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
+                stmt :: Syntax, tactic :: maybe(Syntax),
+                at :: Syntax) :: HolState:
+  let attrs = attr_kws.map(fun (k): Symbol.from_string(to_string(k)))
+  let (statement, names) = try:
+                             elab.parse_theorem_statement(st.thy, stmt)
+                             ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let [induct, using_names] = elab.parse_tactic(tactic)
+  // `~using:` adds named theorems for this proof only, and overrides
+  // `disable_rules`: an explicit request beats a blanket one.
+  let db = for values(d :~ RuleDB = st.db) (u in (using_names :~ List)):
+             match st.thms.get(u, #false)
+             | #false:
+                 hol_error(#'proof, "no such theorem to use: " ++ to_string(u), at)
+             | th: add_thm(st.thy, d, u :~ Symbol, th :~ Thm)
+  let ctx = mk_context(st.thy, ~rules: db, ~datatypes: st.dts,
+                       ~functions: st.funs)
+  let (th, node) = try:
+                     prove(ctx, statement, ~names: names,
+                           ~induct: (induct :~ maybe(Symbol)))
+                     ~catch e :: Exn.Fail: hol_reraise(e, at)
+  match th
+  | #false: hol_error(#'theorem, residue_message(name, node), at)
+  | proved :~ Thm:
+      let db2 = (cond
+                 | attrs.contains(#'rewrite_rule) || attrs.contains(#'simp):
+                     add_thm(st.thy, st.db, name, proved)
+                 | ~else: st.db)
+      HolState(st.thy, db2, st.dts, st.funs, st.thms ++ {name: proved},
+               st.names ++ [name])
+
+// -- replaying an imported theory ---------------------------------------------
+//
+// Types and functions are re-derived, which costs nothing in trust: neither
+// `datatype_axioms` nor `install_function` searches for a proof, so running
+// them again here produces the same declarations by the same route.
+//
+// Theorems are the exception.  A `Thm` belongs to the phase-1 instantiation of
+// the module that proved it and cannot cross, and re-running the proof on
+// every import is not an option -- so the *statement* is admitted on the word
+// of the exporting module's compile, through the kernel's `import_theorem`.
+// That is a trust boundary, and it is why every admitted statement is recorded
+// in `trusted_imports_of`.
+fun replay(st :: HolState, decls :: List, at :: Syntax) :: HolState:
+  for values(s :~ HolState = st) (d in decls):
+    let entry :~ List = d
+    match entry[0]
+    | "type": add_type(s, entry[1] :~ Syntax, at)
+    | "function": add_function(s, entry[1] :~ Syntax, at)
+    | "theorem": replay_theorem(s, entry, at)
+    | ~else: s
+
+fun replay_theorem(st :: HolState, entry :: List, at :: Syntax) :: HolState:
+  let name = Syntax.unwrap(entry[1] :~ Syntax)
+  let stmt = entry[2] :~ Syntax
+  let attr_kws :~ List = entry[3]
+  let attrs = attr_kws.map(fun (k :: Syntax):
+                             Symbol.from_string(to_string(Syntax.unwrap(k))))
+  let statement = try:
+                    elab.parse_prop(st.thy, elab.collect_type_vars(stmt), {}, stmt)
+                    ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let (thy2, th) = import_theorem(st.thy, statement, to_string(name))
+  let db2 = (cond
+             | attrs.contains(#'rewrite_rule) || attrs.contains(#'simp):
+                 add_thm(thy2, st.db, name, th)
+             | ~else: st.db)
+  HolState(thy2, db2, st.dts, st.funs, st.thms ++ {name: th},
+           st.names ++ [name])
+
+// -- rule control ------------------------------------------------------------
+
+fun set_rules(st :: HolState, on :: Boolean,
+              names :: List.of(Symbol)) :: HolState:
+  let db2 = (if on | enable(st.db, names) | disable(st.db, names))
+  HolState(st.thy, db2, st.dts, st.funs, st.thms, st.names)
+
+fun datatype_rules(thms :: DatatypeThms) :: List.of(Thm):
+  let inj = for values(acc :~ List = []) ((_, th) in thms.injectivity): acc ++ [th]
+  inj ++ thms.distinctness ++ thms.discriminators ++ thms.selectors
+
+// -- test hooks --------------------------------------------------------------
+//
+// `declare` and `expect` are not part of the language the specification
+// describes; they exist so that the state threading can be tested directly,
+// which is worth having because everything else depends on it.
+
+fun note_decl(st :: HolState, n :: Symbol) :: HolState:
+  HolState(st.thy, st.db, st.dts, st.funs, st.thms, st.names ++ [n])
+
+fun expect_declared(st :: HolState, expected :: List.of(Symbol),
+                    ~at: at :: Syntax) :: HolState:
+  unless st.names == expected
+  | hol_error(#'expect,
+              "declarations do not match\n  expected: " ++ to_string(expected)
+                ++ "\n  got: " ++ to_string(st.names),
+              at)
+  st

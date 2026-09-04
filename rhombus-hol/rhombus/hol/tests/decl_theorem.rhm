@@ -1,0 +1,98 @@
+#lang rhombus/static
+
+// R1d: `theorem`, the optional `proof:` clause, attributes, and the residue
+// a failed proof reports.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/elab open
+  "fixtures/theorem_ok.rhm" as t
+
+fun load(mp :: ModulePath):
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }: Evaluator.instantiate(mp)
+
+fun bad(which :: Symbol):
+  match which
+  | #'stuck: load(ModulePath'lib("rhombus/hol/tests/fixtures/theorem_stuck.rhm")')
+  | #'orphan:
+      load(ModulePath'lib("rhombus/hol/tests/fixtures/theorem_orphan_proof.rhm")')
+
+// -- the module compiled, so every theorem in it was proved ------------------
+//
+// `theorem_ok.rhm` asserts `expect [...]` at phase 1, which pins both that all
+// six declarations were made and the order they were made in.  In particular
+// two adjacent `theorem`s did not swallow one another.
+
+check t.app(t.Cons(1, t.Nil()), t.Nil()) ~is t.Cons(1, t.Nil())
+
+// ==========================================================================
+// the proposition parser
+// ==========================================================================
+
+def thy:
+  let x = new_type(base_theory(), #'Nat, 0)
+  let n = TyApp(#'Nat, [])
+  let x = new_constant(x, #'zero, n)
+  let x = new_constant(x, #'succ, mk_fun(n, n))
+  let x = new_constant(x, #'p, mk_fun(n, bool))
+  new_constant(x, #'q, mk_fun(n, bool))
+
+// Round trip: what the parser reads, the printer writes back the same way.
+// The two share their precedence table, and this is what pins them together --
+// a residue the user cannot read back is a residue they cannot act on.
+fun rt(s :: Syntax) :~ String: show(parse_prop(thy, [], {}, s))
+
+check rt('p(zero) and q(zero)') ~is "p(zero) and q(zero)"
+check rt('p(zero) and q(zero) or p(zero)') ~is "p(zero) and q(zero) or p(zero)"
+check rt('p(zero) or q(zero) and p(zero)') ~is "p(zero) or q(zero) and p(zero)"
+check rt('not p(zero) and q(zero)') ~is "not p(zero) and q(zero)"
+check rt('not (p(zero) and q(zero))') ~is "not (p(zero) and q(zero))"
+check rt('zero === succ(zero)') ~is "zero === succ(zero)"
+check rt('zero === succ(zero) and p(zero)') ~is "zero === succ(zero) and p(zero)"
+// `==>` is right associative and looser than `and`
+check rt('p(zero) ==> q(zero) ==> p(zero)') ~is "p(zero) ==> q(zero) ==> p(zero)"
+check rt('(p(zero) ==> q(zero)) ==> p(zero)') ~is "(p(zero) ==> q(zero)) ==> p(zero)"
+check rt('p(zero) and q(zero) ==> p(zero)') ~is "p(zero) and q(zero) ==> p(zero)"
+// `<=>` is the loosest
+check rt('p(zero) <=> q(zero) ==> p(zero)') ~is "p(zero) <=> q(zero) ==> p(zero)"
+// quantifiers extend as far right as they can
+check rt('forall (n :: Nat): p(n)') ~is "forall (x :: Nat): p(x)"
+check:
+  rt('forall (n :: Nat, m :: Nat): p(n) ==> q(m)')
+  ~is "forall (x :: Nat, y :: Nat): p(x) ==> q(y)"
+check rt('exists (n :: Nat): p(n) and q(n)') ~is "exists (x :: Nat): p(x) and q(x)"
+
+// the leading binder names are recovered from the source, since a locally
+// nameless term does not carry them
+check:
+  let (_, names) = parse_theorem_statement(thy, 'forall (xs :: Nat, ys :: Nat): xs === ys')
+  names
+  ~is [#'xs, #'ys]
+
+// ==========================================================================
+// the tactic parser
+// ==========================================================================
+
+check parse_tactic(#false) ~is [#false, []]
+check parse_tactic('auto') ~is [#false, []]
+check parse_tactic('auto ~induct: xs') ~is [#'xs, []]
+check parse_tactic('auto(~induct: xs, ~using: [a, b])') ~is [#'xs, [#'a, #'b]]
+check parse_tactic('auto(~using: [a])') ~is [#false, [#'a]]
+check parse_tactic('nonsense') ~throws "this version understands"
+
+// ==========================================================================
+// a failed proof is a compile error with the residue and a location
+// ==========================================================================
+
+check bad(#'stuck) ~throws "could not prove"
+check bad(#'stuck) ~throws "theorem_stuck.rhm:21"
+// the trail says how the prover got where it stopped
+check bad(#'stuck) ~throws "induction on xs"
+check bad(#'stuck) ~throws "simplification"
+
+check bad(#'orphan) ~throws "no `theorem` before it"

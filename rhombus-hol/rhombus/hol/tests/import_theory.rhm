@@ -1,0 +1,55 @@
+#lang rhombus/static
+
+// R3: a module's theory crosses to the modules that import it.
+//
+// A `Thm` cannot cross a module boundary -- it belongs to the phase-1
+// instantiation of the module that proved it -- and re-running every proof on
+// every import is not an option.  So a module publishes a manifest: its
+// declarations in order, with theorems reduced to their statements.  Types and
+// functions are *replayed* by the importer, which costs nothing in trust since
+// neither `datatype_axioms` nor `install_function` searches for a proof.  Only
+// theorem statements cross on trust, through the kernel's `import_theorem`.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/driver open
+  "fixtures/theory_user.rhm" as u
+  "fixtures/theory_uses_empty.rhm" as e
+
+// -- the logic crossed -------------------------------------------------------
+//
+// `theory_user.rhm` proves `app(app(xs, Nil()), ys) === app(xs, ys)`, which
+// needs the *imported* `app_nil_r` as a rewrite rule.  It also asserts
+// `expect [List, app, app_nil_r, twice, needs_imported_lemma]`, which pins that
+// the replay produced the datatype, the function and the theorem, in order,
+// before its own declarations.  Both are checked by the module having compiled.
+
+check u.sample ~is u.Cons(1, u.Cons(1, u.Nil()))
+
+// -- the runtime crossed too -------------------------------------------------
+//
+// `use_theory` does both halves in one line: the ordinary Rhombus import, so
+// the functions can be called, and the manifest, so the prover can use the
+// theory.
+
+check u.twice(u.Nil()) ~is u.Nil()
+check u.app(u.Cons(1, u.Nil()), u.Cons(2, u.Nil())) ~is u.Cons(1, u.Cons(2, u.Nil()))
+
+// -- a module with no declarations still publishes a manifest ----------------
+
+check e.forwarded ~is "hello"
+
+// -- admitted statements are recorded as a trust boundary --------------------
+
+check trusted_imports_of(initial_state().thy) ~is []
+check:
+  // `import_theorem` is the only way a statement enters without a proof, and
+  // it records every one it admits.
+  let st = initial_state()
+  let p = mk_var(#'p, TyApp(#'bool, []))
+  let (thy2, th) = import_theorem(st.thy, p, "elsewhere.rhm")
+  [show(concl_of(th)), trusted_imports_of(thy2).length()]
+  ~is ["p", 1]

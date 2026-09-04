@@ -1,0 +1,70 @@
+#lang rhombus/static
+
+// R1c: `function` emits executable Rhombus and, from the same source, installs the
+// clausal equations logically.  This is the first test of type erasure: the
+// emitted code actually runs.
+
+import:
+  "fixtures/funs_ok.rhm" as f
+
+fun load(mp :: ModulePath):
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }: Evaluator.instantiate(mp)
+
+fun bad(which :: Symbol):
+  match which
+  | #'nonterminating:
+      load(ModulePath'lib("rhombus/hol/tests/fixtures/fun_nonterminating.rhm")')
+  | #'inexhaustive:
+      load(ModulePath'lib("rhombus/hol/tests/fixtures/fun_inexhaustive.rhm")')
+  | #'no_result_type:
+      load(ModulePath'lib("rhombus/hol/tests/fixtures/function_no_result_type.rhm")')
+  | #'bad_body:
+      load(ModulePath'lib("rhombus/hol/tests/fixtures/function_bad_body.rhm")')
+
+// -- the emitted code computes -----------------------------------------------
+
+check f.rev(f.sample) ~is f.Cons(3, f.Cons(2, f.Cons(1, f.Nil())))
+check f.rev(f.Nil()) ~is f.Nil()
+check f.rev(f.rev(f.sample)) ~is f.sample
+check:
+  f.app(f.Cons(1, f.Nil()), f.Cons(2, f.Nil()))
+  ~is f.Cons(1, f.Cons(2, f.Nil()))
+check f.app(f.Nil(), f.sample) ~is f.sample
+check f.length(f.sample) ~is f.succ(f.succ(f.succ(f.zero())))
+check f.length(f.Nil()) ~is f.zero()
+check:
+  f.plus(f.succ(f.zero()), f.succ(f.zero()))
+  ~is f.succ(f.succ(f.zero()))
+
+// Erasure really is erasure: the emitted `app` is monomorphic-free and works
+// at any element type.
+check:
+  f.app(f.Cons("a", f.Nil()), f.Cons("b", f.Nil()))
+  ~is f.Cons("a", f.Cons("b", f.Nil()))
+check f.rev(f.Cons("a", f.Cons("b", f.Nil()))) ~is f.Cons("b", f.Cons("a", f.Nil()))
+
+// -- an ordinary Rhombus `fun` is never intercepted -------------------------
+//
+// Only `function` declares a logical definition, so `fun` keeps its ordinary
+// meaning and `#lang rhombus/hol` stays usable as a general-purpose language.
+// `funs_ok.rhm` asserts `expect [List, Nat, app, rev, length, plus]` at phase
+// 1 -- `double` is deliberately absent, because nothing logical was declared.
+
+check f.double(21) ~is 42
+
+// -- the logical half rejects what it cannot admit ---------------------------
+
+check bad(#'nonterminating) ~throws "cannot see that the definition terminates"
+check bad(#'nonterminating) ~throws "fun_nonterminating.rhm:8"
+check bad(#'inexhaustive) ~throws "not exhaustive"
+check bad(#'inexhaustive) ~throws "fun_inexhaustive.rhm:12"
+
+// A `function` that is not definable is an error, never a silent demotion to
+// an ordinary Rhombus binding: the whole point of the separate keyword is that
+// the author has said which one they meant.
+
+check bad(#'no_result_type) ~throws "a function needs a result type"
+check bad(#'bad_body) ~throws "only variables and named applications"
+// The error names the offending expression, not just the declaration.
+check bad(#'bad_body) ~throws "not a definition"

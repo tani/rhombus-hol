@@ -1,0 +1,58 @@
+#lang rhombus/static
+
+// R1a: the compile-time state threads through a `#lang rhombus/hol` module
+// body, is private to each module, and reports failures at the right place.
+//
+// The state lives as ordinary phase-1 definitions in the user's module
+// (`_hol_st0`, `_hol_st1`, ...), emitted by `#%module_block`.  That is what
+// keeps two modules compiled in one `raco make` from sharing it -- state
+// belonging to the macro itself would be shared, because `raco make` compiles
+// many modules in one process.
+
+import:
+  rhombus/hol/private/driver open
+  "fixtures/state_a.rhm" as a
+  "fixtures/state_b.rhm" as b
+
+// -- the state is threaded ---------------------------------------------------
+//
+// Both fixtures assert their own declaration list at phase 1, so the fact
+// that they compiled at all is the assertion.  Importing them here is what
+// forces that compilation.
+
+check a.marker ~is "a"
+check b.marker ~is "b"
+
+// -- and it does not leak between modules ------------------------------------
+//
+// `state_a` declares `alpha` and `beta`; `state_b` declares only `gamma`.  If
+// the state were shared, `state_b`'s `expect [gamma]` would have seen all
+// three and failed.
+
+check:
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }:
+    Evaluator.instantiate(ModulePath'lib("rhombus/hol/tests/fixtures/state_a.rhm")')
+    Evaluator.instantiate(ModulePath'lib("rhombus/hol/tests/fixtures/state_b.rhm")')
+  #true
+  ~is #true
+
+// -- a phase-1 failure is a compile error, at the user's source location -----
+
+check:
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }:
+    Evaluator.instantiate(ModulePath'lib("rhombus/hol/tests/fixtures/bad_expect.rhm")')
+  ~throws "declarations do not match"
+check:
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }:
+    Evaluator.instantiate(ModulePath'lib("rhombus/hol/tests/fixtures/bad_expect.rhm")')
+  ~throws "bad_expect.rhm:8"
+
+// -- the state itself is an ordinary value -----------------------------------
+
+check declared_names(initial_state()) ~is []
+check:
+  declared_names(note_decl(note_decl(initial_state(), #'p), #'q))
+  ~is [#'p, #'q]

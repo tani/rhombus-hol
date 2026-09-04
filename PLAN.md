@@ -338,6 +338,24 @@ replay していた。実際には越えられる。これで `emit_manifest` / 
 7. 書き換え器では例外ベースの `ORELSEC` を避ける — `conv.rhm` は既に `maybe(Thm)` を
    返す設計。この方針を崩さないこと。
 
+### 付録 — `idris-kernel/`（探索中、未接続）
+
+`htype.rhm` / `term.rhm` / `kernel.rhm` を Idris2 に移植し、Racket バックエンド
+（`idris2 --cg racket`）でコンパイルできることを確認したプロトタイプ。詳細は
+`idris-kernel/README.md`。**まだ何も置き換えていない** — `raco make` /
+`raco test` はこのディレクトリを一切参照せず、信頼境界は今も
+`rhombus-hol-lib/rhombus/hol/private/kernel.rhm` のまま。将来この Idris 実装を
+実際のカーネルとして採用するなら、少なくとも次が要る:
+
+- `Thm`/`Theory` を Rhombus 側の `authentic` + `constructor ~none` 相当の
+  構築不能境界にする(Idris2 の `export`/`public export` で表現可能)。
+- 生成された Racket コードを `rhombus-hol-lib` から安全に import する経路
+  (現状は素の実行ファイルとしてビルドしているだけ)。
+- Idris2 0.8.0 の停止性検査器は `Eq`/`Show` の既定メソッドや `map`/`foldl`/`any`
+  のような高階関数を、`HType`/`Term` と `List` の相互再帰に適用すると
+  誤って非停止と判定する。回避には `mutual` ブロックで手書きの再帰関数を
+  並べて書く必要がある(`idris-kernel/src/HType.idr` 参照)。
+
 ### ドキュメント（完了）
 
 `rhombus-hol/rhombus/hol/scribblings/` に multi-page で 6 章:

@@ -20,7 +20,7 @@
         in
         {
           default = pkgs.mkShell {
-            packages = [ pkgs.racket ];
+            packages = [ pkgs.racket pkgs.idris2 ];
           };
         });
     };

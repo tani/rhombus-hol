@@ -106,8 +106,9 @@ Beyond the termination restrictions in @secref("termination"):
 
 @itemlist(
 
- @item{Declarations must appear directly in a module body --- not inside
-  @rhombus(block), not inside a macro expansion.}
+ @item{Most declarations must appear directly in a module body --- not inside
+  @rhombus(block), not inside a macro expansion. @rhombus(check_property,
+  ~datum) is the one exception; see @secref("declarations").}
 
  @item{Patterns are one constructor deep, clauses are unordered, and there are
   no wildcards.}

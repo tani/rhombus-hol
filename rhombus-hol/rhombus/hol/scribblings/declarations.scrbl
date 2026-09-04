@@ -5,10 +5,16 @@
 These are the forms that @rhombuslangname(rhombus/hol) gives a logical reading.
 Anything else in a module body is ordinary Rhombus.
 
-A declaration is recognised by scanning the module body, not by binding its
-first word, so a declaration must appear directly in the module body. It cannot
-appear inside a @rhombus(block), inside a @rhombus(fun) body, or in the
+Most of these are recognised by scanning the module body, not by binding their
+first word, so such a declaration must appear directly in the module body. It
+cannot appear inside a @rhombus(block), inside a @rhombus(fun) body, or in the
 expansion of a user-written macro. This is a limitation of this version.
+
+@rhombus(check_property, ~datum) is the exception: it touches none of the
+state the others thread through the module (see its own section below), and
+that is what let it become a genuine, independently bound macro. It can
+appear as the expansion of a user's own macro, the same as @rhombus(fun) or
+@rhombus(class) could.
 
 @section{@rhombus(type, ~datum)}
 
@@ -239,6 +245,13 @@ shrunk before it is reported.
 @rhombus(~samples) is how many values to try, @rhombus(~size) bounds how deep a
 generated value can get. The declaration's value is the outcome, so a test can
 assert on it.
+
+Unlike the other forms on this page, @rhombus(check_property, ~datum) is a
+genuine, independently bound macro: it never touches the theory a module
+builds up, since checking a property means running the emitted code rather
+than proving anything, so there is no state for it to thread through. That
+also means it can be written by a macro of the user's own, and Rhombus's
+ordinary expansion will still find it.
 
 @section{@rhombus(declare, ~datum) and @rhombus(expect, ~datum)}
 

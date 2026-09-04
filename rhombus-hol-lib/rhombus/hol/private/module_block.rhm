@@ -23,9 +23,11 @@ import:
   meta:
     "htype.rhm" open
     "expand.rhm" as expand
+    "elab.rhm" as elab
 
 export:
   module_block
+  check_property
 
 meta:
   // Any literal from this module will do as a lexical context: what matters is
@@ -152,24 +154,36 @@ meta:
     | ~else: #false
 
   // -- check_property --------------------------------------------------------
+  //
+  // `check_property` is a genuine, independently bound macro rather than a
+  // form `#%module_block` recognises by scanning.  It can do this because,
+  // unlike `type`/`function`/`theorem`, it never touches the theory chain --
+  // `driver.rhm` has no step for it at all, since a property is checked by
+  // running the emitted code, and its value is the outcome.  With nothing to
+  // thread, there is nothing standing between it and being an ordinary macro,
+  // usable directly or from within a macro of the user's own.
 
-  fun emit_property(d :: expand.Decl) :: Syntax:
-    let [name, samples, binders, lhs, rhs, size] = d.parts
-    let bs :~ List = binders
-    let [v, ...] = bs.map(fun (b :: List): b[0] :~ Syntax)
-    let ctx = head_term(d.form)
-    let [g, ...] = bs.map(fun (b :: List): gen_expr(ctx, b[1]))
-    let [sh, ...] = bs.map(fun (b :: List): shrink_expr(ctx, b[1], d.form))
+  fun emit_property_from(name :: Syntax, samples, binders :: List,
+                         lhs :: Syntax, rhs :: Syntax, size,
+                         ctx :: Syntax, at :: Syntax) :: Syntax:
+    let [v, ...] = binders.map(fun (b :: List): b[0] :~ Syntax)
+    let [g, ...] = binders.map(fun (b :: List): gen_expr(ctx, b[1]))
+    let [sh, ...] = binders.map(fun (b :: List): shrink_expr(ctx, b[1], at))
     let prop = 'fun ($v, ...): ($lhs) == ($rhs)'
     let count = Syntax.make(samples, id_ctx)
     let sz = Syntax.make(size, id_ctx)
-    'def $name:
-       _hol_qc.run(Syntax.unwrap('$name'),
-                   ~samples: $count,
-                   ~size: $sz,
-                   ~gens: [$g, ...],
-                   ~shrinks: [$sh, ...],
-                   ~prop: $prop)'
+    // `check_property` imports `qc` for itself rather than relying on
+    // `module_block`'s own copy: the two are now separate macro expansions,
+    // so an identifier introduced by one is not the same binding as the same
+    // spelling introduced by the other, however identical they look here.
+    'import: rhombus/hol/private/qc as _hol_property_qc
+     def $name:
+       _hol_property_qc.run(Syntax.unwrap('$name'),
+                            ~samples: $count,
+                            ~size: $sz,
+                            ~gens: [$g, ...],
+                            ~shrinks: [$sh, ...],
+                            ~prop: $prop)'
 
   // -- functions -------------------------------------------------------------
 
@@ -291,10 +305,6 @@ meta:
                                                  [Syntax.unwrap('$a'), ...],
                                                  '$stmt', '$tac', '$at')'],
                    n + 1)
-    | #'check_property:
-        // No logical step: a property is checked by running the emitted code,
-        // and its value is the outcome, so a test can assert on it.
-        values([emit_property(d)], [], n)
     | #'disable_rules: rule_step(d, n, cur, nxt, #false)
     | #'enable_rules: rule_step(d, n, cur, nxt, #true)
     | #'declare:
@@ -323,6 +333,29 @@ meta:
         let (r, c, n2) = emit_one(d, n)
         values(rt ++ r, ch ++ c, n2)
     values(rt, ch ++ ['def theory = $(st(n))'])
+
+// `check_property` is a genuine, independently bound macro, not a form
+// `#%module_block` recognises by scanning -- see the note by
+// `emit_property_from` above for why it alone can be one.  Because it is
+// bound, `#%module_block`'s generic pass-through (the `#'other` case in
+// `emit_one`) is what reaches it: Rhombus's own expansion discovers this
+// binding exactly as it would for `fun` or `class`, including when the use
+// arrives via a macro of the user's own.
+//
+// `gen_id`/`shrink_id` build the non-hygienic names `_hol_gen_Foo`/
+// `_hol_shrink_Foo` from a *context* syntax object, and that context must be
+// an identifier the user actually wrote -- one carrying this module's own
+// scope, not this macro's.  `head_term(whole)` would instead be the literal
+// `check_property` spelled in *this template*, which carries this expansion's
+// own scope and would build a name that does not match the one `type`
+// declared.  The property's own name, `name` below, is genuine user syntax
+// (captured through `$rest`), so it is used as the context instead.
+defn.macro 'check_property $rest ...':
+  let whole = 'check_property $rest ...'
+  let [name, samples, binders, lhs, rhs, size] = elab.check_property_shape(whole)
+  emit_property_from(name :~ Syntax, samples, binders :~ List,
+                     lhs :~ Syntax, rhs :~ Syntax, size,
+                     name :~ Syntax, whole)
 
 // Every `#lang rhombus/hol` module carries its theory in a `hol_theory`
 // submodule: the whole logical chain, at the submodule's phase 0.

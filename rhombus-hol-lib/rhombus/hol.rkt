@@ -19,3 +19,4 @@ export:
       #%module_block
   rename:
     mb.module_block as #%module_block
+  mb.check_property

@@ -487,3 +487,52 @@ replay していた。実際には越えられる。これで `emit_manifest` / 
    （`decl_fun.rhm` の `no_result_type` / `bad_body` が固定している）。
 5. **束縛子の下での書き換え**（§2 末尾）。`ABS_CONV` 経由で開いて閉じる方針を
    `tmatch` / `simp` でも貫くこと。
+
+## 7. 参照したソフトウェア
+
+この実装を作る際に参照したもの。「設計を参考にした」ものと、
+「このチャットで実際にソースコード／ドキュメントを読んだ」ものは性質が違うので分けて書く。
+
+### このチャットで実際にソースコード・ドキュメントを開いて読んだもの
+
+- **Rhombus（言語本体）**
+  - ドキュメント一式: `/Users/tani/Documents/rhombus/rhombus/rhombus/scribblings/`
+    以下の多数のファイル。特に頻繁に参照したもの:
+    `reference/module.scrbl`（サブモジュールの合流・`~lang`/`~splice`/`~early`/`~late`
+    の意味論）、`meta/defn-macro.scrbl`（`defn.macro`/`defn.sequence_macro`）、
+    `meta/macro-more.scrbl`、`meta/expr-macro.scrbl`（`expr_meta.Parsed` など）、
+    `meta/bind-macro.scrbl`、`meta/annotation-macro.scrbl`、`meta/lang.scrbl`、
+    `meta/rhombus-meta.scrbl`、`reference/import.scrbl`（`ModulePath`/`ModulePath.maybe`）、
+    `reference/check.scrbl`、`reference/box.scrbl`（`Box`/`.value`/`:=`）、
+    `reference/symbol.scrbl`、`reference/equatable.scrbl`、`reference/eval.scrbl`
+    （`Evaluator.module_is_declared` など）、`reference/syntax-class.scrbl`、
+    `guide/module-basics.scrbl`。
+  - 実装ソース: `/Applications/Racket v9.3/share/pkgs/rhombus-lib/rhombus/private/amalgam/`
+    以下。特に `check.rhm`（`check` フォームの実装 — `theorem`/`proof:` の
+    「後続節を任意で取り込む」設計の比較対象にした）、`defn-macro.rkt`、
+    `sequence_meta.rhm`、`sequence-help.rkt`、`guard.rhm`、`closeable.rhm`。
+  - Rhombus/HOL の `use_theory` を通常の `import` に統合する設計と、
+    宣言形式を実マクロに再実装できるかの検討（本セッションの後半）は、
+    上記のドキュメント・ソースを実際に `grep`/`Read` し、かつ実機で
+    コンパイル・実行して確かめながら進めた。
+- **Racket（Rhombus の実行基盤）** — `lib("racket/base.rkt")` 経由で
+  `raise-syntax-error` などを直接呼んでいる（`driver.rhm`）。処理系自体は
+  `/Applications/Racket v9.3/` にインストールされたものを実行確認に使い続けた
+  （バージョン固定: v9.3）。
+
+### 設計の参考にした（このチャットでソースは見ていない、既存の公表された設計として）
+
+- **HOL Light** — カーネルの十個の基本推論規則、locally nameless の項表現、
+  等式変換（`conv.rhm` は `equal.ml` の設計を踏襲）、型の表現
+  （型変数と型構成子の適用の 2 構成子）。コードコメントに散在して明記済み
+  （`kernel.rhm`、`conv.rhm`、`htype.rhm`、`printer.rhm` など）。
+- **HOL4** — 論理定数の定義のしかたと、3 つの公理（ETA・SELECT・BOOL_CASES）の
+  選び方（HOL Light 式の `INFINITY_AX` を経由しない構成）。`bool.rhm` に明記済み。
+- **ACL2** — Waterfall（簡約・デストラクタ除去・一般化・帰納法の固定パイプライン）
+  の設計、置換可能な書き換え規則を発振させないための項順序（`order.rhm`）、
+  規則データベースが新しい規則を優先する順序（`ruledb.rhm`）。
+  複数のファイルのコメントに明記済み。
+- **QuickCheck**（の系譜のプロパティベーステスト全般） — `check_property` /
+  `qc.rhm` の設計（生成・収縮・反例の最小化）は QuickCheck の系譜の標準的な
+  仕組みを踏襲しているが、具体的な実装（Haskell 版・その他言語版いずれも）の
+  ソースコードを本セッションで直接参照したことはない。

@@ -510,8 +510,8 @@ fun lookup_shrink(name :: String) :: Function
   使うことはできない。必要になったら theory merge を書く必要がある（今は無い）。
 - importer のコンパイルは提供側モジュールを visit するので、**提供側の証明が
   importer ごとに再実行される**。現状 1 モジュールあたり約 1 秒。
-- `check_property` は `forall (x :: T, ...): lhs === rhs` の形のみ。型は具体型で
-  なければならない（型変数の生成器は作れない）。
+- `check_property` の量化変数は具体型でなければならない（型変数の生成器は作れない）。
+  本体は実行可能な任意の Rhombus Boolean 式。
 
 ## 5. 表層構文の確定事項（shrubbery で字句検証済み）
 

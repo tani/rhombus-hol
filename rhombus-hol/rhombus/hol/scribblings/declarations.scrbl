@@ -223,18 +223,21 @@ and says so.
 
 @verbatim{
 check_property Id:
-  forall (arg :: Type, ...): expr === expr
+  forall (arg :: Type, ...): expression
 
 check_property Id(~samples: n, ~size: n):
-  forall (arg :: Type, ...): expr === expr
+  forall (arg :: Type, ...): expression
 }
 
-Tests an equation on generated values at run time. This is not a proof; it is
-the cheap check you run while you are still working out what is true.
+Tests an executable Boolean expression on generated values at run time. The
+body is ordinary Rhombus expression syntax, not the logical proposition syntax
+used by @rhombus(theorem, ~datum), so equality is written @rhombus(==). This is
+not a proof; it is the cheap check you run while you are still working out what
+is true.
 
 @rhombusblock(
   check_property rev_involutive(~samples: 500):
-    forall (xs :: List(Nat)): rev(rev(xs)) === xs
+    forall (xs :: List(Nat)): rev(rev(xs)) == xs
 )
 
 The binder types must be concrete --- a generator cannot be built for a type
@@ -242,6 +245,10 @@ variable. A generator and a shrinker are registered alongside each datatype
 declaration, under the type's own name, in a run-time registry that
 @rhombus(check_property, ~datum) draws from; any declared datatype can be
 sampled, and a counterexample is shrunk before it is reported.
+
+The body is not restricted to an equation. It may use any Rhombus expression
+that produces a Boolean, including function calls, conditionals, local
+definitions, and Boolean operators.
 
 Because the registry is keyed by name rather than by an identifier this
 module would have to import, a type need not be declared in the same module

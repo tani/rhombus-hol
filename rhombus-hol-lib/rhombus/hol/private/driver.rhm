@@ -39,7 +39,7 @@ export:
   add_function
   add_theorem
   set_rules
-  replay
+  adopt
   note_decl
   expect_declared
 
@@ -211,43 +211,34 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
       HolState(st.thy, db2, st.dts, st.funs, st.thms ++ {name: proved},
                st.names ++ [name])
 
-// -- replaying an imported theory ---------------------------------------------
-//
-// Types and functions are re-derived, which costs nothing in trust: neither
-// `datatype_axioms` nor `install_function` searches for a proof, so running
-// them again here produces the same declarations by the same route.
-//
-// Theorems are the exception.  A `Thm` belongs to the phase-1 instantiation of
-// the module that proved it and cannot cross, and re-running the proof on
-// every import is not an option -- so the *statement* is admitted on the word
-// of the exporting module's compile, through the kernel's `import_theorem`.
-// That is a trust boundary, and it is why every admitted statement is recorded
-// in `trusted_imports_of`.
-fun replay(st :: HolState, decls :: List, at :: Syntax) :: HolState:
-  for values(s :~ HolState = st) (d in decls):
-    let entry :~ List = d
-    match entry[0]
-    | "type": add_type(s, entry[1] :~ Syntax, at)
-    | "function": add_function(s, entry[1] :~ Syntax, at)
-    | "theorem": replay_theorem(s, entry, at)
-    | ~else: s
+// -- adopting an imported theory ----------------------------------------------
 
-fun replay_theorem(st :: HolState, entry :: List, at :: Syntax) :: HolState:
-  let name = Syntax.unwrap(entry[1] :~ Syntax)
-  let stmt = entry[2] :~ Syntax
-  let attr_kws :~ List = entry[3]
-  let attrs = attr_kws.map(fun (k :: Syntax):
-                             Symbol.from_string(to_string(Syntax.unwrap(k))))
-  let statement = try:
-                    elab.parse_prop(st.thy, elab.collect_type_vars(stmt), {}, stmt)
-                    ~catch e :: Exn.Fail: hol_reraise(e, at)
-  let (thy2, th) = import_theorem(st.thy, statement, to_string(name))
-  let db2 = (cond
-             | attrs.contains(#'rewrite_rule) || attrs.contains(#'simp):
-                 add_thm(thy2, st.db, name, th)
-             | ~else: st.db)
-  HolState(thy2, db2, st.dts, st.funs, st.thms ++ {name: th},
-           st.names ++ [name])
+// Adopt an imported theory wholesale.
+//
+// The imported state arrives as a live value: the same `Theory`, the same
+// `Thm` objects, the same rule database.  Nothing is re-parsed and nothing is
+// re-asserted, so there is no trust boundary here at all -- a `Thm` cannot be
+// fabricated without the kernel, which is what its being opaque is for.  A
+// description of a theory, by contrast, is data, and anything can write one.
+//
+// The single check is that the imported theory really extends the current one.
+// That is not bureaucracy: `combine_stamps` refuses to mix theorems from two
+// theories neither of which extends the other, so a module that adopted a
+// sibling would be left holding two sets of theorems it could not use
+// together.  Keeping the lineage a chain is what makes this a comparison
+// rather than a theory merge.
+fun adopt(st :: HolState, imported :: HolState, at :: Syntax) :: HolState:
+  unless st.thy.stamp == imported.thy.stamp
+           || descends(st.thy.stamp, imported.thy.stamp)
+  | hol_error(#'use_theory,
+              "this theory does not extend the one in scope; `use_theory` "
+                ++ "must come before the module's own declarations, and "
+                ++ "several of them must be given in dependency order",
+              at)
+  // A rule switched off before the import stays off after it.
+  let off = for values(acc :~ List = []) (n in st.db.disabled): acc ++ [n]
+  HolState(imported.thy, disable(imported.db, off),
+           imported.dts, imported.funs, imported.thms, imported.names)
 
 // -- rule control ------------------------------------------------------------
 

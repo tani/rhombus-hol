@@ -2,13 +2,14 @@
 
 // R3: a module's theory crosses to the modules that import it.
 //
-// A `Thm` cannot cross a module boundary -- it belongs to the phase-1
-// instantiation of the module that proved it -- and re-running every proof on
-// every import is not an option.  So a module publishes a manifest: its
-// declarations in order, with theorems reduced to their statements.  Types and
-// functions are *replayed* by the importer, which costs nothing in trust since
-// neither `datatype_axioms` nor `install_function` searches for a proof.  Only
-// theorem statements cross on trust, through the kernel's `import_theorem`.
+// A module publishes its finished `HolState` as a phase-1 value, and an
+// importer adopts it: the same `Theory`, the same `Thm` objects, the same rule
+// database.  Nothing is re-parsed and nothing is re-asserted, so there is no
+// trust boundary -- a `Thm` is opaque and cannot be built without the kernel,
+// whereas a *description* of a theory is data that any module could write.
+//
+// The cost is that adopting visits the exporting module, which re-runs its
+// proofs once per importing compilation.
 
 import:
   rhombus/hol/private/htype open
@@ -18,38 +19,66 @@ import:
   rhombus/hol/private/driver open
   "fixtures/theory_user.rhm" as u
   "fixtures/theory_uses_empty.rhm" as e
+  "fixtures/theory_transitive.rhm" as t
 
 // -- the logic crossed -------------------------------------------------------
 //
 // `theory_user.rhm` proves `app(app(xs, Nil()), ys) === app(xs, ys)`, which
 // needs the *imported* `app_nil_r` as a rewrite rule.  It also asserts
-// `expect [List, app, app_nil_r, twice, needs_imported_lemma]`, which pins that
-// the replay produced the datatype, the function and the theorem, in order,
-// before its own declarations.  Both are checked by the module having compiled.
+// `expect [List, List_lt, app, app_nil_r, twice, needs_imported_lemma]`, which
+// pins that the adopted state carried the datatype, the function and the
+// theorem, in order, before its own declarations.  Both are checked by the module having compiled.
 
 check u.sample ~is u.Cons(1, u.Cons(1, u.Nil()))
 
 // -- the runtime crossed too -------------------------------------------------
 //
 // `use_theory` does both halves in one line: the ordinary Rhombus import, so
-// the functions can be called, and the manifest, so the prover can use the
-// theory.
+// the functions can be called, and the published state, so the prover can use
+// the theory.
 
 check u.twice(u.Nil()) ~is u.Nil()
 check u.app(u.Cons(1, u.Nil()), u.Cons(2, u.Nil())) ~is u.Cons(1, u.Cons(2, u.Nil()))
 
-// -- a module with no declarations still publishes a manifest ----------------
+// -- a module with no declarations still publishes its state -----------------
 
 check e.forwarded ~is "hello"
 
-// -- admitted statements are recorded as a trust boundary --------------------
+fun load(mp :: ModulePath):
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }: Evaluator.instantiate(mp)
 
-check trusted_imports_of(initial_state().thy) ~is []
+// -- adoption is transitive --------------------------------------------------
+//
+// `theory_transitive.rhm` names only `theory_mid.rhm`, and proves a theorem
+// that needs `app_nil_r` from `theory_base.rhm`.  A description of a theory
+// lists what its module declared; a state *is* what the module ended up with,
+// so what it imported comes along without being mentioned.
+
+check t.result ~is u.Cons(1, u.Cons(1, u.Nil()))
+
+// -- the lineage stays a chain -----------------------------------------------
+//
+// Adopting is only defined when the incoming theory extends the one in scope.
+// That is what keeps `combine_stamps` happy: a module holding two sibling
+// theories could not use their theorems together.  Both ways of breaking it
+// say so at the offending line.
+
 check:
-  // `import_theorem` is the only way a statement enters without a proof, and
-  // it records every one it admits.
-  let st = initial_state()
-  let p = mk_var(#'p, TyApp(#'bool, []))
-  let (thy2, th) = import_theorem(st.thy, p, "elsewhere.rhm")
-  [show(concl_of(th)), trusted_imports_of(thy2).length()]
-  ~is ["p", 1]
+  load(ModulePath'lib("rhombus/hol/tests/fixtures/theory_out_of_order.rhm")')
+  ~throws "does not extend the one in scope"
+
+check:
+  load(ModulePath'lib("rhombus/hol/tests/fixtures/theory_after_decl.rhm")')
+  ~throws "does not extend the one in scope"
+
+// -- a theory cannot be forged -----------------------------------------------
+//
+// `theory_forged.rhm` is a plain `#lang rhombus` module exporting exactly the
+// data the old manifest loader would have accepted.  Nothing adopts it: a
+// `Thm` is opaque, so a module that did not go through the kernel has no state
+// to publish.
+
+check:
+  load(ModulePath'lib("rhombus/hol/tests/fixtures/theory_forged_user.rhm")')
+  ~throws "_hol_theory"

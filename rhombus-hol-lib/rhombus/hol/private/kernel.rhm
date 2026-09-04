@@ -73,13 +73,11 @@ export:
   new_axiom
   new_basic_definition
   new_basic_type_definition
-  import_theorem
   // queries
   type_arity
   const_type
   axioms_of
   definition_of
-  trusted_imports_of
   // hypothesis-set operations, exported because the derived layer needs them
   hyp_union
   hyp_insert
@@ -196,9 +194,6 @@ class Theory(tyops :: Map.of(Symbol, Int),
              consts :: Map.of(Symbol, HType),
              axioms :: List.of(Thm),
              defs :: Map.of(Symbol, Thm),
-             // Statements admitted on the word of another module's compile.
-             // Every entry here widens the trusted base and is reported.
-             trusted_imports :: List.of(Term),
              stamp :: Stamp)
 
 fun type_arity(thy :: Theory, n :: Symbol) :: maybe(Int):
@@ -209,7 +204,6 @@ fun const_type(thy :: Theory, n :: Symbol) :: maybe(HType):
 
 fun axioms_of(thy :: Theory) :: List.of(Thm): thy.axioms
 fun definition_of(thy :: Theory, n :: Symbol) :: maybe(Thm): thy.defs.get(n, #false)
-fun trusted_imports_of(thy :: Theory) :: List.of(Term): thy.trusted_imports
 
 // A rule that takes a theory must check that the theorem belongs to it.
 fun in_theory(who :: Symbol, thy :: Theory, th :: Thm) :: Void:
@@ -225,16 +219,14 @@ fun initial_theory() :: Theory:
          {c_eq: mk_fun(a, mk_fun(a, TyApp(ty_bool, [])))},
          [],
          {},
-         [],
          fresh_stamp())
 
 fun extend(thy :: Theory,
            ~tyops: tyops = thy.tyops,
            ~consts: consts = thy.consts,
            ~axioms: axioms = thy.axioms,
-           ~defs: defs = thy.defs,
-           ~trusted_imports: ti = thy.trusted_imports) :: Theory:
-  Theory(tyops, consts, axioms, defs, ti, next_stamp(thy.stamp))
+           ~defs: defs = thy.defs) :: Theory:
+  Theory(tyops, consts, axioms, defs, next_stamp(thy.stamp))
 
 // -- well-formedness -------------------------------------------------------
 
@@ -513,8 +505,7 @@ fun new_axiom(thy :: Theory, p :: Term) :: values(Theory, Thm):
   // stored in.
   let st = next_stamp(thy.stamp)
   let th = _Thm([], p, st)
-  values(Theory(thy.tyops, thy.consts, List.cons(th, thy.axioms), thy.defs,
-                thy.trusted_imports, st),
+  values(Theory(thy.tyops, thy.consts, List.cons(th, thy.axioms), thy.defs, st),
          th)
 
 // A conservative definition: `c = rhs` where `c` is undeclared, `rhs` is
@@ -547,7 +538,7 @@ fun new_basic_definition(thy :: Theory, tm :: Term) :: values(Theory, Thm):
           let c = mk_const(n, ty)
           let th = _Thm([], mk_eq(c, rhs), st)
           values(Theory(thy.tyops, thy.consts ++ {n: ty}, thy.axioms,
-                        thy.defs ++ {n: th}, thy.trusted_imports, st),
+                        thy.defs ++ {n: th}, st),
                  th)
       | ~else:
           error(~who: #'new_basic_definition,
@@ -616,7 +607,7 @@ fun new_basic_type_definition(thy :: Theory,
       let thy2 = Theory(thy.tyops ++ {tyname: tvs.length()},
                         thy.consts ++ {absname: mk_fun(rty, aty),
                                        repname: mk_fun(aty, rty)},
-                        thy.axioms, thy.defs, thy.trusted_imports, st)
+                        thy.axioms, thy.defs, st)
       let abs = mk_const(absname, mk_fun(rty, aty))
       let rep = mk_const(repname, mk_fun(aty, rty))
       let a = mk_var(#'a, aty)
@@ -633,17 +624,3 @@ fun new_basic_type_definition(thy :: Theory,
 
 // -- the cross-module trust boundary ---------------------------------------
 //
-// A `Thm` value cannot cross a module boundary: it belongs to the phase-1
-// instantiation of the module that proved it.  Re-running the proof on import
-// is not an option, so, exactly as HOL systems do with theory files, we admit
-// the *statement* on the word of the exporting module's compile.
-//
-// This is a trust boundary.  It is the reason every admitted statement is
-// recorded in `trusted_imports` and reported by the module's audit summary.
-// Nothing but the manifest loader may call this.
-fun import_theorem(thy :: Theory, statement :: Term, origin :: String)
-     :: values(Theory, Thm):
-  check_prop(#'import_theorem, thy, statement)
-  let thy2 = extend(thy,
-                    ~trusted_imports: List.cons(statement, thy.trusted_imports))
-  values(thy2, _Thm([], statement, thy2.stamp))

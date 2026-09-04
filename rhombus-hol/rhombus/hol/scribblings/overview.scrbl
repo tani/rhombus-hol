@@ -108,9 +108,11 @@ An ordinary Rhombus module can import that one and use it:
 
 @rhombuslangname(rhombus/hol) is still a general-purpose language. Only the
 declaration forms in @secref("declarations") are given a logical reading;
-everything else --- including ordinary @rhombus(fun), @rhombus(def),
-@rhombus(class) and @rhombus(import) --- means exactly what it means in
-@rhombuslangname(rhombus).
+everything else --- including ordinary @rhombus(fun), @rhombus(def) and
+@rhombus(class) --- means exactly what it means in
+@rhombuslangname(rhombus). @rhombus(import) means what it means in
+@rhombuslangname(rhombus) too, and additionally adopts the theory of whatever
+it names that has one; see @secref("importing").
 
 In particular @rhombus(fun) is never intercepted. A logical definition is
 written with @rhombus(function, ~datum), and the separate keyword is what makes

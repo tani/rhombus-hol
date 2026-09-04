@@ -195,7 +195,7 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 | M7 | `goal` `induct` `waterfall` | **`spec_4_1`** |
 | M8 | `general`（一般化）`destruct`（デストラクタ除去） | **`spec_4_2`** `destruct` |
 | R1 | 表層構文層。`expand` `elab` `driver` `taut` `module_block` | `lang_state` `decl_type` `decl_fun` `decl_theorem` |
-| R3 | モジュール間伝播。`use_theory` が理論の状態を値として採用する | `import_theory` |
+| R3 | モジュール間伝播。通常の `import` が理論を採用する | `import_theory` |
 | R4 | `check_property`。`qc` + 型ごとの生成器・縮小器 | `qc` |
 
 共有フィクスチャ `tests/spec_prelude.rhm` が `Nat` / `List` / `Tree` と
@@ -205,7 +205,7 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 ### 受け入れ状況（すべて仕様書のソースのまま）
 
 `tests/spec/` の 4 ファイルが仕様書そのもの:
-`list_proofs.rhm`（§4.1）、`tree_proofs.rhm`（§4.2、`use_theory` で §4.1 を取り込む）、
+`list_proofs.rhm`（§4.1）、`tree_proofs.rhm`（§4.2、`import` で §4.1 を取り込む）、
 `test_run.rhm`（§4.3、素の `#lang rhombus`）、`properties.rhm`（§4.3 の `check_property`）。
 
 ### 旧・受け入れ状況
@@ -278,40 +278,43 @@ R1〜R4 は完了。残るのは R5 のみ。
 ゴールは閉じる。ガード付き再帰は 1 義務につき分岐条件 1 つ、そのほとんどが矛盾、
 という形をしているので、測度はこれに依存している。
 
-### R3 の作り直し — マニフェストから値渡しへ
+### R3 の作り直し — マニフェスト → 値渡し → 通常の `import`
 
-当初は「`Thm` はモジュール境界を越えられない（証明したモジュールの phase-1
-インスタンス化に属する）」という前提で、宣言の**記述**を `hol_manifest`
-サブモジュールに publish し、importer 側で replay していた。**この前提が誤りだった。**
+**第 1 段: 前提が誤りだった。** 当初は「`Thm` はモジュール境界を越えられない」という
+前提で、宣言の**記述**を `hol_manifest` サブモジュールに publish し、importer 側で
+replay していた。実際には越えられる。これで `emit_manifest` / `manifest_item` /
+`replay` / `replay_theorem` / `import_theorem` / `trusted_imports` が全部消え、
+**トラスト境界そのものが消えた**。推移性の欠如と、手書きマニフェストによる偽造
+（実際に偽の定理を通せることを確認した）も同時に直った。
 
-`export: meta:` で `HolState` をそのまま publish でき、importer は phase 1 で
-同じ `Theory`・同じ `Thm` オブジェクトを受け取れる（stamp も同一）。実測で確認済み。
+**第 2 段: `use_theory` を廃止し、通常の `import` に統合した。**
 
-置き換えで消えたもの:
+理論は `hol_theory` サブモジュール（`~lang rhombus`、phase 0）が持つ。値の export を
+やめたのは、`_hol_theory` がどの理論でも同じ名前で、`open` を 2 つ書くと衝突するから。
+サブモジュールはパスで辿るので `open` と無関係になり、**ユーザーの `import` 節に一切
+手を触れずに済む** — これが `import` に載せられた理由。
 
-- `emit_manifest` / `manifest_item`（module_block.rhm）
-- `replay` / `replay_theorem`（driver.rhm）
-- `import_theorem` と `trusted_imports`（kernel.rhm）— **トラスト境界そのものが消えた**
+`~lang` 付きサブモジュールは本体より先に定義されるので、モジュール自身が
+`import: meta: self!hol_theory` で取り込める。これで証明はコンパイル時に走る。
 
-同時に直った問題:
+検出は推測ではなく照会: `Evaluator.module_is_declared(<path>!hol_theory, ~load: #true)`。
+理論でないモジュールの import は素通し。1 つの `import` に両方混ざっていてもよい。
 
-- **推移性。** マニフェストは自モジュールの宣言しか載せないので `use_theory` が
-  推移的でなかった（孫の依存を手で書く必要があり、しかも順序依存だった）。
-  状態は「そのモジュールが最終的に持っていたもの」なので、取り込んだものも付いてくる。
-- **偽造。** 手書きの `hol_manifest` サブモジュールを置くだけで、証明されていない
-  命題を書き換え規則として注入できた（実際に偽の定理を通せることを確認した）。
-  `Thm` は `constructor ~none` + 未 export の `_Thm` なのでカーネル抜きには作れず、
-  publish すべき状態を捏造できない。
-  ただし `private/` は規約でしかないので、`new_axiom` の直接呼び出しは依然可能。
-  「コンパイル＝証明済み」を本当に保証するなら `private/` の封鎖が別途必要。
+パスの取り出しは「節の接頭辞のうち `ModulePath.maybe` が通る最長のもの」。修飾子名の
+リストを持たずに済むので、Rhombus の import 文法への結合が最小になる。
+読めない形（`import: meta: "a.rhm"` のようにパスがブロックの中にあるもの）は
+**黙って落とさずエラーにする**。
 
-代償は提供側の証明の再実行（上の制限を参照）。行数も概念数も減るのでこちらを採った。
+実装上の罠を 2 つ踏んだ:
 
-実装上の注意: publish される名前 `_hol_theory` はどの理論でも同じなので、
-`open` でそのまま取り込むと 2 つ目の `use_theory` で衝突する。`rename` で
-インポートごとに別名にしている（`except` は「提供されていない名前は除外できない」
-と怒るので使えない）。副作用として、理論でないモジュールを `use_theory` すると
-`_hol_theory` を名指しするエラーになる — これが「これは理論ではない」の唯一の手掛かり。
+1. `expand.rhm`（phase-0 ヘルパ）で組んだ `'$t ...'` グループは、phase-1 マクロから
+   出ていくときに束縛を失う。パスは**項のリスト**で返し、`module_block.rhm` で組み直す。
+2. それでも足りない。サブモジュールの言語は素の `rhombus` なので、ユーザーの
+   `rhombus/hol` コンテキストを持つ項はそこで暗黙の import 形（文字列に対する
+   `#%literal`）に届かない。`Syntax.make(Syntax.unwrap(t), id_ctx)` で組み直す。
+   モジュールパスに必要なのは datum だけなので失うものはない。
+
+副産物: 仕様書 §4.2 が `import:` をそのまま書けるようになり、仕様との綴りの差が 1 つ減った。
 
 ### R5 — 性能（ドキュメントは完了）
 
@@ -377,10 +380,10 @@ R1〜R4 は完了。残るのは R5 のみ。
 - 辞書式の構造的降下が成立する定義では `~measure` は**検査されない**。
   構造的降下だけで停止性の議論は完結しているので健全性の問題はないが、
   誤った測度を書いても黙って通る。
-- `import` への介在はせず `use_theory "path.rhm"` を使う。これは通常の import と
-  理論の採用の両方を行う。
-- `use_theory` は**自分の宣言より前**に、複数あるなら**依存順**に書く。採用は
+- 理論の取り込みは通常の `import`。専用の形式は無い。
+- 理論の `import` は**自分の宣言より前**に、複数あるなら**依存順**に書く。採用は
   「入ってくる理論が今の理論の拡張であること」が条件（`descends` 1 回）。
+- パスがブロックの中にある import（`import: meta: "a.rhm"`）は読めないのでエラー。
 - **兄弟理論は合流できない。** どちらも他方の拡張でない 2 つの理論を 1 モジュールで
   使うことはできない。必要になったら theory merge を書く必要がある（今は無い）。
 - importer のコンパイルは提供側モジュールを visit するので、**提供側の証明が
@@ -405,7 +408,8 @@ R1〜R4 は完了。残るのは R5 のみ。
 
 ## 6. 未解決のリスク
 
-1. **`import` への介在**は行わない。`use_theory` が常設の経路。
+1. **`import` の認識**は既知の修飾子リストを持たない（最長接頭辞方式）が、
+   Rhombus の import 文法が変わればここが影響を受けうる。読めない形はエラーにしてある。
 2. **`module ~splice` 内の引用識別子のスコープ**（M9 初日に実測）。
 3. **書き換えの停止性** — タクティクごとの fuel/timeout は入れない方針。
    置換可能規則は `term_order` で下り方向にしか発火しないので発振しないが、

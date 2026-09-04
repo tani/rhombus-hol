@@ -167,33 +167,51 @@ to park a lemma that is useful in one place and too aggressive everywhere else.
 For the latter, @rhombus(~using) on a single proof is usually better than
 disabling the rule around it.
 
-@section{@rhombus(use_theory, ~datum)}
+@section(~tag: "importing"){Importing a theory}
 
-@verbatim{
-use_theory "path.rhm"
-}
-
-Imports another @rhombuslangname(rhombus/hol) module, both halves at once: the
-ordinary Rhombus import, so its functions can be called, and its theory, so its
+There is no separate form for importing a theory. An ordinary Rhombus
+@rhombus(import) of a @rhombuslangname(rhombus/hol) module brings both halves:
+its functions, because that is what an import does, and its theory, so its
 datatypes, definitions and theorems are available to the prover.
 
 @rhombusblock(
-  use_theory "list_proofs.rhm"
+  import: "list_proofs.rhm" open
 )
 
-It is transitive: the imported theory already contains whatever it imported in
-turn, so a dependency does not have to be named again.
+A module is recognised as a theory by having one --- every
+@rhombuslangname(rhombus/hol) module publishes its theory in a
+@rhombus(hol_theory, ~datum) submodule --- so this is checked, not guessed from
+the shape of the path. An import of anything else passes through untouched, and
+one @rhombus(import) form may name both:
 
-Two rules follow from keeping the chain of theories linear. A
-@rhombus(use_theory, ~datum) must come before the module's own logical
-declarations, and when there is more than one they must be given in dependency
-order. Adopting a theory that is not an extension of the one already in scope
-is an error, because a module holding two unrelated theories could not use
-their theorems together.
+@rhombusblock(
+  import:
+    "plain_helper.rhm" open
+    "list_proofs.rhm" open
+)
 
-@rhombus(use_theory, ~datum) exists rather than an extension of
-@rhombus(import) because interposing on @rhombus(import) would mean reproducing
-its whole grammar.
+Adoption is transitive: the imported theory already contains whatever it
+imported in turn, so a dependency does not have to be named again.
+
+@subsection{Ordering}
+
+Two rules follow from keeping the chain of theories linear. An import of a
+theory must come before the module's own logical declarations, and when there
+is more than one they must be given in dependency order. Adopting a theory that
+is not an extension of the one already in scope is an error, because a module
+holding two unrelated theories could not use their theorems together.
+
+@subsection{Forms that cannot be read}
+
+To find the module path in an import clause, the longest prefix of the clause
+that parses as one is taken. That covers @rhombus("path.rhm"),
+@rhombus(lib("collection/path.rhm")) and @rhombus(collection/path), with any
+modifiers after them.
+
+It does not cover a clause whose path is inside a block, as in
+@rhombus(import: meta: "path.rhm"). Rather than drop such a theory silently,
+an import that names a theory in a form this version cannot read is an error,
+and says so.
 
 @section{@rhombus(check_property, ~datum)}
 

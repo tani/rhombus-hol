@@ -72,8 +72,8 @@ another --- and a theorem from each could be combined into a proof of anything.
 Theorems from sibling theories are refused.
 
 Across modules, a @rhombuslangname(rhombus/hol) module publishes its finished
-theory as a compile-time value, and @rhombus(use_theory, ~datum) adopts it:
-the same theory, the same theorem objects. Nothing is re-parsed and nothing is
+theory in a @rhombus(hol_theory, ~datum) submodule, and an @rhombus(import) of
+that module adopts it: the same theory, the same theorem objects. Nothing is re-parsed and nothing is
 re-asserted, so there is no trust boundary at a module edge. An earlier design
 published a @emph{description} of the theory and re-admitted each theorem on
 the word of the exporting module's compile; that was a trust boundary, and it
@@ -112,9 +112,10 @@ Beyond the termination restrictions in @secref("termination"):
  @item{Patterns are one constructor deep, clauses are unordered, and there are
   no wildcards.}
 
- @item{@rhombus(use_theory, ~datum) must precede the module's own declarations,
-  and several must be given in dependency order. Two theories neither of which
-  extends the other cannot be used together.}
+ @item{An import of a theory must precede the module's own declarations, and
+  several must be given in dependency order. Two theories neither of which
+  extends the other cannot be used together. An import whose module path this
+  version cannot read is refused rather than quietly treated as ordinary.}
 
  @item{Adopting a theory re-runs the exporting module's proofs, once per
   importing compilation.}

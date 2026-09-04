@@ -34,7 +34,7 @@ class Decl(kind :: Symbol,
 // so ordinary Rhombus definitions keep working.
 def declaration_heads :: List.of(Symbol) = [#'type, #'function, #'theorem, #'proof,
                                             #'disable_rules, #'enable_rules,
-                                            #'use_theory, #'check_property,
+                                            #'import, #'check_property,
                                             #'declare, #'expect]
 
 fun head_of(form :: Syntax) :: maybe(Symbol):
@@ -117,12 +117,11 @@ fun plan_one(form :: Syntax) :: Decl:
       let parts = elab.check_property_shape(form)
       // The datatype spec is needed to build a generator, so carry it along.
       Decl(#'check_property, form, parts)
-  | #'use_theory:
-      match form
-      | 'use_theory $(path :: String)': Decl(#'use_theory, form, [path])
-      | ~else:
-          syntax_error_here(#'use_theory,
-                            "expected a module path in quotes", form)
+  | #'import:
+      // An ordinary Rhombus import, with one extra reading: if what it names
+      // is a theory, its logic is adopted as well as its values.  The import
+      // itself is passed through untouched -- this only looks at it.
+      Decl(#'import, form, [theory_paths(form)])
   | #'disable_rules: rule_control(#'disable_rules, form)
   | #'enable_rules: rule_control(#'enable_rules, form)
   | ~else: Decl(#'other, form, [])
@@ -136,3 +135,90 @@ fun rule_control(kind :: Symbol, form :: Syntax) :: Decl:
 
 fun syntax_error_here(who :: Symbol, message :: String, at :: Syntax):
   error(~who: who, message, error.val(~label: "in", to_string(at)))
+
+// -- imports -----------------------------------------------------------------
+
+// The module paths in an `import` that name `rhombus/hol` theories, each as
+// its list of *terms*.
+//
+// Terms rather than an assembled group, because the group would be built here
+// and this module is a phase-0 helper: a template built here loses its
+// bindings on the way out of the phase-1 macro, and an emitted import whose
+// path had lost them cannot read its own string literal.  The terms are the
+// user's own syntax and carry the user's context; `module_block.rhm`
+// reassembles them.
+//
+// A module is a theory exactly when it has a `hol_theory` submodule, and that
+// is *checked*, not guessed from the shape of the path: an ordinary import has
+// to pass through untouched, and a theory import must not be missed.
+fun theory_paths(form :: Syntax) :: List.of(List.of(Syntax)):
+  for values(acc :~ List = []) (c in import_clauses(form)):
+    let chosen = clause_path(c)
+    check_no_stray_theory(c, chosen)
+    cond
+    | chosen && is_theory(chosen :~ Syntax):
+        acc ++ [clause_terms(chosen :~ Syntax)]
+    | ~else: acc
+
+fun import_clauses(form :: Syntax) :: List.of(Syntax):
+  match form
+  | 'import: $c; ...': [c, ...]
+  | ~else: []
+
+fun clause_terms(c :: Syntax) :: List.of(Syntax):
+  match c
+  | '$t ...': [t, ...]
+  | ~else: []
+
+// The longest prefix of the clause that reads as a module path.
+//
+// Trying prefixes rather than matching a list of modifier names keeps this
+// from having to track Rhombus's import grammar: whatever the modifiers are,
+// they are whatever is left once the path stops parsing.
+fun clause_path(c :: Syntax) :: maybe(Syntax):
+  let ts = clause_terms(c)
+  recur loop (k = ts.length()):
+    cond
+    | k == 0: #false
+    | ~else:
+        let [t, ...] = (for List (i in List.iota(k)): ts[i])
+        let cand = '$t ...'
+        (if ModulePath.maybe(cand) | cand | loop(k - 1))
+
+// Probing a path that is not a module at all raises rather than answering --
+// a missing *collection* is an error, where a missing submodule is not -- and
+// every term of every import clause gets probed here.  A path that cannot be
+// resolved is simply not a theory; if it was meant to be one, the user's own
+// import reports the real reason.
+fun is_theory(p :: Syntax) :: Boolean:
+  match ModulePath.maybe('$p ! hol_theory')
+  | #false: #false
+  | mp:
+      try:
+        Evaluator.module_is_declared(mp :~ ModulePath, ~load: #true)
+        ~catch _ :: Exn.Fail: #false
+
+// A clause whose path is not what the prefix rule picked -- `import: meta:
+// "a.rhm"` reads its path out of a block, so the rule stops at `meta` -- would
+// otherwise drop a theory without a word.  Rather than grow the rule to cover
+// every such form, refuse the ones it cannot read.
+fun check_no_stray_theory(c :: Syntax, chosen :: maybe(Syntax)) :: Void:
+  let chosen_str = (if chosen | to_string(chosen :~ Syntax) | "")
+  for (cand in path_candidates(c)):
+    when to_string(cand) != chosen_str && is_theory(cand)
+    | syntax_error_here(
+        #'import,
+        "this import names a theory in a form `rhombus/hol` cannot read; "
+          ++ "write it as a plain `import: \"path.rhm\"` clause so that its "
+          ++ "theory can be adopted",
+        c)
+
+// Every group in the clause that might be a module path: each term on its
+// own, and, for a term that is a block, each group inside it.  The block case
+// is what catches `import: meta: "a.rhm"`, whose path the prefix rule never
+// reaches.
+fun path_candidates(c :: Syntax) :: List.of(Syntax):
+  for values(acc :~ List = []) (t in clause_terms(c)):
+    match t
+    | ': $g; ...': acc ++ [g, ...]
+    | ~else: acc ++ ['$t']

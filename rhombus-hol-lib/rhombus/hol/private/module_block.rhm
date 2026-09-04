@@ -36,6 +36,16 @@ meta:
   fun st(n :: Int) :: Syntax:
     Syntax.make_id("_hol_st" ++ to_string(n), id_ctx)
 
+  // A term rebuilt with this module's context.
+  //
+  // Needed for the terms of a module path emitted into the `hol_theory`
+  // submodule: that submodule's language is plain `rhombus`, and a term
+  // carrying the user's `rhombus/hol` context cannot reach the implicit import
+  // forms there -- a string path fails looking for `#%literal`.  Only the
+  // datum matters for a module path, so rebuilding it loses nothing.
+  fun recontext(t :: Syntax) :: Syntax:
+    Syntax.make(Syntax.unwrap(t), id_ctx)
+
   // -- datatypes -------------------------------------------------------------
 
   // `class.together` so that a datatype can refer to itself, and an
@@ -200,11 +210,40 @@ meta:
 
   // -- one declaration -------------------------------------------------------
 
-  fun emit_one(d :: expand.Decl, n :: Int) :: values(List.of(Syntax), Int):
+  // Two outputs, because they go to two places: the runtime forms stay in the
+  // module, and the chain steps go into the `hol_theory` submodule.  Nothing
+  // in the runtime half ever refers to the chain, which is what makes the
+  // split possible.
+  fun emit_one(d :: expand.Decl, n :: Int)
+       :: values(List.of(Syntax), List.of(Syntax), Int):
     let cur = st(n)
     let nxt = st(n + 1)
     match d.kind
-    | #'other: values([d.form], n)
+    | #'other: values([d.form], [], n)
+    | #'import:
+        // The import itself is passed through untouched.  When it names
+        // theories, the submodule imports their theories too and adopts them,
+        // one step per theory, in the order written.
+        let [paths] = d.parts
+        let at = head_term(d.form)
+        let (chain, n2):
+          for values(acc :~ List = [], k = n) (terms in (paths :~ List)):
+            let alias = Syntax.make_id("_hol_used" ++ to_string(k), id_ctx)
+            // Reassembled here, not in `expand.rhm`: see the note there.
+            //
+            // Rebuilt with this module's context as well.  The submodule's
+            // language is plain `rhombus`, and a term carrying the user's
+            // `rhombus/hol` context cannot find the implicit import forms
+            // there -- a string path fails on `#%literal`.  The datum is all
+            // that matters for a module path.
+            let [t, ...] = (terms :~ List).map(recontext)
+            let p = '$t ...'
+            values(acc ++ ['import: $p!hol_theory as $alias',
+                           'def $(st(k + 1))
+                              = _hol_driver.adopt($(st(k)), $(alias).theory,
+                                                  '$at')'],
+                   k + 1)
+        values([d.form], chain, n2)
     | #'type:
         let [name, ctors, params, gen] = d.parts
         let at = head_term(d.form)
@@ -216,19 +255,19 @@ meta:
                 // from this datatype.
                 'export:
                    $(gen_id(at, Syntax.unwrap(name)))
-                   $(shrink_id(at, Syntax.unwrap(name)))',
-                'meta def $nxt = _hol_driver.add_type($cur, '$form', '$at')'],
+                   $(shrink_id(at, Syntax.unwrap(name)))'],
+               ['def $nxt = _hol_driver.add_type($cur, '$form', '$at')'],
                n + 1)
     | #'function:
         let [name, params, body] = d.parts
         let at = head_term(d.form)
         let form = d.form
-        values([emit_function(name, params :~ List, body),
-                'meta def $nxt = _hol_driver.add_function($cur, '$form', '$at')'],
+        values([emit_function(name, params :~ List, body)],
+               ['def $nxt = _hol_driver.add_function($cur, '$form', '$at')'],
                n + 1)
     | #'theorem:
         // A theorem emits no runtime code: it is a claim about the logic, and
-        // the proof runs at phase 1 while the module is compiled.
+        // the proof runs while the module is compiled.
         //
         // The `proof:` clause is optional, and the two cases need separate
         // templates: a nested syntax literal can only be written inside one,
@@ -239,13 +278,15 @@ meta:
         let [a, ...] = as_
         match tactic
         | #false:
-            values(['meta def $nxt
+            values([],
+                   ['def $nxt
                        = _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
                                                  [Syntax.unwrap('$a'), ...],
                                                  '$stmt', #false, '$at')'],
                    n + 1)
         | tac:
-            values(['meta def $nxt
+            values([],
+                   ['def $nxt
                        = _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
                                                  [Syntax.unwrap('$a'), ...],
                                                  '$stmt', '$tac', '$at')'],
@@ -253,45 +294,21 @@ meta:
     | #'check_property:
         // No logical step: a property is checked by running the emitted code,
         // and its value is the outcome, so a test can assert on it.
-        values([emit_property(d)], n)
-    | #'use_theory:
-        // One line brings in both halves: the ordinary Rhombus import, so the
-        // functions can be called, and the published state, so the logic
-        // carries over.  Interposing on `import` itself would mean reproducing
-        // its whole grammar, and getting that wrong would break ordinary
-        // imports.
-        let [path] = d.parts
-        let at = head_term(d.form)
-        let alias = Syntax.make_id("_hol_used" ++ to_string(n), id_ctx)
-        // One clause does both halves.  The published state has the same
-        // name in every theory, so `open`ing two of them would collide on it;
-        // renaming it to something per-import both avoids that and is how
-        // this module gets hold of it.
-        //
-        // A module that publishes no state is not a theory, and the rename is
-        // what says so -- the error names `_hol_theory`, which is the only
-        // breadcrumb available at that point.
-        let [path] = d.parts
-        let at = head_term(d.form)
-        let alias = Syntax.make_id("_hol_used" ++ to_string(n), id_ctx)
-        values(['import:
-                   $path:
-                     open
-                     rename: $(theory_id()) as $alias',
-                'meta def $nxt = _hol_driver.adopt($cur, $alias, '$at')'],
-               n + 1)
+        values([emit_property(d)], [], n)
     | #'disable_rules: rule_step(d, n, cur, nxt, #false)
     | #'enable_rules: rule_step(d, n, cur, nxt, #true)
     | #'declare:
         let [name] = d.parts
-        values(['meta def $nxt = _hol_driver.note_decl($cur, Syntax.unwrap('$name'))'],
+        values([],
+               ['def $nxt = _hol_driver.note_decl($cur, Syntax.unwrap('$name'))'],
                n + 1)
     | #'expect:
         let [names] = d.parts
         let ns :~ List = names
         let [nm, ...] = ns
         let at = head_term(d.form)
-        values(['meta def $nxt
+        values([],
+               ['def $nxt
                    = _hol_driver.expect_declared($cur,
                                                  [Syntax.unwrap('$nm'), ...],
                                                  ~at: '$at')'],
@@ -299,33 +316,42 @@ meta:
 
   // -- the whole body --------------------------------------------------------
 
-  fun emit_all(decls :: List.of(expand.Decl)) :: List.of(Syntax):
-    let (out, n) = for values(acc :~ List = [], n = 0) (d in decls):
-                     let (forms, n2) = emit_one(d, n)
-                     values(acc ++ forms, n2)
-    out ++ ['meta def $(theory_id()) = $(st(n))',
-            'export: meta: $(theory_id())']
+  fun emit_all(decls :: List.of(expand.Decl))
+       :: values(List.of(Syntax), List.of(Syntax)):
+    let (rt, ch, n):
+      for values(rt :~ List = [], ch :~ List = [], n = 0) (d in decls):
+        let (r, c, n2) = emit_one(d, n)
+        values(rt ++ r, ch ++ c, n2)
+    values(rt, ch ++ ['def theory = $(st(n))'])
 
-  // Every `#lang rhombus/hol` module publishes its finished state as a
-  // phase-1 value, so an importer can adopt it directly.
-  //
-  // Publishing the state rather than a description of it is what removes the
-  // trust boundary: a `Thm` is opaque and cannot be built without the kernel,
-  // whereas a description is data that anything can write.  It also makes
-  // `use_theory` transitive for free -- the state already contains whatever
-  // its own imports contributed.
-  //
-  // The price is that an importer's compilation *visits* this module, which
-  // re-runs its proofs.  That is paid per importing compilation and is the
-  // reason a description was tried first.
-  fun theory_id() :: Syntax:
-    Syntax.make_id("_hol_theory", id_ctx)
-
+// Every `#lang rhombus/hol` module carries its theory in a `hol_theory`
+// submodule: the whole logical chain, at the submodule's phase 0.
+//
+// A submodule rather than an exported value, because the name is the same in
+// every theory and `open`ing two of them would collide on it.  Submodules are
+// reached by path, so an ordinary `import` of a theory needs no adjusting --
+// which is what lets `import` do this job at all.
+//
+// `~lang rhombus` is what makes it a separate module rather than part of this
+// one: were it to inherit `rhombus/hol`, this very `#%module_block` would
+// process its body.  It is declared before the rest of the module is expanded,
+// so the module can import it from `self` -- which is how the proofs come to
+// run while the module is compiled rather than when it is used.
+//
+// The price is that an importer's compilation visits this submodule, which
+// re-runs its proofs.  That is paid once per importing compilation.
 decl.macro 'module_block: $form; ...':
-  let [out, ...] = emit_all(expand.plan_body([form, ...]))
+  let (rt, ch) = emit_all(expand.plan_body([form, ...]))
+  let [r, ...] = rt
+  let [c, ...] = ch
   '#%module_block:
+     module hol_theory ~lang rhombus:
+       import: rhombus/hol/private/driver as _hol_driver
+       export: theory
+       def $(st(0)) = _hol_driver.initial_state()
+       $c
+       ...
      import: rhombus/hol/private/qc as _hol_qc
-     import: meta: rhombus/hol/private/driver as _hol_driver
-     meta def $(st(0)) = _hol_driver.initial_state()
-     $out
+     import: meta: self!hol_theory as _hol_self
+     $r
      ...'

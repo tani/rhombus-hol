@@ -160,9 +160,8 @@ fun install_function(thy :: Theory,
       | error(~who: who, "clause body mentions an unbound variable",
               error.val(~label: "variable", (v :~ FVar).name))
 
-  // -- exhaustiveness and non-overlap, over the matched column
-  let col = matched_column(who, spec)
-  check_coverage(who, spec, dts, col)
+  // -- exhaustiveness and non-overlap, over the pattern matrix
+  check_coverage(who, spec, dts)
 
   // -- termination
   let fn_placeholder = mk_const(spec.name, fty)
@@ -196,65 +195,97 @@ fun install_function(thy :: Theory,
 fun clause_vars(who :: Symbol, cl :: DefClause) :: List.of(FVar):
   for values(acc :~ List = []) (p in cl.pats): acc ++ pattern_vars(who, p)
 
-// The single argument position that is matched by constructors.  `#false`
-// means no position is -- a non-recursive, single-clause definition.
-fun matched_column(who :: Symbol, spec :: FunSpec) :: maybe(Int):
-  let n = spec.arg_types.length()
-  let cols = for values(acc :~ List = []) (i in List.iota(n)):
-               let any_ctor = for any (cl in spec.clauses):
-                                pattern_ctor((cl :~ DefClause).pats[i]) != #false
-               (if any_ctor | acc ++ [i] | acc)
-  cond
-  | cols.length() == 0: #false
-  | cols.length() == 1: cols[0]
-  | ~else:
-      error(~who: who,
-            "more than one argument is matched by constructors",
-            error.val(~label: "name", spec.name),
-            error.val(~label: "positions", to_string(cols)),
-            error.val(~label: "hint",
-                      "this version matches on a single argument; split the "
-                        ++ "definition into nested functions"))
-
+// Exhaustiveness and non-overlap, over the whole pattern matrix.
+//
+// The matrix comes from nested `match`es, so it is a decision tree flattened
+// into rows.  Checking it is the same descent: find a column every row splits
+// on, require the split to name each constructor of that type exactly once,
+// and recur into each branch with that column spent.  A leaf -- no column left
+// to split on -- must be a single row, or two clauses match the same
+// arguments.
+//
+// The column is *searched for* rather than taken left to right, because the
+// nesting need not follow the parameter order: `match n` outer and `match m`
+// inner leaves a matrix that only splits cleanly on the second column first.
 fun check_coverage(who :: Symbol, spec :: FunSpec,
-                   dts :: Map.of(Symbol, DatatypeSpec), col :: maybe(Int)) :: Void:
-  cond
-  | col == #false:
-      unless spec.clauses.length() == 1
+                   dts :: Map.of(Symbol, DatatypeSpec)) :: Void:
+  let n = spec.arg_types.length()
+  cover(who, spec, dts, spec.clauses, List.iota(n))
+
+fun cover(who :: Symbol, spec :: FunSpec, dts :: Map.of(Symbol, DatatypeSpec),
+          rows :: List.of(DefClause), cols :: List.of(Int)) :: Void:
+  match split_column(rows, cols)
+  | #false:
+      // Nothing left to split on.  Either some column mixes a variable in
+      // with constructors -- a fall-through clause, which this version does
+      // not compile because it does not order clauses -- or every remaining
+      // row matches the same arguments, and there had better be only one.
+      when (for any (col in cols): is_mixed(rows, col))
       | error(~who: who,
-              "several clauses but no argument is matched by constructors",
-              error.val(~label: "name", spec.name))
-  | ~else:
-      let ty = spec.arg_types[col]
-      let tyname = (match ty
-                    | TyApp(n, _): n
-                    | ~else:
-                        error(~who: who,
-                              "cannot match on an argument of variable type",
-                              error.val(~label: "name", spec.name)))
-      let dt :~ DatatypeSpec = (match dts.get(tyname, #false)
-                                | #false:
-                                    error(~who: who,
-                                          "no datatype declaration for the matched type",
-                                          error.val(~label: "type", tyname))
-                                | d: d)
-      let seen = for values(acc :~ List = []) (cl in spec.clauses):
-                   match pattern_ctor((cl :~ DefClause).pats[col])
-                   | #false:
-                       error(~who: who,
-                             "a variable pattern mixed with constructor patterns",
-                             error.val(~label: "name", spec.name),
-                             error.val(~label: "hint",
-                                       "give every clause a constructor pattern "
-                                         ++ "in the matched position"))
-                   | c:
-                       when acc.contains(c)
-                       | error(~who: who, "two clauses match the same constructor",
-                               error.val(~label: "constructor", c))
-                       acc ++ [c]
+              "a variable pattern mixed with constructor patterns",
+              error.val(~label: "name", spec.name),
+              error.val(~label: "hint",
+                        "give every clause a constructor pattern in the "
+                          ++ "matched position"))
+      unless rows.length() == 1
+      | error(~who: who, "two clauses match the same arguments",
+              error.val(~label: "name", spec.name),
+              error.val(~label: "clause", show(list_mk_comb(
+                                            mk_const(spec.name, fun_type(spec)),
+                                            (rows[0] :~ DefClause).pats))))
+  | col:
+      let col :~ Int = col
+      let dt = datatype_at(who, spec, dts, col)
+      let groups = for values(m :~ Map = {}) (r in rows):
+                     let c = pattern_ctor((r :~ DefClause).pats[col]) :~ Symbol
+                     m ++ {c: (m.get(c, []) :~ List) ++ [r]}
       for (c in dt.ctors):
         let c :~ Ctor = c
-        unless seen.contains(c.name)
-        | error(~who: who, "definition is not exhaustive",
-                error.val(~label: "name", spec.name),
-                error.val(~label: "missing constructor", c.name))
+        match groups.get(c.name, #false)
+        | #false:
+            error(~who: who, "definition is not exhaustive",
+                  error.val(~label: "name", spec.name),
+                  error.val(~label: "missing constructor", c.name))
+        | group:
+            cover(who, spec, dts, group :~ List, cols.remove(col))
+      for ((c, _) in groups):
+        unless (for any (k in dt.ctors): (k :~ Ctor).name == c)
+        | error(~who: who,
+                "a constructor that does not build the matched type",
+                error.val(~label: "constructor", c))
+
+// A column every row splits on, or `#false` if there is none.  A column that
+// no row splits on is not a candidate; one that only *some* rows split on is
+// rejected outright, because a row with a variable there is a wildcard and
+// this version does not order clauses.
+fun split_column(rows :: List.of(DefClause),
+                 cols :: List.of(Int)) :: maybe(Int):
+  recur loop (cs :~ List = cols):
+    match cs
+    | []: #false
+    | List.cons(col, rest):
+        let ctors = rows.map(fun (r :: DefClause): pattern_ctor(r.pats[col]))
+        cond
+        | (for all (c in ctors): c != #false): col
+        | ~else: loop(rest)
+
+// Some row splits on this column and some does not.
+fun is_mixed(rows :: List.of(DefClause), col :: Int) :: Boolean:
+  let ctors = rows.map(fun (r :: DefClause): pattern_ctor(r.pats[col]))
+  (for any (c in ctors): c != #false) && (for any (c in ctors): c == #false)
+
+fun datatype_at(who :: Symbol, spec :: FunSpec,
+                dts :: Map.of(Symbol, DatatypeSpec), col :: Int) :: DatatypeSpec:
+  let ty = spec.arg_types[col]
+  let tyname = (match ty
+                | TyApp(n, _): n
+                | ~else:
+                    error(~who: who,
+                          "cannot match on an argument of variable type",
+                          error.val(~label: "name", spec.name)))
+  match dts.get(tyname, #false)
+  | #false:
+      error(~who: who, "no datatype declaration for the matched type",
+            error.val(~label: "type", tyname))
+  | d: d :~ DatatypeSpec
+

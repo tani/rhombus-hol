@@ -1,0 +1,86 @@
+#lang rhombus/static
+
+// The lexicographic search, on its own.
+//
+// Driving it through `install_function` only ever shows whether a definition
+// was accepted; this shows which order was found, which is what the prover
+// later reads to pick an induction variable.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/terminate open
+
+def nat = TyApp(#'Nat, [])
+def zero = mk_const(#'zero, nat)
+def succ_c = mk_const(#'succ, mk_fun(nat, nat))
+fun succ(t :: Term) :: Term: mk_comb(succ_c, t)
+
+def m = mk_var(#'m, nat)
+def n = mk_var(#'n, nat)
+def p = mk_var(#'p, nat)
+def q = mk_var(#'q, nat)
+
+def f = mk_const(#'f, mk_fun(nat, mk_fun(nat, nat)))
+
+// `[patterns, body]` pairs, as `install_function` passes them.
+fun info(clauses :: List) :: RecursionInfo:
+  check_termination(#'test, #'f, 2, clauses, f)
+
+fun call(args :: List.of(Term)) :: Term: list_mk_comb(f, args)
+
+// -- a single descending argument ---------------------------------------------
+
+check:
+  info([[[succ(p), n], call([p, n])]])
+  ~matches RecursionInfo([0], #'structural, _)
+
+// A column that descends at every site is reported even when the first one
+// already settles every call, because the prover uses it as a hint.
+
+check:
+  info([[[succ(p), succ(q)], call([p, q])]])
+  ~matches RecursionInfo([0, 1], #'structural, _)
+
+// -- neither argument descends everywhere -------------------------------------
+//
+// The Ackermann shape: one call shrinks `m`, another holds `m` and shrinks
+// `n`.  Order [0, 1] works; no single column does.
+
+check:
+  info([[[succ(p), zero], call([p, succ(zero)])],
+        [[succ(p), succ(q)], call([succ(p), q])]])
+  ~matches RecursionInfo([0, 1], #'structural, _)
+
+// Order matters: with the roles swapped the search has to pick column 1
+// first.
+
+check:
+  info([[[zero, succ(q)], call([succ(zero), q])],
+        [[succ(p), succ(q)], call([p, succ(q)])]])
+  ~matches RecursionInfo([1, 0], #'structural, _)
+
+// One call holding a column while the other shrinks it is fine -- that is
+// what lexicographic order is for.  Here `m` is held and `n` shrinks, then
+// `m` shrinks; order [0, 1] settles both.
+
+check:
+  info([[[succ(p), succ(q)], call([succ(p), q])],
+        [[succ(p), succ(q)], call([p, succ(q)])]])
+  ~matches RecursionInfo([0, 1], #'structural, _)
+
+// -- no order at all ----------------------------------------------------------
+//
+// Each call *grows* the column the other shrinks, so whichever is tried
+// first, some call increases it.  No lexicographic order exists and none is
+// invented.
+
+check:
+  info([[[succ(p), succ(q)], call([succ(succ(p)), q])],
+        [[succ(p), succ(q)], call([p, succ(succ(q))])]])
+  ~throws "cannot see that the definition terminates"
+
+// -- not recursive at all -----------------------------------------------------
+
+check info([[[m, n], zero]]) ~matches RecursionInfo([], #'none, [])

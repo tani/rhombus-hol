@@ -9,9 +9,11 @@
 //
 // Two methods, tried in that order:
 //
-//   structural  one argument is a proper constructor subterm of the
-//               corresponding pattern at every recursive call.  Purely
-//               syntactic, no proof obligations.
+//   structural  the arguments descend lexicographically: there is an order of
+//               argument positions such that every recursive call leaves some
+//               prefix of them unchanged and shrinks the next one to a proper
+//               constructor subterm of its pattern.  Purely syntactic, no
+//               proof obligations.
 //
 //   measure     the author supplied `~measure(e)`, and `e` decreases in the
 //               subterm order of its own type at every recursive call.  That
@@ -97,12 +99,9 @@ fun check_termination(who :: Symbol,
       RecursionInfo([], #'none, [])
   | ~else:
       let sites = all_sites.map(fun ([_, _, args]): CallSite(args :~ List))
-      let good = for values(acc :~ List = []) (i in List.iota(arity)):
-                   let ok = for all ([pats, _, args] in all_sites):
-                              descends_at((pats :~ List)[i], (args :~ List)[i])
-                   (if ok | acc ++ [i] | acc)
+      let order = lexicographic_order(arity, all_sites)
       cond
-      | good.length() > 0: RecursionInfo(good, #'structural, sites)
+      | order: RecursionInfo(order :~ List, #'structural, sites)
       | measure:
           let m :~ Measure = measure
           check_measure(who, name, arity, fn, m, all_sites)
@@ -122,6 +121,62 @@ fun check_termination(who :: Symbol,
                             ++ "recursive call; give the definition a "
                             ++ "`~measure(...)` if it terminates for another "
                             ++ "reason"))
+
+// -- lexicographic structural descent ----------------------------------------
+
+// An order of argument positions the calls descend in, or `#false`.
+//
+// Greedy, and that is not a heuristic: a column admissible at this step stays
+// admissible later, and taking it can only discharge call sites, so if any
+// order works this one does.  At each step, look for a column that no call
+// site *grows* -- each either leaves it alone or shrinks it to a constructor
+// subterm -- and that at least one site shrinks.  The sites it shrinks are
+// settled; the rest carry on to the next column.
+//
+// Descending on one argument is the common case and comes out as a
+// single-element order, so this subsumes the plain structural check rather
+// than sitting beside it.
+fun lexicographic_order(arity :: Int, all_sites :: List) :: maybe(List.of(Int)):
+  recur loop (pending :~ List = all_sites, used :~ List = [], order :~ List = []):
+    cond
+    | pending.length() == 0: order ++ fully_descending(arity, all_sites, order)
+    | ~else:
+        match next_column(arity, pending, used)
+        | #false: #false
+        | col:
+            let col :~ Int = col
+            let rest = pending.filter(
+              ~keep: fun ([pats, _, args]):
+                       !descends_at((pats :~ List)[col], (args :~ List)[col]))
+            loop(rest, used ++ [col], order ++ [col])
+
+fun next_column(arity :: Int, pending :: List, used :: List.of(Int)) :: maybe(Int):
+  recur loop (i = 0):
+    cond
+    | i >= arity: #false
+    | used.contains(i): loop(i + 1)
+    | ~else:
+        let ok = for all ([pats, _, args] in pending):
+                   let p = (pats :~ List)[i]
+                   let a = (args :~ List)[i]
+                   descends_at(p, a) || a == p
+        let any_shrinks = for any ([pats, _, args] in pending):
+                            descends_at((pats :~ List)[i], (args :~ List)[i])
+        (if ok && any_shrinks | i | loop(i + 1))
+
+// Columns that shrink at *every* call site, beyond those the order already
+// names.  They are not needed for termination, but the prover uses them to
+// pick an induction variable, and a column that always shrinks is a good
+// guess whether or not the lexicographic search happened to reach it.
+fun fully_descending(arity :: Int, all_sites :: List,
+                     order :: List.of(Int)) :: List.of(Int):
+  for values(acc :~ List = []) (i in List.iota(arity)):
+    cond
+    | order.contains(i): acc
+    | ~else:
+        let ok = for all ([pats, _, args] in all_sites):
+                   descends_at((pats :~ List)[i], (args :~ List)[i])
+        (if ok | acc ++ [i] | acc)
 
 // -- the measure -------------------------------------------------------------
 

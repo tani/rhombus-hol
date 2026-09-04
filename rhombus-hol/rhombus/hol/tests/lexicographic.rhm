@@ -1,0 +1,57 @@
+#lang rhombus/static
+
+// R2: nested `match` and lexicographic descent.
+//
+// One matched column and one descending argument were the same restriction
+// wearing two hats: a definition that recurses on two arguments could not be
+// written, so the fact that it could not be checked never came up.
+
+import:
+  "fixtures/lexicographic_ok.rhm" as f
+
+fun load(mp :: ModulePath):
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }: Evaluator.instantiate(mp)
+
+fun nat(n :: Int):
+  recur loop (k = n):
+    (if k == 0 | f.zero() | f.succ(loop(k - 1)))
+
+fun lst(ns :: List):
+  recur loop (ns :~ List = ns):
+    match ns
+    | []: f.Nil()
+    | List.cons(n, rest): f.Cons(nat(n), loop(rest))
+
+// -- Ackermann ---------------------------------------------------------------
+//
+// The inner call shrinks the second argument and leaves the first alone; the
+// outer calls shrink the first.  No single argument decreases at every call,
+// so this compiles only if the order [m, n] is found.
+
+check f.ack(f.zero(), f.zero()) ~is nat(1)
+check f.ack(nat(1), nat(1)) ~is nat(3)
+check f.ack(nat(2), nat(2)) ~is nat(7)
+check f.ack(nat(3), nat(2)) ~is nat(29)
+
+// -- descending on either argument -------------------------------------------
+
+check f.merge(f.Nil(), lst([1, 2])) ~is lst([1, 2])
+check f.merge(lst([1, 2]), f.Nil()) ~is lst([1, 2])
+check f.merge(lst([1, 3]), lst([2, 4])) ~is lst([1, 2, 3, 4])
+
+// -- the matrix has to cover the product -------------------------------------
+
+check:
+  load(ModulePath'lib("rhombus/hol/tests/fixtures/lexicographic_partial.rhm")')
+  ~throws "not exhaustive"
+
+// -- a nested `match` may not re-match a refined column ----------------------
+//
+// `succ(n)` rebinds the name `n`, so `match n` inside it is a match on the
+// field.  Treating that as a second match on the parameter would discard the
+// outer pattern.
+
+check:
+  load(ModulePath'lib("rhombus/hol/tests/fixtures/lexicographic_rematch.rhm")')
+  ~throws "already been matched"

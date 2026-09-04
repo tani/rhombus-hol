@@ -313,17 +313,9 @@ fun parse_function_decl(thy :: Theory, stx :: Syntax) :: FunSpec:
         let e = parse_group(PEnv(thy, tyvars, env0, #'expr, #false, #false),
                             ms :~ Syntax)
         list_mk_abs(pvars, e)
-  let clauses:
-    match body :~ Syntax
-    | 'match $(sv :: Identifier)
-       | $c
-       | ...':
-        let sname = Syntax.unwrap(sv)
-        let col = index_of_param(pvars, sname, stx)
-        [parse_clause(thy, name, self, pvars, col, env0, c), ...]
-    | ~else:
-        [DefClause(pvars.map(fun (v :: FVar): v :~ Term),
-                   elab_expr(thy, name, self, env0, body :~ Syntax))]
+  let clauses = parse_body(thy, name, self, pvars,
+                           pvars.map(fun (v :: FVar): v :~ Term),
+                           env0, body :~ Syntax, stx)
   FunSpec(name, arg_tys, rty, clauses, measure)
 
 fun index_of_param(pvars :: List.of(FVar), n :: Symbol, at :: Syntax) :: Int:
@@ -334,17 +326,59 @@ fun index_of_param(pvars :: List.of(FVar), n :: Symbol, at :: Syntax) :: Int:
     | (pvars[i] :~ FVar).name == n: i
     | ~else: loop(i + 1)
 
+// A body, as the clauses it stands for.
+//
+// `match` may be nested, one argument per level, and the nesting is flattened
+// into a pattern matrix: `match m | zero(): ... | succ(p): match n | ...`
+// becomes `[zero(), n]`, `[succ(p), zero()]`, `[succ(p), succ(q)]`.  That is
+// what lets a definition descend on more than one argument -- `install_function`
+// checks the matrix for coverage, and the termination checker looks for a
+// descending column across the whole of it.
+//
+// `pats` is the row built so far: initially the bare parameters, refined one
+// column at a time as the nesting is descended.
+fun parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
+               pvars :: List.of(FVar), pats :: List.of(Term),
+               env :: Map.of(Symbol, Term), body :: Syntax,
+               at :: Syntax) :: List.of(DefClause):
+  match body
+  | 'match $(sv :: Identifier)
+     | $c
+     | ...':
+      let col = matched_index(pvars, pats, Syntax.unwrap(sv), body)
+      let cs = [c, ...]
+      for values(acc :~ List = []) (c in cs):
+        acc ++ parse_clause(thy, self_name, self, pvars, pats, col, env, c, at)
+  | ~else:
+      [DefClause(pats, elab_expr(thy, self_name, self, env, body))]
+
+// The column a nested `match` refines, refusing to refine one twice.
+//
+// A pattern variable may shadow a parameter -- `function f(n)` with a clause
+// `succ(n)` -- and without this check `match n` inside that clause would look
+// like a second match on the parameter and silently discard the first.
+fun matched_index(pvars :: List.of(FVar), pats :: List.of(Term),
+                  n :: Symbol, at :: Syntax) :: Int:
+  let col = index_of_param(pvars, n, at)
+  unless pats[col] == (pvars[col] :~ Term)
+  | syntax_error(#'function,
+                 "this argument has already been matched; a nested `match` "
+                   ++ "must be on a different parameter",
+                 at)
+  col
+
 fun parse_clause(thy :: Theory, self_name :: Symbol, self :: Term,
-                 pvars :: List.of(FVar), col :: Int,
-                 env0 :: Map.of(Symbol, Term), c :: Syntax) :: DefClause:
+                 pvars :: List.of(FVar), pats :: List.of(Term), col :: Int,
+                 env0 :: Map.of(Symbol, Term), c :: Syntax,
+                 at :: Syntax) :: List.of(DefClause):
   let (cname, vids, body) = clause_parts(c)
   let scrut_ty = (pvars[col] :~ FVar).ty
   let (pat, bound) = ctor_pattern(thy, cname, vids, scrut_ty, c)
   let env = for values(m :~ Map = env0) (v in bound):
               m ++ {(v :~ FVar).name: v :~ Term}
-  let pats = for List (v in pvars, i in List.iota(pvars.length())):
-               (if i == col | pat | (v :~ Term))
-  DefClause(pats, elab_expr(thy, self_name, self, env, body))
+  let pats2 = for List (p in pats, i in List.iota(pats.length())):
+                (if i == col | pat | p)
+  parse_body(thy, self_name, self, pvars, pats2, env, body, at)
 
 fun clause_parts(c :: Syntax) :: values(Symbol, List.of(Syntax), Syntax):
   match c

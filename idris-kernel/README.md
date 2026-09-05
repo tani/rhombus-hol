@@ -29,41 +29,255 @@ one to keep --the runtime cost (see "History" below) versus the value of
 value of *proving properties about* one authoritative implementation and
 keeping the other as the single thing that actually runs.
 
-## What is proved so far
+## What is proved
 
-`combineStampsSound`, in `src/Kernel.idr`: whichever `Stamp` `combineStamps`
-picks when merging two theorems' provenance, that stamp is reachable
-(`descends`) from *both* inputs -- given each input is itself
-self-reachable, which `descendsSelfFresh`/`descendsSelfNext` show holds for
-every `Stamp` this kernel's own constructors (`freshStamp`/`nextStamp`) can
-produce. This is the formal version of the argument `kernel.rhm`'s "-- Two
-theorems may be combined only when their theories lie on one line of
-extension. The result belongs to the later of the two." comment makes in
-prose: it says the *chosen* stamp is never a regression for either side,
-which is what makes "later of the two, or reject" a sound merge strategy
-and not merely a deterministic one.
+**Every one of the kernel's ten primitive rules is proved to produce a
+well-formed theorem.** Everything below is machine-checked by
+`idris2 --cg racket --build kernel.ipkg` -- with **no `?hole`s anywhere**
+(verified with `:metavars` after loading `Main`, which reaches every proof
+transitively) and **no axioms**: `grep believe_me src/*.idr` comes back
+empty. Every fact below is an ordinary structural induction.
 
-One assumption is made explicit rather than derived: `stringEqRefl` asserts
-`s == s = True` for an abstract `String`, because Idris cannot derive that
-by computation for a primitive/opaque backend operation. It is stated as an
-axiom, not hidden inside a `believe_me` with no comment -- see its doc
-comment in `src/Kernel.idr`.
+### Why there are no axioms: `Name` instead of `String`
 
-This is one property, not an exhaustive verification of the kernel --
-term/type safety (e.g. "`checkTerm` succeeding implies `typeOf` always
-succeeds", the usual subject-reduction-shaped claim) is not proved here yet.
-The lineage property was chosen first because it is exactly the one
-`kernel.rhm`'s own comments call out as the subtle, easy-to-get-wrong part
-(the fork/sibling-theories argument), and because it does not require
-re-architecting `Term`/`HType` as intrinsically-typed to state.
+An earlier version of this development assumed two axioms about `String`
+equality (`s == s = True`, and `a == b = True -> a = b`). They were not
+avoidable while names were `String`s: `String` is a *primitive* -- it has
+no constructors -- so for abstract `x` and `y` a proof of `x = y` cannot be
+built by matching on anything, only coerced into being with `believe_me`.
+Base's own `DecEq String` instance is implemented exactly that way, so
+switching to it would have relocated the assumption into the standard
+library rather than removed it.
+
+`src/Name.idr` makes the name type inductive instead:
+
+```idris
+data Name = NFun | NBool | NEq | NAlpha | NUser Nat
+```
+
+The four canonical names are the ones the kernel singles out (`fun`,
+`bool`, `eq`, and the type variable in `eq`'s generic type), mirroring
+`rhombus-hol-lib/rhombus/hol/private/names.rhm`, which fixes the same
+names on the Rhombus side. Everything a user declares is `NUser`, carrying
+a `Nat` rather than text -- which is what Rhombus `Symbol` equality
+actually *is*: interned identity, not a character-by-character comparison.
+`nameEqRefl` and `nameEqSound` are then plain inductions, and so is
+`natEqSound` (`Nat` is inductive too), and everything downstream
+-- `htypeEqSound`, `htypeEqRefl`, `termEqSound` -- follows from those.
+
+`Stamp`'s identity token became a `Nat` for the same reason: it is a fresh
+identity supplied by the caller, never text.
+
+A future re-wiring to Rhombus would intern names at the boundary (a
+`Symbol`-to-`Nat` map on the Racket side), which is the same thing Racket
+already does for symbols internally.
+
+### Lineage: `combineStampsSound`
+
+Whichever `Stamp` `combineStamps` picks when merging two theorems'
+provenance is reachable (`descends`) from *both* inputs, given each is
+itself self-reachable -- which `descendsSelfFresh`/`descendsSelfNext` show
+holds for every `Stamp` the kernel's own constructors can produce. This is
+the formal version of the "the result belongs to the later of the two"
+argument `kernel.rhm`'s comment makes in prose: the chosen stamp is never
+a regression for either side, which is what makes "later of the two, or
+reject" sound rather than merely deterministic.
+
+`siblingsIncomparable` and `rootsIncomparable` state the property the
+ancestor *set* exists for, and the one the section's prose asserted but
+nothing proved: two sibling extensions of one base theory (and two
+independently rooted theories) never descend from one another, in either
+direction. Without it, a theorem proved in one sibling could be handed to
+a rule checking membership in the other. A plain generation counter cannot
+support this — both siblings would get the same number — which is the
+formal reason the kernel carries sets rather than a depth.
+
+Token freshness is a genuine precondition of both, not an oversight: Idris
+cannot mint identities, so distinctness is what the caller supplies and
+what the Racket host's `gensym` provides. Making that a typed hypothesis
+rather than a comment is the point.
+
+### The construction boundary
+
+`Stamp`, `Thm` and `Theory` are `export`, not `public export`, so their
+constructors are private to `Kernel.idr`. Outside it they can only be
+built by the ten rules and the extension principles, and only read through
+the accessors — the same boundary `kernel.rhm` draws with `authentic`,
+`constructor ~none` and an unexported `internal` constructor. Costing
+nothing in proofs (every proof lives in `Kernel.idr` and still sees the
+constructors), it removes the possibility of an Idris-level client
+fabricating a theorem.
+
+The guarantee is Idris-level and **does not survive compilation**: the
+Racket backend represents these values as bare tagged vectors, so a Racket
+caller can fabricate one. This is not a fixable gap in the port — it is a
+property of the FFI boundary — and it is the concrete reason a wiring that
+*hands* this kernel caller-built theorems gains nothing from the proofs
+here. What does gain from them is a wiring in which this kernel constructs
+every theorem itself.
+
+### Type safety: `checkTermTypeOfSound`, `typeOfWellFormed`
+
+`checkOpenTerm thy t env = Right () -> (ty ** typeOf t = Right ty)`: a term
+the kernel accepts always has a type, so `typeOf` never fails downstream on
+something `checkTerm` already passed. And `typeOfWellFormed`: that type is
+itself well-formed in the theory (needs `WellFormedTheory`, below, for the
+`Abs` case, which builds a `fun` type).
+
+### Beta reduction: the full subject-reduction story
+
+`BETA` rewrites `Comb (Abs ty body) arg` to `substBvar arg body` and never
+re-checks the result, so it owes three things, all now proved:
+
+| | theorem | what it gives |
+|---|---|---|
+| type | `betaTypeSound` | the reduct has the same type as the redex |
+| scope | `betaClosedSound` | the reduct has no dangling de Bruijn index |
+| form | `betaCheckSound` | the reduct still passes `checkTerm` |
+
+Each rests on a general substitution lemma proved by induction under
+binders, with the de Bruijn depth and the environment growing together:
+`substAtTypeSound` (typing), `substShiftClosed` (local closure, in
+`Term.idr`), and `substAtCheckSound` (well-formedness), the last of which
+also needs `checkWeakenRight` (weakening: entering more binders never
+invalidates a term) and `checkClosed` (anything well-formed in an
+environment has no index escaping it).
+
+`shiftPreservesType` and `shiftClosedId` are the load-bearing small lemmas:
+`shift` only rewrites `BVar` *indices*, so it cannot change a type, and on
+a term already closed at the cutoff it is the identity. The second is what
+keeps `shift`'s `Integer` index arithmetic out of every proof here -- no
+reasoning about `integerToNat (natToInteger i + d)`, which would need
+further axioms about primitive `Integer` operations, appears anywhere.
+
+### Theory extension: `newTypeMonotone`, `newConstantMonotone`
+
+Declaring a new type constructor or constant never un-declares an existing
+one. This is what makes `in_theory`/`descends` meaningful: a theorem proved
+against an ancestor theory is safe to reuse in an extension *because* the
+extension still recognizes everything the ancestor did.
+
+### Well-formed theories and equation building
+
+`WellFormedTheory` pins down what the kernel assumes about a theory: `fun`
+has arity 2, `bool` arity 0, and `eq` is declared at `'a -> 'a -> bool`.
+`initialTheoryWellFormed` proves `initialTheory` satisfies it (the
+monotonicity results above are what carry it through extension).
+
+On top of that, `mkEqCheckSound`: an equation `mkEq` builds from two
+checked terms of one type is itself a checked term. Its core,
+`eqConstCheck`, is where `typeMatch` has to actually succeed -- matching
+`'a -> 'a -> bool` against `ty -> ty -> bool` binds `'a` to `ty`, then
+meets `'a` again and compares `ty` with itself, which is what
+`htypeEqRefl` is for.
+
+### The rules' outputs: all ten of them
+
+A `Thm` is well-formed when every hypothesis and its conclusion are terms
+the theory accepts (`WellFormedThm`). Nothing in the kernel re-checks a
+theorem it built, so each rule owes exactly that -- and **all ten now
+discharge it**:
+
+| rule | theorem | what the proof turns on |
+|---|---|---|
+| `REFL` | `reflWellFormed` | `mkEqCheckSound` on the term it was handed |
+| `ASSUME` | `assumeWellFormed` | its conclusion *is* the checked term |
+| `BETA` | `betaWellFormed` | the whole beta development above |
+| `TRANS` | `transWellFormed` | operands of a well-formed equation are well-formed |
+| `EQ_MP` | `eqMpWellFormed` | its conclusion is the equation's right-hand side |
+| `DEDUCT_ANTISYM_RULE` | `deductAntisymWellFormed` | operands are the inputs' own conclusions |
+| `MK_COMB` | `mkCombWellFormed` | `eqOperandTypes` -- see below |
+| `ABS` | `absWellFormed` | `abstractAtCheck`, substitution run backwards |
+| `INST` | `instWellFormed` | `instFvarGoCheck`, substitution driven by a list |
+| `INST_TYPE` | `instTypeWellFormed` | `instTypeGoCheck` + `typeMatchSubst` |
+
+Three of these needed machinery of their own:
+
+- **`MK_COMB`** equates applications it *builds*, so it has to know the two
+  theorems it was given equate same-typed terms. `eqOperandTypes` recovers
+  that from nothing but the fact that the equation type-checked, by
+  inverting `typeMatch` (`typeMatchEqInv`): `eq`'s generic type
+  `'a -> 'a -> bool` meets `'a` twice, so any instance of it pins both
+  sides to one type. The other equation rules get their types more cheaply
+  -- `mkEq` refuses to build an equation whose sides disagree, so a
+  successful `mkEq` is already that proof (`mkEqTypes`).
+- **`ABS`** closes a free variable: substitution run backwards, replacing
+  an `FVar` by a `BVar` and *appending* the variable's type to the
+  environment rather than consuming it (`abstractAtCheck`).
+- **`INST_TYPE`** rewrites the types inside a theorem, so the environment
+  moves with the term (`map (typeSubst' tyin) env`). Its delicate case is
+  `Const`, whose check asks whether the use type is still an instance of
+  the declared generic type: `typeMatchSubst` shows instantiating an
+  instance leaves it an instance, with the matcher's bindings substituted
+  the same way.
+
+Hypothesis-list bookkeeping is covered too (`hypInsertChecked`,
+`hypUnionChecked`, `hypRemoveChecked`, `rehashChecked`): every rule that
+merges or drops hypotheses only moves existing ones around.
+
+## What is not proved
+
+The kernel's *syntactic* obligations are discharged: every primitive rule
+produces a well-formed theorem, beta reduction preserves typing and scope,
+theory extension is monotonic, and the lineage discipline is sound.
+
+What is not here, and would not be:
+
+- **Semantic consistency** -- that the axioms and rules cannot derive
+  falsity. That is a claim about a model of the logic, not about the syntax
+  this port describes; no amount of work in this directory would state it.
+- **The theory-extension principles' own soundness** (`new_axiom`,
+  `new_basic_definition`, `new_basic_type_definition` being conservative).
+  Conservativity is again a semantic property; what *is* proved here is the
+  syntactic half that the kernel relies on -- `newTypeMonotone` /
+  `newConstantMonotone`.
+(Termination is *not* on this list any more: every module is
+`%default total`, so the proofs are of total correctness. See below.)
+
+## Termination
+
+Every module carries `%default total`, so Idris2 checks each function for
+coverage *and* termination, and a `total` function may only call other
+`total` functions — the property is closed downwards through the whole
+development, base library included. Consequently the well-formedness
+theorems are statements of total correctness: `reflWellFormed` and friends
+say the rule *returns* a well-formed `Thm`, not merely that it does so if
+it returns at all.
+
+This was not hard, because nothing in an LCF kernel actually needs
+non-structural recursion: `typeOf`, `checkOpenTerm`, `checkType`, `shift`,
+`substAt`, `abstractAt`, `instFvarGo`, `instTypeGo`, `typeMatch`,
+`htypeEq`, `nthEnv` and `hypInsert` all recurse into a strict subterm of
+their argument. The kernel has no fixpoint iteration and no fresh-name
+search loop (`term.rhm`'s `variant`, whose termination *would* need a real
+argument — that a finite avoid-set leaves some suffix unused — is not part
+of this port; the locally-nameless representation is exactly what removes
+the need for it).
+
+The one function Idris2's size-change analysis could not see through was
+`termOrd`, and not for a deep reason: it dispatched on the *pair*
+`case (a, b) of ...`, which hides the structural descent from the checker
+because the recursive calls are on components of a freshly built tuple
+rather than on subterms of the matched arguments. Pattern-matching the two
+arguments directly instead makes the descent visible and it is accepted.
+The earlier hand-written `mutual` blocks for `HType`/`Term`'s `Eq`/`Show`
+(written to dodge the checker's blind spot around interface default
+methods and higher-order list combinators over a type mutually recursive
+with `List`) turned out to be exactly what totality needed as well, so
+they carried over unchanged.
 
 ## Layout
 
-- `src/HType.idr` — HOL types (`htype.rhm`).
-- `src/Term.idr` — locally-nameless terms (`term.rhm`).
+- `src/Name.idr` — the inductive name type, and the equality
+  soundness/reflexivity for it and for `Nat` that everything else rests on.
+- `src/HType.idr` — HOL types (`htype.rhm`), plus `HType` equality
+  soundness and reflexivity.
+- `src/Term.idr` — locally-nameless terms (`term.rhm`), plus
+  `shiftPreservesType` and the local-closedness lemmas
+  (`shiftClosedId`, `substShiftClosed`, `substBvarClosed`).
 - `src/Kernel.idr` — the ten primitive inference rules and theory extension
-  (`kernel.rhm`), returning `Either String a` rather than raising, plus the
-  lineage soundness proof described above.
+  (`kernel.rhm`), returning `Either String a` rather than raising, plus
+  every other proof described above.
 - `src/Main.idr` — a smoke test exercising every one of the ten primitive
   rules plus theory extension (idris2's codegen only emits functions
   *reachable from `main`*, so this also keeps everything buildable even
@@ -129,10 +343,30 @@ runtime cost), the design changed to the one described above.
 - `new_basic_type_definition`'s soundness comment and `dest_abs`'s
   human-readable variable naming (`x, y, z, u, v, w, ...`) are ported as
   logic but not re-explained here; read the `.rhm` originals for the "why".
-- Beyond `combineStampsSound`, no proofs of totality/soundness beyond what
-  Idris2's (non-`%default total`) checker gives for free -- `%default
-  covering` is used throughout, and list recursion into `HType`/`Term` is
-  hand-written in `mutual` blocks because Idris2 0.8.0's termination
-  checker does not see through `Eq`/`Show`'s default methods or
-  higher-order list combinators (`map`, `foldl`, `any`) applied to a type
-  mutually recursive with `List`.
+- See "What is not proved" above.
+- Many definitions had to change from `export` to `public export` for the proofs above to see
+  through their definitions at all (Idris2's `export` hides a function's
+  *body* outside its own module, keeping only its type visible -- `public
+  export` keeps the body transparent for reduction elsewhere, which a
+  proof needs). This is a visibility widening only; it changes nothing
+  about what other modules can construct or observe. `checkOpenTerm` also
+  gained plain `export` (it was module-private before) so `Main.idr` and
+  any future caller can reach it -- the proofs about it live in the same
+  module (`Kernel.idr`) and never needed that widening themselves.
+- Several definitions were restructured so that proofs can unfold them,
+  with behaviour unchanged in every case: `checkOpenTerm`'s `Const`,
+  `BVar` and `Comb` clauses now call `checkConstUse`/`checkBVarUse`/
+  `checkCombUse` instead of inlining a `do` block (Idris's unifier
+  compares two `checkOpenTerm` applications argument-wise and never
+  unfolds a multi-statement clause body); `checkType` walks its arguments
+  with an explicit `checkTypeList` rather than `traverse_`, and
+  `instTypeR` likewise; `nthEnv` puts its empty-list clause first;
+  `destFun`, `isFun` and `destEq` test the constructor name with `==`
+  rather than matching a string literal (a literal pattern leaves them
+  stuck on an abstract name, since Idris's evaluator does not carry "n is
+  not \"fun\"" into the default branch); `instFvar`'s and `instType`'s
+  workers, and `instR`'s `checkTheta`, are top-level rather than
+  `where`-local; and both `typeMatch`'s accumulator and `typeSubst`'s
+  substitution are association lists rather than `SortedMap`s, whose
+  operations are `export`-only in base and therefore will not reduce
+  during typechecking at all.

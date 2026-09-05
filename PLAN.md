@@ -349,16 +349,74 @@ Rhombus/HOL が実際に走らせる信頼境界であり、`raco make` / `raco 
 ロジックの性質を Idris2 の依存型で独立に証明すること。`raco make` とは
 別スケジュールで（`idris2 --build kernel.ipkg` を手動 / CI などで）検証する。
 
-**証明済みの性質**（`src/Kernel.idr` の「soundness proofs: lineage」節）:
-`combineStampsSound` — `combine_stamps` が二つの定理の系譜を合成する際に
-選ぶ方のスタンプは、両方の入力から到達可能であることを証明。
-`kernel.rhm` の「後の方を採る」戦略が単に決定的なだけでなく健全である、
-という同ファイルのコメントの主張を機械的に検証したもの。`descends` が
-反射的であること(`freshStamp`/`nextStamp` が作るスタンプは常に自分自身の
-祖先集合に自分を含む)を土台に使う。`String` の `==` が反射的であることは
-Idris が計算だけでは導けない(バックエンドのプリミティブなので)ため、
-明示的な公理(`stringEqRefl`)として宣言している。系譜の性質1つのみで、
-カーネル全体の網羅的検証ではない(型安全性の証明などは未着手)。
+**カーネルの十原始規則すべてについて、「出力する定理が整形式である」ことを
+証明済み。** `idris2 --cg racket --build kernel.ipkg` で機械検証、`:metavars`
+で未解決ホールが無いことも確認済み。**公理はゼロ**
+（`grep believe_me src/*.idr` が空）。すべて通常の構造的帰納法。
+
+**公理がゼロな理由 — 名前を `String` ではなく帰納型にした。** `String` は
+コンストラクタを持たないプリミティブなので、抽象的な `x`,`y` について
+`x = y` を作る手段は `believe_me` による強制変換しかない（base の
+`DecEq String` も同じ実装なので、乗り換えても公理が標準ライブラリへ移るだけ）。
+`src/Name.idr` の
+`data Name = NFun | NBool | NEq | NAlpha | NUser Nat`
+なら `nameEqRefl`/`nameEqSound` がただの帰納法で証明でき、
+`htypeEqSound`/`termEqSound` 等もそこから導出できる。正準名 4 つは
+カーネルが特別扱いする名前（`names.rhm` と同じ設計）で、ユーザー宣言は
+`NUser Nat` — Rhombus の `Symbol` の等価性は文字列比較ではなく
+インターンされた同一性なので、こちらの方がむしろ忠実。`Stamp` の識別子も
+同じ理由で `Nat` にした。Rhombus へ再接続する場合は境界で
+`Symbol`→`Nat` のインターンを行えばよい。
+
+| 規則 | 定理 | 要となる補題 |
+|---|---|---|
+| `REFL` | `reflWellFormed` | `mkEqCheckSound` |
+| `ASSUME` | `assumeWellFormed` | 結論が検査済みの項そのもの |
+| `BETA` | `betaWellFormed` | 下記の主辞保存3点セット |
+| `TRANS` | `transWellFormed` | 整形式な等式の両辺は整形式 |
+| `EQ_MP` | `eqMpWellFormed` | 結論は等式の右辺 |
+| `DEDUCT_ANTISYM_RULE` | `deductAntisymWellFormed` | 両辺は入力の結論そのもの |
+| `MK_COMB` | `mkCombWellFormed` | `eqOperandTypes`（`typeMatch` の逆転） |
+| `ABS` | `absWellFormed` | `abstractAtCheck`（代入の逆向き） |
+| `INST` | `instWellFormed` | `instFvarGoCheck` |
+| `INST_TYPE` | `instTypeWellFormed` | `instTypeGoCheck` + `typeMatchSubst` |
+
+土台となる主な定理:
+
+- **系譜**: `combineStampsSound` — `combine_stamps` が選ぶスタンプは両方の
+  入力から到達可能。`kernel.rhm` の「後の方を採る」戦略が健全である根拠。
+- **型安全性**: `checkTermTypeOfSound`（整形式な項は必ず型を持つ）、
+  `typeOfWellFormed`（その型自身も理論の中で整形式）。
+- **BETA の主辞保存（3点セット）**: `betaTypeSound`（型が変わらない）、
+  `betaClosedSound`（宙に浮いた de Bruijn 添字が生じない）、
+  `betaCheckSound`（簡約結果も `checkTerm` を通る）。束縛子の下へ潜る
+  一般化代入補題（`substAtTypeSound` / `substShiftClosed` /
+  `substAtCheckSound`）に支えられ、後者はさらに `checkWeakenRight`（弱化）
+  と `checkClosed` を使う。`shiftClosedId`（閉じた項に対する `shift` は
+  恒等）のおかげで `shift` の `Integer` 添字演算に関する推論は一切不要。
+- **理論拡張の単調性**: `newTypeMonotone` / `newConstantMonotone`。
+  `in_theory`/`descends` が意味を持つための前提そのもの。
+- **理論の整形式性と等式構築**: `WellFormedTheory`（`fun` は 2 引数、
+  `bool` は 0 引数、`eq` は `'a -> 'a -> bool`）、`initialTheoryWellFormed`、
+  `mkEqCheckSound`。
+- **仮説リストの操作**: `hypInsertChecked` / `hypUnionChecked` /
+  `hypRemoveChecked` / `rehashChecked`。
+
+**証明していない・できないもの**: 論理の**無矛盾性**（公理と規則から偽が
+導けないこと）は構文ではなくモデルについての主張なので、この移植で述べられる
+種類の命題ではない。理論拡張原理の**保存拡大性**も同様に意味論的性質で、
+ここで証明したのはカーネルが依拠する構文的な半分（単調性）だけ。
+
+**停止性は証明済み**: 全モジュールが `%default total`。Idris2 は網羅性と
+停止性の両方を検査し、`total` な関数は `total` な関数しか呼べないので、
+性質は基底ライブラリまで下向きに閉じている。したがって十規則の
+`*WellFormed` は部分正当性ではなく全正当性の主張になる。LCF カーネルは
+本質的に構造再帰しか使わない（不動点反復も新名探索ループも無い。`variant`
+に相当するものは locally nameless 表現によって不要）ので、これは難しく
+なかった。唯一引っかかったのは `termOrd` で、`case (a, b) of` とタプルで
+分岐していたためサイズ変化解析が構造的降下を見失っていた。二引数を直接
+パターンマッチする形に書き直すだけで通る。詳細は
+`idris-kernel/README.md` の「Termination」節。
 
 **経緯 — なぜランタイムに接続しなかったか:** 以前のイテレーションでは
 十原始規則すべてを実際に `kernel.rhm` から Idris 実装(生成した Racket
@@ -375,7 +433,7 @@ Idris が計算だけでは導けない(バックエンドのプリミティブ�
 なく、「1つの権威ある実装について性質を証明し、実行コストゼロでチェック
 できる」方が価値が高いと判断し、現在の設計(検証専用・共存)に変更した。
 詳細と技術的な学び(idris2 の到達可能性ベースの codegen、`libify.py`、
-`%default covering` の落とし穴など)は `idris-kernel/README.md` に集約。
+停止性検査の落とし穴など)は `idris-kernel/README.md` に集約。
 
 ### ドキュメント（完了）
 

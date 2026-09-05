@@ -4,12 +4,18 @@
 // (which runs both kernels side by side) and `idris_replay.rhm` (which
 // replays a recorded derivation through the Idris kernel alone).
 //
-// `idris_kernel_gen.rkt` is generated from `../../../../idris-kernel/` by
-// `idris2 --cg racket` followed by `idris-kernel/scripts/libify.py`, and
-// checked in here as a build artifact -- `raco make` cannot run `idris2`.
-// It lives in the test package, not the library, so it is not in
-// `rhombus/hol.rkt`'s dependency graph and cannot affect `raco make` for
-// users of the language.
+// `idris_kernel_gen.rkt` is exactly what `idris2 --cg racket` emits for
+// `../../../../idris-kernel/`, byte for byte, checked in here because
+// `raco make` cannot run `idris2`.  `idris_kernel.rkt` is what turns it
+// into a library: it reads that file at expansion time and splices the
+// transformed body in, so nothing post-processes the generated source and
+// `raco make` byte-compiles the result.  Both live in the test package, not
+// the library, so they are not in `rhombus/hol.rkt`'s dependency graph and
+// cannot affect `raco make` for users of the language.
+//
+// One consequence matters here: that transform makes the Idris side build
+// *immutable* vectors, and a mutable and an immutable vector are never `==`
+// however equal their contents.  So this codec builds immutable ones too.
 
 import:
   rhombus/hol/private/htype open
@@ -17,7 +23,7 @@ import:
   rhombus/hol/private/names open
   lib("racket/base.rkt") as rb
   lib("racket/treelist.rkt") as rt
-  "idris_kernel_gen.rkt" as ik
+  "idris_kernel.rkt" as ik
 
 export:
   ik
@@ -52,21 +58,21 @@ def name_counter = rb.#{box}(0)
 
 fun idr_name(n :: Symbol) :: Any:
   cond
-  | n == ty_fun: rb.#{vector}(0)
-  | n == ty_bool: rb.#{vector}(1)
-  | n == c_eq: rb.#{vector}(2)
-  | n == v_alpha: rb.#{vector}(3)
-  | n == v_rep: rb.#{vector}(4)
+  | n == ty_fun: rb.#{vector-immutable}(0)
+  | n == ty_bool: rb.#{vector-immutable}(1)
+  | n == c_eq: rb.#{vector-immutable}(2)
+  | n == v_alpha: rb.#{vector-immutable}(3)
+  | n == v_rep: rb.#{vector-immutable}(4)
   | ~else:
       let cached = rb.#{hash-ref}(name_ids, n, #false)
       cond
-      | cached: rb.#{vector}(5, cached)
+      | cached: rb.#{vector-immutable}(5, cached)
       | ~else:
           let k = rb.#{unbox}(name_counter)
           rb.#{set-box!}(name_counter, k + 1)
           rb.#{hash-set!}(name_ids, n, k)
           rb.#{hash-set!}(id_names, k, n)
-          rb.#{vector}(5, k)
+          rb.#{vector-immutable}(5, k)
 
 fun rhombus_name(v :: Any) :: Symbol:
   let tag = rb.#{vector-ref}(v, 0)
@@ -86,8 +92,8 @@ fun rhombus_name(v :: Any) :: Symbol:
 // converting at each crossing.
 fun idr_htype(t :: HType) :: Any:
   match t
-  | TyVar(n): rb.#{vector}(0, idr_name(n))
-  | TyApp(n, args): rb.#{vector}(1, idr_name(n), rt.#{treelist->list}(args.map(idr_htype)))
+  | TyVar(n): rb.#{vector-immutable}(0, idr_name(n))
+  | TyApp(n, args): rb.#{vector-immutable}(1, idr_name(n), rt.#{treelist->list}(args.map(idr_htype)))
 
 fun rhombus_htype(v :: Any) :: HType:
   cond
@@ -98,11 +104,11 @@ fun rhombus_htype(v :: Any) :: HType:
 
 fun idr_term(t :: Term) :: Any:
   match t
-  | FVar(n, ty): rb.#{vector}(0, idr_name(n), idr_htype(ty))
-  | BVar(i, ty): rb.#{vector}(1, i, idr_htype(ty))
-  | Const(n, ty): rb.#{vector}(2, idr_name(n), idr_htype(ty))
-  | Comb(f, x): rb.#{vector}(3, idr_term(f), idr_term(x))
-  | Abs(aty, b): rb.#{vector}(4, idr_htype(aty), idr_term(b))
+  | FVar(n, ty): rb.#{vector-immutable}(0, idr_name(n), idr_htype(ty))
+  | BVar(i, ty): rb.#{vector-immutable}(1, i, idr_htype(ty))
+  | Const(n, ty): rb.#{vector-immutable}(2, idr_name(n), idr_htype(ty))
+  | Comb(f, x): rb.#{vector-immutable}(3, idr_term(f), idr_term(x))
+  | Abs(aty, b): rb.#{vector-immutable}(4, idr_htype(aty), idr_term(b))
 
 fun rhombus_term(v :: Any) :: Term:
   let tag = rb.#{vector-ref}(v, 0)

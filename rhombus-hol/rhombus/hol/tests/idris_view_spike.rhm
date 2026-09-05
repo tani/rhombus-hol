@@ -1,0 +1,125 @@
+#lang rhombus/static/and_meta
+
+// Spike: could `Term`/`HType` *be* the Idris representation, with Rhombus
+// providing a view over it, instead of being their own classes?
+//
+// This is the variant of an Idris-only kernel that skips the codec
+// entirely.  `idris_bench.rhm` measures why it is worth wanting: with no
+// codec in the way the Idris rules are 2-3.5x faster than the native ones,
+// and the codec is the whole of the ~30% regression the earlier runtime
+// integration cost.  If the derived layer can pattern-match Idris values
+// directly, terms never cross a boundary and there is no codec to pay for.
+//
+// The checks below are the load-bearing facilities that migration would
+// depend on, kept running so a Rhombus upgrade that breaks one is caught
+// here rather than half-way through the port.  Findings are written up in
+// idris-kernel/README.md.
+//
+// The one thing that nearly sank it: Rhombus `==` on a *mutable* `Array` is
+// identity, not structure.  Terms are locally nameless, so `==` **is**
+// alpha-equivalence and is relied on everywhere -- `TRANS`'s middle-term
+// check, `EQ_MP`'s antecedent match, hypothesis dedup.  Silently getting
+// identity there would be an unsoundness, not a bug.  Immutable vectors
+// compare structurally, and Idris's generated module never mutates a vector
+// (no `vector-set!`, `make-vector` or `vector-fill!` anywhere in it -- a
+// fact `idris_kernel.rkt` checks rather than assumes), so the expansion-time
+// transform can emit `vector-immutable` and the problem disappears.
+
+import lib("racket/base.rkt") as rb
+
+// -- the view --------------------------------------------------------------
+//
+// One name, three spaces: a function for construction, a `bind.macro` for
+// patterns, and (for `Term`) an `annot.macro` carrying a dot provider.  This
+// is what `class` does for itself, done by hand over someone else's data.
+
+fun FVar(n, ty): rb.#{vector-immutable}(0, n, ty)
+fun BVar(i, ty): rb.#{vector-immutable}(1, i, ty)
+fun Const(n, ty): rb.#{vector-immutable}(2, n, ty)
+fun Comb(f, x): rb.#{vector-immutable}(3, f, x)
+fun Abs(aty, b): rb.#{vector-immutable}(4, aty, b)
+
+bind.macro 'FVar($n, $ty)': 'Array(0, $n, $ty)'
+bind.macro 'BVar($i, $ty)': 'Array(1, $i, $ty)'
+bind.macro 'Const($n, $ty)': 'Array(2, $n, $ty)'
+bind.macro 'Comb($f, $x)': 'Array(3, $f, $x)'
+bind.macro 'Abs($aty, $b)': 'Array(4, $aty, $b)'
+
+fun is_term(v): v is_a Array && rb.#{immutable?}(v)
+
+annot.macro 'Term':
+  annot_meta.pack_predicate('fun (x): is_term(x)',
+                            '(($(statinfo_meta.dot_provider_key), term_dot))')
+
+dot.macro 'term_dot $left $dot $right':
+  match right
+  | 'ty': 'term_ty($left)'
+  | 'name': 'term_name($left)'
+  | ~else: 'error("no such field")'
+
+fun term_ty(t :: Array): t[2]
+fun term_name(t :: Array): t[1]
+
+// -- what the migration needs to work --------------------------------------
+
+def ty_num = rb.#{vector-immutable}(1, #'num, [])
+def x = FVar(#'x, ty_num)
+def idf = Abs(ty_num, BVar(0, ty_num))
+def redex = Comb(idf, x)
+
+// Construction and matching under the same name.
+check (match redex | Comb(f, a): "comb" | ~else: "no") ~is "comb"
+
+// Nested patterns compose -- this is exactly `BETA`'s
+// `Comb(Abs(_, body), arg)`, and the reason `bind.macro` expanding to
+// another *pattern* rather than to a predicate is what makes the approach
+// work at all.
+check:
+  match redex
+  | Comb(Abs(_, body), arg): [body, arg]
+  | ~else: #false
+  ~is [BVar(0, ty_num), x]
+
+// Structural equality: alpha-equivalence, and the thing mutable arrays got
+// wrong.
+check FVar(#'x, ty_num) == x ~is #true
+check Comb(idf, x) == redex ~is #true
+
+// ...including as a `Map` key, which follows from `==` and is needed by
+// every table the derived layer keys on a term.
+check ({x: 1})[FVar(#'x, ty_num)] ~is 1
+
+// Field access through the dot provider, on an annotated binding.
+fun ty_of(t :: Term): t.ty
+check ty_of(x) ~is ty_num
+check (x :: Term).name ~is #'x
+
+// The annotation itself.
+check (x is_a Term) ~is #true
+check (5 is_a Term) ~is #false
+
+// Identity comparison still available, which `term.rhm` uses to
+// short-circuit rebuilding when a subterm is unchanged.
+check (x === x) ~is #true
+check (FVar(#'x, ty_num) === x) ~is #false
+
+// -- the representation must be consistently immutable ---------------------
+//
+// There is only one representation here: Idris's generated code builds
+// Racket vectors, and `Array` is Rhombus's name for exactly those.  Both
+// mutable and immutable ones satisfy `is_a Array` and match the same
+// patterns; the only difference is what `==` means.
+check rb.#{vector}(3, 7, 8) is_a Array ~is #true
+check rb.#{vector-immutable}(3, 7, 8) is_a Array ~is #true
+check (match rb.#{vector}(3, 7, 8) | Array(3, a, b): [a, b] | ~else: #false) ~is [7, 8]
+
+// The trap: a mutable and an immutable vector are never `==`, however equal
+// their contents, and Rhombus's own `Array(...)` constructor makes a
+// *mutable* one.  So a migration has to build every term through
+// `vector-immutable` and never through the `Array(...)` literal -- mixing
+// the two makes `==` quietly answer #false, which for alpha-equivalence is
+// the unsound direction.  These pin that down.
+check rb.#{immutable?}(Array(3, 7, 8)) ~is #false
+check rb.#{immutable?}(rb.#{vector-immutable}(3, 7, 8)) ~is #true
+check (rb.#{vector}(3, 7, 8) == rb.#{vector-immutable}(3, 7, 8)) ~is #false
+check (rb.#{vector}(3, 7, 8) == rb.#{vector}(3, 7, 8)) ~is #false

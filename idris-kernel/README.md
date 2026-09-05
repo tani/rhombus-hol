@@ -66,6 +66,184 @@ one to keep --the runtime cost (see "History" below) versus the value of
 value of *proving properties about* one authoritative implementation and
 keeping the other as the single thing that actually runs.
 
+## Could `kernel.rhm` become glue over this kernel?
+
+Measured, not guessed — `rhombus-hol/rhombus/hol/tests/idris_bench.rhm`
+(µs/call, one machine):
+
+| | native Rhombus | via Idris |
+|---|---|---|
+| `REFL`, 10-deep term, codec on every call | 2.99 | 10.92 |
+| `MK_COMB`, theorems already Idris-side | 0.53 | **0.15** |
+| `INST`, theorem already Idris-side | 0.77 | **0.27** |
+
+The first row is why the earlier integration regressed ~30%, and it is not
+what the original post-mortem blamed. The rules themselves are not slow:
+**with no codec in the way the Idris kernel is 2–3.5× faster than the
+native one.** All the cost is the boundary — for a 10-deep term, encode
+1.9µs plus decode 3.7µs against a 1.5µs call.
+
+And the boundary is nearly free once it is memoised. Rewriting rebuilds
+spines but shares subterms, so a cache keyed on term identity makes the
+cost proportional to the *new* nodes:
+
+| | cold | memoised |
+|---|---|---|
+| encode, one new node on a cached spine | 2.07 | **0.021** |
+| decode | 3.74 | **0.023** |
+
+A full `REFL` round trip with a memoised codec measures 2.70µs against the
+native 2.95µs — cost-neutral, with the rule itself still 2× faster.
+
+So the answer is yes in principle, and the remaining work is not
+performance:
+
+- **Memo tables.** Two identity-keyed caches. They must be ephemeron
+  tables (`make-ephemeron-hasheq`), not plain weak ones: encode maps term →
+  vector and decode maps vector → term, and a plain weak hash holds its
+  values strongly, so the pair would keep each other alive forever.
+- **Identity.** Stamps become caller-supplied `Nat` tokens from a counter,
+  and names go through a `Symbol`-to-`Nat` intern table. Both are global
+  mutable state, but of the kind `initial_theory`'s comment permits:
+  nothing *decides* anything by comparing them except for equality and set
+  membership, so a different allocation order gives different tokens and
+  the same answers — which is already true of today's uninterned symbols.
+- **The trust boundary grows.** The 92KB generated module joins it, along
+  with `idris_kernel.rkt`'s transform, the codec and the intern table. That
+  is the real price: `kernel.rhm` today is readable Rhombus that a person
+  can audit.
+- **Error messages.** This kernel returns terse `Left` strings where
+  `kernel.rhm` raises with labelled values; the white-box tests match on
+  message text.
+- **Hypothesis order** becomes this kernel's (see the divergence above).
+
+### The generated file is never edited
+
+There is no post-processing step and no `libify.py` any more.
+`idris_kernel_gen.rkt` is byte-for-byte what `idris2 --cg racket` emits,
+and `rhombus-hol/rhombus/hol/tests/idris_kernel.rkt` turns it into a
+library at *expansion time*: it reads the file with Racket's own reader and
+splices the transformed body into itself, so `raco make` byte-compiles the
+result and nothing is paid at load time.
+
+That removes the objection that used to sit here. Rewriting generated
+source with a regex is a bad trade — it cannot tell an application of
+`vector` from the same characters inside a string literal, and it cannot
+fail loudly when the shape it assumed is gone. Doing the same work on the
+s-expressions the reader produces is neither of those things, and every
+assumption is checked with a `raise-syntax-error` that names what it
+expected:
+
+1. exactly one top-level `(let () ...)` holds the whole body,
+2. nothing outside it but `require`s and a trailing `(collect-garbage)`,
+3. the `let` ends by forcing `Main-main`, which is dropped,
+4. **every vector is born from a `(vector ...)` application and none is
+   ever mutated.**
+
+(4) is what licenses the one semantic change: applications of `vector`
+become `vector-immutable`, in head position only. It is checked as an
+allowlist rather than a blocklist of mutators, which matters: a blocklist
+would wave through `list->vector`, whose result is mutable and would then
+never be `==` to anything — silently, which is the failure mode worth
+engineering against. So any symbol naming a vector operation must be one of
+the four readers the module actually uses (`vector-ref`, `vector-length`,
+`vector?`, `vector->list`, plus the `blodwen-vector-*` wrappers around
+them), and bare `vector` must appear only in head position.
+
+Verified by injection, not by inspection: adding `(list->vector '(1 2))`,
+`(vector-set! v 0 1)` or `(apply vector xs)` to the generated file each
+fails the build with a message naming the problem. And past that, the
+runtime failure would still be loud — `vector-set!` on an immutable vector
+raises.
+
+For the record, on the current output: 183 `(vector ...)` applications, all
+in head position, all rewritten; the only other vector operations are
+`vector-ref`, `vector-length`, `vector?` and one `vector->list`, all
+readers; `blodwen-vector-ref`/`-length`/`-list`/`blodwen-is-vector` are
+thin wrappers around those and create nothing.
+
+`register-external-file` makes `raco make` rebuild when the generated file
+changes, so a fresh `idris2` build is not silently ignored.
+
+### The variant that skips the codec: a Rhombus *view*
+
+Rather than keeping its own `Term`/`HType` classes and encoding, the Rhombus
+side can work on the Idris representation directly, with a view over it.
+Spiked in `rhombus-hol/rhombus/hol/tests/idris_view_spike.rhm`, which is
+kept running so a Rhombus upgrade that breaks one of these facilities is
+caught early. **It works**, with one hazard that had to be found first.
+
+One name in three spaces gives back the existing syntax — a function for
+construction, a `bind.macro` for patterns, an `annot.macro` carrying a dot
+provider for `.ty`:
+
+```rhombus
+fun Comb(f, x): rb.#{vector-immutable}(3, f, x)
+bind.macro 'Comb($f, $x)': 'Array(3, $f, $x)'
+```
+
+Because the binding macro expands to another *pattern* rather than to a
+predicate, nesting composes: `Comb(Abs(_, body), arg)` — `BETA`'s exact
+shape — matches. Verified along with `.ty` through the dot provider,
+`is_a Term`, and `===` for `term.rhm`'s unchanged-subterm short-circuit.
+
+There is only one representation in play, which is worth being explicit
+about: Idris's generated code builds ordinary Racket vectors, and `Array`
+is Rhombus's name for exactly those. Both mutable and immutable vectors are
+`is_a Array` and match the same patterns. The change below is one rewrite in
+`idris_kernel.rkt` — emit `vector-immutable` instead of `vector` — not a
+second data type.
+
+**The hazard.** Rhombus `==` on a *mutable* `Array` is identity, not
+structure. Terms are locally nameless, so `==` **is** alpha-equivalence, and
+it is relied on in `TRANS`'s middle-term check, `EQ_MP`'s antecedent match,
+hypothesis dedup, and as a `Map` key. Silently getting identity there would
+be an unsoundness, not a bug. Immutable vectors compare structurally and
+work as `Map` keys, and the generated module never mutates a vector — no
+`vector-set!`, `make-vector` or `vector-fill!` occurs in it (the three
+`vector-copy!` greps are `bytevector-copy!` in the string runtime) — so
+`idris_kernel.rkt` rewrites them to `vector-immutable` as it splices the
+body in. With that in place the differential and replay tests still pass,
+31/31.
+
+The corollary is that the representation has to be immutable
+*consistently*. A mutable and an immutable vector are never `==` however
+equal their contents, and Rhombus's own `Array(...)` constructor makes a
+mutable one — so every term must be built through `vector-immutable` and
+none through the `Array(...)` literal. Mixing them makes `==` quietly
+answer false, which for alpha-equivalence is the unsound direction. Having
+the `Term` annotation test `immutable?`, as the spike does, turns that into
+a failed annotation at the boundary instead.
+
+**Cost, measured** (µs, depth-10 term, 200k iterations):
+
+| | Rhombus class | view |
+|---|---|---|
+| construction | 0.039 | 0.045 |
+| pattern-match traversal | 0.026 | 0.041 |
+| structural equality | 1.09 | **0.28** |
+
+Traversal is ~1.6× slower; equality is ~3.8× *faster*, because a class's
+`Equatable` goes through a recursive protocol while `equal-always?` on an
+immutable vector is a primitive. Term equality is pervasive in HOL, so this
+is not a small line.
+
+**What stays a Rhombus class: `Thm` and `Theory`.** A bare vector is
+forgeable by anyone who can write `vector-immutable`, which would destroy
+the LCF boundary. They keep `authentic` / `constructor ~none` / an
+unexported `internal` constructor and wrap the Idris value — one allocation
+per theorem, negligible against a 0.15µs rule. Terms need no such
+protection: they carry no authority.
+
+**What the migration would still cost.** The 121 constructor and pattern
+sites across 18 files need *no* change — that is the point of the view. The
+124 field accesses need their values statically annotated for the dot
+provider to fire; where they are not, it is a compile-time error, so
+nothing breaks silently. Everything in the previous section that is not
+about the codec still applies: identity tokens, the intern table, the trust
+boundary growing to include the generated module and the transform, error
+messages, and hypothesis order.
+
 ## What is proved
 
 **Every one of the kernel's ten primitive rules is proved to produce a
@@ -328,36 +506,11 @@ they carried over unchanged.
   straight into Racket's own `display`) rather than idris2's own
   `putStrLn`, which otherwise pulls in a runtime shared library
   (`libidris2_support.so`) purely for that -- see its doc comment.
-- `scripts/libify.py` — turns `idris2 --cg racket`'s executable output into
-  a `require`-able Racket module. Not currently used by anything (nothing
-  requires the generated module any more), kept because re-wiring this
-  directory into the runtime -- if a future property proved here, or a
-  performance fix, changes the calculus -- would need it again; see
-  `SPIKE.md` for why it's needed and how it works.
-
-## Building / checking the proofs
-
-```sh
-cd idris-kernel
-idris2 --cg racket --build kernel.ipkg   # typechecks everything, including
-                                          # the proofs in Kernel.idr, and
-                                          # builds the smoke-test executable
-racket build/exec/kernel_app/kernel.rkt  # or just: build/exec/kernel
-```
-
-A failing proof is a compile error from this command, same as any other
-type error -- there is no separate "run the proofs" step.
-
-## History: why this isn't wired into `kernel.rhm`
-
-An earlier iteration of this directory routed all ten primitive rules
-through Idris at runtime (Rhombus `kernel.rhm` calling into a generated
-Racket module via a hand-written term/type codec, with all lineage/stamp
-bookkeeping kept native in Rhombus regardless -- Idris only validated and
-computed the resulting term). It worked -- all 872 tests in
-`rhombus-hol/rhombus/hol/tests` passed, including the white-box
-`kernel.rhm` soundness-regression suite -- but:
-
+- (`scripts/libify.py` is gone. The generated file used to be
+  post-processed into a `require`-able module by that script; it is now
+  transformed at expansion time by
+  `rhombus-hol/rhombus/hol/tests/idris_kernel.rkt` instead, so the checked-in
+  generated file is byte-for-byte idris2's output.)
 - Clean `raco make` + `raco test` went from 3m52s (native) to ~5m
   (Idris-backed), a real ~30% regression, confirmed apples-to-apples on one
   machine.

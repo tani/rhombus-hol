@@ -14,7 +14,7 @@
 (require racket/flonum)                ; for float-typed transcendental functions
 (require math/flonum)                  ; for flonum constants
 
-(provide (all-defined-out))
+(let ()
 (define (blodwen-os)
   (case (system-type 'os)
     [(unix) "unix"]
@@ -851,3 +851,6 @@
 (define PreludeC-45EqOrd-compareInteger (lambda (ext-0 ext-1) (PreludeC-45EqOrd-u--compare_Ord_Integer ext-0 ext-1)))
 (define PrimIO-unsafeCreateWorld (lambda (arg-1) (arg-1 #f)))
 (define PrimIO-unsafePerformIO (lambda (arg-1) (PrimIO-unsafeCreateWorld (lambda (u--w) (arg-1 u--w)))))
+(void (PrimIO-unsafePerformIO Main-main))
+)
+(collect-garbage)

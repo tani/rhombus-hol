@@ -1,5 +1,14 @@
 # Phase 0 interop spike — findings
 
+> **Superseded in part.** `scripts/libify.py`, described below, no longer
+> exists. The generated file is not post-processed at all now: the same
+> three edits, plus a `vector` → `vector-immutable` rewrite, are done at
+> expansion time on the s-expressions Racket's reader produces, by
+> `rhombus-hol/rhombus/hol/tests/idris_kernel.rkt`. The findings about the
+> codegen's *shape* and about interop being essentially free still hold —
+> they are what that module's assumptions are built on.
+
+
 Question: can a function compiled by `idris2 --cg racket` be called from an
 ordinary Racket module via `require`, at an acceptable per-call cost?
 

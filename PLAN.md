@@ -338,23 +338,44 @@ replay していた。実際には越えられる。これで `emit_manifest` / 
 7. 書き換え器では例外ベースの `ORELSEC` を避ける — `conv.rhm` は既に `maybe(Thm)` を
    返す設計。この方針を崩さないこと。
 
-### 付録 — `idris-kernel/`（探索中、未接続）
+### 付録 — `idris-kernel/`（検証専用ツールとして共存、ランタイムには不接続）
 
 `htype.rhm` / `term.rhm` / `kernel.rhm` を Idris2 に移植し、Racket バックエンド
-（`idris2 --cg racket`）でコンパイルできることを確認したプロトタイプ。詳細は
-`idris-kernel/README.md`。**まだ何も置き換えていない** — `raco make` /
-`raco test` はこのディレクトリを一切参照せず、信頼境界は今も
-`rhombus-hol-lib/rhombus/hol/private/kernel.rhm` のまま。将来この Idris 実装を
-実際のカーネルとして採用するなら、少なくとも次が要る:
+（`idris2 --cg racket`）でコンパイルしたもの。詳細は `idris-kernel/README.md`。
 
-- `Thm`/`Theory` を Rhombus 側の `authentic` + `constructor ~none` 相当の
-  構築不能境界にする(Idris2 の `export`/`public export` で表現可能)。
-- 生成された Racket コードを `rhombus-hol-lib` から安全に import する経路
-  (現状は素の実行ファイルとしてビルドしているだけ)。
-- Idris2 0.8.0 の停止性検査器は `Eq`/`Show` の既定メソッドや `map`/`foldl`/`any`
-  のような高階関数を、`HType`/`Term` と `List` の相互再帰に適用すると
-  誤って非停止と判定する。回避には `mutual` ブロックで手書きの再帰関数を
-  並べて書く必要がある(`idris-kernel/src/HType.idr` 参照)。
+**`kernel.rhm` は 100% ネイティブ Rhombus のまま** — これが今も
+Rhombus/HOL が実際に走らせる信頼境界であり、`raco make` / `raco test` は
+このディレクトリを一切参照しない。このディレクトリの役割は、同じカーネル
+ロジックの性質を Idris2 の依存型で独立に証明すること。`raco make` とは
+別スケジュールで（`idris2 --build kernel.ipkg` を手動 / CI などで）検証する。
+
+**証明済みの性質**（`src/Kernel.idr` の「soundness proofs: lineage」節）:
+`combineStampsSound` — `combine_stamps` が二つの定理の系譜を合成する際に
+選ぶ方のスタンプは、両方の入力から到達可能であることを証明。
+`kernel.rhm` の「後の方を採る」戦略が単に決定的なだけでなく健全である、
+という同ファイルのコメントの主張を機械的に検証したもの。`descends` が
+反射的であること(`freshStamp`/`nextStamp` が作るスタンプは常に自分自身の
+祖先集合に自分を含む)を土台に使う。`String` の `==` が反射的であることは
+Idris が計算だけでは導けない(バックエンドのプリミティブなので)ため、
+明示的な公理(`stringEqRefl`)として宣言している。系譜の性質1つのみで、
+カーネル全体の網羅的検証ではない(型安全性の証明などは未着手)。
+
+**経緯 — なぜランタイムに接続しなかったか:** 以前のイテレーションでは
+十原始規則すべてを実際に `kernel.rhm` から Idris 実装(生成した Racket
+モジュール経由)へ委譲していた。動作はした — 872 件全テスト通過 — が:
+
+- クリーンビルド込みの全テストが 3 分 52 秒(ネイティブ)→ 約5分
+  (Idris 経由)と、約 30% の実測回帰があった。
+- 原因は呼び出し回数に比例するコストではなく、生成 Racket モジュールを
+  `raco test` の各サブプロセスごとに読み込み・初期化する固定コストが
+  支配的だと判明(`libidris2_support.so` の FFI 依存を完全に除去しても
+  改善は誤差の範囲内だった)。
+
+同じロジックを2言語で毎回実行し直すランタイムコストに見合うだけの価値は
+なく、「1つの権威ある実装について性質を証明し、実行コストゼロでチェック
+できる」方が価値が高いと判断し、現在の設計(検証専用・共存)に変更した。
+詳細と技術的な学び(idris2 の到達可能性ベースの codegen、`libify.py`、
+`%default covering` の落とし穴など)は `idris-kernel/README.md` に集約。
 
 ### ドキュメント（完了）
 

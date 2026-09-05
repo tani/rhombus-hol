@@ -13,7 +13,6 @@ module Kernel
 import Data.List
 import Data.Maybe
 import Data.SortedMap
-import Data.SortedSet
 import HType
 import Term
 
@@ -28,31 +27,113 @@ import Term
 -- theorem from one can be combined with a theorem from the other to prove
 -- something false.  See the Rhombus kernel's comment for the concrete
 -- example.
+--
+-- Identity is a caller-supplied opaque `String` token, not a counter Idris
+-- mints itself: Idris has no pure "uninterned symbol" primitive, and a
+-- kernel that minted its own identities would need either global mutable
+-- state (ruled out -- see the Rhombus kernel's comment on why) or a counter
+-- threaded through every caller. The Racket host already has exactly the
+-- right primitive (`gensym`), used for this same purpose by the Rhombus
+-- kernel today, so extension functions below take the fresh token as a
+-- plain argument instead of returning one.  `ancestors` is a plain `List
+-- String` rather than a `SortedSet`: it stays small (one entry per
+-- extension in a lineage), and a `List` compiles to a bare Racket list with
+-- no embedded interface-dictionary closures, which is what makes
+-- constructing kernel values from the Racket side of the FFI boundary
+-- tractable.
 public export
 record Stamp where
   constructor MkStamp
-  stampId    : Nat
+  stampId    : String
   stampGen   : Nat
-  ancestors  : SortedSet Nat
+  ancestors  : List String
 
 export
 descends : Stamp -> Stamp -> Bool
-descends a b = contains (stampId a) (ancestors b)
+descends a b = stampId a `elem` ancestors b
 
-freshStamp : Nat -> Stamp
-freshStamp fresh = MkStamp fresh 0 (SortedSet.insert fresh SortedSet.empty)
+export
+freshStamp : String -> Stamp
+freshStamp fresh = MkStamp fresh 0 [fresh]
 
-nextStamp : Nat -> Stamp -> Stamp
-nextStamp fresh prev =
-  MkStamp fresh (S (stampGen prev)) (SortedSet.insert fresh (ancestors prev))
+export
+nextStamp : String -> Stamp -> Stamp
+nextStamp fresh prev = MkStamp fresh (S (stampGen prev)) (fresh :: ancestors prev)
 
 -- Two theorems may be combined only when their theories lie on one line of
 -- extension.  The result belongs to the later of the two.
+export
 combineStamps : Stamp -> Stamp -> Either String Stamp
 combineStamps a b =
   if descends a b then Right b
   else if descends b a then Right a
   else Left "theorems come from different theories"
+
+-- -- soundness proofs: lineage ------------------------------------------
+--
+-- These are not exercised by any rule -- they exist to check, at
+-- `idris2 --build` time (i.e. whenever this file's proofs are re-checked,
+-- decoupled from any Rhombus build), that the lineage argument the Rhombus
+-- kernel's module comment makes in prose actually holds. This is the
+-- "verify at the appropriate time" half of the idris-kernel/Rhombus split:
+-- the Rhombus kernel is what runs; this file is what gets proved about the
+-- same logic, on its own schedule (`idris2 --build kernel.ipkg`), not on
+-- every `raco make`.
+
+-- Idris cannot derive `s == s = True` for an abstract `String` by
+-- computation: the underlying equality is a primitive/opaque operation on
+-- the Racket backend, not something built from constructors Idris can
+-- pattern-match on. This is the one place that fact is assumed rather than
+-- derived -- an axiom about the primitive, stated explicitly rather than
+-- left implicit.
+export
+stringEqRefl : (s : String) -> s == s = True
+stringEqRefl s = believe_me (Refl {x = True})
+
+-- `elem` here folds with `||` seeded at `True` once the head matches, and
+-- `foldl` does not short-circuit -- it walks every remaining element
+-- regardless of the accumulator -- so showing the fold "stays `True`" over
+-- an arbitrary tail needs its own induction, not just unfolding `stringEqRefl`.
+orTrueAbsorbs : (p : a -> Bool) -> (xs : List a) -> foldl (\acc, e => acc || p e) True xs = True
+orTrueAbsorbs p [] = Refl
+orTrueAbsorbs p (x :: xs) = orTrueAbsorbs p xs
+
+export
+elemSelf : (x : String) -> (xs : List String) -> elem x (x :: xs) = True
+elemSelf x xs = rewrite stringEqRefl x in orTrueAbsorbs _ xs
+
+-- Every `Stamp` this kernel ever constructs contains its own identity in
+-- its own ancestor set -- by construction, `freshStamp`/`nextStamp` always
+-- cons the fresh id onto the front of `ancestors`. This is exactly what
+-- makes `descends` reflexive for any stamp this kernel could actually
+-- produce (an arbitrary hand-built `Stamp` need not satisfy it, but
+-- nothing in `Kernel` builds one any other way).
+export
+descendsSelfFresh : (fresh : String) -> descends (freshStamp fresh) (freshStamp fresh) = True
+descendsSelfFresh fresh = elemSelf fresh []
+
+export
+descendsSelfNext : (fresh : String) -> (prev : Stamp) ->
+                    descends (nextStamp fresh prev) (nextStamp fresh prev) = True
+descendsSelfNext fresh prev = elemSelf fresh (ancestors prev)
+
+-- The heart of the kernel's lineage argument (see the big comment at the
+-- top of this section): whichever stamp `combineStamps` picks is reachable
+-- from *both* inputs' provenance, given each input is itself
+-- self-reachable (true of every stamp `Kernel` can build -- see the two
+-- lemmas above). This is what makes the Rhombus kernel's "later of the
+-- two, or reject" strategy actually sound and not merely deterministic:
+-- a theorem re-stamped with the combined lineage is provably still usable
+-- everywhere either of its two inputs was.
+export
+combineStampsSound : (a, b : Stamp) -> descends a a = True -> descends b b = True ->
+                      (st : Stamp) -> combineStamps a b = Right st ->
+                      (descends a st = True, descends b st = True)
+combineStampsSound a b aSelf bSelf st eq with (descends a b) proof pab
+  combineStampsSound a b aSelf bSelf b Refl | True = (pab, bSelf)
+  combineStampsSound a b aSelf bSelf st eq | False with (descends b a) proof pba
+    combineStampsSound a b aSelf bSelf a Refl | False | True = (aSelf, pba)
+    combineStampsSound a b aSelf bSelf st eq | False | False = absurd eq
 
 -- -- theorems ---------------------------------------------------------------
 
@@ -107,23 +188,29 @@ rehashHyps : List Term -> List Term
 rehashHyps = foldl (flip hypInsert) []
 
 -- -- theories -----------------------------------------------------------------
-
+--
+-- `tyops`/`consts`/`defs` are plain association lists, not `SortedMap`s, for
+-- the same reason `Stamp.ancestors` is a plain `List` above: a `SortedMap`'s
+-- runtime representation carries an embedded `Ord`-dictionary closure that
+-- is impractical to construct from the Racket side of the FFI boundary.
+-- These maps are small (one entry per declaration in a theory, not a
+-- hot-path structure), so linear lookup is the right trade.
 public export
 record Theory where
   constructor MkTheory
-  tyops  : SortedMap String Nat
-  consts : SortedMap String HType
+  tyops  : List (String, Nat)
+  consts : List (String, HType)
   axioms : List Thm
-  defs   : SortedMap String Thm
+  defs   : List (String, Thm)
   thyStamp : Stamp
 
 export
 typeArity : Theory -> String -> Maybe Nat
-typeArity thy n = SortedMap.lookup n (tyops thy)
+typeArity thy n = lookup n (tyops thy)
 
 export
 constType : Theory -> String -> Maybe HType
-constType thy n = SortedMap.lookup n (consts thy)
+constType thy n = lookup n (consts thy)
 
 export
 axiomsOf : Theory -> List Thm
@@ -131,7 +218,7 @@ axiomsOf = axioms
 
 export
 definitionOf : Theory -> String -> Maybe Thm
-definitionOf thy n = SortedMap.lookup n (defs thy)
+definitionOf thy n = lookup n (defs thy)
 
 inTheory : Theory -> Thm -> Either String ()
 inTheory thy th =
@@ -139,26 +226,23 @@ inTheory thy th =
     then Right ()
     else Left "theorem was not proved in this theory or an ancestor of it"
 
--- `fresh` is a counter supplied by the caller.  The Rhombus kernel uses
--- uninterned symbols for this; Idris has no equivalent primitive available
--- purely, so extension threads a `Nat` counter instead.  Every extension
--- function below returns the counter alongside the theory.
+-- `fresh` is an opaque identity token supplied by the caller (see the
+-- comment on `Stamp` above) -- one per theory-extending call, never reused.
 export
-initialTheory : Nat -> (Theory, Nat)
+initialTheory : String -> Theory
 initialTheory fresh =
-  ( MkTheory (fromList [("bool", 0), ("fun", 2)])
-             (fromList [("eq", mkFun (TyVar "a") (mkFun (TyVar "a") boolTy))])
-             []
-             empty
-             (freshStamp fresh)
-  , S fresh)
+  MkTheory [("bool", 0), ("fun", 2)]
+           [("eq", mkFun (TyVar "a") (mkFun (TyVar "a") boolTy))]
+           []
+           []
+           (freshStamp fresh)
 
-extend : Theory -> Nat
-       -> SortedMap String Nat -> SortedMap String HType
-       -> List Thm -> SortedMap String Thm
-       -> (Theory, Nat)
+extend : Theory -> String
+       -> List (String, Nat) -> List (String, HType)
+       -> List Thm -> List (String, Thm)
+       -> Theory
 extend thy fresh tyops' consts' axioms' defs' =
-  (MkTheory tyops' consts' axioms' defs' (nextStamp fresh (thyStamp thy)), S fresh)
+  MkTheory tyops' consts' axioms' defs' (nextStamp fresh (thyStamp thy))
 
 -- -- well-formedness ----------------------------------------------------------
 
@@ -380,43 +464,47 @@ instR thy theta th = do
         then Left "instantiation changes a variable's type"
         else checkTheta rest
 
--- Instantiate type variables.
+-- Instantiate type variables.  `tyin` is a plain association list (see the
+-- comment on `Theory` above for why); converted once to a `SortedMap` for
+-- `instType`'s internal use, since that conversion never crosses the FFI
+-- boundary.
 export
-instTypeR : Theory -> SortedMap String HType -> Thm -> Either String Thm
+instTypeR : Theory -> List (String, HType) -> Thm -> Either String Thm
 instTypeR thy tyin th = do
   inTheory thy th
-  traverse_ (checkType thy) (values tyin)
-  let hyps2 = rehashHyps (map (instType tyin) (thmHyps th))
-  Right (MkThm hyps2 (instType tyin (thmConcl th)) (thyStamp thy))
+  traverse_ (checkType thy) (map snd tyin)
+  let tyinMap = SortedMap.fromList tyin
+  let hyps2 = rehashHyps (map (instType tyinMap) (thmHyps th))
+  Right (MkThm hyps2 (instType tyinMap (thmConcl th)) (thyStamp thy))
 
 -- -- theory extension -----------------------------------------------------
 
 export
-newType : Theory -> Nat -> String -> Nat -> Either String (Theory, Nat)
+newType : Theory -> String -> String -> Nat -> Either String Theory
 newType thy fresh n arity =
   case typeArity thy n of
     Just _  => Left ("type constructor is already declared: " ++ n)
-    Nothing => Right (extend thy fresh (insert n arity (tyops thy)) (consts thy)
+    Nothing => Right (extend thy fresh ((n, arity) :: tyops thy) (consts thy)
                               (axioms thy) (defs thy))
 
 export
-newConstant : Theory -> Nat -> String -> HType -> Either String (Theory, Nat)
+newConstant : Theory -> String -> String -> HType -> Either String Theory
 newConstant thy fresh n ty =
   case constType thy n of
     Just _  => Left ("constant is already declared: " ++ n)
     Nothing => do
       checkType thy ty
-      Right (extend thy fresh (tyops thy) (insert n ty (consts thy))
+      Right (extend thy fresh (tyops thy) ((n, ty) :: consts thy)
                     (axioms thy) (defs thy))
 
 -- The escape hatch: every use shows up in `axiomsOf`.
 export
-newAxiom : Theory -> Nat -> Term -> Either String (Theory, Thm, Nat)
+newAxiom : Theory -> String -> Term -> Either String (Theory, Thm)
 newAxiom thy fresh p = do
   checkProp thy p
   let st = nextStamp fresh (thyStamp thy)
   let th = MkThm [] p st
-  Right (MkTheory (tyops thy) (consts thy) (th :: axioms thy) (defs thy) st, th, S fresh)
+  Right (MkTheory (tyops thy) (consts thy) (th :: axioms thy) (defs thy) st, th)
 
 termTypeVars : Term -> List String
 termTypeVars t = walk t []
@@ -433,7 +521,7 @@ termTypeVars t = walk t []
 -- A conservative definition: `c = rhs` where `c` is undeclared, `rhs` is
 -- closed, and `rhs` has no type variables beyond those of its own type.
 export
-newBasicDefinition : Theory -> Nat -> Term -> Either String (Theory, Thm, Nat)
+newBasicDefinition : Theory -> String -> Term -> Either String (Theory, Thm)
 newBasicDefinition thy fresh tm =
   case destEq tm of
     Nothing => Left "definition is not an equation"
@@ -458,16 +546,16 @@ newBasicDefinition thy fresh tm =
                       let c  = mkConst n ty
                       eq <- mkEq c rhs
                       let th = MkThm [] eq st
-                      Right (MkTheory (tyops thy) (insert n ty (consts thy))
-                                       (axioms thy) (insert n th (defs thy)) st,
-                             th, S fresh)
+                      Right (MkTheory (tyops thy) ((n, ty) :: consts thy)
+                                       (axioms thy) ((n, th) :: defs thy) st,
+                             th)
     Just _ => Left "left-hand side is not a fresh name"
 
 -- Carve out a new type in bijection with the subset picked out by `pred`,
 -- given `|- pred witness`.
 export
-newBasicTypeDefinition : Theory -> Nat -> String -> String -> String -> Thm
-                        -> Either String (Theory, Thm, Thm, Nat)
+newBasicTypeDefinition : Theory -> String -> String -> String -> String -> Thm
+                        -> Either String (Theory, Thm, Thm)
 newBasicTypeDefinition thy fresh tyname absname repname th = do
   inTheory thy th
   when (isJust (constType thy absname) || isJust (constType thy repname))
@@ -487,9 +575,8 @@ newBasicTypeDefinition thy fresh tyname absname repname th = do
         (Left "witness has type variables not present in the predicate")
       let st  = nextStamp fresh (thyStamp thy)
       let aty = TyApp tyname (map TyVar tvs)
-      let thy2 = MkTheory (insert tyname (length tvs) (tyops thy))
-                           (insert repname (mkFun aty rty)
-                             (insert absname (mkFun rty aty) (consts thy)))
+      let thy2 = MkTheory ((tyname, length tvs) :: tyops thy)
+                           ((repname, mkFun aty rty) :: (absname, mkFun rty aty) :: consts thy)
                            (axioms thy) (defs thy) st
       let absC = mkConst absname (mkFun rty aty)
       let repC = mkConst repname (mkFun aty rty)
@@ -498,7 +585,7 @@ newBasicTypeDefinition thy fresh tyname absname repname th = do
       eq1 <- mkEq (Comb absC (Comb repC a)) a
       inner <- mkEq (Comb repC (Comb absC r)) r
       eq2 <- mkEq (Comb pred r) inner
-      Right (thy2, MkThm [] eq1 st, MkThm [] eq2 st, S fresh)
+      Right (thy2, MkThm [] eq1 st, MkThm [] eq2 st)
     _ => Left "witness theorem is not an application"
   where
     when : Bool -> Either String () -> Either String ()

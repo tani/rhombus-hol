@@ -34,6 +34,16 @@ data Name : Type where
   NEq    : Name
   ||| The type variable in `eq`'s generic type, `'a`.
   NAlpha : Name
+  ||| The representation variable `newBasicTypeDefinition` introduces --
+  ||| `names.rhm`'s `v_rep`, spelled `r`.  It has its own constructor for
+  ||| the same reason `NAlpha` does, and it is a narrow one: `Name` carries
+  ||| no text, so every name the kernel writes *literally* needs one.  It is
+  ||| not privileged -- a user may declare `r` too, and that is harmless,
+  ||| since `newBasicTypeDefinition` checks its predicate closed and a free
+  ||| variable in a conclusion is instantiable anyway.  Writing
+  ||| `NUser 0` here instead, as this once did, is wrong for a different
+  ||| reason: it is not the name `kernel.rhm` writes.
+  NRepVar : Name
   ||| Everything a user declares.
   NUser  : Nat -> Name
 
@@ -66,6 +76,7 @@ nameEq NFun      NFun      = True
 nameEq NBool     NBool     = True
 nameEq NEq       NEq       = True
 nameEq NAlpha    NAlpha    = True
+nameEq NRepVar   NRepVar   = True
 nameEq (NUser a) (NUser b) = a == b
 nameEq _         _         = False
 
@@ -79,6 +90,7 @@ nameEqRefl NFun      = Refl
 nameEqRefl NBool     = Refl
 nameEqRefl NEq       = Refl
 nameEqRefl NAlpha    = Refl
+nameEqRefl NRepVar   = Refl
 nameEqRefl (NUser k) = natEqRefl k
 
 export
@@ -87,27 +99,38 @@ nameEqSound NFun      NFun      prf = Refl
 nameEqSound NBool     NBool     prf = Refl
 nameEqSound NEq       NEq       prf = Refl
 nameEqSound NAlpha    NAlpha    prf = Refl
+nameEqSound NRepVar   NRepVar   prf = Refl
 nameEqSound (NUser a) (NUser b) prf = rewrite natEqSound a b prf in Refl
 nameEqSound NFun      NBool     prf = absurd prf
 nameEqSound NFun      NEq       prf = absurd prf
 nameEqSound NFun      NAlpha    prf = absurd prf
+nameEqSound NFun      NRepVar   prf = absurd prf
 nameEqSound NFun      (NUser _) prf = absurd prf
 nameEqSound NBool     NFun      prf = absurd prf
 nameEqSound NBool     NEq       prf = absurd prf
 nameEqSound NBool     NAlpha    prf = absurd prf
+nameEqSound NBool     NRepVar   prf = absurd prf
 nameEqSound NBool     (NUser _) prf = absurd prf
 nameEqSound NEq       NFun      prf = absurd prf
 nameEqSound NEq       NBool     prf = absurd prf
 nameEqSound NEq       NAlpha    prf = absurd prf
+nameEqSound NEq       NRepVar   prf = absurd prf
 nameEqSound NEq       (NUser _) prf = absurd prf
 nameEqSound NAlpha    NFun      prf = absurd prf
 nameEqSound NAlpha    NBool     prf = absurd prf
 nameEqSound NAlpha    NEq       prf = absurd prf
+nameEqSound NAlpha    NRepVar   prf = absurd prf
 nameEqSound NAlpha    (NUser _) prf = absurd prf
+nameEqSound NRepVar   NFun      prf = absurd prf
+nameEqSound NRepVar   NBool     prf = absurd prf
+nameEqSound NRepVar   NEq       prf = absurd prf
+nameEqSound NRepVar   NAlpha    prf = absurd prf
+nameEqSound NRepVar   (NUser _) prf = absurd prf
 nameEqSound (NUser _) NFun      prf = absurd prf
 nameEqSound (NUser _) NBool     prf = absurd prf
 nameEqSound (NUser _) NEq       prf = absurd prf
 nameEqSound (NUser _) NAlpha    prf = absurd prf
+nameEqSound (NUser _) NRepVar   prf = absurd prf
 
 -- A total order, used only to keep hypothesis lists canonical (`termOrd`
 -- in `Term.idr`); nothing is proved about it.
@@ -116,7 +139,8 @@ nameRank NFun      = 0
 nameRank NBool     = 1
 nameRank NEq       = 2
 nameRank NAlpha    = 3
-nameRank (NUser _) = 4
+nameRank NRepVar   = 4
+nameRank (NUser _) = 5
 
 public export
 Ord Name where
@@ -129,4 +153,5 @@ Show Name where
   show NBool     = "bool"
   show NEq       = "eq"
   show NAlpha    = "a"
+  show NRepVar   = "r"
   show (NUser k) = "u" ++ show k

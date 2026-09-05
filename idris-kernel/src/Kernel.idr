@@ -2257,8 +2257,13 @@ newBasicTypeDefinition thy fresh tyname absname repname th = do
                            (axioms thy) (defs thy) st
       let absC = mkConst absname (mkFun rty aty)
       let repC = mkConst repname (mkFun aty rty)
+      -- The two names `kernel.rhm` writes here, `names.rhm`'s `v_alpha`
+      -- and `v_rep`.  Which names they are does not matter logically --
+      -- `pred` is checked closed, and a free variable in a conclusion is
+      -- instantiable -- but they must be *the same* names, or the two
+      -- kernels produce different theorems.
       let a = mkVar NAlpha aty
-      let r = mkVar (NUser 0) rty
+      let r = mkVar NRepVar rty
       eq1 <- mkEq (Comb absC (Comb repC a)) a
       inner <- mkEq (Comb repC (Comb absC r)) r
       eq2 <- mkEq (Comb pred r) inner

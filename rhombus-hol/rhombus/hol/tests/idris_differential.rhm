@@ -1,0 +1,384 @@
+#lang rhombus/static
+
+// Differential test: the native Rhombus kernel against the Idris2 kernel.
+//
+// `idris-kernel/` proves the ten primitive rules produce well-formed
+// theorems, but those proofs are about *that* development.  What connects
+// them to the kernel Rhombus/HOL actually runs has, until now, been reading
+// the two side by side.  This file turns that correspondence into something
+// machine-checked: both kernels are driven through the same operations and
+// their answers compared at every step.
+//
+// Two design points, both reactions to how the earlier (reverted) runtime
+// integration got this wrong -- see idris-kernel/README.md's History:
+//
+//  * Lockstep, not encoding.  Idris `Thm`/`Theory` values are never
+//    fabricated here.  Both sides start from their own `initial_theory` and
+//    every subsequent value is produced by its own kernel, so the Idris
+//    kernel's internal lineage checks are live and deciding.  The earlier
+//    integration handed Idris theorems carrying a shared placeholder stamp,
+//    which made those checks trivially succeed and decide nothing.
+//  * Terms cross the boundary, theorems do not.  A theorem is compared by
+//    its hypotheses and conclusion, never by its stamp: the two kernels mint
+//    identities by different mechanisms (uninterned `Symbol` vs a
+//    caller-supplied `Nat` token), and agreeing on stamp *values* is neither
+//    possible nor the point.  What is compared is that the two lineage
+//    algebras accept and reject the same operations.
+//
+// Which side is normative: the Idris kernel.  It is machine-checked --
+// `%default total`, no `believe_me`, no holes, and all ten rules proved to
+// produce well-formed theorems -- so a disagreement reported here is far
+// more likely to be a bug in `kernel.rhm` than in `Kernel.idr`, and the fix
+// belongs on the Rhombus side.  Revising the Idris kernel to match Rhombus
+// would throw away the only independently verified artifact in the project.
+// The exception is a discrepancy showing the Idris *statement* is the wrong
+// specification (a rule HOL does not have, say); that is worth fixing there,
+// and worth saying so explicitly.
+//
+// This file lives in the test package, not the library, so the generated
+// Racket module is not in `rhombus/hol.rkt`'s dependency graph and cannot
+// affect `raco make` for users of the language.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  lib("racket/base.rkt") as rb
+  lib("racket/treelist.rkt") as rt
+  // codec and the generated Idris kernel; see that file's header
+  "idris_bridge.rhm" open
+
+// -- outcomes --------------------------------------------------------------
+
+// Both kernels are compared on *outcome shape* -- accepted or rejected --
+// and, when accepted, on the resulting term.  Rejection messages are
+// deliberately not compared: the two implementations word them differently
+// and always did, and requiring identical prose would make the test fail on
+// changes that mean nothing.
+fun rh_run(thunk) :: List:
+  try:
+    ["ok", thunk()]
+    ~catch _ :: Exn.Fail: ["err", #false]
+
+// Idris `Bool` compiles to the Racket integers 1/0, not `#true`/`#false`.
+
+// A theorem compares as its hypotheses and conclusion; see the header for
+// why the stamp is excluded.
+fun rh_parts(th :: Thm) :: List: [th.hyps, th.concl]
+
+// Hypothesis lists are compared as *sets*, not sequences.  Both kernels keep
+// them sorted and deduplicated, but by different orders, and neither order
+// is part of the contract: `kernel.rhm` sorts names lexicographically
+// (`sym_ord` on `Symbol`), while `Name.idr` has no text to sort by -- that
+// is precisely what dropping `String` bought -- so `Ord Name` ranks the
+// reserved constructors and orders `NUser` by its id.  The two therefore
+// disagree on, say, `zz` versus `bb`, and cannot be made to agree without
+// giving `Name` back its text.  What both guarantee, and what matters, is
+// that the hypothesis *set* is right and free of duplicates.
+fun same_hyps(a :: List, b :: List) :: Boolean:
+  a.length() == b.length() && (for all (h in a): b.contains(h))
+
+// The comparison every rule case funnels through: same accept/reject
+// decision, and on acceptance the same sequent.
+fun agree_thm(rh :: List, idr :: List) :: List:
+  cond
+  | rh[0] == "err" && idr[0] == "err": ["err", "err"]
+  | rh[0] == "ok" && idr[0] == "ok":
+      let rp = rh_parts(rh[1] :~ Thm)
+      let ip = idr_parts(idr[1])
+      cond
+      | rp[1] == ip[1] && same_hyps(rp[0], ip[0]): ["ok", "ok"]
+      | ~else: ["MISMATCH-RESULT", [rp, ip]]
+  | ~else: ["MISMATCH-DECISION", [rh[0], idr[0]]]
+
+
+// -- lockstep state --------------------------------------------------------
+
+// Idris cannot mint identities, so the host supplies a fresh token per
+// extension; `gensym` plays that role on the Rhombus side.  Distinctness is
+// exactly the precondition `siblingsIncomparable` in Kernel.idr takes.
+def token = rb.#{box}(0)
+fun next_token() :: Any:
+  let t = rb.#{unbox}(token)
+  rb.#{set-box!}(token, t + 1)
+  t
+
+def rthy0 = initial_theory()
+def ithy0 = ik.#{Kernel-initialTheory}(next_token())
+
+// A working signature, built through *both* kernels step by step.  Every
+// Idris theory below is the output of the Idris kernel's own extension
+// principle, never an encoded Rhombus theory.
+def bl = TyApp(ty_bool, [])
+def num = TyApp(#'num, [])
+
+def rthy1 = new_type(rthy0, #'num, 0)
+def ithy1v = idr_run(ik.#{Kernel-newType}(ithy0, next_token(), idr_name(#'num), 0))[1]
+
+def rthy2 = new_constant(rthy1, #'zero, num)
+def ithy2 = idr_run(ik.#{Kernel-newConstant}(ithy1v, next_token(), idr_name(#'zero), idr_htype(num)))[1]
+
+def rthy3 = new_constant(rthy2, #'s, mk_fun(num, num))
+def ithy3 = idr_run(ik.#{Kernel-newConstant}(ithy2, next_token(), idr_name(#'s), idr_htype(mk_fun(num, num))))[1]
+
+def rthy = new_constant(rthy3, #'p, mk_fun(num, bl))
+def ithy = idr_run(ik.#{Kernel-newConstant}(ithy3, next_token(), idr_name(#'p), idr_htype(mk_fun(num, bl))))[1]
+
+// -- the term corpus -------------------------------------------------------
+
+// A deterministic generator, so a failure is reproducible from the seed
+// printed in the message rather than "sometimes fails".  The corpus is
+// deliberately *not* restricted to well-typed terms: the interesting
+// agreement is on rejection, which is where a kernel is unsound if it is
+// unsound at all.  Wild `BVar` indices are included for the same reason --
+// terms are locally nameless, so a dangling index is precisely the sort of
+// malformed input the two implementations could disagree about.
+def atoms :: List:
+  [mk_var(#'x, num), mk_var(#'y, num), mk_var(#'b, bl),
+   mk_var(#'f, mk_fun(num, num)), mk_var(#'g, mk_fun(num, bl)),
+   mk_const(#'zero, num), mk_const(#'s, mk_fun(num, num)),
+   mk_const(#'p, mk_fun(num, bl)), mk_const(#'nope, num),
+   BVar(0, num), BVar(1, num), BVar(0, bl)]
+
+def types :: List: [num, bl, mk_fun(num, num), mk_fun(num, bl), TyVar(#'a)]
+
+fun lcg(seed :: Int) :: Int:
+  (seed * 1103515245 + 12345) mod 2147483648
+
+fun gen_term(seed :: Int, depth :: Int) :: Term:
+  let s1 = lcg(seed)
+  cond
+  | depth <= 0 || s1 mod 3 == 0: atoms[s1 mod atoms.length()]
+  | s1 mod 3 == 1:
+      Comb(gen_term(s1, depth - 1), gen_term(lcg(s1), depth - 1))
+  | ~else:
+      Abs(types[s1 mod types.length()], gen_term(s1, depth - 1))
+
+def corpus :: List:
+  for values(acc :~ List = []) (i in 0..120):
+    acc ++ [gen_term(i * 7919 + 1, 3)]
+
+// A failing check should name one counterexample, not dump the corpus.
+fun cap(acc :: List, item) :: List:
+  if acc == [] | [item] | acc
+
+// -- the ten primitive rules ----------------------------------------------
+
+// Each rule is driven with every corpus term (and every pair, for the
+// two-theorem rules, via theorems the corpus can actually produce).
+
+fun refl_case(t :: Term) :: List:
+  agree_thm(rh_run(fun (): REFL(rthy, t)),
+            idr_run(ik.#{Kernel-reflR}(ithy, idr_term(t))))
+
+check (for values(bad :~ List = []) (t :: Term in corpus):
+         let r = refl_case(t)
+         if r[0] == "ok" || r[0] == "err" | bad | cap(bad, [t, r])) ~is []
+
+fun assume_case(t :: Term) :: List:
+  agree_thm(rh_run(fun (): ASSUME(rthy, t)),
+            idr_run(ik.#{Kernel-assumeR}(ithy, idr_term(t))))
+
+check (for values(bad :~ List = []) (t :: Term in corpus):
+         let r = assume_case(t)
+         if r[0] == "ok" || r[0] == "err" | bad | cap(bad, [t, r])) ~is []
+
+fun beta_case(t :: Term) :: List:
+  agree_thm(rh_run(fun (): BETA(rthy, t)),
+            idr_run(ik.#{Kernel-betaR}(ithy, idr_term(t))))
+
+check (for values(bad :~ List = []) (t :: Term in corpus):
+         let r = beta_case(t)
+         if r[0] == "ok" || r[0] == "err" | bad | cap(bad, [t, r])) ~is []
+
+// Theorems to feed the rules that consume them: whatever the corpus yields
+// through REFL and ASSUME, kept in lockstep pairs.
+def thm_pairs :: List:
+  for values(acc :~ List = []) (t :: Term in corpus):
+    let rh = rh_run(fun (): REFL(rthy, t))
+    let idr = idr_run(ik.#{Kernel-reflR}(ithy, idr_term(t)))
+    let rh2 = rh_run(fun (): ASSUME(rthy, t))
+    let idr2 = idr_run(ik.#{Kernel-assumeR}(ithy, idr_term(t)))
+    let a = if rh[0] == "ok" && idr[0] == "ok" | [[rh[1], idr[1]]] | []
+    let b = if rh2[0] == "ok" && idr2[0] == "ok" | [[rh2[1], idr2[1]]] | []
+    acc ++ a ++ b
+
+fun binary_case(rule, irule, a :: List, b :: List) :: List:
+  agree_thm(rh_run(fun (): rule(a[0], b[0])), idr_run(irule(a[1], b[1])))
+
+fun check_binary(label :: String, rule, irule) :: List:
+  for values(bad :~ List = []) (a :: List in thm_pairs):
+    for values(bad2 :~ List = bad) (b :: List in thm_pairs):
+      let r = binary_case(rule, irule, a, b)
+      if r[0] == "ok" || r[0] == "err" | bad2 | cap(bad2, [label, r])
+
+check check_binary("TRANS", TRANS, ik.#{Kernel-transR}) ~is []
+check check_binary("MK_COMB", MK_COMB, ik.#{Kernel-mkCombR}) ~is []
+check check_binary("EQ_MP", EQ_MP, ik.#{Kernel-eqMpR}) ~is []
+check check_binary("DEDUCT_ANTISYM_RULE", DEDUCT_ANTISYM_RULE,
+                   ik.#{Kernel-deductAntisymRule}) ~is []
+
+// ABS quantifies over a free variable; INST and INST_TYPE take
+// substitutions.  All three also take the theory, so they exercise the
+// lineage check on both sides.
+def abs_vars :: List: [mk_var(#'x, num), mk_var(#'b, bl), mk_const(#'zero, num)]
+
+check (for values(bad :~ List = []) (v :: Term in abs_vars):
+         for values(bad2 :~ List = bad) (p :: List in thm_pairs):
+           let r = agree_thm(rh_run(fun (): ABS(rthy, v, p[0])),
+                             idr_run(ik.#{Kernel-absR}(ithy, idr_term(v), p[1])))
+           if r[0] == "ok" || r[0] == "err" | bad2 | cap(bad2, [v, r])) ~is []
+
+def inst_thetas :: List:
+  [[], [[mk_const(#'zero, num), mk_var(#'x, num)]],
+   [[mk_var(#'y, num), mk_var(#'x, num)]],
+   [[mk_var(#'b, bl), mk_var(#'x, num)]],
+   [[mk_const(#'zero, num), mk_const(#'zero, num)]]]
+
+check (for values(bad :~ List = []) (theta :: List in inst_thetas):
+         for values(bad2 :~ List = bad) (p :: List in thm_pairs):
+           let r = agree_thm(rh_run(fun (): INST(rthy, theta, p[0])),
+                             idr_run(ik.#{Kernel-instR}(ithy, idr_theta(theta), p[1])))
+           if r[0] == "ok" || r[0] == "err" | bad2 | cap(bad2, [theta, r])) ~is []
+
+def type_thetas :: List:
+  [{}, {#'a: num}, {#'a: bl}, {#'a: TyApp(#'nope, [])}]
+
+check (for values(bad :~ List = []) (tyin :: Map in type_thetas):
+         for values(bad2 :~ List = bad) (p :: List in thm_pairs):
+           let r = agree_thm(rh_run(fun (): INST_TYPE(rthy, tyin, p[0])),
+                             idr_run(ik.#{Kernel-instTypeR}(ithy, idr_type_theta(tyin), p[1])))
+           if r[0] == "ok" || r[0] == "err" | bad2 | cap(bad2, [tyin, r])) ~is []
+
+// -- well-formedness and equality helpers ---------------------------------
+
+// Non-rule entry points, compared on decision only (they return `Void` or a
+// Boolean on the Rhombus side and `Either` on the Idris side).
+fun agree_decision(rh :: List, idr :: List) :: String:
+  cond
+  | rh[0] == idr[0]: "same"
+  | ~else: "MISMATCH"
+
+check (for values(bad :~ List = []) (ty :: HType in types ++ [TyApp(#'nope, []), TyApp(#'num, [num])]):
+         let r = agree_decision(rh_run(fun (): check_type(rthy, ty)),
+                                idr_run(ik.#{Kernel-checkType}(ithy, idr_htype(ty))))
+         if r == "same" | bad | cap(bad, [ty, r])) ~is []
+
+check (for values(bad :~ List = []) (t :: Term in corpus):
+         let r = agree_decision(rh_run(fun (): check_term(rthy, t)),
+                                idr_run(ik.#{Kernel-checkTerm}(ithy, idr_term(t))))
+         if r == "same" | bad | cap(bad, [t, r])) ~is []
+
+check (for values(bad :~ List = []) (t :: Term in corpus):
+         let rh = rh_run(fun (): mk_eq(t, t))
+         let idr = idr_run(ik.#{Kernel-mkEq}(idr_term(t), idr_term(t)))
+         let ok:
+           cond
+           | rh[0] == "err" && idr[0] == "err": #true
+           | rh[0] == "ok" && idr[0] == "ok": rh[1] == rhombus_term(idr[1])
+           | ~else: #false
+         if ok | bad | cap(bad, [t, rh[0], idr[0]])) ~is []
+
+check (for values(bad :~ List = []) (t :: Term in corpus):
+         if is_eq(t) == idr_bool(ik.#{Kernel-isEq}(idr_term(t))) | bad | cap(bad, t)) ~is []
+
+// -- lineage ---------------------------------------------------------------
+
+// The property `siblingsIncomparable` states in Idris, checked here against
+// the Rhombus implementation: a theorem proved in one sibling extension is
+// rejected by the other, both ways round, on both sides.
+def rsibA = new_type(rthy, #'sibA, 0)
+def rsibB = new_type(rthy, #'sibB, 0)
+def isibA = idr_run(ik.#{Kernel-newType}(ithy, next_token(), idr_name(#'sibA), 0))[1]
+def isibB = idr_run(ik.#{Kernel-newType}(ithy, next_token(), idr_name(#'sibB), 0))[1]
+
+def x_num = mk_var(#'x, num)
+def rthA = REFL(rsibA, x_num)
+def ithA = idr_run(ik.#{Kernel-reflR}(isibA, idr_term(x_num)))[1]
+
+// Proved in sibling A, offered to sibling B: both kernels must refuse.
+check agree_thm(rh_run(fun (): ABS(rsibB, x_num, rthA)),
+                idr_run(ik.#{Kernel-absR}(isibB, idr_term(x_num), ithA))) ~is ["err", "err"]
+
+// ...and accept it in the sibling it came from, and in that sibling's
+// descendants, so the check is refusing the right thing rather than
+// everything.
+check agree_thm(rh_run(fun (): ABS(rsibA, x_num, rthA)),
+                idr_run(ik.#{Kernel-absR}(isibA, idr_term(x_num), ithA))) ~is ["ok", "ok"]
+
+// Two independently rooted theories are likewise incomparable
+// (`rootsIncomparable`).
+def rroot2 = initial_theory()
+def iroot2 = ik.#{Kernel-initialTheory}(next_token())
+check agree_thm(rh_run(fun (): ABS(rroot2, x_num, rthA)),
+                idr_run(ik.#{Kernel-absR}(iroot2, idr_term(x_num), ithA))) ~is ["err", "err"]
+
+// -- keeping the test honest ----------------------------------------------
+
+// A differential test that only ever exercises rejection agrees vacuously.
+// These pin the corpus down to covering both outcomes, so a future edit that
+// accidentally makes every term ill-formed fails here rather than passing
+// everything above for the wrong reason.
+check [for values(n :~ Int = 0) (t :: Term in corpus):
+         if refl_case(t)[0] == "ok" | n + 1 | n,
+       for values(n :~ Int = 0) (t :: Term in corpus):
+         if refl_case(t)[0] == "err" | n + 1 | n] ~is [50, 70]
+
+// 50 theorems, so each two-theorem rule above compares 2500 pairs.
+check thm_pairs.length() ~is 50
+
+// Why `siblingsIncomparable` takes token freshness as a hypothesis rather
+// than proving it: reuse a token and the Idris kernel really does accept a
+// theorem from a foreign lineage, while Rhombus (whose stamps are
+// uninterned symbols, and so cannot collide) still refuses.  The mismatch
+// is the point -- it shows the precondition is load-bearing, and that this
+// harness would catch its violation.
+def shared = next_token()
+def isibC = idr_run(ik.#{Kernel-newType}(ithy, shared, idr_name(#'sibC), 0))[1]
+def isibD = idr_run(ik.#{Kernel-newType}(ithy, shared, idr_name(#'sibD), 0))[1]
+def ithC = idr_run(ik.#{Kernel-reflR}(isibC, idr_term(x_num)))[1]
+check idr_run(ik.#{Kernel-absR}(isibD, idr_term(x_num), ithC))[0] ~is "ok"
+
+// -- new_basic_type_definition --------------------------------------------
+
+// The one primitive neither test reached before: `bool.rhm` does not use it,
+// so it never appeared in a recorded derivation, and the corpus above builds
+// no witness theorem of the right shape.  `|- p = p` is
+// `Comb (Comb (Const eq _) p) p`, which already parses as `Comb pred witness`
+// with a closed `pred`, so it is a witness without further work.
+def witness_r = REFL(rthy, mk_const(#'p, mk_fun(num, bl)))
+def witness_i = idr_run(ik.#{Kernel-reflR}(ithy, idr_term(mk_const(#'p, mk_fun(num, bl)))))[1]
+
+fun tydef_rhombus() :: List:
+  let (thy2, t1, t2) = new_basic_type_definition(rthy, #'nt, #'af, #'rf, witness_r)
+  [t1.concl, t2.concl, type_arity(thy2, #'nt)]
+
+def tydef_rh = rh_run(tydef_rhombus)
+def tydef_idr = idr_run(ik.#{Kernel-newBasicTypeDefinition}(
+                          ithy, 99, idr_name(#'nt), idr_name(#'af),
+                          idr_name(#'rf), witness_i))
+
+fun tydef_idr_parts() :: List:
+  let pair = rb.#{cdr}(tydef_idr[1])
+  [rhombus_term(ik.#{Kernel-conclOf}(rb.#{car}(pair))),
+   rhombus_term(ik.#{Kernel-conclOf}(rb.#{cdr}(pair))),
+   rhombus_htype(idr_htype(TyApp(#'nt, []))) == TyApp(#'nt, [])]
+
+// Both accept, and both extend the theory with the new type constructor.
+check [tydef_rh[0], tydef_idr[0]] ~is ["ok", "ok"]
+check (tydef_rh[1] :~ List)[2] ~is 0
+
+// The abstraction theorem `|- abs (rep a) = a` agrees exactly: both kernels
+// name that variable `a`, which `Name.idr` has as `NAlpha`.
+check (tydef_rh[1] :~ List)[0] ~is tydef_idr_parts()[0]
+
+// The representation theorem agrees too.  It did not until `Name` gained a
+// reserved `NRepVar`: this kernel used to write `mkVar (NUser 0) rty`, a
+// hardcoded *user* id, where `kernel.rhm` writes `mk_var(#'r, rty)`.  Both
+// theorems were correct either way -- the variable is arbitrary and `pred`
+// is checked closed, so nothing can capture -- but the `Thm` values
+// differed, and a name the kernel picks for itself must be one a user
+// cannot also pick, which is exactly what the reserved constructors are
+// for.  This is the check that would have caught it.
+check (tydef_rh[1] :~ List)[1] ~is tydef_idr_parts()[1]

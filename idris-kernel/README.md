@@ -9,8 +9,45 @@ the native Rhombus kernel.
 
 `rhombus-hol-lib/rhombus/hol/private/kernel.rhm` is 100% native Rhombus --
 the trust boundary Rhombus/HOL actually runs on. This directory is not
-`require`d by it, does not participate in `raco make` / `raco test`, and
-adds no runtime dependency to the Rhombus packages.
+`require`d by it, does not participate in `raco make`, and adds no runtime
+dependency to the Rhombus packages.
+
+**Which side is normative: this one.** The Idris kernel is machine-checked
+— `%default total`, no `believe_me`, no holes, all ten rules proved to
+produce well-formed theorems — so when the two disagree, the bug is far
+more likely to be in `kernel.rhm`, and the fix belongs there. Revising the
+Idris kernel to match Rhombus would throw away the only independently
+verified artifact in the project. The exception is a discrepancy showing
+that the Idris *statement* is the wrong specification (a rule HOL does not
+have, say); that is worth fixing here, and worth saying so explicitly.
+
+Two tests in the Rhombus test package connect the two, using a generated
+Racket module checked in there (not in the library, so it stays out of
+`rhombus/hol.rkt`'s dependency graph):
+
+- `tests/idris_differential.rhm` runs both kernels side by side over a
+  deterministic corpus — all ten rules, theory extension, and the lineage
+  cases — and compares every decision and every resulting sequent.
+- `tests/idris_replay.rhm` records the primitive steps of a derivation the
+  library actually performs (`bool.rhm`'s base theory: every logical
+  constant plus the three axioms, followed by one application of each of
+  the ten rules) and has the Idris kernel re-derive the whole thing from
+  its own `initialTheory`.
+
+The replay is the shape of integration these proofs actually support. They
+say the ten rules, *as this kernel implements them*, produce well-formed
+theorems from theorems this kernel built. A wiring that hands it a theorem
+manufactured elsewhere gets nothing from them — which is exactly what the
+reverted integration did (see History). In replay the Idris kernel is
+handed no theorems at all, only a script of rule applications, so it is in
+the situation the proofs are about; and it runs once, in a test, rather
+than on `kernel.rhm`'s phase-1 hot path.
+
+Recording the steps needs a hook in `kernel.rhm`, off by default, costing
+one box read and a branch per rule. Measured A/B on one machine, clean
+build plus full suite: 4m02.8s for 892 tests without it, 4m07.6s for 899
+tests with it and the replay test — **+4.8s (+2.0%)**, of which the replay
+test is about 1.9s. The reverted runtime integration cost about 30%.
 
 This directory's job instead is to **state and check properties of the same
 kernel logic in Idris2's dependent type system**, on its own schedule
@@ -52,13 +89,18 @@ library rather than removed it.
 `src/Name.idr` makes the name type inductive instead:
 
 ```idris
-data Name = NFun | NBool | NEq | NAlpha | NUser Nat
+data Name = NFun | NBool | NEq | NAlpha | NRepVar | NUser Nat
 ```
 
-The four canonical names are the ones the kernel singles out (`fun`,
-`bool`, `eq`, and the type variable in `eq`'s generic type), mirroring
-`rhombus-hol-lib/rhombus/hol/private/names.rhm`, which fixes the same
-names on the Rhombus side. Everything a user declares is `NUser`, carrying
+The five fixed constructors are the names `kernel.rhm` writes *literally*
+rather than receiving from a caller: `fun`, `bool`, `eq`, the type variable
+in `eq`'s generic type, and the representation variable
+`newBasicTypeDefinition` introduces. `Name` carries no text, so each of
+those needs its own constructor. They are not privileged — a user may
+declare `a` or `r` too, and the bridge maps those to the same place, which
+is what keeps it injective. They mirror
+`rhombus-hol-lib/rhombus/hol/private/names.rhm`, which fixes the same names
+on the Rhombus side. Everything a user declares is `NUser`, carrying
 a `Nat` rather than text -- which is what Rhombus `Symbol` equality
 actually *is*: interned identity, not a character-by-character comparison.
 `nameEqRefl` and `nameEqSound` are then plain inductions, and so is
@@ -333,13 +375,47 @@ what proving a property once, checked on its own schedule, buys (a
 genuine independent check of the kernel's reasoning, paid for zero
 runtime cost), the design changed to the one described above.
 
+## Known divergences from `kernel.rhm`
+
+Found by reading the two implementations side by side rather than by
+testing; the ten rules, the extension principles, `check_type` /
+`check_open_term`, `type_of`, `type_match`, `type_subst`, `inst_fvar`,
+`inst_type`, `abstract_at`, `subst_at`, the hypothesis-set operations and
+`term_ord`'s rank table all agree exactly. Two remain.
+
+A third was fixed rather than documented: `new_basic_type_definition` used
+to write `mkVar (NUser 0) rty` for its representation variable, a hardcoded
+*user* id, where `kernel.rhm` writes `mk_var(#'r, rty)`. Both theorems were
+correct — the variable is arbitrary and `pred` is checked closed, so
+nothing can capture — but they were not the *same* theorem, and through the
+bridge `NUser 0` decoded to whichever symbol was interned first. `Name` now
+has an `NRepVar` alongside `NAlpha`, and `names.rhm` gained `v_alpha` and
+`v_rep` so the Rhombus side names them in one place too.
+
+1. **Hypothesis order.** Both kernels keep hypothesis lists sorted and
+   deduplicated, but by different orders. `kernel.rhm` sorts names
+   lexicographically (`sym_ord` on `Symbol`); `Name` here has no text to
+   sort by — that is exactly what dropping `String` bought — so `Ord Name`
+   ranks the reserved constructors and orders `NUser` by its id. They
+   disagree on, e.g., `zz` versus `bb`. This cannot be reconciled without
+   giving `Name` its text back. It is not a soundness issue: the order is
+   an internal canonicalisation, nothing in the derived layer indexes
+   hypotheses positionally, and each kernel is self-consistent. The shared
+   contract is the hypothesis *set*, which is what the tests now compare.
+
+2. **`shift` on a negative result.** `kernel.rhm` raises "shift would
+   produce a negative index"; here `integerToNat` clamps it to `0`
+   silently. Unreachable through the kernel's own checked paths — the only
+   negative shift is `substBvar`'s `shift (-1)`, and `BETA` calls
+   `checkTerm` first, which is what `shiftClosedId` and `substBvarClosed`
+   above prove — but the two differ on malformed input reaching `substBvar`
+   directly.
+
 ## Known gaps
 
-- `Thm`/`Theory` are ordinary exported records here, not given the
-  construction-proof boundary the Rhombus kernel has (`authentic`,
-  `constructor ~none`, an unexported `internal` constructor) -- moot for
-  verification purposes (nothing here needs to forge a `Thm`), but would
-  matter again if this were ever wired back into the runtime.
+- The construction boundary is drawn at the Idris level only (see "The
+  construction boundary" above); it does not survive compilation, since the
+  Racket backend emits bare tagged vectors.
 - `new_basic_type_definition`'s soundness comment and `dest_abs`'s
   human-readable variable naming (`x, y, z, u, v, w, ...`) are ported as
   logic but not re-explained here; read the `.rhm` originals for the "why".

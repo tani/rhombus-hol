@@ -1,0 +1,143 @@
+#lang rhombus/static
+
+// Shared bridge to the Idris2 kernel, used by `idris_differential.rhm`
+// (which runs both kernels side by side) and `idris_replay.rhm` (which
+// replays a recorded derivation through the Idris kernel alone).
+//
+// `idris_kernel_gen.rkt` is generated from `../../../../idris-kernel/` by
+// `idris2 --cg racket` followed by `idris-kernel/scripts/libify.py`, and
+// checked in here as a build artifact -- `raco make` cannot run `idris2`.
+// It lives in the test package, not the library, so it is not in
+// `rhombus/hol.rkt`'s dependency graph and cannot affect `raco make` for
+// users of the language.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  lib("racket/base.rkt") as rb
+  lib("racket/treelist.rkt") as rt
+  "idris_kernel_gen.rkt" as ik
+
+export:
+  ik
+  idr_name
+  rhombus_name
+  idr_htype
+  rhombus_htype
+  idr_term
+  rhombus_term
+  idr_bool
+  idr_run
+  idr_parts
+  idr_theta
+  idr_type_theta
+
+// -- names -----------------------------------------------------------------
+
+// `Name` is inductive on the Idris side (see idris-kernel/src/Name.idr):
+// `#(0)` NFun, `#(1)` NBool, `#(2)` NEq, `#(3)` NAlpha, `#(4)` NRepVar,
+// `#(5 k)` NUser.  The five fixed constructors are the names `kernel.rhm`
+// spells out literally (`names.rhm`'s `ty_fun`, `ty_bool`, `c_eq`,
+// `v_alpha`, `v_rep`); `Name` carries no text, so each of those needs its
+// own constructor there.  They are not privileged -- a user may write `a`
+// or `r` too, and this map sends them to the same place, which is what
+// keeps it injective.  Everything else is interned to a `NUser` id, which
+// is what
+// a real wiring would also have to do (Rhombus `Symbol` equality *is*
+// interned identity, so the table is a faithful bridge, not a fudge).
+def name_ids = rb.#{make-hash}()
+def id_names = rb.#{make-hash}()
+def name_counter = rb.#{box}(0)
+
+fun idr_name(n :: Symbol) :: Any:
+  cond
+  | n == ty_fun: rb.#{vector}(0)
+  | n == ty_bool: rb.#{vector}(1)
+  | n == c_eq: rb.#{vector}(2)
+  | n == v_alpha: rb.#{vector}(3)
+  | n == v_rep: rb.#{vector}(4)
+  | ~else:
+      let cached = rb.#{hash-ref}(name_ids, n, #false)
+      cond
+      | cached: rb.#{vector}(5, cached)
+      | ~else:
+          let k = rb.#{unbox}(name_counter)
+          rb.#{set-box!}(name_counter, k + 1)
+          rb.#{hash-set!}(name_ids, n, k)
+          rb.#{hash-set!}(id_names, k, n)
+          rb.#{vector}(5, k)
+
+fun rhombus_name(v :: Any) :: Symbol:
+  let tag = rb.#{vector-ref}(v, 0)
+  cond
+  | tag == 0: ty_fun
+  | tag == 1: ty_bool
+  | tag == 2: c_eq
+  | tag == 3: v_alpha
+  | tag == 4: v_rep
+  | ~else: rb.#{hash-ref}(id_names, rb.#{vector-ref}(v, 1), #false)
+
+// -- types and terms -------------------------------------------------------
+
+// `HType` is `#(0 name)` TyVar / `#(1 name args)` TyApp; `Term` is
+// `#(0 n ty)` FVar, `#(1 i ty)` BVar, `#(2 n ty)` Const, `#(3 f x)` Comb,
+// `#(4 aty body)` Abs.  A Rhombus `List` is a treelist, so it needs
+// converting at each crossing.
+fun idr_htype(t :: HType) :: Any:
+  match t
+  | TyVar(n): rb.#{vector}(0, idr_name(n))
+  | TyApp(n, args): rb.#{vector}(1, idr_name(n), rt.#{treelist->list}(args.map(idr_htype)))
+
+fun rhombus_htype(v :: Any) :: HType:
+  cond
+  | rb.#{vector-ref}(v, 0) == 0: TyVar(rhombus_name(rb.#{vector-ref}(v, 1)))
+  | ~else:
+      TyApp(rhombus_name(rb.#{vector-ref}(v, 1)),
+            rt.#{list->treelist}(rb.#{map}(rhombus_htype, rb.#{vector-ref}(v, 2))))
+
+fun idr_term(t :: Term) :: Any:
+  match t
+  | FVar(n, ty): rb.#{vector}(0, idr_name(n), idr_htype(ty))
+  | BVar(i, ty): rb.#{vector}(1, i, idr_htype(ty))
+  | Const(n, ty): rb.#{vector}(2, idr_name(n), idr_htype(ty))
+  | Comb(f, x): rb.#{vector}(3, idr_term(f), idr_term(x))
+  | Abs(aty, b): rb.#{vector}(4, idr_htype(aty), idr_term(b))
+
+fun rhombus_term(v :: Any) :: Term:
+  let tag = rb.#{vector-ref}(v, 0)
+  cond
+  | tag == 0: FVar(rhombus_name(rb.#{vector-ref}(v, 1)), rhombus_htype(rb.#{vector-ref}(v, 2)))
+  | tag == 1: BVar(rb.#{vector-ref}(v, 1), rhombus_htype(rb.#{vector-ref}(v, 2)))
+  | tag == 2: Const(rhombus_name(rb.#{vector-ref}(v, 1)), rhombus_htype(rb.#{vector-ref}(v, 2)))
+  | tag == 3: Comb(rhombus_term(rb.#{vector-ref}(v, 1)), rhombus_term(rb.#{vector-ref}(v, 2)))
+  | ~else: Abs(rhombus_htype(rb.#{vector-ref}(v, 1)), rhombus_term(rb.#{vector-ref}(v, 2)))
+
+// -- outcomes --------------------------------------------------------------
+
+// Both kernels are compared on *outcome shape* -- accepted or rejected --
+// and, when accepted, on the resulting term.  Rejection messages are
+// deliberately not compared: the two implementations word them differently
+// and always did, and requiring identical prose would make the test fail on
+// changes that mean nothing.
+fun idr_bool(v :: Any) :: Boolean: v == 1
+
+fun idr_run(result :: Any) :: List:
+  cond
+  | rb.#{vector-ref}(result, 0) == 0: ["err", #false]
+  | ~else: ["ok", rb.#{vector-ref}(result, 1)]
+
+fun idr_parts(v :: Any) :: List:
+  [rt.#{list->treelist}(rb.#{map}(rhombus_term, ik.#{Kernel-hypsOf}(v))),
+   rhombus_term(ik.#{Kernel-conclOf}(v))]
+
+
+// `INST`'s substitution is a list of `[replacement, variable]` pairs on both
+// sides; `INST_TYPE`'s is a Rhombus `Map` against an Idris assoc list.
+fun idr_theta(theta :: List) :: Any:
+  rt.#{treelist->list}(theta.map(fun (pr :: List):
+                                   rb.#{cons}(idr_term(pr[0]), idr_term(pr[1]))))
+
+fun idr_type_theta(tyin :: Map) :: Any:
+  rt.#{treelist->list}(for values(acc :~ List = []) ((n, ty) in tyin):
+                          acc ++ [rb.#{cons}(idr_name(n), idr_htype(ty))])

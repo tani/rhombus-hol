@@ -78,6 +78,10 @@ export:
   const_type
   axioms_of
   definition_of
+  // derivation recording, for offline replay by an independent checker
+  TraceStep
+  trace_start
+  trace_stop
   // hypothesis-set operations, exported because the derived layer needs them
   hyp_union
   hyp_insert
@@ -214,12 +218,17 @@ fun in_theory(who :: Symbol, thy :: Theory, th :: Thm) :: Void:
 // A fresh, uninterned root, so two theories built in the same process (which
 // is what `raco make` does) cannot be confused for one another.
 fun initial_theory() :: Theory:
-  let a = TyVar(#'a)
-  Theory({ty_bool: 0, ty_fun: 2},
-         {c_eq: mk_fun(a, mk_fun(a, TyApp(ty_bool, [])))},
-         [],
-         {},
-         fresh_stamp())
+  let a = TyVar(v_alpha)
+  let res = Theory({ty_bool: 0, ty_fun: 2},
+                   {c_eq: mk_fun(a, mk_fun(a, TyApp(ty_bool, [])))},
+                   [],
+                   {},
+                   fresh_stamp())
+  // Recorded like a rule so that a replayed derivation has a root to hang
+  // from; see the tracing section below.
+  when tracing.value
+  | note(#'initial_theory, #false, [], [], res.stamp.id, [])
+  res
 
 fun extend(thy :: Theory,
            ~tyops: tyops = thy.tyops,
@@ -353,10 +362,66 @@ fun need_eq(who :: Symbol, th :: Thm) :: List.of(Term):
 // points at which an undeclared constant, an ill-typed application or a
 // dangling index could otherwise enter a theorem.
 
+// -- tracing ---------------------------------------------------------------
+//
+// A write-only record of the primitive steps a derivation takes, off unless
+// a verification tool turns it on.  It exists so that a derivation built
+// here can be replayed by an independent checker -- the Idris2 kernel in
+// `idris-kernel/`, whose proofs are only worth something if the theorems it
+// checks are ones it built itself (see that directory's README).  Recording
+// the steps and replaying them offline is what buys that without putting
+// the Idris kernel on the compile-time hot path.
+//
+// This is global mutable state, which the comment on `initial_theory` warns
+// against -- but of a different kind, and the distinction is the reason it
+// is admissible here.  What that comment rules out is state that results
+// depend on, which would make `raco make` order-dependent.  The log is
+// never read by anything in this file, no rule consults it, and turning it
+// on or off cannot change a single theorem.  Its only cost on the hot path
+// is one box read and a branch per rule; the keys and step records are
+// built only while recording.
+//
+// A step names the rule, the stamp of the theory it was applied in (rules
+// that take no theory record `#false`), keys identifying the theorems it
+// consumed, its remaining arguments, and what it produced.  A theorem is
+// keyed by its stamp's identity together with its sequent: two theorems
+// agreeing on all three are interchangeable for replay, since every rule
+// depends on exactly those.
+class TraceStep(rule :: Symbol,
+                thy :: maybe(Symbol),
+                thms :: List,
+                data :: List,
+                out_thy :: maybe(Symbol),
+                out_thms :: List)
+
+fun thm_key(th :: Thm) :: List: [th.stamp.id, th.hyps, th.concl]
+
+def tracing :: Box = Box(#false)
+def trace_log :: Box = Box([])
+
+// Steps are consed on and reversed at the end: appending would make
+// recording quadratic in the length of the derivation.
+fun note(rule :: Symbol, thy, thms :: List, data :: List,
+         out_thy, out_thms :: List) :: Void:
+  trace_log.value := List.cons(TraceStep(rule, thy, thms, data, out_thy, out_thms),
+                               trace_log.value :~ List)
+
+fun trace_start() :: Void:
+  trace_log.value := []
+  tracing.value := #true
+
+fun trace_stop() :: List:
+  tracing.value := #false
+  let steps = (trace_log.value :~ List).reverse()
+  trace_log.value := []
+  steps
+
 // |- t = t
 fun REFL(thy :: Theory, t :: Term) :: Thm:
   check_term(thy, t)
-  _Thm([], mk_eq(t, t), thy.stamp)
+  let res = _Thm([], mk_eq(t, t), thy.stamp)
+  when tracing.value | note(#'REFL, thy.stamp.id, [], [t], #false, [thm_key(res)])
+  res
 
 // |- l = m   |- m = r
 // -------------------
@@ -369,7 +434,10 @@ fun TRANS(a :: Thm, b :: Thm) :: Thm:
   | error(~who: #'TRANS, "middle terms do not match",
           error.val(~label: "left", show(m1)),
           error.val(~label: "right", show(m2)))
-  _Thm(hyp_union(a.hyps, b.hyps), mk_eq(l, r), st)
+  let res = _Thm(hyp_union(a.hyps, b.hyps), mk_eq(l, r), st)
+  when tracing.value
+  | note(#'TRANS, #false, [thm_key(a), thm_key(b)], [], #false, [thm_key(res)])
+  res
 
 // |- f = g   |- x = y
 // -------------------
@@ -384,9 +452,12 @@ fun MK_COMB(fth :: Thm, xth :: Thm) :: Thm:
   let (dom, _) = dest_fun(fty)
   unless dom == type_of(x)
   | error(~who: #'MK_COMB, "types do not agree")
-  _Thm(hyp_union(fth.hyps, xth.hyps),
-       mk_eq(mk_comb(f, x), mk_comb(g, y)),
-       st)
+  let res = _Thm(hyp_union(fth.hyps, xth.hyps),
+                 mk_eq(mk_comb(f, x), mk_comb(g, y)),
+                 st)
+  when tracing.value
+  | note(#'MK_COMB, #false, [thm_key(fth), thm_key(xth)], [], #false, [thm_key(res)])
+  res
 
 //        |- l = r          (v not free in the hypotheses)
 // -------------------------
@@ -404,7 +475,10 @@ fun ABS(thy :: Theory, v :: FVar, th :: Thm) :: Thm:
   // The result is stamped with `thy`, not with `th`'s older theory: the
   // abstracted variable was checked against `thy`, so `thy` is the earliest
   // theory in which the conclusion is meaningful.
-  _Thm(th.hyps, mk_eq(mk_abs(v, l), mk_abs(v, r)), thy.stamp)
+  let res = _Thm(th.hyps, mk_eq(mk_abs(v, l), mk_abs(v, r)), thy.stamp)
+  when tracing.value
+  | note(#'ABS, thy.stamp.id, [thm_key(th)], [v], #false, [thm_key(res)])
+  res
 
 // |- (\x. body) arg = body[arg]
 //
@@ -415,7 +489,10 @@ fun BETA(thy :: Theory, t :: Term) :: Thm:
   check_term(thy, t)
   match t
   | Comb(Abs(_, body), arg):
-      _Thm([], mk_eq(t, subst_bvar(arg, body)), thy.stamp)
+      let res = _Thm([], mk_eq(t, subst_bvar(arg, body)), thy.stamp)
+      when tracing.value
+      | note(#'BETA, thy.stamp.id, [], [t], #false, [thm_key(res)])
+      res
   | ~else:
       error(~who: #'BETA, "not a beta redex",
             error.val(~label: "term", show(t)))
@@ -423,7 +500,9 @@ fun BETA(thy :: Theory, t :: Term) :: Thm:
 // p |- p
 fun ASSUME(thy :: Theory, p :: Term) :: Thm:
   check_prop(#'ASSUME, thy, p)
-  _Thm([p], p, thy.stamp)
+  let res = _Thm([p], p, thy.stamp)
+  when tracing.value | note(#'ASSUME, thy.stamp.id, [], [p], #false, [thm_key(res)])
+  res
 
 // |- p = q   |- p
 // ---------------
@@ -435,16 +514,23 @@ fun EQ_MP(eqth :: Thm, th :: Thm) :: Thm:
   | error(~who: #'EQ_MP, "antecedent does not match",
           error.val(~label: "expected", show(p)),
           error.val(~label: "given", show(th.concl)))
-  _Thm(hyp_union(eqth.hyps, th.hyps), q, st)
+  let res = _Thm(hyp_union(eqth.hyps, th.hyps), q, st)
+  when tracing.value
+  | note(#'EQ_MP, #false, [thm_key(eqth), thm_key(th)], [], #false, [thm_key(res)])
+  res
 
 //  A |- p       B |- q
 // ---------------------------------
 //  (A - q) u (B - p) |- p = q
 fun DEDUCT_ANTISYM_RULE(a :: Thm, b :: Thm) :: Thm:
   let st = combine_stamps(#'DEDUCT_ANTISYM_RULE, a.stamp, b.stamp)
-  _Thm(hyp_union(hyp_remove(b.concl, a.hyps), hyp_remove(a.concl, b.hyps)),
-       mk_eq(a.concl, b.concl),
-       st)
+  let res = _Thm(hyp_union(hyp_remove(b.concl, a.hyps), hyp_remove(a.concl, b.hyps)),
+                 mk_eq(a.concl, b.concl),
+                 st)
+  when tracing.value
+  | note(#'DEDUCT_ANTISYM_RULE, #false, [thm_key(a), thm_key(b)], [], #false,
+         [thm_key(res)])
+  res
 
 // Instantiate free variables.  `theta` is a list of `[replacement, variable]`
 // pairs.  The replacements are checked against the theory: this is the point
@@ -467,17 +553,23 @@ fun INST(thy :: Theory, theta :: List, th :: Thm) :: Thm:
   // Stamped with `thy`: the replacements were checked against `thy` and may
   // mention constants declared after `th` was proved, so the result is not
   // meaningful in `th`'s older theory.
-  _Thm(rehash_hyps(th.hyps.map(fun (h :: Term): inst_fvar(theta, h))),
-       inst_fvar(theta, th.concl),
-       thy.stamp)
+  let res = _Thm(rehash_hyps(th.hyps.map(fun (h :: Term): inst_fvar(theta, h))),
+                 inst_fvar(theta, th.concl),
+                 thy.stamp)
+  when tracing.value
+  | note(#'INST, thy.stamp.id, [thm_key(th)], [theta], #false, [thm_key(res)])
+  res
 
 // Instantiate type variables.
 fun INST_TYPE(thy :: Theory, tyin :: Map.of(Symbol, HType), th :: Thm) :: Thm:
   in_theory(#'INST_TYPE, thy, th)
   for ((_, ty) in tyin): check_type(thy, ty)
-  _Thm(rehash_hyps(th.hyps.map(fun (h :: Term): inst_type(tyin, h))),
-       inst_type(tyin, th.concl),
-       thy.stamp)
+  let res = _Thm(rehash_hyps(th.hyps.map(fun (h :: Term): inst_type(tyin, h))),
+                 inst_type(tyin, th.concl),
+                 thy.stamp)
+  when tracing.value
+  | note(#'INST_TYPE, thy.stamp.id, [thm_key(th)], [tyin], #false, [thm_key(res)])
+  res
 
 // -- theory extension ------------------------------------------------------
 
@@ -485,14 +577,20 @@ fun new_type(thy :: Theory, n :: Symbol, arity :: NonnegInt) :: Theory:
   when type_arity(thy, n) != #false
   | error(~who: #'new_type, "type constructor is already declared",
           error.val(~label: "name", n))
-  extend(thy, ~tyops: thy.tyops ++ {n: arity})
+  let res = extend(thy, ~tyops: thy.tyops ++ {n: arity})
+  when tracing.value
+  | note(#'new_type, thy.stamp.id, [], [n, arity], res.stamp.id, [])
+  res
 
 fun new_constant(thy :: Theory, n :: Symbol, ty :: HType) :: Theory:
   when const_type(thy, n) != #false
   | error(~who: #'new_constant, "constant is already declared",
           error.val(~label: "name", n))
   check_type(thy, ty)
-  extend(thy, ~consts: thy.consts ++ {n: ty})
+  let res = extend(thy, ~consts: thy.consts ++ {n: ty})
+  when tracing.value
+  | note(#'new_constant, thy.stamp.id, [], [n, ty], res.stamp.id, [])
+  res
 
 // The escape hatch.  Nothing in `type` or `fun` routes through this; it exists
 // so that a user-level `axiom` form has somewhere to go, and every use shows
@@ -505,8 +603,10 @@ fun new_axiom(thy :: Theory, p :: Term) :: values(Theory, Thm):
   // stored in.
   let st = next_stamp(thy.stamp)
   let th = _Thm([], p, st)
-  values(Theory(thy.tyops, thy.consts, List.cons(th, thy.axioms), thy.defs, st),
-         th)
+  let thy2 = Theory(thy.tyops, thy.consts, List.cons(th, thy.axioms), thy.defs, st)
+  when tracing.value
+  | note(#'new_axiom, thy.stamp.id, [], [p], thy2.stamp.id, [thm_key(th)])
+  values(thy2, th)
 
 // A conservative definition: `c = rhs` where `c` is undeclared, `rhs` is
 // closed, and `rhs` has no type variables beyond those of its own type.
@@ -537,9 +637,12 @@ fun new_basic_definition(thy :: Theory, tm :: Term) :: values(Theory, Thm):
           let st = next_stamp(thy.stamp)
           let c = mk_const(n, ty)
           let th = _Thm([], mk_eq(c, rhs), st)
-          values(Theory(thy.tyops, thy.consts ++ {n: ty}, thy.axioms,
-                        thy.defs ++ {n: th}, st),
-                 th)
+          let thy2 = Theory(thy.tyops, thy.consts ++ {n: ty}, thy.axioms,
+                            thy.defs ++ {n: th}, st)
+          when tracing.value
+          | note(#'new_basic_definition, thy.stamp.id, [], [tm], thy2.stamp.id,
+                 [thm_key(th)])
+          values(thy2, th)
       | ~else:
           error(~who: #'new_basic_definition,
                 "left-hand side is not a fresh name")
@@ -610,14 +713,18 @@ fun new_basic_type_definition(thy :: Theory,
                         thy.axioms, thy.defs, st)
       let abs = mk_const(absname, mk_fun(rty, aty))
       let rep = mk_const(repname, mk_fun(aty, rty))
-      let a = mk_var(#'a, aty)
-      let r = mk_var(#'r, rty)
-      values(thy2,
-             _Thm([], mk_eq(mk_comb(abs, mk_comb(rep, a)), a), st),
-             _Thm([],
-                  mk_eq(mk_comb(pred, r),
-                        mk_eq(mk_comb(rep, mk_comb(abs, r)), r)),
-                  st))
+      let a = mk_var(v_alpha, aty)
+      let r = mk_var(v_rep, rty)
+      let th_abs_rep = _Thm([], mk_eq(mk_comb(abs, mk_comb(rep, a)), a), st)
+      let th_pred = _Thm([],
+                         mk_eq(mk_comb(pred, r),
+                               mk_eq(mk_comb(rep, mk_comb(abs, r)), r)),
+                         st)
+      when tracing.value
+      | note(#'new_basic_type_definition, thy.stamp.id, [thm_key(th)],
+             [tyname, absname, repname], thy2.stamp.id,
+             [thm_key(th_abs_rep), thm_key(th_pred)])
+      values(thy2, th_abs_rep, th_pred)
   | ~else:
       error(~who: #'new_basic_type_definition,
             "witness theorem is not an application")

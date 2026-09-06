@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 961 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 980 tests passed。
 §10 に外部レビュー対応の状況をまとめてある。
 
 ---
@@ -504,9 +504,9 @@ solely on the statements in DatatypeThms, never on how they were obtained」
 | 7 | `Surface → CoreExpr → HOL + Rhombus` の共通 IR | **未着手**。`elab.rhm`（HOL 側）と `module_block.rhm`（Rhombus 側）は今も同じソースを別々に読む二経路のまま。 |
 | 8 | `match`/`cond`/局所 `def`/入れ子パターンの追加 | **未着手**。現状は `elab.rhm` の `parse_body`/`parse_clause` が「1 引数につき 1 段」の制約を持ち、`terminate.rhm` の `descends_at` も同じ制約に依存しているため、単なる文法追加ではなく決定木コンパイラ相当の設計変更になる。 |
 | 11 | fertilization / irrelevance 除去 / induction pool | fertilization と irrelevance 除去は**完了**（本セッション以前）。induction pool は**試みて撤回**。下記参照。 |
-| 13 | rule classes | **未着手**（依頼したサブエージェントが基盤モデルの利用上限で失敗、本セッション内では再着手できず）。 |
-| 14 | conditional rewriting | **未着手**（同上）。 |
-| 15 | hints の拡充（`~cases`/`~expand`/`~in_theory`） | **未着手**（同上）。`~do_not:` は本セッション以前に追加済み。 |
+| 13 | rule classes | **完了**。`ruledb.rhm` の `RuleDB` が type-prescription 事実を rewrite ルールと独立に分類・保持（`type_facts_of`）、`general.rhm` の `generalize_goal` が一般化時にそれを消費する。 |
+| 14 | conditional rewriting | **完了**。`RewriteRule` が `conds :: List.of(Term)` を持ち、`apply_rule` が（自分自身を除外した db で）各条件を `simp_conv` により再帰的に discharge する。 |
+| 15 | hints の拡充（`~cases`/`~expand`/`~in_theory`） | **`~in_theory:` と `~cases:` は完了**。`~expand:` は見送り（下記）。`~do_not:` は本セッション以前に追加済み。 |
 
 ### `HType`（`TyVar`/`TyApp`）の raw construction は意図的に隠していない
 
@@ -523,6 +523,21 @@ solely on the statements in DatatypeThms, never on how they were obtained」
 着手する場合は `mk_tyvar`/`mk_tyapp` を `htype.rhm` に追加し、上記ファイル
 群の**構築**箇所（パターンマッチ箇所は触らなくてよい ── `constructor ~none`
 は構築だけを塞ぐ）を機械的に置き換える。
+
+
+### `~expand:` は見送った（この設計では素直な意味論がない）
+
+ACL2 の `:expand` は「その関数呼び出しを、引数の形によらず定義本体で
+置き換える」というものだが、それは ACL2 の関数が `(if ...)` を内蔵した
+**単一の再帰方程式**として定義されているから成り立つ。このシステムの
+`function` はコンストラクタごとの**複数の節**（`recdef.rhm`）で定義されて
+おり、`f(v)`（`v` が構築子適用の形をしていないバインダ）にマッチする節は
+どの節にも存在しない ── つまり「引数の形によらず展開する」に対応する
+単一の方程式が最初から無い。素直に実装すると destructor elimination
+（すでに waterfall の一段）が自動でやっていることを手動で強制するだけの
+ヒントになり、追加の表現力を持たない。導入するなら「節ごとの等式を
+ヒントに使ってよい変数を明示する」形の別の意味論を設計する必要があり、
+今回は見送った。
 
 ### induction pool は実装して撤回した（性能退行）
 
@@ -548,7 +563,8 @@ solely on the statements in DatatypeThms, never on how they were obtained」
 P2 の 4 項目（induction pool・rule classes・conditional rewriting・
 richer hints）をまとめて 4 並列のサブエージェントに委譲しようとしたが、
 基盤モデル（当時 `openai-codex/gpt-5.6-terra`）の利用上限に達しており
-即座に全滅した。再試行も同様に失敗したため、本セッションでは induction
-pool のみ自分で試みて上記の理由で撤回し、残り 3 項目には着手できなかった。
-次にこの作業を再開する際は、まずサブエージェント基盤が使えるか probe
-してから並列委譲するか、使えなければ逐次に自分で実装するかを判断すること。
+即座に全滅した（probe も再試行も同様に失敗）。そのため本セッションでは
+残り 3 項目（rule classes・conditional rewriting・hints のうち
+`~in_theory:`/`~cases:`）を逐次、自分で実装した。次にサブエージェントへ
+委譲する場合は、まず可用性を probe してから並列委譲するか、使えなければ
+最初から逐次実装を選ぶか判断すること。

@@ -38,10 +38,13 @@ export:
   simp_conv
 
 class RewriteRule(name :: Symbol,
-                  // the specialised theorem `|- lhs === rhs`; instantiating it
-                  // is how the rule fires
+                  // the specialised theorem `|- cond1 ==> ... ==> lhs === rhs`
+                  // (an empty `conds` when there are none); instantiating it
+                  // and discharging each instantiated `cond` is how the rule
+                  // fires
                   src :: Thm,
                   vars :: List.of(FVar),
+                  conds :: List.of(Term),
                   lhs :: Term,
                   rhs :: Term,
                   head :: Symbol,
@@ -104,16 +107,43 @@ fun spec_all_vars(thy :: Theory, th :: Thm) :: values(List.of(FVar), Thm):
         loop(SPEC(thy, v, th), acc ++ [v])
     | ~else: values(acc, th)
 
+// A theorem `|- cond1 ==> ... ==> condn ==> consequent` becomes a
+// *conditional* rewrite rule: `conds` are carried along, unoriented, and
+// only the final `consequent` is turned into an equation (ACL2's rewrite
+// rules work the same way -- the hypotheses are side conditions to
+// discharge at firing time, not part of what gets rewritten). Peel the
+// antecedents off with `UNDISCH` to expose `consequent` for `orient`, then
+// put them back with `DISCH` in the same nesting order -- this is not
+// postulating anything new, just repackaging `th` through primitive rules.
+fun strip_conditions(thy :: Theory, spec :: Thm) :: values(List.of(Term), Thm):
+  let (conds, consequent) = strip_imp(concl_of(spec))
+  cond
+  | conds.length() == 0: values([], orient(thy, spec))
+  | ~else:
+      let peeled = for values(acc :~ Thm = spec) (c in conds): UNDISCH(thy, acc)
+      let oriented = orient(thy, peeled)
+      let redischarged = for values(acc :~ Thm = oriented) (c in conds.reverse()):
+                           DISCH(thy, c, acc)
+      values(conds, redischarged)
+
 fun mk_rule(thy :: Theory, name :: Symbol, th :: Thm)
      :: maybe(RewriteRule):
-  let (pvars, spec) = spec_all_vars(thy, th)
-  let eqth = orient(thy, spec)
-  match dest_eq(concl_of(eqth))
+  let (pvars, spec0) = spec_all_vars(thy, th)
+  let (conds, spec) = strip_conditions(thy, spec0)
+  let (_, consequent) = strip_imp(concl_of(spec))
+  match dest_eq(consequent)
   | #false: #false
   | [lhs, rhs]:
       let lfv = free_vars(lhs)
       let vars = pvars.filter(~keep: fun (v :: FVar): lfv.contains(v))
       let rvars = pvars.filter(~keep: fun (v :: FVar): vfree_in(v, rhs))
+      // A side condition may mention a pattern variable the left side does
+      // not determine either -- exactly the same hazard `rvars` guards
+      // against on the right side, and for the same reason: matching would
+      // leave it uninstantiated.
+      let cvars = for values(acc :~ List = []) (c in conds):
+                    for values(a :~ List = acc) (v in pvars):
+                      (if vfree_in(v, c) && !a.contains(v) | a ++ [v] | a)
       cond
       // A variable left-hand side matches everything, so the rule would
       // rewrite the whole world.
@@ -121,6 +151,7 @@ fun mk_rule(thy :: Theory, name :: Symbol, th :: Thm)
       // A pattern variable on the right that the left side does not determine
       // would be left uninstantiated by matching.
       | !(for all (v in rvars): vars.contains(v)): #false
+      | !(for all (v in cvars): vars.contains(v)): #false
       | lhs == rhs: #false
       | ~else:
           match head_symbol(lhs)
@@ -133,7 +164,7 @@ fun mk_rule(thy :: Theory, name :: Symbol, th :: Thm)
               cond
               | !(for all (v in rtv): ltv.contains(v)): #false
               | ~else:
-                  RewriteRule(name, eqth, vars, lhs, rhs, h,
+                  RewriteRule(name, spec, vars, conds, lhs, rhs, h,
                               is_variant(vars, lhs, rhs))
 
 fun type_vars_of(t :: Term) :: List.of(Symbol):
@@ -237,20 +268,52 @@ fun type_facts_of(db :: RuleDB, head :: Symbol) :: List.of(Thm):
 
 // -- rewriting -------------------------------------------------------------
 
-fun apply_rule(r :: RewriteRule, thy :: Theory, t :: Term) :: maybe(Thm):
+// Instantiate a rule and, if it has side conditions, try to discharge each
+// one by simplifying it against the *same* database with this rule's own
+// name disabled first.  Excluding the rule from its own conditions' proof is
+// not a shortcut for termination -- discharging can still recurse through
+// every *other* enabled rule, and `simp_conv`'s own termination properties
+// (or lack of them; see `PLAN.md`) are unchanged either way -- it exists so
+// that a rule can never be used to prove its own side condition circularly,
+// which would make firing it prove nothing.  A condition that fails to
+// discharge just means the rule does not fire here, exactly like a
+// non-matching left-hand side: never an error, never a wrong rewrite.
+fun apply_rule(r :: RewriteRule, thy :: Theory, db :: RuleDB, t :: Term)
+     :: maybe(Thm):
   match term_match(r.vars, r.lhs, t)
   | #false: #false
   | m :~ MatchResult:
-      let th = INST(thy, m.theta, INST_TYPE(thy, m.tyin, r.src))
-      let [l, rr] = (match dest_eq(concl_of(th)) | pair: pair)
-      cond
-      // The match should have produced exactly this term; if it did not, the
-      // rule would silently rewrite something else.
-      | l != t: #false
-      // A permutative rule fires only when it strictly decreases the term, so
-      // it cannot oscillate.
-      | r.permutative && !term_lt(rr, l): #false
-      | ~else: th
+      let inst_conds = r.conds.map(
+        fun (c :: Term): inst_type(m.tyin, inst_fvar(m.theta, c)))
+      match discharge_all(thy, disable(db, [r.name]), inst_conds)
+      | #false: #false
+      | proofs :~ List:
+          let inst_th = INST(thy, m.theta, INST_TYPE(thy, m.tyin, r.src))
+          let th = for values(acc :~ Thm = inst_th) (p in proofs): MP(thy, acc, p :~ Thm)
+          let [l, rr] = (match dest_eq(concl_of(th)) | pair: pair)
+          cond
+          // The match should have produced exactly this term; if it did not,
+          // the rule would silently rewrite something else.
+          | l != t: #false
+          // A permutative rule fires only when it strictly decreases the
+          // term, so it cannot oscillate.
+          | r.permutative && !term_lt(rr, l): #false
+          | ~else: th
+
+// A proof of each condition in order, or `#false` if any one does not
+// simplify all the way to `true`.
+fun discharge_all(thy :: Theory, db :: RuleDB, conds :: List.of(Term))
+     :: maybe(List.of(Thm)):
+  match conds
+  | []: []
+  | List.cons(c, rest):
+      match simp_conv(db)(thy, c)
+      | #false: #false
+      | eq :~ Thm when rhs_of(eq) == tm_true:
+          match discharge_all(thy, db, rest)
+          | #false: #false
+          | more: List.cons(EQT_ELIM(thy, eq), more :~ List)
+      | ~else: #false
 
 // Try every enabled rule whose head matches, newest first.
 fun db_conv(db :: RuleDB):
@@ -262,9 +325,10 @@ fun db_conv(db :: RuleDB):
           match rs
           | []: #false
           | List.cons(r, rest):
-              match apply_rule(r :~ RewriteRule, thy, t)
+              match apply_rule(r :~ RewriteRule, thy, db, t)
               | #false: loop(rest)
               | th: th
+
 
 // `a === a` is `true`.  Without this the simplifier can normalise both sides
 // of a goal to the same term and still not know it has finished.

@@ -299,3 +299,61 @@ check:
   let final = st.justify([sub_proof])
   [show(concl_of(final)), hyps_of(final).length()]
   ~is ["length(xs) === length(xs)", 0]
+
+// ==========================================================================
+// conditional rewriting
+// ==========================================================================
+//
+// `c === zero ==> plus(c, m) === m`, for a fresh constant `c` defined (not
+// postulated) to be `zero`: true because `plus`'s own base clause says
+// exactly this for the literal `zero`, but as *stated* the left side is
+// `plus(c, m)`, which does not match either of `plus`'s own two clauses --
+// their left sides are `plus(zero, _)` and `plus(succ(_), _)`, and `c` is a
+// different constant, not the literal `zero`, even though it equals it.
+
+def plus_zero_eq = (P.funs.get(#'plus, #false) :~ FunInfo).equations[0]
+check show(concl_of(plus_zero_eq)) ~is "forall (x :: Nat): plus(zero, x) === x"
+
+def (thy_c, def_c) = new_basic_definition(thy, mk_eq(mk_var(#'c, nat_ty), P.zero))
+def cc = mk_const(#'c, nat_ty)
+
+def cond_plus_thm:
+  let h = ASSUME(thy_c, mk_eq(cc, P.zero))
+  let cong = AP_THM(thy_c, AP_TERM(thy_c, P.plus, h), m)
+  let base = SPEC(thy_c, m, plus_zero_eq)
+  GENL(thy_c, [m], DISCH(thy_c, mk_eq(cc, P.zero), TRANS(cong, base)))
+
+check show(concl_of(cond_plus_thm)) ~is "forall (x :: Nat): c === zero ==> plus(c, x) === x"
+
+def cond_rule = mk_rule(thy_c, #'cond_plus, cond_plus_thm) :~ RewriteRule
+check cond_rule.conds.length() ~is 1
+check [show(cond_rule.lhs), show(cond_rule.rhs)] ~is ["plus(c, x)", "x"]
+
+// `c`'s own definition, registered as an ordinary (unconditional) rule --
+// `c` is a bare constant, not a pattern variable, so `mk_rule` accepts it
+// exactly the way it accepts any other left-hand side headed by a declared
+// symbol.
+def db_c_only = add_thm(thy_c, empty_db, #'def_c, def_c)
+def db_cond = add_rule(db_c_only, cond_rule)
+
+fun norm_c(d :: RuleDB, t :: Term) :~ String:
+  match simp_conv(d)(thy_c, t)
+  | #false: "<no change>"
+  | th :~ Thm: (if is_refl_thm(th) | "<no change>" | show(rhs_of(th)))
+
+// The conditional rule alone (its condition undischargeable -- nothing here
+// says `c === zero`) does not fire; `plus`'s own two clauses are
+// deliberately *not* in this database, so there is no other route either.
+check norm_c(add_rule(empty_db, cond_rule), plus_(cc, m)) ~is "<no change>"
+// knowing `c === zero` but only that -- still no unconditional rule for
+// `plus` is in this database -- gets no further than rewriting the `c`
+// inside it (ordinary congruence rewriting, not the conditional rule): it
+// does not reach `m`, because that needs `plus`'s own zero-clause, which is
+// deliberately absent here too.
+check norm_c(db_c_only, plus_(cc, m)) ~is "plus(zero, m)"
+// with both registered, the condition discharges (`c` rewrites to `zero`
+// via its own definition, closing `c === zero` by reflexivity) and the
+// conditional rule fires directly on `plus(c, m)` -- `plus`'s own clauses
+// are still absent from this database, so reaching `m` is the conditional
+// rule's doing alone, not a `c`-then-zero-clause chain.
+check norm_c(db_cond, plus_(cc, m)) ~is "m"

@@ -63,6 +63,14 @@ export:
   beta_reduce
   // debugging
   term_to_string
+  // raw construction, for testing the locally-nameless representation only
+  // -- lib code must build terms through the smart constructors above, never
+  // through these; see the note beside their definitions.
+  raw_fvar
+  raw_bvar
+  raw_const
+  raw_comb
+  raw_abs
 
 class Term():
   nonfinal
@@ -70,26 +78,52 @@ class Term():
 // A free variable: named, and visible to hypotheses and instantiation.
 class FVar(name :: Symbol, ty :: HType):
   extends Term
+  constructor ~none
+  internal _FVar
 
 // A bound variable: `index` counts binders outwards from the innermost `Abs`,
 // so `BVar(0)` refers to the binder immediately enclosing it.
 class BVar(index :: NonnegInt, ty :: HType):
   extends Term
+  constructor ~none
+  internal _BVar
 
 class Const(name :: Symbol, ty :: HType):
   extends Term
+  constructor ~none
+  internal _Const
 
 class Comb(func :: Term, arg :: Term):
   extends Term
+  constructor ~none
+  internal _Comb
 
 // No binder name: that is what makes structural equality the right equality.
 class Abs(arg_ty :: HType, body :: Term):
   extends Term
+  constructor ~none
+  internal _Abs
 
 // -- construction ----------------------------------------------------------
+// `internal` names are curried the same way `super` would be (once per
+// ancestor in the `extends` chain; `Term` itself has no fields), so each
+// gets a plain wrapper that applies the empty super-call before the fields.
+// `mk_var`/`mk_const` below build on top of two of them and are the ones
+// lib code should use; `raw_fvar`/`raw_bvar`/`raw_const`/`raw_comb`/`raw_abs`
+// perform none of `mk_comb`'s or `mk_abs`'s checks and exist only so that
+// `tests/term.rhm`, `tests/kernel.rhm` and the Idris differential tests can
+// build and inspect the raw locally-nameless shape (including deliberately
+// ill-formed terms, for the soundness regressions in `tests/kernel.rhm`)
+// without the kernel package losing sole authority over well-formed
+// construction. Lib code must never import them.
+fun raw_fvar(name :: Symbol, ty :: HType) :: FVar: _FVar()(name, ty)
+fun raw_bvar(index :: NonnegInt, ty :: HType) :: BVar: _BVar()(index, ty)
+fun raw_const(name :: Symbol, ty :: HType) :: Const: _Const()(name, ty)
+fun raw_comb(func :: Term, arg :: Term) :: Comb: _Comb()(func, arg)
+fun raw_abs(arg_ty :: HType, body :: Term) :: Abs: _Abs()(arg_ty, body)
 
-fun mk_var(name :: Symbol, ty :: HType) :: FVar: FVar(name, ty)
-fun mk_const(name :: Symbol, ty :: HType) :: Const: Const(name, ty)
+fun mk_var(name :: Symbol, ty :: HType) :: FVar: raw_fvar(name, ty)
+fun mk_const(name :: Symbol, ty :: HType) :: Const: raw_const(name, ty)
 
 fun type_of(t :: Term) :: HType:
   match t
@@ -119,7 +153,7 @@ fun mk_comb(func :: Term, arg :: Term) :: Comb:
       let (dom, _) = dest_fun(fty)
       let aty = type_of(arg)
       cond
-      | dom == aty: Comb(func, arg)
+      | dom == aty: raw_comb(func, arg)
       | ~else:
           error(~who: #'mk_comb, "operand type does not match operator domain",
                 error.val(~label: "domain", type_to_string(dom)),
@@ -127,7 +161,7 @@ fun mk_comb(func :: Term, arg :: Term) :: Comb:
 
 // `\v. body`, with `v`'s occurrences turned into `BVar(0)`.
 fun mk_abs(v :: FVar, body :: Term) :: Abs:
-  Abs(v.ty, abstract_fvar(v, body))
+  raw_abs(v.ty, abstract_fvar(v, body))
 
 fun dest_comb(t :: Term) :: values(Term, Term):
   match t
@@ -159,7 +193,7 @@ fun fresh_for(body :: Term, ty :: HType) :: FVar:
     let round = n div base_names.length()
     let text = (if round == 0 | base | base ++ to_string(round))
     let name = Symbol.from_string(text)
-    let v = FVar(name, ty)
+    let v = raw_fvar(name, ty)
     // A name is taken if *any* free variable uses it, whatever its type:
     // reusing it at a different type would be legal but unreadable.
     (if (for any (u in fvs): (u :~ FVar).name == name) | loop(n + 1) | v)
@@ -209,14 +243,14 @@ fun shift(d :: Int, cutoff :: NonnegInt, tm :: Term) :: Term:
               error(~who: #'shift, "shift would produce a negative index",
                     error.val(~label: "index", i),
                     error.val(~label: "by", d))
-          | ~else: BVar(i2, ty)
+          | ~else: raw_bvar(i2, ty)
   | Comb(f, x):
       let f2 = shift(d, cutoff, f)
       let x2 = shift(d, cutoff, x)
-      (if f2 === f && x2 === x | tm | Comb(f2, x2))
+      (if f2 === f && x2 === x | tm | raw_comb(f2, x2))
   | Abs(aty, b):
       let b2 = shift(d, cutoff + 1, b)
-      (if b2 === b | tm | Abs(aty, b2))
+      (if b2 === b | tm | raw_abs(aty, b2))
   | ~else: tm
 
 fun subst_at(j :: NonnegInt, s :: Term, t :: Term) :: Term:
@@ -225,10 +259,10 @@ fun subst_at(j :: NonnegInt, s :: Term, t :: Term) :: Term:
   | Comb(f, x):
       let f2 = subst_at(j, s, f)
       let x2 = subst_at(j, s, x)
-      (if f2 === f && x2 === x | t | Comb(f2, x2))
+      (if f2 === f && x2 === x | t | raw_comb(f2, x2))
   | Abs(aty, b):
       let b2 = subst_at(j + 1, s, b)
-      (if b2 === b | t | Abs(aty, b2))
+      (if b2 === b | t | raw_abs(aty, b2))
   | ~else: t
 
 // Replace the innermost bound variable by `s`, closing up the indices above
@@ -238,14 +272,14 @@ fun subst_bvar(s :: Term, body :: Term) :: Term:
 
 fun abstract_at(j :: NonnegInt, v :: FVar, t :: Term) :: Term:
   match t
-  | FVar(_, _): (if t == v | BVar(j, v.ty) | t)
+  | FVar(_, _): (if t == v | raw_bvar(j, v.ty) | t)
   | Comb(f, x):
       let f2 = abstract_at(j, v, f)
       let x2 = abstract_at(j, v, x)
-      (if f2 === f && x2 === x | t | Comb(f2, x2))
+      (if f2 === f && x2 === x | t | raw_comb(f2, x2))
   | Abs(aty, b):
       let b2 = abstract_at(j + 1, v, b)
-      (if b2 === b | t | Abs(aty, b2))
+      (if b2 === b | t | raw_abs(aty, b2))
   | ~else: t
 
 // Turn every occurrence of the free variable `v` into a bound one, ready to
@@ -273,10 +307,10 @@ fun inst_fvar(theta :: List, tm :: Term) :: Term:
     | Comb(f, x):
         let f2 = go(f, depth)
         let x2 = go(x, depth)
-        (if f2 === f && x2 === x | t | Comb(f2, x2))
+        (if f2 === f && x2 === x | t | raw_comb(f2, x2))
     | Abs(aty, b):
         let b2 = go(b, depth + 1)
-        (if b2 === b | t | Abs(aty, b2))
+        (if b2 === b | t | raw_abs(aty, b2))
     | ~else: t
   cond
   | theta.length() == 0: tm
@@ -292,21 +326,21 @@ fun inst_type(tyin :: Map.of(Symbol, HType), tm :: Term) :: Term:
     match t
     | FVar(n, ty):
         let ty2 = type_subst(tyin, ty)
-        (if ty2 === ty | t | FVar(n, ty2))
+        (if ty2 === ty | t | raw_fvar(n, ty2))
     | BVar(i, ty):
         let ty2 = type_subst(tyin, ty)
-        (if ty2 === ty | t | BVar(i, ty2))
+        (if ty2 === ty | t | raw_bvar(i, ty2))
     | Const(n, ty):
         let ty2 = type_subst(tyin, ty)
-        (if ty2 === ty | t | Const(n, ty2))
+        (if ty2 === ty | t | raw_const(n, ty2))
     | Comb(f, x):
         let f2 = go(f)
         let x2 = go(x)
-        (if f2 === f && x2 === x | t | Comb(f2, x2))
+        (if f2 === f && x2 === x | t | raw_comb(f2, x2))
     | Abs(aty, b):
         let aty2 = type_subst(tyin, aty)
         let b2 = go(b)
-        (if aty2 === aty && b2 === b | t | Abs(aty2, b2))
+        (if aty2 === aty && b2 === b | t | raw_abs(aty2, b2))
   cond
   | tyin.length() == 0: tm
   | ~else: go(tm)
@@ -354,7 +388,7 @@ fun variant(avoid :: List.of(Term), v :: FVar) :: FVar:
   | ~else:
       let base = to_string(v.name)
       recur loop (n = 1):
-        let w = FVar(Symbol.from_string(base ++ "_" ++ to_string(n)), v.ty)
+        let w = raw_fvar(Symbol.from_string(base ++ "_" ++ to_string(n)), v.ty)
         (if clashes(w) | loop(n + 1) | w)
 
 // -- ordering --------------------------------------------------------------

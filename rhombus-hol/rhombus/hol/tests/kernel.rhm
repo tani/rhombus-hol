@@ -116,6 +116,44 @@ check:
   initial_theory() with (stamp = 0)
   ~throws "does not support functional update"
 
+
+// `FVar`/`BVar`/`Const`/`Comb`/`Abs` are closed off the same way: pattern
+// matching and annotations still work (`check_term` and every rule below
+// still have to re-derive well-formedness for terms built through `mk_comb`
+// and `mk_abs`, so this is defense in depth, not the only line of defense),
+// but building one directly from outside the kernel package is not
+// possible.  `raw_fvar`/`raw_bvar`/`raw_const`/`raw_comb`/`raw_abs` exist
+// only so this file and `tests/term.rhm` can still construct and inspect
+// the raw locally-nameless shape, including the deliberately ill-formed
+// terms below.
+check:
+  ~eval: kernel_eval
+  FVar(#'x, TyApp(#'num, []))
+  ~throws "FVar: undefined"
+check:
+  ~eval: kernel_eval
+  BVar(0, TyApp(#'num, []))
+  ~throws "BVar: undefined"
+check:
+  ~eval: kernel_eval
+  Const(#'zero, TyApp(#'num, []))
+  ~throws "Const: undefined"
+check:
+  ~eval: kernel_eval
+  Comb(mk_const(#'zero, TyApp(#'num, [])), mk_const(#'zero, TyApp(#'num, [])))
+  ~throws "Comb: undefined"
+check:
+  ~eval: kernel_eval
+  Abs(TyApp(#'num, []), mk_const(#'zero, TyApp(#'num, [])))
+  ~throws "Abs: undefined"
+// but every one of them is still bound as an annotation and a binding
+// pattern, which is all the derived layer needs to inspect a term
+check x is_a FVar ~is #true
+check zero is_a Const ~is #true
+check pl(x, y) is_a Comb ~is #true
+check mk_abs(x, x) is_a Abs ~is #true
+check (match x | FVar(n, ty): [n, ty]) ~is [#'x, num]
+
 // ==========================================================================
 // Well-formedness checking
 // ==========================================================================
@@ -131,8 +169,8 @@ check check_term(thy, mk_const(#'zero, bl)) ~throws "non-instance type"
 check check_term(thy, mk_eq(x, y)) ~is #void
 check check_term(thy, mk_eq(px(x), qx(y))) ~is #void
 // a term built with the raw constructors, bypassing `mk_comb`, is still caught
-check check_term(thy, Comb(zero, x)) ~throws "operator is not a function"
-check check_term(thy, Comb(s, px(x))) ~throws "ill-typed application"
+check check_term(thy, raw_comb(zero, x)) ~throws "operator is not a function"
+check check_term(thy, raw_comb(s, px(x))) ~throws "ill-typed application"
 
 check is_bool(px(x)) ~is #true
 check is_bool(x) ~is #false
@@ -192,7 +230,7 @@ def beta_inner = mk_abs(y, pl(x, y))
 check:
   BETA(thy, mk_comb(mk_abs(x, beta_inner), y)).concl
   ~is mk_eq(mk_comb(mk_abs(x, beta_inner), y),
-            Abs(num, Comb(Comb(plus, y), BVar(0, num))))
+            raw_abs(num, raw_comb(raw_comb(plus, y), raw_bvar(0, num))))
 check BETA(thy, sc(x)) ~throws "not a beta redex"
 
 // -- ASSUME ----------------------------------------------------------------
@@ -421,12 +459,12 @@ check:
 // Local closure: a dangling de Bruijn index is not a term
 // ==========================================================================
 
-check REFL(thy, BVar(0, num)) ~throws "unbound de Bruijn index"
-check REFL(thy, Abs(num, BVar(1, num))) ~throws "unbound de Bruijn index"
-check ASSUME(thy, Abs(num, BVar(1, bl))) ~throws "unbound de Bruijn index"
-check REFL(thy, Abs(num, BVar(0, num))) ~completes
+check REFL(thy, raw_bvar(0, num)) ~throws "unbound de Bruijn index"
+check REFL(thy, raw_abs(num, raw_bvar(1, num))) ~throws "unbound de Bruijn index"
+check ASSUME(thy, raw_abs(num, raw_bvar(1, bl))) ~throws "unbound de Bruijn index"
+check REFL(thy, raw_abs(num, raw_bvar(0, num))) ~completes
 check:
-  INST(thy, [[BVar(0, num), x]], e_xy)
+  INST(thy, [[raw_bvar(0, num), x]], e_xy)
   ~throws "unbound de Bruijn index"
 
 // ==========================================================================
@@ -493,19 +531,19 @@ check:
 // `bool`.  Admitting it puts an ill-typed term inside a theorem, and from
 // there `type_of` is lying about everything built on top.
 
-def liar = Abs(num, Comb(pp, BVar(0, bl)))
+def liar = raw_abs(num, raw_comb(pp, raw_bvar(0, bl)))
 check type_of(liar) ~is mk_fun(num, bl)
 check is_locally_closed(liar) ~is #true
 check check_term(thy, liar) ~throws "does not match its binder"
 check REFL(thy, liar) ~throws "does not match its binder"
-check BETA(thy, Comb(liar, zero)) ~throws "does not match its binder"
+check BETA(thy, raw_comb(liar, zero)) ~throws "does not match its binder"
 // the honest version of the same shape is fine
-check check_term(thy, Abs(num, Comb(pp, BVar(0, num)))) ~is #void
+check check_term(thy, raw_abs(num, raw_comb(pp, raw_bvar(0, num)))) ~is #void
 // a deeper index must match the binder it actually points at
 check:
-  check_term(thy, Abs(num, Abs(bl, BVar(1, bl))))
+  check_term(thy, raw_abs(num, raw_abs(bl, raw_bvar(1, bl))))
   ~throws "does not match its binder"
-check check_term(thy, Abs(num, Abs(bl, BVar(1, num)))) ~is #void
+check check_term(thy, raw_abs(num, raw_abs(bl, raw_bvar(1, num)))) ~is #void
 
 // -- a rule that takes a theory stamps its result with that theory ---------
 //

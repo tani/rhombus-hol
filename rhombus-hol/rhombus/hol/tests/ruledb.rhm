@@ -16,6 +16,7 @@ import:
   rhombus/hol/private/recdef open
   rhombus/hol/private/goal open
   rhombus/hol/private/simp open
+  rhombus/hol/private/general open
   "spec_prelude.rhm" open
 
 def P = prelude
@@ -240,3 +241,61 @@ check:
   let g = mk_goal([], mk_eq(app_(xs, ys), app_(xs, ys)))
   simplify_goal(thy, defs, mk_goal([], mk_eq(xs, ys)))
   ~is #false
+
+// ==========================================================================
+// rule classes: type-prescription facts
+// ==========================================================================
+//
+// `Q := \n. #true`, so `|- forall xs. Q(length(xs))` is provable with no new
+// axiom -- `Q(length(xs))` unfolds to `true` and `EQT_INTRO` closes it -- but
+// registering it as a rule keeps the term as written, `Q(length(xs))`,
+// exactly the shape a type-prescription fact about `length` has.
+
+def (thy_q2, def_q) = new_basic_definition(thy, mk_eq(mk_var(#'Q, mk_fun(nat_ty, bool)), mk_abs(n, tm_true)))
+def qc = mk_const(#'Q, mk_fun(nat_ty, bool))
+
+def q_len_fact:
+  let unf = TRANS(AP_THM(thy_q2, def_q, ap1(lenN, xs)),
+                  (match BETA_CONV(thy_q2, mk_comb(mk_abs(n, tm_true), ap1(lenN, xs)))
+                   | th :~ Thm: th))
+  GEN(thy_q2, xs, EQT_ELIM(thy_q2, unf))
+
+check show(concl_of(q_len_fact)) ~is "forall (x :: List(Nat)): Q(length(x))"
+
+def db_with_q = add_thm(thy_q2, defs, #'q_len_fact, q_len_fact)
+
+// classified as a type-prescription about `length`, keyed by its head symbol
+check:
+  type_facts_of(db_with_q, #'length).length()
+  ~is 1
+// and *also* still an ordinary rewrite rule -- the two classifications are
+// not exclusive, and every existing rewrite behavior is unaffected
+check:
+  simp_conv(db_with_q)(thy_q2, mk_comb(qc, ap1(lenN, nil_n)))
+  ~is_a Thm
+
+// generalizing `length(xs)` in a goal now carries `Q(g)` along as a fresh
+// hypothesis about the generalized variable -- exactly what a proof that
+// needs to know something about what `length` produces would otherwise
+// lose by hiding it behind a bare variable.
+check:
+  let ctors = Set(#'zero, #'succ, #'nil, #'cons)
+  let g = mk_goal([], mk_eq(ap1(lenN, xs), ap1(lenN, xs)))
+  let st = generalize_goal(thy_q2, db_with_q, ctors, g) :~ Step
+  let sub :~ Goal = st.subgoals[0]
+  [sub.asms.length(), show(sub.asms[0])]
+  ~is [1, "Q(g)"]
+// and the reconstructed proof is a real theorem, not a shortcut: closing
+// the generalized subgoal (trivially, `g === g`) under the extra hypothesis
+// still comes back as a proof of the *original*, ungeneralized goal, with
+// no leftover hypotheses -- `Q(g)` was discharged by `q_len_fact`, not
+// smuggled through.
+check:
+  let ctors = Set(#'zero, #'succ, #'nil, #'cons)
+  let g = mk_goal([], mk_eq(ap1(lenN, xs), ap1(lenN, xs)))
+  let st = generalize_goal(thy_q2, db_with_q, ctors, g) :~ Step
+  let sub :~ Goal = st.subgoals[0]
+  let sub_proof = (match dest_eq(sub.concl) | [l, _]: REFL(thy_q2, l))
+  let final = st.justify([sub_proof])
+  [show(concl_of(final)), hyps_of(final).length()]
+  ~is ["length(xs) === length(xs)", 0]

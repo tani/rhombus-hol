@@ -27,6 +27,7 @@ import:
   rhombus/hol/private/printer open
   "bool.rhm" open
   "drule.rhm" open
+  "ruledb.rhm" open
   "goal.rhm" open
 
 export:
@@ -107,7 +108,45 @@ fun generalization_candidates(ctors :: Set.of(Symbol),
              for any (o in counted): is_proper_subterm(s, o))
   maximal
 
-fun generalize_goal(thy :: Theory, ctors :: Set.of(Symbol),
+// The first type-prescription fact about `t`'s head function that
+// instantiates cleanly at `t`'s actual arguments, as a theorem `|- Q(t)` --
+// or `#false` if there is none, or none instantiates (a fact whose argument
+// is not exactly its own pattern variables, e.g. `Q(f(g(x)))` rather than
+// `Q(f(x))`, is skipped rather than forced; that only means fewer facts are
+// used, never a wrong one).
+fun type_fact_at(thy :: Theory, db :: RuleDB, t :: Term) :: maybe(Thm):
+  match t
+  | Comb(_, _):
+      let (thead, actual_args) = strip_comb(t)
+      match thead
+      | Const(n, _):
+          recur loop (facts :~ List = type_facts_of(db, n)):
+            match facts
+            | []: #false
+            | List.cons(fact, rest):
+                match instantiate_type_fact(thy, fact :~ Thm, thead, actual_args)
+                | #false: loop(rest)
+                | inst: inst
+      | ~else: #false
+  | ~else: #false
+
+fun instantiate_type_fact(thy :: Theory, fact :: Thm, thead :: Term,
+                          actual_args :: List.of(Term)) :: maybe(Thm):
+  let (pvars, spec) = spec_all_vars(thy, fact)
+  match concl_of(spec)
+  | Comb(_, arg):
+      let (fhead, schema_args) = strip_comb(arg)
+      cond
+      | fhead != thead: #false
+      | schema_args.length() != actual_args.length(): #false
+      | !(for all (sa in schema_args): sa is_a FVar && pvars.contains(sa :~ FVar)):
+          #false
+      | ~else:
+          let theta = for List (sa in schema_args, aa in actual_args): [aa, sa]
+          INST(thy, theta, spec)
+  | ~else: #false
+
+fun generalize_goal(thy :: Theory, db :: RuleDB, ctors :: Set.of(Symbol),
                     g :: Goal) :: maybe(Step):
   match generalization_candidates(ctors, g)
   | []: #false
@@ -115,7 +154,16 @@ fun generalize_goal(thy :: Theory, ctors :: Set.of(Symbol),
       let t :~ Term = t
       let avoid = g.asms ++ [g.concl]
       let y = variant(avoid, mk_var(#'g, type_of(t)))
+      // A type-prescription fact about `t`, restated for `y`: what the
+      // waterfall would otherwise lose in generalizing `t` away -- ACL2's
+      // reason for consulting type-prescription rules during generalization
+      // in the first place.
+      let type_fact = type_fact_at(thy, db, t)
+      let type_hyp = (match type_fact
+                      | #false: #false
+                      | tf: replace_subterm(t, y, concl_of(tf :~ Thm)))
       let asms2 = g.asms.map(fun (a): replace_subterm(t, y, a))
+                    ++ (match type_hyp | #false: [] | h: [h :~ Term])
       let concl2 = replace_subterm(t, y, g.concl)
       let sub = note(Goal(asms2, concl2, g.trail),
                      "generalization (" ++ show(t) ++ " -> "
@@ -126,6 +174,9 @@ fun generalize_goal(thy :: Theory, ctors :: Set.of(Symbol),
         let discharged = for values(acc :~ Thm = ths[0]) (a in asms2.reverse()):
                            DISCH(thy, a, acc)
         let specialised = SPEC(thy, t, GEN(thy, y, discharged))
-        for values(acc :~ Thm = specialised) (a in g.asms):
-          MP(thy, acc, ASSUME(thy, a))
+        let after_asms = for values(acc :~ Thm = specialised) (a in g.asms):
+                           MP(thy, acc, ASSUME(thy, a))
+        (match type_fact
+         | #false: after_asms
+         | tf: MP(thy, after_asms, tf :~ Thm))
       Step([sub], justify)

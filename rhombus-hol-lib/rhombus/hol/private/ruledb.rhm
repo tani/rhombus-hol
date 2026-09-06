@@ -24,6 +24,7 @@ export:
   RuleDB
   empty_db
   mk_rule
+  spec_all_vars
   add_rule
   add_thm
   add_thms
@@ -31,6 +32,7 @@ export:
   enable
   rules_of
   rule_names
+  type_facts_of
   db_conv
   refl_conv
   simp_conv
@@ -47,10 +49,19 @@ class RewriteRule(name :: Symbol,
                   // only be allowed to fire downhill
                   permutative :: Boolean)
 
+// `type_by_head` is a second, independent classification of the same
+// theorems `add_thm` sees: ACL2's rule classes are not mutually exclusive,
+// and a fact of the shape `|- forall xs. P(f(xs))` is registered *both* as
+// an ordinary rewrite rule for `P` (unchanged from before -- ordinary
+// rewriting is not touched by this) *and*, separately, as a type fact about
+// what `f`'s result always satisfies, keyed by `f` rather than by `P`. Only
+// the second lookup (`type_facts_of`) is new; every existing `rules_of`
+// query returns exactly what it always did.
 class RuleDB(by_head :: Map.of(Symbol, List.of(RewriteRule)),
-             disabled :: Set.of(Symbol))
+             disabled :: Set.of(Symbol),
+             type_by_head :: Map.of(Symbol, List.of(Thm)))
 
-def empty_db :: RuleDB = RuleDB({}, Set())
+def empty_db :: RuleDB = RuleDB({}, Set(), {})
 
 // -- building a rule from a theorem ----------------------------------------
 
@@ -150,10 +161,44 @@ fun is_variant(vars :: List.of(FVar), lhs :: Term, rhs :: Term) :: Boolean:
 fun add_rule(db :: RuleDB, r :: RewriteRule) :: RuleDB:
   let cur = db.by_head.get(r.head, [])
   // Newest first, as ACL2 does: a later rule shadows an earlier one.
-  RuleDB(db.by_head ++ {r.head: List.cons(r, cur :~ List)}, db.disabled)
+  RuleDB(db.by_head ++ {r.head: List.cons(r, cur :~ List)}, db.disabled, db.type_by_head)
+
+// The function a type-prescription fact is about, or `#false`.
+//
+// A type-prescription is a plain Boolean fact `|- forall vs. P(f(vs...))`:
+// not an equation (an equation is already a rewrite rule and needs no
+// second classification), with the whole proposition applying some
+// predicate to a *single* argument headed by a declared function `f`. This
+// deliberately does not try to recognise `P(f(vs), other)` or other shapes;
+// widening it is easy later and narrowing a published classification is
+// not.
+fun type_prescription_head(spec :: Thm) :: maybe(Symbol):
+  let c = concl_of(spec)
+  cond
+  | is_eq(c): #false
+  | ~else:
+      match c
+      | Comb(_, arg):
+          let (h, _) = strip_comb(arg)
+          match h
+          | Const(n, _): n
+          | ~else: #false
+      | ~else: #false
 
 // Add a theorem as a rule, silently ignoring it when it cannot be oriented.
+// Independently of whether it became a rewrite rule, it may *also* be
+// registered as a type-prescription fact about some function's results --
+// the two classifications are not exclusive; see the comment on `RuleDB`.
 fun add_thm(thy :: Theory, db :: RuleDB, name :: Symbol, th :: Thm) :: RuleDB:
+  let db2 = add_thm_rewrite(db, thy, name, th)
+  let (_, spec) = spec_all_vars(thy, th)
+  match type_prescription_head(spec)
+  | #false: db2
+  | fname:
+      let cur = db2.type_by_head.get(fname, [])
+      RuleDB(db2.by_head, db2.disabled, db2.type_by_head ++ {fname: List.cons(th, cur :~ List)})
+
+fun add_thm_rewrite(db :: RuleDB, thy :: Theory, name :: Symbol, th :: Thm) :: RuleDB:
   match mk_rule(thy, name, th)
   | #false: db
   | r: add_rule(db, r)
@@ -167,10 +212,12 @@ fun add_thms(thy :: Theory, db :: RuleDB, name :: Symbol,
 // `disable` and `enable` swap only the suppressed set, so a scoped rule
 // change shares the whole index with its parent.
 fun disable(db :: RuleDB, names :: List.of(Symbol)) :: RuleDB:
-  RuleDB(db.by_head, for values(s :~ Set = db.disabled) (n in names): s ++ {n})
+  let disabled2 = for values(s :~ Set = db.disabled) (n in names): s ++ {n}
+  RuleDB(db.by_head, disabled2, db.type_by_head)
 
 fun enable(db :: RuleDB, names :: List.of(Symbol)) :: RuleDB:
-  RuleDB(db.by_head, for values(s :~ Set = db.disabled) (n in names): s.remove(n))
+  let disabled2 = for values(s :~ Set = db.disabled) (n in names): s.remove(n)
+  RuleDB(db.by_head, disabled2, db.type_by_head)
 
 fun rules_of(db :: RuleDB, head :: Symbol) :: List.of(RewriteRule):
   (db.by_head.get(head, []) :~ List).filter(
@@ -179,6 +226,14 @@ fun rules_of(db :: RuleDB, head :: Symbol) :: List.of(RewriteRule):
 fun rule_names(db :: RuleDB) :: List.of(Symbol):
   for values(acc :~ List = []) ((_, rs) in db.by_head):
     acc ++ (rs :~ List).map(fun (r :: RewriteRule): r.name)
+
+// Every type-prescription fact registered about `head`'s results, newest
+// first. Unlike `rules_of`, these are not filtered by `disabled`: a type
+// fact is consulted as a heuristic (see `general.rhm`'s use), not fired as a
+// rewrite, so disabling a rewrite rule of the same name has nothing to
+// silence here.
+fun type_facts_of(db :: RuleDB, head :: Symbol) :: List.of(Thm):
+  db.type_by_head.get(head, [])
 
 // -- rewriting -------------------------------------------------------------
 

@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 921 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 932 tests passed。
 
 ---
 
@@ -296,6 +296,8 @@ Racket 生成コードをテストパッケージ内に検証データとして�
   項順序（`order.rhm`）、規則データベースの優先順序（`ruledb.rhm`）。
 - **QuickCheck** の系譜 — `check_property` / `qc.rhm` の設計（生成・収縮・反例の最小化）。
 
+---
+
 ## 8. ドキュメント
 
 `rhombus-hol/rhombus/hol/scribblings/` に multi-page で 6 章:
@@ -311,3 +313,122 @@ Racket 生成コードをテストパッケージ内に検証データとして�
 | `trust.scrbl` | カーネル・3 公理・公準化しているもの・漏れているところ |
 
 ビルドは `raco setup --pkgs rhombus-hol`（`doc/` は .gitignore 済み）。
+
+---
+
+## 9. 設計: `datatype` / `recdef` を公理から導出に置き換える
+
+`trust.scrbl` が明言している通り、公理化されているのは 2 箇所だけで、
+それぞれ「境界の内側で検査条件が全ソウンドネス論証」というナローシームに
+なっている。ここでは両方を実際に導出に置き換える設計を固める。
+**両者は独立に進められ、`recdef` の方が先に着手できる**というのが、
+このメモの一番の結論。
+
+### 9.0 決定的な事実: 再帰的な datatype には新しい公理が要る
+
+`new_basic_type_definition` は既存の型の部分集合を型に仕立てる原理でしかない
+（`kernel.rhm` の実装通り）。無限の公理を持たない現状のカーネルでは、
+`bool` と `fun` から有限回の型構成で作れる型はすべて**有限**である
+（`A -> B` は `|B|^|A|` で、両方有限なら有限。無限公理なしに無限型を作る
+経路は存在しない）。`List` や `Nat` のような再帰的 datatype は無限型なので、
+**`new_basic_type_definition` だけをいくら組み合わせても導出できない** ---
+review が示唆する「`new_basic_type_definition` に置き換えれば済む」という
+見立ては、非再帰的 datatype にしか成り立たない。
+
+したがって再帰的 datatype の完全な導出は、HOL Light / HOL4 と同様に
+**無限の公理を 1 つ新設する**ことを意味する。これは公理の数を増やすが、
+質的には改善である: 現状は「datatype 宣言の数だけ」公理スキーマのインス
+タンスが生成される（`check_spec` を信頼する箇所が宣言のたびに増える）のに
+対し、無限公理は **1 個だけ、一度だけ監査すればよい、標準的でよく研究された
+公理**であり、`ETA`/`SELECT`/`BOOL_CASES` と同格の「4 本目の公理」として
+`trust.scrbl` にそのまま書ける。
+
+### 9.1 `recdef`: 公理を増やさずに導出できる（先に着手）
+
+`subterm.rhm` が既に指摘している通り、各 datatype の構造的部分項関係
+`T_lt` は導出済みの関数であり、その整礎性は「datatype の帰納法公理が
+無限降下列を禁じるから」という**書かれてはいるが証明されていない**論証に
+依拠している（`subterm.rhm` 冒頭のコメント参照）。`recdef.rhm` は
+`check_termination` が `T_lt` に沿った構造的減少を確認した後、各節を
+`new_axiom` で導入している（`install_function` 内、唯一のシーム）。
+
+導出への置き換えは 3 段:
+
+1. **`WF(R) := forall P. (exists x. P(x)) ==> exists m. P(m) and forall y. R(y, m) ==> not P(y)`**
+   という `bool` だけで書ける整礎性の定義を `lib` に追加する（新しい公理は
+   不要 --- 論理定数の上の定義）。
+2. **`|- WF(T_lt)` を datatype ごとに導出する。** 各 `DatatypeThms.induction`
+   （帰納法の公理--- 9.2 で導出に変わるがそれまでは公理のまま）から、
+   「`P` を反例の否定として `WF` の存在部分を構成する」という標準的な
+   一階論証で `|- WF(T_lt)` を証明する。ここは `datatype` が公理のままでも
+   進められる: 依拠しているのは「induction という命題」であって「それが
+   `new_axiom` 経由で得られたか `new_basic_type_definition` 経由で得られたか」
+   ではないから。
+3. **`WFREC` の一般定理を一度だけ証明する。**
+   `WF(R) ==> exists f. forall x. f(x) === M(RESTRICT(f, R, x), x)`
+   （`RESTRICT(f, R, x)` は `R`-worse な引数では未定義に潰す関数）という形の
+   存在定理を、`SELECT`（既存の公理 #2）と `WF` の整礎帰納法だけで証明する
+   （HOL4 の `relationTheory.WF_RECURSION` / TFL 相当、Slind の構成）。
+   これは **一度書けば全 `function` 宣言が共有する**、datatype 非依存の
+   定理であることが肝心 --- ここに手間をかける価値が最も高い。
+
+`install_function` はその後:
+- `new_constant` の代わりに `f = @f. forall x. f(x) === M(...)` を
+  `new_basic_definition`（Hilbert choice による一点定義）で導入する。
+- ユーザーに見える各節の等式は、`WFREC` の定義方程式を termination proof
+  （節ごとの再帰呼び出しが `T_lt` で真に減ることの証明、`check_termination`
+  が今も生成している情報）で書き換えて**導出する** --- `new_axiom` は
+  もう出てこない。
+
+この節の変更は `datatype.rhm` に一切触れずに完結する。9.2 が未着手のままでも
+`recdef.rhm` だけ先に閉じられる。
+
+### 9.2 `datatype`: 段階的に閉じる
+
+**フェーズ 1 (公理追加なし, 実利がすぐ出る)**: 自己再帰フィールドを一切持たない
+datatype (enum、非再帰レコード/バリアント) に限定して `new_basic_type_definition`
+で導出する。土台として `unit` / `sum` / `prod` の 3 つの型構成子を一度だけ
+`new_basic_type_definition` で作る（HOL Light の `pair.ml` 相当、これも
+有限型の組み合わせなので無限公理は不要）。任意の非再帰 `DatatypeSpec` は
+`sum(prod(F1_1, ..., F1_k1), sum(prod(F2_1, ...), ...))` の入れ子にエンコード
+でき、コンストラクタは `inl`/`inr`/`pair` の合成、injectivity/distinctness/
+cases/induction/discriminators/selectors はすべて sum と prod のその性質
+（一度だけ証明する）から**定理として**出る。`check_spec` の
+`nonrecursive_ctors` チェックは既にこの場合分けの入り口になっている。
+
+**フェーズ 2 (無限公理の新設)**: `trust.scrbl` に「4 本目の公理」として
+明記した上で、`exists f :: ind -> ind. injective(f) and not (surjective(f))`
+という標準形の無限公理を導入し、そこから `Nat`（あるいは `ind` をそのまま
+使う）を HOL Light の `nums.ml` / HOL4 の `arith.ml` に相当する手順で構成する。
+これは 1 回限りの、既に何十年も監査されてきた構成であり、datatype の個数に
+スケールしない。
+
+**フェーズ 3 (再帰 datatype の一般導出)**: フェーズ 2 の `Nat`/`ind` を使い、
+`check_spec` が既に課している制約（有限・厳密正・非入れ子・非相互再帰・
+直接の自己再帰のみ）のもとで、HOL Light `ind-types.ml` を単純化した構成を
+実装する: 各コンストラクタを「タグ + フィールドの有限タプル（非再帰
+フィールドは既存の型の表現、再帰フィールドは `U` 自身）」として `NUMPAIR`
+的なペアリングで `U`（`ind`/`Nat` 上の普遍型）へ単射に符号化し、「コンス
+トラクタの像で閉じた最小部分集合」を強い帰納法で特徴づけて
+`new_basic_type_definition` で切り出す。injectivity はペアリングの単射性
+から、distinctness はタグの違いから、induction はその集合の**最小性**から、
+cases は**構成による全射性**から、それぞれ定理として出る。これが 3 段の
+うち唯一「入れ子でない self 再帰専用」の制約を陽に使う箇所で、この制約が
+`check_spec` に既にあるおかげでフェーズ 3 は HOL Light 本家より大幅に単純化
+できる（相互再帰・他の型構成子を介したネストへの対応が要らない）。
+
+### 9.3 実装順序と検証方法
+
+1. `recdef`（9.1） --- 公理を増やさず、`kernel.rhm` にも触れない。
+2. `datatype` フェーズ 1（9.2） --- 非再帰 datatype のみ、公理を増やさない。
+3. `datatype` フェーズ 2・3（9.2） --- 無限公理の新設を伴う、複数セッション
+   規模。
+
+各段で `idris_differential.rhm` / `idris_replay.rhm` と同じ発想の
+**差分テスト**を追加する: 旧（公理的）実装と新（導出）実装を両方コンパイル
+できる状態にしばらく残し、同じ `DatatypeSpec`/`FunSpec` から出る
+`DatatypeThms`/`FunInfo` の**命題（`show` した文字列）が一致すること**を
+確認してから、旧実装を消す。命題以外は誰も見ていない
+（`datatype.rhm` 冒頭のコメント「Everything above this module depends
+solely on the statements in DatatypeThms, never on how they were obtained」
+の通り）ので、この一致確認が正しさの実用的な担保になる。

@@ -19,6 +19,57 @@ The kernel provides ten primitive inference rules, following HOL Light:
 locally nameless, so alpha-equivalence is structural equality and there is no
 alpha-conversion to get wrong.
 
+@section{Alignment with HOL Light's @tt{fusion.ml}}
+
+The kernel's public surface is deliberately close to HOL Light's, close enough
+that reading @tt{fusion.ml} is a reasonable way to predict what this kernel
+does before reading it. Three differences, and why each one is there:
+
+@itemlist(
+ @item{@bold{@tt{BETA} takes an arbitrary redex}, not only the trivial
+  @tt{(fun x: t(x))(x) === t(x)}. HOL Light's primitive @tt{BETA} is
+  deliberately the trivial case only; general beta conversion is a derived
+  rule built on top of it. Terms here are locally nameless, so substitution
+  cannot capture, and admitting the general case as primitive costs nothing
+  in soundness --- it is exactly as easy to state and check as the trivial
+  case. Taking the general case as primitive removes one derived-rule layer
+  (@tt{BETA_CONV} composed with a substitution argument) that would otherwise
+  exist purely to work around named bound variables, which this
+  representation does not have.}
+ @item{@bold{@tt{Thm} carries a @tt{Stamp}}, not a bare theory reference.
+  HOL Light's kernel has a single global, mutably-extended theory, so a
+  theorem needs no lineage tag to know what it can be combined with. This
+  kernel's theories are immutable values (see the section on theories below,
+  needed because @tt{raco make} compiles many modules in one process and a
+  single mutable global would make one module's declarations leak into
+  another's), so a rule combining two theorems has to check they come from
+  one line of extension. The ten rules' @emph{content} is unchanged; the
+  stamp check is bookkeeping the mutable-theory design does not need.}
+ @item{@bold{Two extra polymorphic definitional principles} beyond the eight
+  HOL Light exposes as primitive-adjacent (@tt{new_constant},
+  @tt{new_axiom}, @tt{new_basic_definition}): @tt{new_type} and
+  @tt{new_basic_type_definition} are named the same as HOL Light's and do the
+  same thing (the latter is the one genuinely conservative type-formation
+  principle, carving a new type out of a nonempty predicate on an existing
+  one). Nothing here is additional trust; it is the same principle under the
+  same name.}
+)
+
+Everything else --- the argument order, the error conditions each rule
+checks, and the set of ten primitive rules itself
+(@tt{REFL}/@tt{TRANS}/@tt{MK_COMB}/@tt{ABS}/@tt{BETA}/@tt{ASSUME}/@tt{EQ_MP}/
+@tt{DEDUCT_ANTISYM_RULE}/@tt{INST}/@tt{INST_TYPE}) --- matches
+@tt{fusion.ml} rule for rule. Type unification (used only by the elaborator,
+never by a proof step), pretty printing, and the compile-time trace log used
+by the independent Idris differential checker are not part of this
+comparison: none of the three exists in @tt{fusion.ml} either, and none of
+the three is one of the ten rules or a definitional principle --- printing
+lives beside the kernel only because @tt{check_term}'s error messages need
+it (see @tt{PLAN.md} section 1 for why that one dependency cannot be cut
+without a circular import), and type unification was already moved out to
+the elaborator (@tt{rhombus-hol-lib/.../elab.rhm}) before this section was
+written.
+
 @section{The axioms}
 
 Three, following HOL4:

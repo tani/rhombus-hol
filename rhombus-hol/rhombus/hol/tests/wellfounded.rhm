@@ -1,0 +1,59 @@
+#lang rhombus/static
+
+// `WF`, defined in `bool.rhm`, and the two directions connecting it to
+// well-founded induction (`wellfounded.rhm`).  See PLAN.md section 9.1: this
+// is the first derived step toward replacing `recdef.rhm`'s `new_axiom`
+// with an actual `WFREC` derivation.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/drule open
+  rhombus/hol/private/wellfounded open
+
+def thy = base_theory()
+def tyA :: HType = TyVar(#'a)
+def relty :: HType = mk_fun(tyA, mk_fun(tyA, bool))
+def bigR = mk_var(#'R, relty)
+def bigP = mk_var(#'P, mk_fun(tyA, bool))
+def x = mk_var(#'x, tyA)
+def y = mk_var(#'y, tyA)
+
+fun ind_scheme_for(r :: Term) :: Term:
+  mk_forall(bigP,
+            mk_imp(mk_forall(x,
+                             mk_imp(mk_forall(y, mk_imp(list_mk_comb(r, [y, x]), mk_comb(bigP, y))),
+                                    mk_comb(bigP, x))),
+                   mk_forall(x, mk_comb(bigP, x))))
+
+// -- WF_INDUCTION: a closed theorem, proved once, no hypotheses -------------
+
+def wf_induction = prove_wf_induction(thy)
+check hyps_of(wf_induction) ~is []
+check:
+  show(concl_of(wf_induction))
+  ~is "forall (x :: 'a -> 'a -> bool): wf(x) ==> forall (y :: 'a -> bool): "
+        ++ "(forall (z :: 'a): (forall (u :: 'a): x(u, z) ==> y(u)) ==> y(z)) "
+        ++ "==> forall (z :: 'a): y(z)"
+
+// Applying it to a hypothesised `WF(R)` recovers exactly the induction
+// scheme for `R`, with that one hypothesis and nothing else.
+check:
+  let wf_r = ASSUME(thy, mk_wf(bigR))
+  let applied = MP(thy, SPEC(thy, bigR, wf_induction), wf_r)
+  [show(concl_of(applied)), hyps_of(applied)]
+  ~is [show(ind_scheme_for(bigR)), [mk_wf(bigR)]]
+
+// -- WF_FROM_INDUCTION: the converse, as a rule taking a proof ------------
+
+check:
+  let ind_scheme = ASSUME(thy, ind_scheme_for(bigR))
+  let wf_from_ind = prove_wf_from_induction(thy, bigR, ind_scheme)
+  // exactly one hypothesis: the induction scheme it was handed
+  [show(concl_of(wf_from_ind)), hyps_of(wf_from_ind)]
+  ~is [show(mk_wf(bigR)), [ind_scheme_for(bigR)]]
+

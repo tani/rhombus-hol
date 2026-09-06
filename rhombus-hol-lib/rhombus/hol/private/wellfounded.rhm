@@ -1,0 +1,183 @@
+#lang rhombus/static
+
+// Well-founded induction, derived from `WF` (see `bool.rhm`'s `mk_wf`/`c_wf`).
+//
+// This is the first concrete step of PLAN.md section 9.1: replacing
+// `recdef.rhm`'s `new_axiom` with a derivation needs a well-founded relation
+// to recurse on, and *that* needs two facts about `WF`, proved once here and
+// reused by every datatype's subterm relation:
+//
+//   WF_INDUCTION       WF(R) ==> well-founded induction holds for R
+//   WF_FROM_INDUCTION  well-founded induction holds for R ==> WF(R)
+//
+// Both directions are genuine derivations from the ten primitive rules (via
+// `drule.rhm`'s combinators) plus the three base axioms already in
+// `bool.rhm` -- nothing here is asserted with `new_axiom`.  `WF_FROM_INDUCTION`
+// is the one `subterm.rhm` needs: a datatype's induction axiom already has
+// the shape of a well-founded induction scheme for "is an immediate
+// constructor field of", so instantiating it there yields `|- WF(child_rel)`
+// without postulating well-foundedness separately.
+//
+// What is still owed toward closing `recdef.rhm` entirely (PLAN.md section
+// 9.1, steps 2 and 3): the per-datatype conversion from the constructor-case
+// induction axiom to the generic scheme `WF_FROM_INDUCTION` expects, and the
+// generic `WFREC` existence theorem
+//   WF(R) ==> !M. ?f. !x. f(x) = M(RESTRICT(f, R, x), x)
+// which needs `RESTRICT` and a uniqueness-of-approximations argument built
+// from `WF_INDUCTION` -- substantially more work, not attempted here.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+
+export:
+  unfold_wf
+  prove_wf_induction
+  prove_wf_from_induction
+
+// `WF(R)` unfolded at a concrete relation `r`, instantiating the schematic
+// element type to `r`'s own domain the same way `unfold_forall` does for the
+// quantifier's bound-variable type.
+fun unfold_wf(thy :: Theory, r :: Term) :: Thm:
+  let (dom, _) = dest_fun(type_of(r))
+  unfold_def(thy, INST_TYPE(thy, {#'a: dom}, base_defs(c_wf)), [r])
+
+// `A |- not (not p)  ==>  A |- p`.  Classical, via `CCONTR`: assuming `not p`
+// alongside `not (not p)` contradicts directly.
+fun not_not_elim(thy :: Theory, p :: Term, th :: Thm) :: Thm:
+  let imp_th = NOT_ELIM(thy, th)
+  let contra = MP(thy, imp_th, ASSUME(thy, mk_neg(p)))
+  CCONTR(thy, p, contra)
+
+// `A |- not (?v. body)  ==>  A |- !v. not (body)`.  Purely constructive --
+// no case split needed, unlike the converse (`not (!x. P x) ==> ?x. not (P x)`
+// which this file never needs).
+fun not_exists_forall_not(thy :: Theory, v :: FVar, body :: Term, th :: Thm) :: Thm:
+  let witness = EXISTS(thy, mk_exists(v, body), v, ASSUME(thy, body))
+  let contra = MP(thy, NOT_ELIM(thy, th), witness)
+  GEN(thy, v, NOT_INTRO(thy, DISCH(thy, body, contra)))
+
+// `A |- not (p and q)  ==>  A |- p ==> not q`.
+fun not_conj_imp(thy :: Theory, p :: Term, q :: Term, th :: Thm) :: Thm:
+  let both = CONJ(thy, ASSUME(thy, p), ASSUME(thy, q))
+  let contra = MP(thy, NOT_ELIM(thy, th), both)
+  DISCH(thy, p, NOT_INTRO(thy, DISCH(thy, q, contra)))
+
+// |- !R. WF(R) ==> !P. (!x. (!y. R y x ==> P y) ==> P x) ==> !x. P x
+//
+// Standard classical argument: suppose `P` fails somewhere.  `WF(R)` applied
+// to `\x. not (P x)` gives an `R`-minimal counterexample `m`: `not (P m)`,
+// and every `y` with `R y m` satisfies `P y` (after eliminating the double
+// negation `WF` produces).  The induction hypothesis at `m` then gives
+// `P m`, a contradiction.
+fun prove_wf_induction(thy :: Theory) :: Thm:
+  let tyA :: HType = TyVar(#'a)
+  let rel_ty = mk_fun(tyA, mk_fun(tyA, bool))
+  let bigR = mk_var(#'R, rel_ty)
+  let bigP = mk_var(#'P, mk_fun(tyA, bool))
+  let x = mk_var(#'x, tyA)
+  let y = mk_var(#'y, tyA)
+  let m = mk_var(#'m, tyA)
+
+  let below_x = mk_forall(y, mk_imp(list_mk_comb(bigR, [y, x]), mk_comb(bigP, y)))
+  let ind_hyp_term = mk_forall(x, mk_imp(below_x, mk_comb(bigP, x)))
+  let goal_x = mk_comb(bigP, x)
+
+  let wf_r = ASSUME(thy, mk_wf(bigR))
+  let ind_hyp = ASSUME(thy, ind_hyp_term)
+  let notpx = ASSUME(thy, mk_neg(goal_x))
+
+  let exists_notp = EXISTS(thy, mk_exists(y, mk_neg(mk_comb(bigP, y))), x, notpx)
+
+  let qpred = mk_abs(y, mk_neg(mk_comb(bigP, y)))
+  let wf_unfold = EQ_MP(unfold_wf(thy, bigR), wf_r)
+  let wf_at_q = BETA_RULE(thy, SPEC(thy, qpred, wf_unfold))
+  let min_ex = MP(thy, wf_at_q, exists_notp)
+
+  let below_m_double_neg = mk_forall(y, mk_imp(list_mk_comb(bigR, [y, m]), mk_neg(mk_neg(mk_comb(bigP, y)))))
+  let body_m = mk_conj(mk_neg(mk_comb(bigP, m)), below_m_double_neg)
+  let asm = ASSUME(thy, body_m)
+  let notpm = CONJUNCT1(thy, asm)
+  let disj = CONJUNCT2(thy, asm)
+
+  let step:
+    let ry_m = list_mk_comb(bigR, [y, m])
+    let r_y_m_hyp = ASSUME(thy, ry_m)
+    let notnotpy = MP(thy, SPEC(thy, y, disj), r_y_m_hyp)
+    let py = not_not_elim(thy, mk_comb(bigP, y), notnotpy)
+    DISCH(thy, ry_m, py)
+  let all_y = GEN(thy, y, step)
+
+  let mp_ind = MP(thy, SPEC(thy, m, ind_hyp), all_y)
+  let contra = MP(thy, NOT_ELIM(thy, notpm), mp_ind)
+  let false_th = CHOOSE(thy, m, min_ex, contra)
+
+  let px = CCONTR(thy, goal_x, false_th)
+  let forall_x = GEN(thy, x, px)
+  let disch_ind = DISCH(thy, ind_hyp_term, forall_x)
+  let gen_p = GEN(thy, bigP, disch_ind)
+  let disch_wf = DISCH(thy, mk_wf(bigR), gen_p)
+  GEN(thy, bigR, disch_wf)
+
+// `ind_scheme : |- !P. (!x. (!y. R y x ==> P y) ==> P x) ==> !x. P x`, for a
+// *concrete* relation `bigR`, possibly with hypotheses (typically a
+// datatype's own induction axiom, converted to this shape) -- derive
+// `|- WF(bigR)`, carrying the same hypotheses.
+//
+// The converse of `prove_wf_induction`: assume the minimal element `WF`
+// promises does not exist for some nonempty `P`; then *every* element
+// satisfying `P` fails to be minimal, i.e. has a smaller `P`-element below
+// it, which is exactly the shape well-founded induction needs to prove
+// `not (P x)` everywhere -- contradicting the assumed nonemptiness.
+fun prove_wf_from_induction(thy :: Theory, bigR :: Term, ind_scheme :: Thm) :: Thm:
+  let (dom, _) = dest_fun(type_of(bigR))
+  let bigP = mk_var(#'P, mk_fun(dom, bool))
+  let x = mk_var(#'x, dom)
+  let y = mk_var(#'y, dom)
+  let m = mk_var(#'m, dom)
+
+  let exists_px = ASSUME(thy, mk_exists(x, mk_comb(bigP, x)))
+
+  let below_m_neg = mk_forall(y, mk_imp(list_mk_comb(bigR, [y, m]), mk_neg(mk_comb(bigP, y))))
+  let min_body = mk_conj(mk_comb(bigP, m), below_m_neg)
+  let neg_min = ASSUME(thy, mk_neg(mk_exists(m, min_body)))
+
+  let forall_not = not_exists_forall_not(thy, m, min_body, neg_min)
+
+  let step1:
+    let inst = SPEC(thy, m, forall_not)
+    let below_m_neg_term = mk_forall(y, mk_imp(list_mk_comb(bigR, [y, m]), mk_neg(mk_comb(bigP, y))))
+    not_conj_imp(thy, mk_comb(bigP, m), below_m_neg_term, inst)
+  let all_step1 = GEN(thy, m, step1)
+
+  let ind_case:
+    let below_x_neg = mk_forall(y, mk_imp(list_mk_comb(bigR, [y, x]), mk_neg(mk_comb(bigP, y))))
+    let hyp_all = ASSUME(thy, below_x_neg)
+    let step1_x = SPEC(thy, x, all_step1)
+    let inner:
+      let px = ASSUME(thy, mk_comb(bigP, x))
+      let not_all = MP(thy, step1_x, px)
+      MP(thy, NOT_ELIM(thy, not_all), hyp_all)
+    let notpx_th = NOT_INTRO(thy, DISCH(thy, mk_comb(bigP, x), inner))
+    DISCH(thy, below_x_neg, notpx_th)
+  let all_ind_case = GEN(thy, x, ind_case)
+
+  let qpred = mk_abs(x, mk_neg(mk_comb(bigP, x)))
+  let all_not_p = BETA_RULE(thy, MP(thy, BETA_RULE(thy, SPEC(thy, qpred, ind_scheme)), all_ind_case))
+
+  let false_th:
+    let px0 = ASSUME(thy, mk_comb(bigP, x))
+    let notpx0 = SPEC(thy, x, all_not_p)
+    let contra = MP(thy, NOT_ELIM(thy, notpx0), px0)
+    CHOOSE(thy, x, exists_px, contra)
+
+  let min_ex = CCONTR(thy, mk_exists(m, min_body), false_th)
+  let disch1 = DISCH(thy, mk_exists(x, mk_comb(bigP, x)), min_ex)
+  let unfolded_wf = GEN(thy, bigP, disch1)
+  EQ_MP(SYM(thy, unfold_wf(thy, bigR)), unfolded_wf)

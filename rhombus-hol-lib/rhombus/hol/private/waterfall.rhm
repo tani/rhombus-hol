@@ -39,6 +39,7 @@ import:
   "general.rhm" open
   "irrelevance.rhm" open
   "induct.rhm" open
+  "taut.rhm" open
 
 export:
   Context
@@ -46,6 +47,7 @@ export:
   prove_goal
   prove
   residue_message
+  strip_forall_all
 
 class Context(thy :: Theory,
               db :: RuleDB,
@@ -176,7 +178,8 @@ fun prove_goal(ctx :: Context, g :: Goal,
 fun prove(ctx :: Context, statement :: Term,
           ~names: names :: List.of(Symbol) = [],
           ~induct: hint :: maybe(Symbol) = #false,
-          ~do_not: do_not :: Set.of(Symbol) = Set())
+          ~do_not: do_not :: Set.of(Symbol) = Set(),
+          ~cases: cases :: List.of(Term) = [])
      :: values(maybe(Thm), ProofNode):
   let thy = ctx.thy
   let (vars, matrix) = strip_forall_all(statement, names)
@@ -199,8 +202,7 @@ fun prove(ctx :: Context, statement :: Term,
                         | List.cons(v, rest):
                             (if (v :~ FVar).name == hint | v | loop(rest))
                   | ~else: #false)
-  let node = prove_goal(ctx, mk_goal([], matrix), ~induct: hint_var,
-                        ~do_not: do_not)
+  let node = apply_cases(ctx, cases, mk_goal([], matrix), hint_var, do_not)
   match run(node)
   | #false: values(#false, node)
   | th :~ Thm:
@@ -215,6 +217,31 @@ fun prove(ctx :: Context, statement :: Term,
                 error.val(~label: "asked", show(statement)),
                 error.val(~label: "got", show(concl_of(closed))))
       | ~else: values(closed, node)
+
+// `~cases:`, applied before the waterfall runs: split the goal on each term
+// in turn, true branch and false branch, so `n` terms give `2^n` subgoals.
+// Justified by `taut.rhm`'s `excluded_middle`, not postulated -- a term that
+// turns out irrelevant to the goal just produces two subgoals that both need
+// the same proof the unsplit goal would have, so a bad choice of case terms
+// costs search effort, never soundness. Every subgoal, however deep the
+// nesting, restarts at the top of the ordinary waterfall (`prove_goal`), so
+// `~cases:` composes with `~induct:`/`~do_not:` rather than replacing them.
+fun apply_cases(ctx :: Context, cases :: List.of(Term), g :: Goal,
+                hint :: maybe(FVar), do_not :: Set.of(Symbol)) :: ProofNode:
+  match cases
+  | []: prove_goal(ctx, g, ~induct: hint, ~do_not: do_not)
+  | List.cons(c, rest):
+      let rest :~ List = rest
+      let sub_true = note(Goal(g.asms ++ [c], g.concl, g.trail),
+                          "case split: " ++ show(c))
+      let sub_false = note(Goal(g.asms ++ [mk_neg(c)], g.concl, g.trail),
+                           "case split: not (" ++ show(c) ++ ")")
+      let step = Step([sub_true, sub_false],
+                      fun (ths :: List.of(Thm)):
+                        let em = excluded_middle(ctx.thy, c)
+                        DISJ_CASES(ctx.thy, em, ths[0], ths[1]))
+      Derived(step, [apply_cases(ctx, rest, sub_true, hint, do_not),
+                     apply_cases(ctx, rest, sub_false, hint, do_not)])
 
 fun strip_forall_all(t :: Term, names :: List.of(Symbol))
      :: values(List.of(FVar), Term):

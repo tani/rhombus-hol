@@ -113,7 +113,7 @@ attribute = ~rewrite_rule | ~simp
 tactic = auto
        | auto ~induct: Id
        | auto(~induct: Id, ~using: [Id, ...], ~do_not: [Id, ...],
-              ~in_theory: [Id, ...])
+              ~in_theory: [Id, ...], ~cases: [proposition, ...])
 }
 
 States a proposition and proves it while the module compiles. The proposition
@@ -148,10 +148,13 @@ aggressive to leave in the rewriter permanently. @rhombus(~in_theory) names
 rules to disable for this proof only, on top of whatever a module-level
 @rhombus(disable_rules, ~datum) already disabled --- useful when an enabled
 rule is firing somewhere it should not, without turning it off for the whole
-module. @rhombus(~do_not) names waterfall stages --- @tt{simplify},
-@tt{eliminate}, @tt{fertilize}, @tt{generalize}, @tt{irrelevance},
-@tt{induct} --- to skip for this proof only; see @secref("prover"). Both
-change what the prover tries, never what it is allowed to conclude.
+module. @rhombus(~cases) splits the goal on one or more Boolean terms up
+front, one true/false branch per term, before the waterfall runs; the terms
+may refer to the theorem's own quantified variables. @rhombus(~do_not) names
+waterfall stages --- @tt{simplify}, @tt{eliminate}, @tt{fertilize},
+@tt{generalize}, @tt{irrelevance}, @tt{induct} --- to skip for this proof
+only; see @secref("prover"). None of these change what the prover is
+allowed to conclude, only what it tries.
 
 @section{@rhombus(disable_rules, ~datum) and @rhombus(enable_rules, ~datum)}
 

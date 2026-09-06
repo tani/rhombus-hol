@@ -187,7 +187,7 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
   let (statement, names) = try:
                              elab.parse_theorem_statement(st.thy, stmt)
                              ~catch e :: Exn.Fail: hol_reraise(e, at)
-  let [induct, using_names, do_not_names, in_theory_names] = elab.parse_tactic(tactic)
+  let [induct, using_names, do_not_names, in_theory_names, case_stxs] = elab.parse_tactic(tactic)
   // `~using:` adds named theorems for this proof only, and overrides
   // `disable_rules`: an explicit request beats a blanket one.
   let db0 = for values(d :~ RuleDB = st.db) (u in (using_names :~ List)):
@@ -204,11 +204,26 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
                        ~functions: st.funs)
   let do_not = for values(acc :~ Set = Set()) (d in (do_not_names :~ List)):
                  acc ++ {d :~ Symbol}
+  // `~cases:` terms are parsed against the theorem's own leading-binder
+  // variables, the same ones the statement itself was parsed with -- so a
+  // case term can name `xs` when the theorem reads `forall (xs :: ...): ...`.
+  let cases:
+    match case_stxs :~ List
+    | []: []
+    | _:
+        let (vars, _) = strip_forall_all(statement, names)
+        let tyvars = elab.collect_type_vars(stmt)
+        let env = for values(m :~ Map = {}) (v in vars):
+                    m ++ {(v :~ FVar).name: v :~ Term}
+        for List (c in case_stxs :~ List):
+          try:
+            elab.parse_prop(st.thy, tyvars, env, c :~ Syntax)
+            ~catch e :: Exn.Fail: hol_reraise(e, at)
   let (th, node) = try:
                      prove(ctx, statement, ~names: names,
                            ~induct: (induct :~ maybe(Symbol)),
-                           ~do_not: do_not)
-                     ~catch e :: Exn.Fail: hol_reraise(e, at)
+                           ~do_not: do_not,
+                           ~cases: cases)
   match th
   | #false: hol_error(#'theorem, residue_message(name, node), at)
   | proved :~ Thm:

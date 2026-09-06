@@ -1,0 +1,65 @@
+#lang rhombus/static
+
+// The waterfall driver itself: `prove`/`prove_goal` against a hand-built
+// `Context`, below the surface `#lang rhombus/hol` syntax. `~cases:` is
+// tested here rather than through a `#lang rhombus/hol` fixture because a
+// genuine witness needs a Boolean-valued constant whose truth value the
+// ordinary stages (destructor elimination, induction) cannot resolve by
+// destructuring an argument -- every surface `function` comes with defining
+// equations that eventually reveal its value, which would let the proof go
+// through some other way and prove nothing about `~cases:` specifically.
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/drule open
+  rhombus/hol/private/waterfall open
+  rhombus/hol/private/driver open
+
+def st0 = initial_state()
+def nat = TyApp(#'Nat, [])
+def thy1 = new_type(st0.thy, #'Nat, 0)
+def thy2 = new_constant(thy1, #'p, mk_fun(nat, bool))
+def thy = new_constant(thy2, #'k, nat)
+def ctx = mk_context(thy, ~rules: st0.db)
+
+def n = mk_var(#'n, nat)
+def px = mk_comb(mk_const(#'p, mk_fun(nat, bool)), n)
+def kk = mk_const(#'k, nat)
+
+// `if p(n) | k | k === k`: both branches of the conditional are identical,
+// but nothing simplifies `if p(n) | k | k` without first knowing whether
+// `p(n)` is true or false -- `cond_rule` only fires on the literal
+// constants, and `p` is an uninterpreted constant with no equations to
+// destructure `n` against. Left to the ordinary waterfall, this is stuck.
+def goal_stmt = mk_eq(mk_cond(px, kk, kk), kk)
+
+check:
+  let (th, _) = prove(ctx, goal_stmt, ~names: [#'n])
+  th
+  ~is #false
+
+// `~cases: [p(n)]` splits into a branch where `p(n)` holds and one where it
+// does not; in each, the hypothesis orients into a rewrite rule for `p(n)`
+// (see `simp.rhm`'s `with_assumptions`), `cond_rule` fires, and the goal
+// collapses to `k === k`.
+check:
+  let (th, _) = prove(ctx, goal_stmt, ~names: [#'n], ~cases: [px])
+  match th
+  | #false: #false
+  | proved :~ Thm: [hyps_of(proved), show(concl_of(proved))]
+  ~is [[], show(goal_stmt)]
+
+// A case term irrelevant to the goal still lets a proof that did not need
+// it go through -- `~cases:` only ever adds hypotheses, never removes the
+// goal's own provability by some other route.
+check:
+  let unrelated = mk_comb(mk_const(#'p, mk_fun(nat, bool)), kk)
+  let (th, _) = prove(ctx, mk_eq(kk, kk), ~cases: [unrelated])
+  match th
+  | #false: #false
+  | proved :~ Thm: hyps_of(proved)
+  ~is []

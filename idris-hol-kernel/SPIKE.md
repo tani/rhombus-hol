@@ -46,7 +46,7 @@ size, which is inherent to the problem, not overhead the interop adds.
 ## How to reproduce
 
 ```sh
-cd idris-kernel
+cd idris-hol-kernel
 idris2 --cg racket --build kernel.ipkg
 python3 scripts/libify.py build/exec/kernel_app/kernel.rkt /tmp/kernel-lib.rkt
 export LD_LIBRARY_PATH="$PWD/build/exec/kernel_app:$LD_LIBRARY_PATH"

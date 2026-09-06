@@ -350,10 +350,10 @@ replay していた。実際には越えられる。これで `emit_manifest` / 
 7. 書き換え器では例外ベースの `ORELSEC` を避ける — `conv.rhm` は既に `maybe(Thm)` を
    返す設計。この方針を崩さないこと。
 
-### 付録 — `idris-kernel/`（検証専用ツールとして共存、ランタイムには不接続）
+### 付録 — `idris-hol-kernel/`（検証専用ツールとして共存、ランタイムには不接続）
 
 `htype.rhm` / `term.rhm` / `kernel.rhm` を Idris2 に移植し、Racket バックエンド
-（`idris2 --cg racket`）でコンパイルしたもの。詳細は `idris-kernel/README.md`。
+（`idris2 --cg racket`）でコンパイルしたもの。詳細は `idris-hol-kernel/README.md`。
 
 **`kernel.rhm` は 100% ネイティブ Rhombus のまま** — これが今も
 Rhombus/HOL が実際に走らせる信頼境界であり、`raco make` / `raco test` は
@@ -428,7 +428,7 @@ Rhombus/HOL が実際に走らせる信頼境界であり、`raco make` / `raco 
 なかった。唯一引っかかったのは `termOrd` で、`case (a, b) of` とタプルで
 分岐していたためサイズ変化解析が構造的降下を見失っていた。二引数を直接
 パターンマッチする形に書き直すだけで通る。詳細は
-`idris-kernel/README.md` の「Termination」節。
+`idris-hol-kernel/README.md` の「Termination」節。
 
 **経緯 — なぜランタイムに接続しなかったか:** 以前のイテレーションでは
 十原始規則すべてを実際に `kernel.rhm` から Idris 実装(生成した Racket
@@ -461,7 +461,7 @@ Rhombus/HOL が実際に走らせる信頼境界であり、`raco make` / `raco 
 なく、「1つの権威ある実装について性質を証明し、実行コストゼロでチェック
 できる」方が価値が高いと判断し、現在の設計(検証専用・共存)に変更した。
 詳細と技術的な学び(idris2 の到達可能性ベースの codegen、`libify.py`、
-停止性検査の落とし穴など)は `idris-kernel/README.md` に集約。
+停止性検査の落とし穴など)は `idris-hol-kernel/README.md` に集約。
 
 **どちらが規範か: Idris 側。** Idris カーネルは機械検査済み
 (`%default total`、`believe_me` なし、hole なし、十規則すべての
@@ -496,7 +496,7 @@ Idris 側を Rhombus に合わせて書き換えるのは、このプロジェ�
   再導出させて、生成された各 sequent を照合する(27 ステップ、
   規則種別 14)。
 
-  この形が、`idris-kernel/` の証明が実際に支持する唯一の接続形態である。
+  この形が、`idris-hol-kernel/` の証明が実際に支持する唯一の接続形態である。
   証明が言っているのは「**その**カーネルが構築した定理から、**その**
   カーネルの十規則が well-formed な定理を作る」ことなので、外部で
   作られた定理を渡す配線からは何も得られない — 撤回した統合が

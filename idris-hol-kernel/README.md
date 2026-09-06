@@ -1,4 +1,4 @@
-# idris-kernel
+# idris-hol-kernel
 
 An Idris2 port of the LCF kernel's term algebra
 (`rhombus-hol-lib/rhombus/hol/private/{htype,term,kernel}.rhm`), compiled

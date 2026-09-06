@@ -1,0 +1,61 @@
+#lang rhombus/static
+
+// Full type unification with an occurs check.
+//
+// The kernel never unifies -- every kernel rule either checks a type against
+// a theory (`check_type`) or one-way matches a generic type against a used
+// instance (`type_match`). Full two-way unification is an elaborator
+// convenience: `elab.rhm` uses it to solve for the type variables of a
+// constant or datatype occurrence from context, before the result is checked
+// by the kernel exactly like anything else. Living here rather than in
+// `rhombus-hol-kernel/.../htype.rhm` keeps the kernel's public surface to
+// only what the ten primitive rules need.
+
+import:
+  rhombus/hol/private/htype open
+
+export:
+  type_unify
+
+// One-way matching: extend `acc` so that `type_subst(result, pat) == t`.
+fun resolve(t :: HType, s :: Map.of(Symbol, HType)) :: HType:
+  match t
+  | TyVar(n):
+      match s.get(n, #false)
+      | #false: t
+      | t2: resolve(t2, s)
+  | ~else: t
+
+fun bind(n :: Symbol, t :: HType, s :: Map.of(Symbol, HType))
+     :: maybe(Map.of(Symbol, HType)):
+  cond
+  | t is_a TyVar && (t :~ TyVar).name == n: s
+  | type_occurs(n, type_subst(s, t)): #false
+  | ~else: s ++ { n: t }
+
+// Full unification with occurs check.  Used only by the elaborator; the
+// kernel never unifies, it only checks and matches.
+fun type_unify(a :: HType, b :: HType, acc :: Map.of(Symbol, HType))
+     :: maybe(Map.of(Symbol, HType)):
+  fun go(a :: HType, b :: HType, s :: Map.of(Symbol, HType))
+       :: maybe(Map.of(Symbol, HType)):
+    let a = resolve(a, s)
+    let b = resolve(b, s)
+    match a
+    | TyVar(n): bind(n, b, s)
+    | TyApp(na, aargs):
+        match b
+        | TyVar(m): bind(m, a, s)
+        | TyApp(nb, bargs) when na == nb && aargs.length() == bargs.length():
+            recur loop (xs = aargs, ys = bargs, s = s):
+              match xs
+              | []: s
+              | List.cons(x, xrest):
+                  match ys
+                  | List.cons(y, yrest):
+                      match go(x, y, s)
+                      | #false: #false
+                      | s2: loop(xrest, yrest, s2)
+                  | ~else: #false
+        | ~else: #false
+  go(a, b, acc)

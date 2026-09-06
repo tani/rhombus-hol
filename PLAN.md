@@ -50,8 +50,7 @@ rhombus-hol/
 │       ├── names.rhm             論理定数の正準名（eq/imp/conj/…）
 │       ├── htype.rhm             型：TyVar / TyApp、subst・match・unify・order
 │       ├── term.rhm              項：locally nameless（下記 §2）
-│       ├── order.rhm             ACL2 term-order（順序付き書き換え用）
-│       ├── printer.rhm           De Bruijn → 名前付き逆変換
+│       ├── printer.rhm           De Bruijn → 名前付き逆変換（kernel.rhm がエラー整形に使うため同居）
 │       └── kernel.rhm            十の基本推論規則、Thm/Theory の唯一の発行元
 ├── rhombus-hol-lib/              派生層 + 言語面（deps: base, rhombus-lib 1.1, rhombus-hol-kernel）
 │   ├── info.rkt
@@ -63,6 +62,7 @@ rhombus-hol/
 │           ├── conv.rhm          変換（equal.ml 相当）
 │           ├── drule.rhm         派生規則（bool.ml + drule.ml 相当）
 │           ├── datatype.rhm      データ型の公理（信頼境界②）
+│           ├── order.rhm         ACL2 term-order（順序付き書き換え用、ruledb.rhm 専用）
 │           └── module_block.rhm  #%module_block 差し替え（現在は素通し）
 └── rhombus-hol/                  ドキュメント + テスト（deps: rhombus-hol-lib, rhombus-hol-kernel）
     ├── info.rkt
@@ -73,13 +73,21 @@ rhombus-hol/
                                   lang_meta lang_export
 ```
 
-`rhombus-hol-kernel/` の 6 ファイルは他パッケージの `private/` 内ファイルから、
+`rhombus-hol-kernel/` の 4 ファイルは他パッケージの `private/` 内ファイルから、
 相対パスの文字列 (`"kernel.rhm"`) ではなく `rhombus/hol/private/kernel open`
 のようなコレクション相対のむき出しパスで参照する。同じコレクション
 `rhombus/hol/private/` に複数パッケージが合流する（`collection 'multi`）ため、
 これはファイル名が衝突しない限り問題なく解決される。テストパッケージが
 既にこの書き方で `rhombus-hol-lib` の中身を参照していたので、その慣習に
 合わせただけである。
+
+境界に何を入れるかは「信頼境界そのもの」と「ビルド上の依存」の 2 つの基準が
+ある。`printer.rhm` は trust.scrbl の「十の基本推論規則」ではないが、
+`kernel.rhm` が実際に import しているので、`rhombus-hol-lib` 側に置くと
+`rhombus-hol-kernel → rhombus-hol-lib → rhombus-hol-kernel` の循環になり
+置けない。逆に `order.rhm`（ACL2 term-order）は `kernel.rhm` からも
+どのカーネルファイルからも参照されておらず、使うのは派生層の `ruledb.rhm`
+だけなので、`rhombus-hol-lib` 側に置く。
 
 ### 位相（phase）の設計 — 最重要
 

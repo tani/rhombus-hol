@@ -106,7 +106,16 @@ def hol_version :: String = "0.1"
 //
 // `gen` is kept for error messages and debugging only; nothing decides
 // anything by comparing it.
-class Stamp(id :: Symbol, gen :: Int, ancestors :: Set.of(Symbol))
+// `constructor ~none` / `reconstructor ~none` close off `Stamp` the same way
+// `Thm` is closed off below: without them, a forged `Stamp` sharing a real
+// theory's `id` could be attached to a hand-built `Theory` that drops some of
+// that theory's declarations, and a theorem proved against the forgery would
+// then be usable wherever the real theory is -- see the note on `Theory` for
+// the attack this blocks.
+class Stamp(id :: Symbol, gen :: Int, ancestors :: Set.of(Symbol)):
+  constructor ~none
+  reconstructor ~none
+  internal _Stamp
 
 // True when a theorem stamped `a` is usable in a theory stamped `b`: `b`'s
 // theory is `a`'s, or an extension of it.  A theorem from a sibling branch, or
@@ -116,11 +125,11 @@ fun descends(a :: Stamp, b :: Stamp) :: Boolean:
 
 fun fresh_stamp() :: Stamp:
   let id = Symbol.uninterned_from_string("thy")
-  Stamp(id, 0, {id})
+  _Stamp(id, 0, {id})
 
 fun next_stamp(prev :: Stamp) :: Stamp:
   let id = Symbol.uninterned_from_string("thy")
-  Stamp(id, prev.gen + 1, prev.ancestors ++ {id})
+  _Stamp(id, prev.gen + 1, prev.ancestors ++ {id})
 
 // Two theorems may be combined only when their theories lie on one line of
 // extension.  The result belongs to the later of the two.
@@ -193,11 +202,26 @@ fun rehash_hyps(hs :: List.of(Term)) :: List.of(Term):
 
 // -- theories --------------------------------------------------------------
 
+// Closed off the same way as `Stamp` and `Thm`, and for a soundness reason,
+// not just hygiene: if `Theory` were forgeable, code outside this module
+// could build a `Theory` value that carries a real theory's `Stamp` (stamps
+// are readable, per the comment on `Thm`) while quietly omitting some of that
+// theory's declarations or definitions.  Passing that forgery to
+// `new_basic_definition` would then define a *second* meaning for a name the
+// real theory already fixed, and `descends` would accept the result wherever
+// the genuine theory is accepted, because it only ever compares stamps.  The
+// two definitions could then be combined by `TRANS`/`EQ_MP` into `|- F`.
+// Gating construction closes that path: a `Theory` reaching any rule below
+// has to have come from `initial_theory` and this module's own extension
+// functions, so its fields and its stamp agree by construction.
 class Theory(tyops :: Map.of(Symbol, Int),
              consts :: Map.of(Symbol, HType),
              axioms :: List.of(Thm),
              defs :: Map.of(Symbol, Thm),
-             stamp :: Stamp)
+             stamp :: Stamp):
+  constructor ~none
+  reconstructor ~none
+  internal _Theory
 
 fun type_arity(thy :: Theory, n :: Symbol) :: maybe(Int):
   thy.tyops.get(n, #false)
@@ -218,11 +242,11 @@ fun in_theory(who :: Symbol, thy :: Theory, th :: Thm) :: Void:
 // is what `raco make` does) cannot be confused for one another.
 fun initial_theory() :: Theory:
   let a = TyVar(v_alpha)
-  let res = Theory({ty_bool: 0, ty_fun: 2},
-                   {c_eq: mk_fun(a, mk_fun(a, TyApp(ty_bool, [])))},
-                   [],
-                   {},
-                   fresh_stamp())
+  let res = _Theory({ty_bool: 0, ty_fun: 2},
+                    {c_eq: mk_fun(a, mk_fun(a, TyApp(ty_bool, [])))},
+                    [],
+                    {},
+                    fresh_stamp())
   // Recorded like a rule so that a replayed derivation has a root to hang
   // from; see the tracing section below.
   when tracing.value
@@ -234,7 +258,7 @@ fun extend(thy :: Theory,
            ~consts: consts = thy.consts,
            ~axioms: axioms = thy.axioms,
            ~defs: defs = thy.defs) :: Theory:
-  Theory(tyops, consts, axioms, defs, next_stamp(thy.stamp))
+  _Theory(tyops, consts, axioms, defs, next_stamp(thy.stamp))
 
 // -- well-formedness -------------------------------------------------------
 
@@ -602,7 +626,7 @@ fun new_axiom(thy :: Theory, p :: Term) :: values(Theory, Thm):
   // stored in.
   let st = next_stamp(thy.stamp)
   let th = _Thm([], p, st)
-  let thy2 = Theory(thy.tyops, thy.consts, List.cons(th, thy.axioms), thy.defs, st)
+  let thy2 = _Theory(thy.tyops, thy.consts, List.cons(th, thy.axioms), thy.defs, st)
   when tracing.value
   | note(#'new_axiom, thy.stamp.id, [], [p], thy2.stamp.id, [thm_key(th)])
   values(thy2, th)
@@ -636,8 +660,8 @@ fun new_basic_definition(thy :: Theory, tm :: Term) :: values(Theory, Thm):
           let st = next_stamp(thy.stamp)
           let c = mk_const(n, ty)
           let th = _Thm([], mk_eq(c, rhs), st)
-          let thy2 = Theory(thy.tyops, thy.consts ++ {n: ty}, thy.axioms,
-                            thy.defs ++ {n: th}, st)
+          let thy2 = _Theory(thy.tyops, thy.consts ++ {n: ty}, thy.axioms,
+                             thy.defs ++ {n: th}, st)
           when tracing.value
           | note(#'new_basic_definition, thy.stamp.id, [], [tm], thy2.stamp.id,
                  [thm_key(th)])
@@ -706,10 +730,10 @@ fun new_basic_type_definition(thy :: Theory,
       // theory they live in share a node.
       let st = next_stamp(thy.stamp)
       let aty = TyApp(tyname, tvs.map(fun (v :: Symbol): TyVar(v)))
-      let thy2 = Theory(thy.tyops ++ {tyname: tvs.length()},
-                        thy.consts ++ {absname: mk_fun(rty, aty),
-                                       repname: mk_fun(aty, rty)},
-                        thy.axioms, thy.defs, st)
+      let thy2 = _Theory(thy.tyops ++ {tyname: tvs.length()},
+                         thy.consts ++ {absname: mk_fun(rty, aty),
+                                        repname: mk_fun(aty, rty)},
+                         thy.axioms, thy.defs, st)
       let abs = mk_const(absname, mk_fun(rty, aty))
       let rep = mk_const(repname, mk_fun(aty, rty))
       let a = mk_var(v_alpha, aty)

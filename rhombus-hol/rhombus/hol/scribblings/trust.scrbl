@@ -74,10 +74,10 @@ Theorems from sibling theories are refused.
 Across modules, a @rhombuslangname(rhombus/hol) module publishes its finished
 theory in a @rhombus(hol_theory, ~datum) submodule, and an @rhombus(import) of
 that module adopts it: the same theory, the same theorem objects. Nothing is re-parsed and nothing is
-re-asserted, so there is no trust boundary at a module edge. An earlier design
-published a @emph{description} of the theory and re-admitted each theorem on
-the word of the exporting module's compile; that was a trust boundary, and it
-could be forged by hand-writing the description.
+re-asserted, so there is no trust boundary at a module edge. A design that
+instead published a @emph{description} of the theory and re-admitted each
+theorem on the word of the exporting module's compile would introduce exactly
+such a boundary, forgeable by hand-writing the description.
 
 @section{Where this leaks}
 
@@ -107,8 +107,8 @@ Beyond the termination restrictions in @secref("termination"):
 @itemlist(
 
  @item{Most declarations must appear directly in a module body --- not inside
-  @rhombus(block), not inside a macro expansion. @rhombus(check_property,
-  ~datum) is the one exception; see @secref("declarations").}
+  @rhombus(block), not inside a macro expansion. @rhombus(check_property, ~datum)
+  is the one exception; see @secref("declarations").}
 
  @item{Patterns are one constructor deep, clauses are unordered, and there are
   no wildcards.}

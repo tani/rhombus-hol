@@ -28,13 +28,14 @@ compile error with the goals left over.
 
 ## Packages
 
-- `rhombus-hol-lib` — the kernel, prover, and `#lang rhombus/hol` implementation.
+- `rhombus-hol-kernel` — the LCF kernel: the whole trust boundary.
+- `rhombus-hol-lib` — the derived rules, the prover, and `#lang rhombus/hol`.
 - `rhombus-hol` — the documentation and test suite.
 
 ## Building
 
 ```sh
-raco pkg install --link ./rhombus-hol-lib ./rhombus-hol
+raco pkg install --link ./rhombus-hol-kernel ./rhombus-hol-lib ./rhombus-hol
 raco make rhombus-hol-lib/rhombus/hol.rkt
 raco test rhombus-hol/rhombus/hol/tests
 ```

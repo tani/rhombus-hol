@@ -1,30 +1,28 @@
-# Rhombus/HOL — 実装状況と再開計画
+# Rhombus/HOL — 実装リファレンス
 
-最終更新: R1〜R4 完了。`raco test rhombus-hol/rhombus/hol/tests` → 814 tests passed
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 921 tests passed。
 
 ---
 
-## 0. 5 分で再開するために
+## 0. 再開手順
 
 ```sh
 export PATH="/Applications/Racket v9.3/bin:$PATH"
-cd /Users/tani/ghq/git.sr.ht/~tani/rhombus-hol
+cd /path/to/rhombus-hol
 
 # 初回のみ
 raco pkg install --batch --auto --link rhombus-hol-kernel/ rhombus-hol-lib/ rhombus-hol/
 
 # 通常のループ
-raco make rhombus-hol-lib/rhombus/hol.rkt        # 言語がコンパイルされるか
-raco test rhombus-hol/rhombus/hol/tests           # 全テスト
+raco make rhombus-hol-lib/rhombus/hol.rkt          # 言語がコンパイルされるか
+raco test rhombus-hol/rhombus/hol/tests             # 全テスト
 raco test rhombus-hol/rhombus/hol/tests/kernel.rhm  # 単体
 ```
 
 `raco make` は `raco test` とは別に CI に入れること。証明は展開時に走るので、
 **証明の失敗はテストの失敗ではなくコンパイルの失敗として現れる。**
 
-### Rhombus / shrubbery で繰り返し踏んだ落とし穴
-
-新しくコードを書く前にこれだけは頭に入れておくと時間を大幅に節約できる。
+### Rhombus / shrubbery のよくある落とし穴
 
 | 症状 | 原因と対処 |
 |---|---|
@@ -36,6 +34,14 @@ raco test rhombus-hol/rhombus/hol/tests/kernel.rhm  # 単体
 | `not bound as an annotation` | 注釈は展開時に解決されるので、**クラス定義より後に**それを使う関数を置く。値の相互再帰は問題ない。 |
 | `~is` 節で束縛が見えない | `check:` ブロックの `let` は `~is` 側から見えない。定数はブロックの外に出す。 |
 | `not bound as a reducer` | `let all = ...` が `for all` の `all` を隠す。ローカル名を変える。 |
+| マクロが返した構文で `def: unbound identifier` | phase-0 モジュールで作った構文リテラルは、`meta:` import 越しにマクロ出力として使うと束縛を失う。テンプレートはマクロモジュール（`#lang rhombus/and_meta`）に置くこと。 |
+| エラーにファイル・行が出ない | `raise-syntax-error` に渡す構文が**グループ**だとテンプレート側の位置になる。宣言の**先頭の項**（`head_term`）を渡す。 |
+| `type: type: ...` と who が二重になる | 捕まえた例外のメッセージは既に `who: ` 前置を持つ。`strip_who` で剥がす。 |
+| `$alias.field` がマクロ実行時に評価される | `$` が `alias.field` 全体を取る。`$(alias).field` と括る。 |
+| `fun (...): ...` を引数やリスト要素に置くと構文エラー | ブロックが後続を飲む。`(fun (...): ...)` と括る。 |
+| `Syntax.make_id` が `maybe(Term)` で落ちる | コンテキストは**項**でなければならない。グループは渡せない。 |
+| テンプレート内に `#'sym` が書けない | `'` がテンプレートを閉じる。文字列を使うか、識別子を渡して受け側で `Syntax.unwrap` する。 |
+| 生成した名前を別モジュールから参照したい | 衛生的な名前は import 越しに見えない。ユーザーの宣言の構文をコンテキストにして `Syntax.make_id` し、`export:` も生成する。 |
 
 ---
 
@@ -63,39 +69,32 @@ rhombus-hol/
 │           ├── drule.rhm         派生規則（bool.ml + drule.ml 相当）
 │           ├── datatype.rhm      データ型の公理（信頼境界②）
 │           ├── order.rhm         ACL2 term-order（順序付き書き換え用、ruledb.rhm 専用）
-│           └── module_block.rhm  #%module_block 差し替え（現在は素通し）
+│           └── module_block.rhm  #%module_block 差し替え
 └── rhombus-hol/                  ドキュメント + テスト（deps: rhombus-hol-lib, rhombus-hol-kernel）
     ├── info.rkt
     └── rhombus/hol/
-        ├── info.rkt, scribblings/rhombus-hol.scrbl（雛形のみ）
-        └── tests/                htype term order printer kernel bool conv
-                                  drule datatype positivity lang_smoke
-                                  lang_meta lang_export
+        ├── info.rkt, scribblings/（6 章、§8 参照）
+        └── tests/                各モジュールに 1 対 1 対応するテスト一式
 ```
 
-`rhombus-hol-kernel/` の 4 ファイルは他パッケージの `private/` 内ファイルから、
+`rhombus-hol-kernel/` のファイルは他パッケージの `private/` 内ファイルから、
 相対パスの文字列 (`"kernel.rhm"`) ではなく `rhombus/hol/private/kernel open`
 のようなコレクション相対のむき出しパスで参照する。同じコレクション
 `rhombus/hol/private/` に複数パッケージが合流する（`collection 'multi`）ため、
-これはファイル名が衝突しない限り問題なく解決される。テストパッケージが
-既にこの書き方で `rhombus-hol-lib` の中身を参照していたので、その慣習に
-合わせただけである。
+ファイル名が衝突しない限り問題なく解決される。
 
-境界に何を入れるかは「信頼境界そのもの」と「ビルド上の依存」の 2 つの基準が
-ある。`printer.rhm` は trust.scrbl の「十の基本推論規則」ではないが、
-`kernel.rhm` が実際に import しているので、`rhombus-hol-lib` 側に置くと
-`rhombus-hol-kernel → rhombus-hol-lib → rhombus-hol-kernel` の循環になり
-置けない。逆に `order.rhm`（ACL2 term-order）は `kernel.rhm` からも
-どのカーネルファイルからも参照されておらず、使うのは派生層の `ruledb.rhm`
-だけなので、`rhombus-hol-lib` 側に置く。
+境界に何を入れるかは「信頼境界そのもの」と「ビルド上の依存」の 2 つの基準がある。
+`printer.rhm` は trust.scrbl の「十の基本推論規則」ではないが、`kernel.rhm` が
+実際に import しているので、`rhombus-hol-lib` 側に置くと循環になり置けない。
+逆に `order.rhm` は `kernel.rhm` からもどのカーネルファイルからも参照されておらず、
+使うのは派生層の `ruledb.rhm` だけなので `rhombus-hol-lib` 側に置く。
 
 ### 位相（phase）の設計 — 最重要
 
 証明は**展開時**に走るのでカーネルは phase 1 で動く。しかしカーネル自体は
 `meta:` ブロックを一切含まない**通常の `#lang rhombus/static` モジュール**である。
-言語層（`hol.rkt` と今後の `decl_*.rhm`）だけが `import: meta: rhombus/hol/private/kernel open`
-で位相を 1 ずらして取り込む（`kernel.rhm` は `rhombus-hol-kernel` パッケージにあるので、
-相対パス文字列ではなくコレクション相対のむき出しパスで参照する）。
+言語層（`hol.rkt` と `decl_*.rhm` 相当のコード）だけが
+`import: meta: rhombus/hol/private/kernel open` で位相を 1 ずらして取り込む。
 
 このおかげで:
 1. カーネルのテストが素の phase 0 の `.rhm` で書ける（`raco test` がそのまま効く）
@@ -109,14 +108,14 @@ rhombus-hol/
 ## 2. 項の表現（locally nameless）
 
 ```rhombus
-class FVar(name :: Symbol, ty :: HType)   // 自由変数：名前を持つ
+class FVar(name :: Symbol, ty :: HType)     // 自由変数：名前を持つ
 class BVar(index :: NonnegInt, ty :: HType) // 束縛変数：直近の Abs からの相対位置
 class Const(name :: Symbol, ty :: HType)
 class Comb(func :: Term, arg :: Term)
-class Abs(arg_ty :: HType, body :: Term)  // 束縛変数名を持たない
+class Abs(arg_ty :: HType, body :: Term)    // 束縛変数名を持たない
 ```
 
-**帰結（新しいコードを書くときの前提）:**
+**新しいコードを書くときの前提:**
 
 - α 同値は**構造的等価そのもの**。`aconv` は存在しない。`==` を使う。
 - 置換に捕獲回避は不要。`inst_fvar` は単なる再帰走査。
@@ -130,12 +129,10 @@ class Abs(arg_ty :: HType, body :: Term)  // 束縛変数名を持たない
 - `ABS(thy, v, th)` は理論を取る（束縛変数の型を検査するため）。
 - **局所閉性だけでなく、`BVar` の型が束縛子と一致することも `check_term` が検査する。**
   `BVar` は型フィールドを持つので、外側の `Abs` と食い違うと `type_of` が嘘をつく。
-  `Abs(num, Comb(p, BVar(0, bool)))` は局所閉で型もすべて宣言済みだが
-  `type_of` は `num -> bool` になり、beta 簡約すると型の合わない項が定理に入る。
   `check_open_term` は束縛子の型スタック `env :: List.of(HType)` を引き回して
   `env[i] == ty` を照合する。
 - **系統（lineage）は祖先集合で追跡する。** 線形カウンタでは
-  **イミュータブル理論の分岐を区別できず、実際に矛盾が導ける**
+  イミュータブル理論の分岐を区別できず、矛盾が導ける
   （同一ベースの兄弟拡張で同名同型の定数を別々に定義すると
   `|- c = zero` と `|- c = one` が合成できて `|- zero = one`）。
   ```rhombus
@@ -171,755 +168,146 @@ class Abs(arg_ty :: HType, body :: Term)  // 束縛変数名を持たない
 回帰テストは `tests/kernel.rhm` の "Soundness regressions" 節にある。
 **この節のテストを緩めないこと** — それぞれが実際に通った攻撃に対応している。
 
-
-### マクロ層を書くときの注意（R1 で判明したこと）
-
-| 症状 | 原因と対処 |
-|---|---|
-| マクロが返した構文で `def: unbound identifier` | **phase-0 モジュールで作った構文リテラルは、`meta:` import 越しにマクロ出力として使うと束縛を失う。** テンプレートはマクロモジュール（`#lang rhombus/and_meta`）に置くこと。`expand.rhm` / `elab.rhm` は解析だけを担い、生成は `module_block.rhm` が行う。 |
-| エラーにファイル・行が出ない | `raise-syntax-error` に渡す構文が**グループ**だとテンプレート側の位置になる。宣言の**先頭の項**（`head_term`）を渡す。 |
-| `type: type: ...` と who が二重になる | 捕まえた例外のメッセージは既に `who: ` 前置を持ち、`raise-syntax-error` も付ける。`strip_who` で剥がす。 |
-| `$alias.field` がマクロ実行時に評価される | `$` が `alias.field` 全体を取る。`$(alias).field` と括る。 |
-| `fun (...): ...` を引数やリスト要素に置くと構文エラー | ブロックが後続を飲む。`(fun (...): ...)` と括る。 |
-| `Syntax.make_id` が `maybe(Term)` で落ちる | コンテキストは**項**でなければならない。グループは渡せない。 |
-| テンプレート内に `#'sym` が書けない | `'` がテンプレートを閉じる。文字列を使うか、識別子を渡して受け側で `Syntax.unwrap` する。 |
-| 生成した名前を別モジュールから参照したい | 衛生的な名前（`id_ctx` 由来）は import 越しに見えない。**ユーザーの宣言の構文をコンテキストにして** `Syntax.make_id` し、`export:` も生成する（生成器・縮小器がこれ）。 |
-
-### 書き換え器を書くときの注意（M6 で効いてくる）
+### 書き換え器を書くときの注意
 
 De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 書き換え規則の左辺のパターン変数（`FVar`）が、loose な `BVar` を含む部分項に
-束縛されてはならない。実務的な選択肢は 2 つ:
+束縛されてはならない。
 
-1. **束縛子の下に降りるときは `dest_abs` で開く**（`ABS_CONV` が既にこれを行う）。
-   開いてから書き換え、`ABS` で閉じ直す。マッチ側は常に局所閉な項だけを見る。
-2. 開かずに降りて、マッチ結果が局所閉であることを検査する。
-
-**推奨は (1)**。`conv.rhm` の `ABS_CONV` が既にその形になっており、
-`SUB_CONV` / `DEPTH_CONV` 系はすべてそれを通る。`tmatch.rhm` は
-「局所閉な項どうしの一階マッチ」だけを実装すればよい、という前提で書くこと。
+**採用している方式:** 束縛子の下に降りるときは `dest_abs` で開く
+（`ABS_CONV` が既にこれを行う）。開いてから書き換え、`ABS` で閉じ直す。
+マッチ側は常に局所閉な項だけを見るので、`tmatch.rhm` は「局所閉な項どうしの
+一階マッチ」だけを実装すればよい。`conv.rhm` の `SUB_CONV` / `DEPTH_CONV` 系は
+すべてこの形になっている。
 
 ---
 
-## 3. 完了済みマイルストーン
+## 3. 実装済みの範囲
 
-| M | 内容 | テスト |
+| 領域 | 主なファイル | テスト |
 |---|---|---|
-| M0 | 言語ペア。`#lang rhombus/hol` が `#lang rhombus` と同一に振る舞い、重量級の `meta:` import が回る | `lang_smoke` `lang_meta` `lang_export` |
-| M1 | `htype` `term`（locally nameless）`order` `printer` `names` | `htype` `term` `order` `printer` |
-| M2 | カーネル：`Theory` `Stamp`（祖先集合）不可侵 `Thm` 基本 10 規則 + 理論拡張原理 + `import_theorem` | `kernel` |
-| M3 | `bool`（Church 流定数 + ETA/SELECT/BOOL_CASES）`conv` `drule` | `bool` `conv` `drule` |
-| M4 | `datatype`：正値性チェッカ + 公理スキーマ | `datatype` `positivity` |
-| M5 | `terminate`（構造的降下）`recdef`（節形式の再帰定義） | `recdef` |
-| M6 | `tmatch` `ruledb` `simp`：一階マッチ、規則 DB、順序付き書き換え | `ruledb` |
-| M7 | `goal` `induct` `waterfall` | **`spec_4_1`** |
-| M8 | `general`（一般化）`destruct`（デストラクタ除去） | **`spec_4_2`** `destruct` |
-| R1 | 表層構文層。`expand` `elab` `driver` `taut` `module_block` | `lang_state` `decl_type` `decl_fun` `decl_theorem` |
-| R3 | モジュール間伝播。通常の `import` が理論を採用する | `import_theory` |
-| R4 | `check_property`。`qc` + 型ごとの生成器・縮小器 | `qc` |
+| 言語ペア | `hol.rkt`（`#lang rhombus/hol` が `#lang rhombus` と同一に振る舞う） | `lang_smoke` `lang_meta` `lang_export` |
+| 項・型の表現 | `htype` `term`（locally nameless）`order` `printer` `names` | `htype` `term` `order` `printer` |
+| カーネル | `Theory` `Stamp`（祖先集合）不可侵 `Thm`、基本 10 規則、理論拡張原理 | `kernel` |
+| 論理定数 | `bool`（Church 流定数 + ETA/SELECT/BOOL_CASES）`conv` `drule` | `bool` `conv` `drule` |
+| データ型 | `datatype`：正値性チェッカ + 公理スキーマ | `datatype` `positivity` |
+| 停止性 | `terminate`（辞書式構造的降下 + 測度）`recdef`（節形式の再帰定義） | `recdef` |
+| 書き換え | `tmatch` `ruledb` `simp`：一階マッチ、規則 DB、順序付き書き換え | `ruledb` |
+| 証明探索 | `goal` `induct` `waterfall`（簡約・デストラクタ除去・一般化・帰納法の固定パイプライン） | `spec_4_1` |
+| 一般化・デストラクタ除去 | `general` `destruct` | `spec_4_2` `destruct` |
+| 表層構文 | `expand` `elab` `driver` `taut` `module_block` | `lang_state` `decl_type` `decl_fun` `decl_theorem` |
+| モジュール間の理論伝播 | 通常の `import` が理論を採用する（`Evaluator.module_is_declared` で検出） | `import_theory` |
+| プロパティテスト | `check_property`（実マクロ）+ `qc.rhm` の実行時レジストリ + 型ごとの生成器・縮小器 | `qc` |
 
 共有フィクスチャ `tests/spec_prelude.rhm` が `Nat` / `List` / `Tree` と
-`plus` `app` `rev` `length` `size` `flatten` を組み立てる。M5 以降のテストは
-すべてこれを使うので、同じ対象について議論している。
+`plus` `app` `rev` `length` `size` `flatten` を組み立てる。仕様書 §4.1〜§4.3 は
+`tests/spec/` の 3 ファイル（`list_proofs.rhm` `tree_proofs.rhm` `test_run.rhm`）に
+そのまま対応する。
 
-### 受け入れ状況（すべて仕様書のソースのまま）
+### 現在の設計上の要点
 
-`tests/spec/` の 3 ファイルが仕様書そのもの:
-`list_proofs.rhm`（§4.1）、`tree_proofs.rhm`（§4.2、`import` で §4.1 を取り込む）、
-`test_run.rhm`（§4.3、素の `#lang rhombus`。`check_property` の生成器/縮小器が
-実行時レジストリ経由になったことで、§4.3 の `check_property` も
-仕様書どおりこのファイルに直接書けるようになった。以前は「型宣言と同じ
-モジュールでしか使えない」という制約のために別ファイル `properties.rhm` に
-分けていたが、その制約が無くなったので統合し、`properties.rhm` は削除した）。
-
-### 旧・受け入れ状況
-
-- **仕様書 §4.1**: `app_nil_r` `app_assoc` `rev_app_distr` `rev_involutive`
-  すべてカーネル定理として証明済み。誤った予想（`rev(app(xs,ys)) === app(rev(xs),rev(ys))`）は
-  residue を出して落ちる。
-- **仕様書 §4.2**: `plus_succ` `length_app` `flatten_preserves_size` 証明済み。
-  さらに**一般化を入れたことで `plus_succ` 補題なしでも `flatten_preserves_size` が通る**
-  — 詰まった算術ゴール `plus(size(y), succ(size(z))) === succ(plus(size(y), size(z)))` の
-  `size(y)` `size(z)` を新変数に置き換えると、帰納法が片付けられる形になる。
-  これが ACL2 が一般化段を持つ理由そのもの。
-
-### 実装中に見つかった要点
-
-- **規則のパターン変数は「全称量化されていた変数」だけ。** `free_vars(lhs)` を
-  使うと、仮定 `app(y, nil) === y` がスキーマとして扱われ `y := cons(x, y)` で
-  マッチしてしまう。ゴールが `true` に書き換わる一方、正当化定理は
-  **ゴール自身を仮説として抱える**ため、ずっと後の `GEN` で失敗する。
-  `ruledb.rhm` の `spec_all_vars` がこれを分けている。
+- **規則のパターン変数は「全称量化されていた変数」だけ**（`ruledb.rhm` の
+  `spec_all_vars`）。`free_vars(lhs)` を使うと仮定がスキーマとして扱われ、
+  無関係な項にマッチしてしまう。
 - **名前ベースのヒント（`~induct: xs`）は項からは解決できない。** 束縛子は名前を
-  持たないので、`prove` に `~names:` で表層の名前を渡す。閉じた言明を印字すると
-  printer が名前を作り直す（`xs` ではなく `x`）のは正常。
-- **一般化の候補は適用スパイン全体だけ。** `Comb(f, x)` を素朴に走査すると部分適用
-  `app(xs)` まで候補になり、関数型の変数で置き換えて項を壊す。
-- **ゴールは節ではなく sequent**（仮定 + 結論）。節は `if` の場合分けが要るように
-  なったとき正しい形だが、現段階の 4 段はすべて sequent → sequent で自然に書ける。
-  ドライバは `Step` しか見ないので、後から節層を挟める。
+  持たないので、`prove` に `~names:` で表層の名前を渡す。
+- **一般化の候補は適用スパイン全体だけ。** 部分項全体を素朴に走査すると
+  部分適用まで候補になり、関数型の変数で置き換えて項を壊す。
+- **ゴールは節ではなく sequent**（仮定 + 結論）。ドライバは `Step` しか見ないので、
+  後から節層を挟める。
 - **`max_induction_depth` は 2 に固定**（`waterfall.rhm`）。タクティクごとの
-  fuel/timeout は入れない方針。この定数はチューニング用の予算ではなく、
-  ドライバを探索ではなく関数にするためのもの — 帰納法は同じ型の新しい変数を
-  作るので、上限がないと永遠に帰納法を試し続ける。
+  fuel/timeout は入れない方針 — 帰納法は同じ型の新しい変数を作るので、
+  上限がないと永遠に帰納法を試し続ける。
 
-## 4. 残りの作業
+---
 
-R1〜R4 は完了。残るのは R5 のみ。
+## 4. 現在の制限・既知の課題
 
-### R2 — 測度による停止性（完了）
+- `type` / `function` / `theorem` / `disable_rules` / `enable_rules` / `declare` /
+  `expect` は `#%module_block` が本体を走査して認識する形式で、束縛ではない。
+  ユーザー定義マクロの中や `block:` の中には書けない。`check_property` だけが
+  実マクロとして再実装済みで、この制限を受けない。
+- `@doc` ブロックが使えていない（`check_property` 以外）。上記の理由で
+  for-label 束縛を要求する `@doc` に載らないため、`@verbatim` の文法表示 +
+  `@section` で代用している。
+- `function` の本体は `match` / `if` / 変数 / 名前付き適用 / Boolean 演算子と
+  `#true` / `#false` のみ。`let` / 算術 / リテラルは文法外でコンパイルエラーになる。
+- `match` の入れ子は 1 引数につき 1 段。ワイルドカード節・構築子パターンの入れ子は不可。
+- 測度は宣言済みデータ型に着地しなければならない。入れ子再帰には義務を立てられない。
+- 構造的降下が成立する定義では `~measure` は検査されない（健全性の問題ではないが、
+  誤った測度を書いても黙って通る）。
+- 理論の取り込みは通常の `import`。自分の宣言より前に、複数あるなら依存順に書く。
+  兄弟理論（どちらも他方の拡張でない 2 つの理論）は合流できない。
+- importer のコンパイルは提供側モジュールを visit するので、提供側の証明が
+  importer ごとに再実行される（1 モジュールあたり約 1 秒）。
+- `check_property` の量化変数は具体型でなければならない。
+- **書き換えの停止性は保証されない。** タクティクごとの fuel/timeout は入れない方針。
+  置換可能規則は `term_order` で下り方向にしか発火しないので発振しないが、
+  `mk_rule` は「変数だけの左辺」「右辺の未束縛変数・型変数」「自明な等式」しか
+  弾かない。非対称かつ非停止な規則（`f(x) === g(f(x))` 等）は現状のまま通ってしまい、
+  `raco make` が停止しなくなりうる。防ぐなら `mk_rule` の受け入れ条件を強めるべき
+  （fuel ではなく）。
+- `import` の認識は既知の修飾子リストを持たない（最長接頭辞方式）。読めない形は
+  エラーにしてあるが、Rhombus の import 文法が変われば影響を受けうる。
 
-停止性は 2 段構えになった。
+---
 
-1. **辞書式の構造的降下**（`terminate.rhm` の `lexicographic_order`）。
-   「どの引数を、どの順で見るか」を貪欲に探す。ある段で使える列は後の段でも使えるので、
-   貪欲で完全 — 順序が存在すれば見つかる。単一引数の降下はその 1 要素の特別な場合なので、
-   旧来の検査を置き換えている。Ackermann と `merge` がこれで通る。
-2. **測度**（`~measure(e)`）。再帰呼び出し 1 つにつき義務 1 つを立て、Waterfall に流す。
-   証明できなければ義務と residue を添えたコンパイルエラー。
+## 5. 表層構文の確定事項
 
-そのための前提 3 つも入った:
+| 仕様書 | 採用する綴り | 理由 |
+|---|---|---|
+| `type List('a)` | `type List(~a)` | `'` は syntax literal の開き括弧で字句解析できない |
+| `@rewrite_rule` | `theorem ~rewrite_rule name:` | `@` は at-記法として消え、別グループになる |
+| `theorem` + `proof` | `expand.rhm` が本体走査で 1 段先読み | 2 つの別グループとして解析される |
+| `auto ~induct: xs ~using: [a]` | 単独なら可。複数指定は `auto(~induct: xs, ~using: [a, b])` | 2 つ目の `~kw:` が 1 つ目のブロックに入れ子になる |
+| `fun app(...)` | `function app(...)` | 通常の Rhombus `fun` と衝突させない |
+| `and` / `or` / `not` | 命題専用の構文空間で定義 | 優先順位制御とエラーメッセージのため分離する |
 
-1. **`if`** — `cond` は `select` で定義されているので、`if true | a | b === a` は
-   `taut.rhm` で**導出**した（選択公理をその条件式自身の述語で具体化し、残った連言から
-   等式を取り出す）。新しい公理は増えていない。表層は Rhombus と同じ綴り
-   （`#true` / `!` / `&&` / `||` / `==` / `if`）で、本体はそのまま実行コードとして
-   出力されるので、綴りが一致していなければ 2 つの読みがずれる。
-   命題と式のパーサは 1 つの優先順位パーサの 2 モードに統合した。
-2. **順序関係** — `lt` を手書きするのではなく、再帰的なデータ型 1 つにつき構造的部分項関係
-   `T_lt` を自動生成する（`subterm.rhm`）。`Nat` に対してはそれがちょうど `<`。
-   通常の節形式の定義として `install_function` を通るので、新しい公理は増えない。
-   整礎性はそのデータ型自身の帰納法公理そのもの — これが「測度は宣言済みデータ型に
-   着地しなければならない」理由。
-3. **パターン行列** — `match` の入れ子を平坦化し、被覆検査を「列で分割し、その型の
-   構築子をちょうど 1 回ずつ要求し、各枝に再帰する」形に一般化した。
-   分割する列は左から順ではなく**探索**する（`match n` が外側で `match m` が内側の
-   場合、きれいに割れるのは 2 列目が先）。
+そのまま使えることを確認済み: `a === b`、`p ==> q`、`forall (x :: Ty): P`。
 
-**仮説の簡約**（`simp.rhm` の `simplify_asms`）も必要だった。仮説はこれまで結論を
-書き換える規則でしかなく、`not nul(zero)` のような仮説では何も起きない
-（規則としては出現しない語句を書き換える）。簡約すれば `false` になり、結論が何であれ
-ゴールは閉じる。ガード付き再帰は 1 義務につき分岐条件 1 つ、そのほとんどが矛盾、
-という形をしているので、測度はこれに依存している。
+---
 
-### R3 の作り直し — マニフェスト → 値渡し → 通常の `import`
-
-**第 1 段: 前提が誤りだった。** 当初は「`Thm` はモジュール境界を越えられない」という
-前提で、宣言の**記述**を `hol_manifest` サブモジュールに publish し、importer 側で
-replay していた。実際には越えられる。これで `emit_manifest` / `manifest_item` /
-`replay` / `replay_theorem` / `import_theorem` / `trusted_imports` が全部消え、
-**トラスト境界そのものが消えた**。推移性の欠如と、手書きマニフェストによる偽造
-（実際に偽の定理を通せることを確認した）も同時に直った。
-
-**第 2 段: `use_theory` を廃止し、通常の `import` に統合した。**
-
-理論は `hol_theory` サブモジュール（`~lang rhombus`、phase 0）が持つ。値の export を
-やめたのは、`_hol_theory` がどの理論でも同じ名前で、`open` を 2 つ書くと衝突するから。
-サブモジュールはパスで辿るので `open` と無関係になり、**ユーザーの `import` 節に一切
-手を触れずに済む** — これが `import` に載せられた理由。
-
-`~lang` 付きサブモジュールは本体より先に定義されるので、モジュール自身が
-`import: meta: self!hol_theory` で取り込める。これで証明はコンパイル時に走る。
-
-検出は推測ではなく照会: `Evaluator.module_is_declared(<path>!hol_theory, ~load: #true)`。
-理論でないモジュールの import は素通し。1 つの `import` に両方混ざっていてもよい。
-
-パスの取り出しは「節の接頭辞のうち `ModulePath.maybe` が通る最長のもの」。修飾子名の
-リストを持たずに済むので、Rhombus の import 文法への結合が最小になる。
-読めない形（`import: meta: "a.rhm"` のようにパスがブロックの中にあるもの）は
-**黙って落とさずエラーにする**。
-
-実装上の罠を 2 つ踏んだ:
-
-1. `expand.rhm`（phase-0 ヘルパ）で組んだ `'$t ...'` グループは、phase-1 マクロから
-   出ていくときに束縛を失う。パスは**項のリスト**で返し、`module_block.rhm` で組み直す。
-2. それでも足りない。サブモジュールの言語は素の `rhombus` なので、ユーザーの
-   `rhombus/hol` コンテキストを持つ項はそこで暗黙の import 形（文字列に対する
-   `#%literal`）に届かない。`Syntax.make(Syntax.unwrap(t), id_ctx)` で組み直す。
-   モジュールパスに必要なのは datum だけなので失うものはない。
-
-副産物: 仕様書 §4.2 が `import:` をそのまま書けるようになり、仕様との綴りの差が 1 つ減った。
-
-### R5 — 性能（ドキュメントは完了）
-
-クリーンビルドからの全テストが 3 分 37 秒（870 tests）。証明は展開時に走るので、
-この大半は `raco make` の時間である。着手順（**まず計測**）:
-
-1. 書き換え内ループ — `ruledb.rhm` の `by_head` 索引はあるが `key` 事前フィルタは未実装。
-2. `check_term` は `REFL`/`ASSUME`/`BETA`/`INST` が毎回呼び、束縛子環境を伸ばしながら
-   項全域を歩く。検査済み項のメモ化が効くかもしれない（未計測）。
-3. 代入と具体化 — 自由変数集合をノードにキャッシュし、触れない部分項は `===` で短絡。
-4. 項の等価性 — 構造ハッシュを `Int` でキャッシュ。ハッシュコンスするなら
-   `Map.by(===)` を子リストで引くのは**不可**（リストの `===` は要素同一性ではない）。
-5. **`Equatable` の罠** — メモ用の private 可変フィールドを足した瞬間に既定の `==` が
-   `===` に劣化する（`equatable.scrbl:78-82`）。`Term` の各クラスに
-   `Equatable.equals`/`hash_code` を手書きしてから足すこと。
-6. ホットパスでは `::` でなく `:~`。
-7. 書き換え器では例外ベースの `ORELSEC` を避ける — `conv.rhm` は既に `maybe(Thm)` を
-   返す設計。この方針を崩さないこと。
-
-### 付録 — `idris-hol-kernel/`（検証専用ツールとして共存、ランタイムには不接続）
+## 6. `idris-hol-kernel/` — 独立検証ツール（ランタイムには不接続）
 
 `htype.rhm` / `term.rhm` / `kernel.rhm` を Idris2 に移植し、Racket バックエンド
-（`idris2 --cg racket`）でコンパイルしたもの。詳細は `idris-hol-kernel/README.md`。
+（`idris2 --cg racket`）でコンパイルしたもの。`kernel.rhm` は 100% ネイティブ
+Rhombus のままで、これが今も Rhombus/HOL が実際に走らせる信頼境界である。
+`raco make` / `raco test` はこのディレクトリを一切参照しない。
 
-**`kernel.rhm` は 100% ネイティブ Rhombus のまま** — これが今も
-Rhombus/HOL が実際に走らせる信頼境界であり、`raco make` / `raco test` は
-このディレクトリを一切参照しない。このディレクトリの役割は、同じカーネル
-ロジックの性質を Idris2 の依存型で独立に証明すること。`raco make` とは
-別スケジュールで（`idris2 --build kernel.ipkg` を手動 / CI などで）検証する。
+十原始規則すべてについて「出力する定理が整形式である」ことを Idris2 で機械検証
+済み（`%default total`、`believe_me` なし、hole なし）。テストパッケージの
+`idris_differential.rhm`（両カーネルを120項のコーパスで並走比較）と
+`idris_replay.rhm`（実際の起動導出を Idris 側に再生させて照合）で、
+Racket 生成コードをテストパッケージ内に検証データとして持ち、両者の一致を
+確認している。生成コードはテストパッケージのみが依存するので `rhombus/hol.rkt`
+の依存グラフには入らず、`raco make` に影響しない。
 
-**カーネルの十原始規則すべてについて、「出力する定理が整形式である」ことを
-証明済み。** `idris2 --cg racket --build kernel.ipkg` で機械検証、`:metavars`
-で未解決ホールが無いことも確認済み。**公理はゼロ**
-（`grep believe_me src/*.idr` が空）。すべて通常の構造的帰納法。
+詳細（証明の構造、Idris/Rhombus 間の差分、ベンチマーク、設計の経緯）は
+`idris-hol-kernel/README.md` を参照。
 
-**公理がゼロな理由 — 名前を `String` ではなく帰納型にした。** `String` は
-コンストラクタを持たないプリミティブなので、抽象的な `x`,`y` について
-`x = y` を作る手段は `believe_me` による強制変換しかない（base の
-`DecEq String` も同じ実装なので、乗り換えても公理が標準ライブラリへ移るだけ）。
-`src/Name.idr` の
-`data Name = NFun | NBool | NEq | NAlpha | NUser Nat`
-なら `nameEqRefl`/`nameEqSound` がただの帰納法で証明でき、
-`htypeEqSound`/`termEqSound` 等もそこから導出できる。正準名 4 つは
-カーネルが特別扱いする名前（`names.rhm` と同じ設計）で、ユーザー宣言は
-`NUser Nat` — Rhombus の `Symbol` の等価性は文字列比較ではなく
-インターンされた同一性なので、こちらの方がむしろ忠実。`Stamp` の識別子も
-同じ理由で `Nat` にした。Rhombus へ再接続する場合は境界で
-`Symbol`→`Nat` のインターンを行えばよい。
+---
 
-| 規則 | 定理 | 要となる補題 |
-|---|---|---|
-| `REFL` | `reflWellFormed` | `mkEqCheckSound` |
-| `ASSUME` | `assumeWellFormed` | 結論が検査済みの項そのもの |
-| `BETA` | `betaWellFormed` | 下記の主辞保存3点セット |
-| `TRANS` | `transWellFormed` | 整形式な等式の両辺は整形式 |
-| `EQ_MP` | `eqMpWellFormed` | 結論は等式の右辺 |
-| `DEDUCT_ANTISYM_RULE` | `deductAntisymWellFormed` | 両辺は入力の結論そのもの |
-| `MK_COMB` | `mkCombWellFormed` | `eqOperandTypes`（`typeMatch` の逆転） |
-| `ABS` | `absWellFormed` | `abstractAtCheck`（代入の逆向き） |
-| `INST` | `instWellFormed` | `instFvarGoCheck` |
-| `INST_TYPE` | `instTypeWellFormed` | `instTypeGoCheck` + `typeMatchSubst` |
+## 7. 参照したソフトウェア
 
-土台となる主な定理:
+- **HOL Light** — カーネルの十個の基本推論規則、locally nameless の項表現、
+  等式変換（`conv.rhm` は `equal.ml` の設計を踏襲）、型の表現。
+- **HOL4** — 論理定数の定義のしかたと、3 つの公理（ETA・SELECT・BOOL_CASES）の選び方。
+- **ACL2** — Waterfall（簡約・デストラクタ除去・一般化・帰納法の固定パイプライン）の設計、
+  項順序（`order.rhm`）、規則データベースの優先順序（`ruledb.rhm`）。
+- **QuickCheck** の系譜 — `check_property` / `qc.rhm` の設計（生成・収縮・反例の最小化）。
 
-- **系譜**: `combineStampsSound` — `combine_stamps` が選ぶスタンプは両方の
-  入力から到達可能。`kernel.rhm` の「後の方を採る」戦略が健全である根拠。
-- **型安全性**: `checkTermTypeOfSound`（整形式な項は必ず型を持つ）、
-  `typeOfWellFormed`（その型自身も理論の中で整形式）。
-- **BETA の主辞保存（3点セット）**: `betaTypeSound`（型が変わらない）、
-  `betaClosedSound`（宙に浮いた de Bruijn 添字が生じない）、
-  `betaCheckSound`（簡約結果も `checkTerm` を通る）。束縛子の下へ潜る
-  一般化代入補題（`substAtTypeSound` / `substShiftClosed` /
-  `substAtCheckSound`）に支えられ、後者はさらに `checkWeakenRight`（弱化）
-  と `checkClosed` を使う。`shiftClosedId`（閉じた項に対する `shift` は
-  恒等）のおかげで `shift` の `Integer` 添字演算に関する推論は一切不要。
-- **理論拡張の単調性**: `newTypeMonotone` / `newConstantMonotone`。
-  `in_theory`/`descends` が意味を持つための前提そのもの。
-- **理論の整形式性と等式構築**: `WellFormedTheory`（`fun` は 2 引数、
-  `bool` は 0 引数、`eq` は `'a -> 'a -> bool`）、`initialTheoryWellFormed`、
-  `mkEqCheckSound`。
-- **仮説リストの操作**: `hypInsertChecked` / `hypUnionChecked` /
-  `hypRemoveChecked` / `rehashChecked`。
-
-**証明していない・できないもの**: 論理の**無矛盾性**（公理と規則から偽が
-導けないこと）は構文ではなくモデルについての主張なので、この移植で述べられる
-種類の命題ではない。理論拡張原理の**保存拡大性**も同様に意味論的性質で、
-ここで証明したのはカーネルが依拠する構文的な半分（単調性）だけ。
-
-**停止性は証明済み**: 全モジュールが `%default total`。Idris2 は網羅性と
-停止性の両方を検査し、`total` な関数は `total` な関数しか呼べないので、
-性質は基底ライブラリまで下向きに閉じている。したがって十規則の
-`*WellFormed` は部分正当性ではなく全正当性の主張になる。LCF カーネルは
-本質的に構造再帰しか使わない（不動点反復も新名探索ループも無い。`variant`
-に相当するものは locally nameless 表現によって不要）ので、これは難しく
-なかった。唯一引っかかったのは `termOrd` で、`case (a, b) of` とタプルで
-分岐していたためサイズ変化解析が構造的降下を見失っていた。二引数を直接
-パターンマッチする形に書き直すだけで通る。詳細は
-`idris-hol-kernel/README.md` の「Termination」節。
-
-**経緯 — なぜランタイムに接続しなかったか:** 以前のイテレーションでは
-十原始規則すべてを実際に `kernel.rhm` から Idris 実装(生成した Racket
-モジュール経由)へ委譲していた。動作はした — 872 件全テスト通過 — が:
-
-- クリーンビルド込みの全テストが 3 分 52 秒(ネイティブ)→ 約5分
-  (Idris 経由)と、約 30% の実測回帰があった。
-- 原因は呼び出し回数に比例するコストではなく、生成 Racket モジュールを
-  `raco test` の各サブプロセスごとに読み込み・初期化する固定コストが
-  支配的だと判明(`libidris2_support.so` の FFI 依存を完全に除去しても
-  改善は誤差の範囲内だった)。
-
-  **後日の再計測でこの原因分析は不正確だったと判明した。** 固定初期化
-  コストはバイトコンパイル済みで 0.16 秒/プロセス（未コンパイルでも 0.60
-  秒）であり、テストプロセスは 32 個しかないので合計 5〜19 秒にしかならない。
-  観測された約 68 秒の回帰の大半は説明できておらず、hot path
-  (`conv.rhm` の `DEPTH_CONV` × `ruledb.rhm`)での呼び出しごとの
-  エンコード/デコードが主因だったと見るのが自然。生成モジュールから
-  `Show`/`IO` を除いてもサイズは 17% 減るだけで初期化コストは不変
-  だったので、固定コスト側にはこれ以上削る余地がない。
-
-- さらに重大な問題として、当時の統合は Symbol↔String のアイデンティティ橋を
-  避けるため Idris へ渡す値に共有プレースホルダ stamp を持たせており、
-  Idris 側の理論整合性検査が自明に成功して何も判定しない構成になっていた。
-  十規則の `*WellFormed` は理論の整合性検査を前提に条件づけられているので、
-  **証明した性質が実行時にはほとんど効いていなかった**。速度を別にしても
-  あれは「置き換え」ではなく「見た目の置き換え」だった。
-
-同じロジックを2言語で毎回実行し直すランタイムコストに見合うだけの価値は
-なく、「1つの権威ある実装について性質を証明し、実行コストゼロでチェック
-できる」方が価値が高いと判断し、現在の設計(検証専用・共存)に変更した。
-詳細と技術的な学び(idris2 の到達可能性ベースの codegen、`libify.py`、
-停止性検査の落とし穴など)は `idris-hol-kernel/README.md` に集約。
-
-**どちらが規範か: Idris 側。** Idris カーネルは機械検査済み
-(`%default total`、`believe_me` なし、hole なし、十規則すべての
-well-formedness 証明済み)なので、両者が食い違ったときバグは
-`kernel.rhm` 側にある可能性の方がはるかに高く、修正もそちらに入れる。
-Idris 側を Rhombus に合わせて書き換えるのは、このプロジェクト唯一の
-独立に検証された成果物を捨てることになる。例外は Idris の**主張**の方が
-仕様として誤りだと示された場合(HOL に無い規則を模していた等)で、その
-ときは Idris 側を直し、その旨を明示する。
-
-### Idris カーネルとの接続（完了）
-
-ランタイム置き換えではなく、テストパッケージ側の2本のテストで両者を
-繋いだ。生成 Racket モジュールはテストパッケージに置いてあるので
-`rhombus/hol.rkt` の依存グラフに入らず、`raco make` には影響しない。
-
-- `tests/idris_differential.rhm` — 決定的な 120 項のコーパスに対して
-  両カーネルを並走させ、十規則(二項規則は各 2500 通り)・理論拡張・
-  `check_type`/`check_term`/`mk_eq`/`is_eq`、および
-  `siblingsIncomparable`/`rootsIncomparable` に対応する系統検査の
-  すべてで、受理/棄却の判断と結果 sequent を突き合わせる。コーパスには
-  型の付かない項や宙に浮いた de Bruijn 添字を意図的に含めてある
-  (カーネルが不健全になるとすれば棄却側なので)。
-  空回り防止として、受理 50・棄却 70 というカバレッジ検査、
-  codec を壊すと 4 件失敗することの手動変異テスト、そして
-  stamp トークンを使い回すと Idris が実際に他系統の定理を受理して
-  しまうこと(= 新鮮性の仮定が効いていること)の実証を置いている。
-
-- `tests/idris_replay.rhm` — ライブラリが**実際に行う**導出、すなわち
-  `bool.rhm` の基底理論構築(全論理定数と三公理)に十規則を各1回
-  適用したものを記録し、Idris カーネルに自前の `initialTheory` から
-  再導出させて、生成された各 sequent を照合する(27 ステップ、
-  規則種別 14)。
-
-  この形が、`idris-hol-kernel/` の証明が実際に支持する唯一の接続形態である。
-  証明が言っているのは「**その**カーネルが構築した定理から、**その**
-  カーネルの十規則が well-formed な定理を作る」ことなので、外部で
-  作られた定理を渡す配線からは何も得られない — 撤回した統合が
-  まさにそれだった。再生では Idris カーネルに定理を一切渡さず、
-  規則適用のスクリプトだけを渡して全定理を自分で構築させるので、
-  証明が対象としている状況そのものになる。しかもコンパイル時の
-  hot path ではなくテストで1回走るだけなので、`raco make` への
-  影響がない。
-
-  記録のために `kernel.rhm` にトレース機構を入れた。既定は off で、
-  hot path のコストは規則あたり box 1 回読みと分岐のみ。ログは
-  この中の何からも読まれず、on/off で定理は 1 つも変わらない
-  (`initial_theory` のコメントが戒めているグローバル可変状態とは
-  種類が違う — 禁じているのは結果が依存する状態であって、
-  `raco make` を順序依存にするもの)。
-
-  同一条件での A/B 計測: トレースなし 892 テストでクリーンビルド込み
-  4 分 02.8 秒、トレースあり + 再生テストで 899 テスト 4 分 07.6 秒。
-  差は **+4.8 秒 (+2.0%)** で、うち再生テスト自体が約 1.9 秒。撤回した
-  ランタイム統合の約 30% 回帰とは桁が違う。
-
-### 実装差分の突き合わせ（完了）
-
-テストによる振る舞い比較とは別に、両実装をコードレベルで読み比べた。
-十規則・拡張原理・`check_type`/`check_open_term`・`type_of`・`type_match`・
-`type_subst`・`inst_fvar`・`inst_type`・`abstract_at`・`subst_at`・
-仮説集合操作・`term_ord` の rank 表は完全に一致。相違は3点で、いずれも
-実測で確認した。
-
-1. **仮説リストの順序** — 双方ソート済み・重複除去済みだが順序が違う。
-   `kernel.rhm` は記号を辞書順に並べ、Idris の `Name` は文字列を持たない
-   (それが公理を消した理由そのもの)ので予約構成子のランクと `NUser` の id で
-   並べる。`zz` と `bb` で実際に食い違うことを確認。文字列を戻さない限り
-   一致させられない。健全性の問題ではない — 順序は内部の正規化で、導出層は
-   仮説を位置で参照しておらず、各実装は自己整合的。共有されている契約は
-   仮説の**集合**なので、両テストを集合比較に改めた。
-
-2. **`new_basic_type_definition` の表現変数(修正済み)** — `kernel.rhm` は
-   `mk_var(#'r, rty)`、Idris は `mkVar (NUser 0) rty` というハードコードの
-   ユーザ id だった。どちらの定理も正しい(変数は任意で `pred` は閉じている
-   ことが検査済みなので捕獲は起きない)が「同じ定理」ではなく、bridge を
-   通すと `NUser 0` は最初に intern された記号にデコードされてしまう。
-   `Name` に `NAlpha` と並ぶ構成子 `NRepVar` を足して一致させ、Rhombus 側も
-   `names.rhm` に `v_alpha` / `v_rep` を置いて 3 箇所のリテラルを 1 箇所に
-   まとめた。なお両者とも**予約名ではない** — ユーザが `a` や `r` を
-   宣言してもよく、無害である(述語は閉じていることが検査済みで、結論中の
-   自由変数はそもそもインスタンス化可能)。`Name` が文字列を持たないので、
-   カーネルがリテラルで書く名前は構成子を1つずつ必要とする、というだけ。
-   どちらのテストも未カバーだった規則なので、併せて差分テストに
-   カバレッジを追加してある(それがこの差分を捕まえる検査になる)。
-
-3. **`shift` の負インデックス** — `kernel.rhm` はエラーを出すが、Idris は
-   `integerToNat` が 0 に切り詰める。カーネル自身の検査経路からは到達不能
-   (負のシフトは `substBvar` の `shift (-1)` だけで、`BETA` は先に
-   `checkTerm` する — それを証明しているのが `shiftClosedId` と
-   `substBvarClosed`)だが、`substBvar` を直接叩く不正な入力では挙動が違う。
-
-### Idris 一本化の可否（調査完了・未着手）
-
-`kernel.rhm` を Idris カーネルへのグルーにできるかを実測で調べた。
-数字は `rhombus-hol/rhombus/hol/tests/idris_bench.rhm`、View 方式の
-成立性は `idris_view_spike.rhm` が検証している（どちらも `raco test` で走る）。
-
-**規則自体は速い。** 定理が既に Idris 側にあれば `MK_COMB` は 0.15µs
-(ネイティブ 0.53)、`INST` は 0.27µs (同 0.77) で、**2〜3.5 倍速い**。
-前回の約 30% 回帰の正体は規則ではなく codec で、深さ 10 の項に対し
-encode 1.9µs + decode 3.7µs を 1.5µs の呼び出しの周りで毎回払っていた。
-
-**codec を残すなら**メモ化でほぼ消える。書き換えは部分項を共有するので、
-項の同一性をキーにすればコストは新規ノード数に比例する
-(encode 2.07→0.021µs、decode 3.74→0.023µs)。メモ表は
-`make-ephemeron-hasheq` でなければならない — 素の弱ハッシュは値を強く
-保持するので、項→ベクタとベクタ→項が互いを永久に生かしてしまう。
-
-**生成ファイルは一切編集しない。** 後処理スクリプト(`libify.py`)は廃止した。
-`idris_kernel_gen.rkt` は `idris2 --cg racket` の出力とバイト同一で、
-`rhombus-hol/rhombus/hol/tests/idris_kernel.rkt` が**展開時**に
-Racket 自身のリーダで読み、変換した本体を自分の中に差し込む。結果は
-`raco make` がバイトコンパイルするので読み込み時コストもゼロ。
-
-正規表現で生成ソースを書き換えるのは筋が悪い — 文字列リテラル中の
-`vector` と適用を区別できず、想定した形が消えても黙って通る。リーダが
-返す S 式に対して同じ作業をすればどちらの問題も無く、前提はすべて
-`raise-syntax-error` で明示的に検査される: (1) トップレベルの
-`(let () ...)` がちょうど 1 つで本体を全部持つ、(2) その外には `require` と
-末尾の `(collect-garbage)` しかない、(3) `let` の最後が `Main-main` を
-走らせる形で、それを落とす、(4) **すべてのベクタが `(vector ...)` の適用
-から生まれ、一度も変更されない**。(4) が唯一の意味的変更 — `vector` の
-適用(head 位置のみ)を `vector-immutable` にすること — を正当化する。
-
-(4) は変更操作のブロックリストではなく**許可リスト**で検査している。
-これが効く: ブロックリストだと `list->vector` を素通しし、その結果は
-可変なので何とも `==` にならない — しかも黙って。だからベクタ操作を
-名乗る記号は本モジュールが実際に使う 4 つの読み取り操作
-(`vector-ref` / `vector-length` / `vector?` / `vector->list`、および
-それらを包む `blodwen-vector-*`)のいずれかでなければならず、裸の
-`vector` は head 位置にしか現れてはならない、としてある。
-
-検査は目視ではなく**注入**で確認済み: `(list->vector '(1 2))` /
-`(vector-set! v 0 1)` / `(apply vector xs)` をそれぞれ生成ファイルに
-差し込むと、いずれも問題を名指しするメッセージでビルドが落ちる。`register-external-file` で
-`raco make` の依存にも入れてあるので、再生成が黙って無視されることもない。
-
-**採ってはいけない中間案**: 生成コードは可変のままにして、view をかぶせ
-`==` だけを明示的な構造比較に置き換える案。これも生成コードは触らないが、
-危険を最悪の場所に移す。ライブラリ内の `==` は 246 箇所あり、そのうち項が
-絡むものを人手で全部見つける必要があって、コンパイラの助けは無く、見落とせば
-α 同値について静かに偽を返す。View の書き換えは機械的・一様で差分テストと
-再生テストが検証し、失敗は不変ベクタへの変更が contract violation として
-大声で出る。比べるまでもない。
-
-**codec を無くす道(View 方式)も成立する。** Rhombus 側が独自クラスを
-やめ、Idris の表現に view をかぶせる。1 つの名前を 3 空間に置く
-(構築は関数、パターンは `bind.macro`、`.ty` は `annot.macro` +
-dot provider)ことで既存の 121 箇所の構成子・パターンは**無改造**で動く。
-`bind.macro` がパターンをパターンに展開するので入れ子も合成でき、
-`BETA` の `Comb(Abs(_, body), arg)` がそのまま通ることを確認した。
-
-表現が2種類あるわけではない点は明確にしておく。Idris の生成コードが作るのは
-普通の Racket ベクタで、`Array` はそれを指す Rhombus 側の名前。可変も不変も
-`is_a Array` で同じパターンにマッチする。変更は `libify.py` が `vector` の
-代わりに `vector-immutable` を吐く 1 点だけで、別の型を導入するのではない。
-
-**危なかった点**: Rhombus の `==` は**可変**ベクタでは構造的でなく同一性。
-項は locally nameless なので `==` は α 同値そのもので、`TRANS` の中間項
-照合・`EQ_MP` の前件照合・仮説の重複排除・Map キーが全部これに乗っている。
-黙って同一性になればバグではなく不健全になる。**不変**ベクタなら構造的に
-比較され Map キーにもなり、生成モジュールはベクタを一切変更しない
-(`vector-set!` / `make-vector` / `vector-fill!` は 0 件。`vector-copy!` の
-3 件は `bytevector-copy!` の部分一致)ので、`libify.py` が
-`vector-immutable` を吐けばよい。183 箇所を書き換えて差分・再生テストを
-流し 31/31 通過を確認した。
-
-系として、表現は**一貫して**不変でなければならない。可変ベクタと不変ベクタは
-中身が同じでも `==` にならず、しかも Rhombus 自身の `Array(...)` リテラルが
-作るのは可変の方なので、項は必ず `vector-immutable` 経由で作り
-`Array(...)` リテラルでは作らないこと。混ざると `==` が静かに偽を返し、
-α 同値としては不健全側に倒れる。スパイクのように `Term` 注釈で
-`immutable?` を検査すれば、境界で注釈違反として弾ける。
-
-性能は構築 +15%、走査 +60%、**等価判定 −74%**(クラスの `Equatable` は
-再帰プロトコルを通るが `equal-always?` はプリミティブ)。項の等価判定は
-HOL の至る所にあるので、これは小さくない。
-
-`Thm` / `Theory` は Rhombus クラスのまま Idris 値を包む。裸のベクタは
-`vector-immutable` を書ける者なら誰でも偽造でき、LCF の境界が消えるため。
-定理 1 個につき 1 アロケーションで、0.15µs の規則に対して無視できる。
-項は権限を持たないのでこの保護は要らない。
-
-**残る移行コスト**: 124 箇所のフィールドアクセスは dot provider が効く
-よう静的注釈が要る(効かなければコンパイルエラーなので黙って壊れない)。
-加えて識別子トークン、intern 表、`libify.py` と生成モジュールが
-信頼境界に入ること、エラーメッセージ、仮説順序。**着手はしていない。**
-
-### ドキュメント（完了）
+## 8. ドキュメント
 
 `rhombus-hol/rhombus/hol/scribblings/` に multi-page で 6 章:
 
 | ファイル | 内容 |
 |---|---|
 | `rhombus-hol.scrbl` | 表紙・`docmodule(~lang, rhombus/hol)`・目次 |
-| `overview.scrbl` | 1 つの宣言の 2 つの読み・いつ何が起きるか・完全な例・`fun` は横取りしない |
+| `overview.scrbl` | 1 つの宣言の 2 つの読み・いつ何が起きるか・完全な例 |
 | `declarations.scrbl` | 全 10 形式のリファレンス |
 | `grammar.scrbl` | 型・式・命題の文法と優先順位表 |
 | `termination.scrbl` | 辞書式構造的降下・測度・部分項関係・未対応のもの |
 | `prover.scrbl` | Waterfall の 4 段・失敗したときの読み方・正当化の合成 |
-| `trust.scrbl` | カーネル・3 公理・公準化しているもの・**漏れているところ** |
+| `trust.scrbl` | カーネル・3 公理・公準化しているもの・漏れているところ |
 
 ビルドは `raco setup --pkgs rhombus-hol`（`doc/` は .gitignore 済み）。
-
-**掲載したコード例と residue はすべて実際にコンパイルして確認した。**
-最初に書いた residue は想像で書いたもので、実物と違っていた（変数名も分岐も）。
-文書のたぐいは実行して確かめること。
-
-**既知の欠点（`check_property` は解消、他は未解消）: `@doc` ブロックが
-使えていない。** `type` / `function` / `theorem` などは `#%module_block` が
-本体を走査して認識しているだけで、束縛ではない。`@doc` は for-label 束縛を
-要求するので、これらを索引付きの項目として書けず、`@verbatim` の文法表示 +
-`@section` で代用している。検索性が落ちる。同じ理由でユーザー自身のマクロの
-展開結果としてこれらの形式を使うこともできない（`#%module_block` は展開前の
-生の構文を綴りで照合するので、マクロの呼び出しそのものしか見えない）。
-
-`check_property` だけは実際に束縛された `defn.macro` として再実装した
-（`module_block.rhm`）。`driver.rhm` に対応する状態遷移が一切無い
-（`HolState` を読みも書きもしない）唯一の形式だったので、状態糸通しの仕組みに
-一切触れずに済んだ。これにより:
-
-- `@doc(defn.macro 'check_property ...')` で文書化できる（未着手、次の一手）。
-- ユーザー自身のマクロが展開結果として `check_property` を生成できる
-  （`tests/fixtures/check_property_composed.rhm` で固定）。
-
-移行で 1 つ罠を踏んだ（当時の記録。**この節の仕組み自体は下の「実行時
-レジストリ」節で置き換え済み**）: `gen_id`/`shrink_id`（`_hol_gen_Foo`/
-`_hol_shrink_Foo`）は非衛生的識別子で、「構築に使う context 構文オブジェクト
-がユーザー自身の書いたトークンであること」に依存していた。旧設計では
-`check_property` の発行が `module_block` **自身の 1 回の展開**の一部だった
-ので、`head_term(d.form)`（`check_property` という**リテラル語**）を
-context に使っても、`type` 側の定義（同じく `module_block` の展開由来）と
-同じ扱いになっていた。`check_property` を**別の**マクロ展開に切り出すと、
-その リテラル語は「このマクロ定義自身が書いたテンプレート語」になり、
-`type` 側の定義とは違う導入スコープを持つ ── 綴りは同じでも別の束縛になる。
-その場しのぎの直しは、context に `check_property` という語ではなく、
-性質の名前（`$rest` から捕捉した、正真正銘ユーザーが書いたトークン）を
-使うことだった。
-
-#### 生成器・縮小器を非衛生的識別子から実行時レジストリへ（密結合 → 疎結合）
-
-上の「その場しのぎの直し」は、依然として `check_property` と `type` の間に
-**命名規則という暗黙の契約**を残していた。加えて、`type` は
-`gen_id(at, Syntax.unwrap(name))` の識別子をわざわざ `export:` していた
-（他モジュールの `check_property` が参照できるように）。これを、
-`qc.rhm` に持たせた実行時レジストリに置き換えた:
-
-```rhombus
-fun register_gen(name :: String, build :: Function) :: Void
-fun register_shrink(name :: String, shrink :: Function) :: Void
-fun lookup_gen(name :: String) :: Function
-fun lookup_shrink(name :: String) :: Function
-```
-
-`type` は生成器・縮小器を `_hol_gen_Foo` という**当てずっぽうの名前**で
-束縛する代わりに、モジュールが実行されたときに
-`_hol_qc.register_gen("Foo", fun (...): ...)` と**明示的に登録**する。
-`check_property` は `Syntax.make_id` を一切使わず、
-`_hol_qc.lookup_gen("Foo")` を呼ぶだけになった。
-
-これは property check が**実行時**に走る（コンパイル時に評価すると
-定義の二重実装になるので意図的にそうなっている）という既存の設計を
-利用している ── `HolState` の糸通し（コンパイル時 = phase 1、マクロ間で
-共有できないと確認済み）とは別の制約空間なので、可変マップで問題なく
-共有できる。
-
-得られたもの:
-
-- **非衛生的識別子の脆さが消えた。** コンテキスト構文オブジェクトの
-  選択ミスというクラスのバグ（上で踏んだ罠）が構造的に無くなった。
-  `gen_id`/`shrink_id`/`ctx` 引数は全て削除。
-- **`check_property` が型の宣言モジュールを `import: ... open` する必要すら
-  無くなった。** 生成器の解決は実行時の名前引きなので、宣言モジュールが
-  **推移的に**（別の import 経由で間接的に）取り込まれてさえいれば、
-  直接 import していなくても解決できることを実測で確認した。
-  §4.3 の `check_property`（`tests/spec/properties.rhm` に分離していたもの）
-  はこれにより仕様書どおり `test_run.rhm`（素の `#lang rhombus`）に直接
-  書けるようになったので、統合して `properties.rhm` を削除した。
-- **拡張性。** `rhombus/hol` の `type` 以外の任意の Rhombus 型にも、
-  誰かが `_hol_qc.register_gen(...)` すれば `check_property` から使える
-  （今回は未検証・未使用だが、経路としては開いている）。
-
-トレードオフ: 「型に生成器が無い」が実行時エラーになる
-（`error(~who: #'check_property, "no generator registered for this type", ...)`）。
-コンパイル時に検出したいなら、`check_property` 展開時に
-「その型に対応する `type` 宣言が事前に処理されたか」を確認するチェックが
-別途要るが、それは静的な話であって、レジストリの疎結合設計とは独立の話。
-未着手。
-
-**`type`/`function`/`theorem`/`disable_rules`/`enable_rules`/`declare`/`expect`
-は依然としてスキャン方式のまま。** これらは `driver.rhm` の `HolState` を
-読み書きするので、束縛だけの独立マクロにするには「連番カウンタなしで
-宣言間の状態をどう糸通しするか」を解かねばならず、これは**実測で不成立と
-確認済み**（詳細は次項）。`check_property` が「たまたま状態を持たない
-唯一の形式」だったから解けた話であり、他の形式には**そのまま**は適用できない。
-
-#### 状態糸通しの独立マクロ化を試して、成立しないと確認した設計（記録）
-
-「可変ボックス + `~lang` なしサブモジュールの合流」で連番カウンタを廃止する
-案を実測した。3 つとも、Rhombus の実機で不成立だった:
-
-1. **`~lang` なし（または `~splice ~lang`）のサブモジュールは、複数の
-   独立したマクロ展開から同名で断片を出すと最終的な出現順で 1 つに
-   合流する**（`module.scrbl` の記述どおりで、これ自体は成立する）。
-   しかし**この合流後のサブモジュールは、囲みモジュール自身からは
-   import できない**（`self!id` で "syntax-local-module-exports: unknown
-   module" になる ── ドキュメントの「`~lang` が無ければ囲みモジュールは
-   サブモジュールを import できない、循環になるから」という記述どおり）。
-   `~splice ~lang` も同じ理由で同じエラーになることを実測した
-   （late-expanding な形はどれも同じ壁に当たる）。
-   囲みモジュール自身から強制 visit できなければ、`raco make` の間に
-   証明を走らせる仕組みが成立しない。
-2. **`meta:`（ブロック形式）はマクロ自身の展開結果の中では使えない**
-   （"meta: misuse as an expression; allowed only in a non-nested
-   declaration context"）。これは `meta def`（定義形式）とは別物 ──
-   `meta def` は今の設計で実際に機能している（マクロ展開結果に含めても
-   問題ない）が、可変ボックスへの逐次代入をマクロ展開の中に書く手段が
-   無いことを意味する。
-3. **`meta def` の同名再定義（シャドーイングでの糸通し）は不可**
-   （"identifier already defined"）。カウンタなしで「今の状態」を
-   参照し続ける手段が、結局どこにも残らない。
-
-（参考までに、"`raco make` は対象モジュール自身を instantiate しない
-（run しない）" ことも実測で確認した ── ただの実行時可変状態に逃げても
-`raco make` の間に証明の失敗を検出できない。だからこそ現行設計は
-`meta def` で phase 1 に状態を置いている。）
-
-残る道は「マクロ定義モジュール自身が持つ、囲みモジュールの識別子で
-キーイングした可変ハッシュ」のような、より低レベルでリスクの高い手法
-（この文書の初期の設計メモが最初から避けていたもの）で、これは
-確認していない。**現実的な結論: `check_property` 以外の形式を、
-状態糸通しをやめて独立マクロにする道は今のところ無い。**
-これらの形式を `@doc` で文書化するだけなら、`#%module_block` の外では
-「ここでは使えません」というエラーを出すだけの薄い `defn.macro` を
-束縛するという最小案が残っている（未着手）。
-
-### v0.1 で残っている制限（文書化すべきもの）
-
-- `type` / `function` / `theorem` は `#%module_block` が認識する形式なので、ユーザー定義
-  マクロの中や `block:` の中には書けない。`check_property` だけは例外
-  （実マクロなので両方できる。上の「既知の欠点」節を参照）。
-- `function` の本体は `match` / `if` / 変数 / 名前付き適用 / Boolean 演算子
-  （`!` `&&` `||` `==`）と `#true` / `#false` のみ。`let` / 算術 / リテラルは文法外で、
-  **コンパイルエラー**になる（違反した式を名指しする）。
-- `match` の入れ子は 1 引数につき 1 段。同じ列を 2 度マッチすることはできず、
-  節に順序はない（ワイルドカード節は書けない）。構築子パターンの入れ子（`succ(succ(k))`）
-  も不可 — この版の帰納法スキームが構築子 1 段しか追えないため。
-- 測度は宣言済みデータ型に着地しなければならない（`T_lt` があるのはそこだけ）。
-  入れ子再帰（再帰呼び出しの引数の中の再帰呼び出し）に対しては義務を立てられない。
-- 辞書式の構造的降下が成立する定義では `~measure` は**検査されない**。
-  構造的降下だけで停止性の議論は完結しているので健全性の問題はないが、
-  誤った測度を書いても黙って通る。
-- 理論の取り込みは通常の `import`。専用の形式は無い。
-- 理論の `import` は**自分の宣言より前**に、複数あるなら**依存順**に書く。採用は
-  「入ってくる理論が今の理論の拡張であること」が条件（`descends` 1 回）。
-- パスがブロックの中にある import（`import: meta: "a.rhm"`）は読めないのでエラー。
-- **兄弟理論は合流できない。** どちらも他方の拡張でない 2 つの理論を 1 モジュールで
-  使うことはできない。必要になったら theory merge を書く必要がある（今は無い）。
-- importer のコンパイルは提供側モジュールを visit するので、**提供側の証明が
-  importer ごとに再実行される**。現状 1 モジュールあたり約 1 秒。
-- `check_property` の量化変数は具体型でなければならない（型変数の生成器は作れない）。
-  本体は実行可能な任意の Rhombus Boolean 式。
-
-## 5. 表層構文の確定事項（shrubbery で字句検証済み）
-
-| 仕様書 | 採用する綴り | 理由 |
-|---|---|---|
-| `type List('a)` | `type List(~a)` | `'` は syntax literal の開き括弧で字句解析できない |
-| `@rewrite_rule` | `theorem ~rewrite_rule name:` | `@` は at-記法として消え、別グループになる |
-| `theorem` + `proof` | `expand.rhm` が本体走査で 1 段先読み | 2 つの別グループとして解析される。`defn.sequence_macro` で同じことを独立マクロとして書けることは実測で確認済み（§4「実マクロとして再実装する」参照）だが、`theorem` 自体は `HolState` を糸通す側なので、その独立マクロ化自体が今のところ不成立 |
-| `auto ~induct: xs ~using: [a]` | 単独なら可。複数指定は `auto(~induct: xs, ~using: [a, b])` | 2 つ目の `~kw:` が 1 つ目のブロックに入れ子になる |
-| `fun app(...)` | `function app(...)` | 通常の Rhombus `fun` と衝突させない。`function` は `rhombus` で未束縛 |
-| `and` / `or` / `not` | 命題専用の構文空間で定義 | `#lang rhombus` では未束縛なので衝突はしないが、優先順位制御とエラーメッセージのため分離する |
-
-そのまま使えることを確認済み: `a === b`、`p ==> q`、`forall (x :: Ty): P`。
-
----
-
-## 6. 未解決のリスク
-
-1. **`import` の認識**は既知の修飾子リストを持たない（最長接頭辞方式）が、
-   Rhombus の import 文法が変わればここが影響を受けうる。読めない形はエラーにしてある。
-2. ~~**`module ~splice` 内の引用識別子のスコープ**~~ — この版の実装は `~splice` を
-   どこでも使っていない（`grep` で確認済み）。R3 の作り直しで `hol_theory`
-   サブモジュールは常時プレーンな `module ... ~lang rhombus:` で、複数箇所からの
-   合流も試みていない（試して不成立と確認したのは別の設計、§4 参照）。この項目は
-   古い記録で、今のコードには対応する懸念が存在しない。
-3. **書き換えの停止性** — タクティクごとの fuel/timeout は入れない方針。
-   置換可能規則は `term_order` で下り方向にしか発火しないので発振しないが、
-   `mk_rule` は「変数だけの左辺」「右辺の未束縛変数・型変数」「自明な等式」しか
-   弾かない。`f(x) === g(f(x))` のような非対称かつ非停止な規則は**現状のまま
-   通ってしまい**、`TOP_DEPTH_CONV` が無限に書き換え続けて `raco make` が
-   停止しなくなる。実際に確認していない（意図的に踏んでいない）が、
-   `mk_rule` のコードを読む限り防御が無いことは確認済み。
-   `mk_rule` の受け入れ条件を強めるのが正しい防ぎ方（fuel ではなく）— 未着手。
-4. ~~**`fun` の上書き**~~ — 解消。論理定義は `function` という別のキーワードになり、
-   通常の Rhombus `fun` には一切介入しない。したがって「文法外なら素通し」という
-   劣化許容規則も不要になり、`function` の文法違反は違反式を名指しするエラーになる
-   （`decl_fun.rhm` の `no_result_type` / `bad_body` が固定している）。
-5. ~~**束縛子の下での書き換え**~~ — 解消。`conv.rhm` の `SUB_CONV` が `Abs` に対して
-   `ABS_CONV` を呼ぶので、`TOP_DEPTH_CONV`（`simp_conv` が使う）は束縛子の中も
-   自然に降りる。`tmatch.rhm` の `term_match` も束縛変数捕獲を depth 引数で
-   チェック済み（`tests/conv.rhm` の `ABS_CONV` テストで固定）。
-
-## 7. 参照したソフトウェア
-
-この実装を作る際に参照したもの。「設計を参考にした」ものと、
-「このチャットで実際にソースコード／ドキュメントを読んだ」ものは性質が違うので分けて書く。
-
-### このチャットで実際にソースコード・ドキュメントを開いて読んだもの
-
-- **Rhombus（言語本体）**
-  - ドキュメント一式: `/Users/tani/Documents/rhombus/rhombus/rhombus/scribblings/`
-    以下の多数のファイル。特に頻繁に参照したもの:
-    `reference/module.scrbl`（サブモジュールの合流・`~lang`/`~splice`/`~early`/`~late`
-    の意味論）、`meta/defn-macro.scrbl`（`defn.macro`/`defn.sequence_macro`）、
-    `meta/macro-more.scrbl`、`meta/expr-macro.scrbl`（`expr_meta.Parsed` など）、
-    `meta/bind-macro.scrbl`、`meta/annotation-macro.scrbl`、`meta/lang.scrbl`、
-    `meta/rhombus-meta.scrbl`、`reference/import.scrbl`（`ModulePath`/`ModulePath.maybe`）、
-    `reference/check.scrbl`、`reference/box.scrbl`（`Box`/`.value`/`:=`）、
-    `reference/symbol.scrbl`、`reference/equatable.scrbl`、`reference/eval.scrbl`
-    （`Evaluator.module_is_declared` など）、`reference/syntax-class.scrbl`、
-    `guide/module-basics.scrbl`。
-  - 実装ソース: `/Applications/Racket v9.3/share/pkgs/rhombus-lib/rhombus/private/amalgam/`
-    以下。特に `check.rhm`（`check` フォームの実装 — `theorem`/`proof:` の
-    「後続節を任意で取り込む」設計の比較対象にした）、`defn-macro.rkt`、
-    `sequence_meta.rhm`、`sequence-help.rkt`、`guard.rhm`、`closeable.rhm`。
-  - Rhombus/HOL の `use_theory` を通常の `import` に統合する設計と、
-    宣言形式を実マクロに再実装できるかの検討（本セッションの後半）は、
-    上記のドキュメント・ソースを実際に `grep`/`Read` し、かつ実機で
-    コンパイル・実行して確かめながら進めた。
-- **Racket（Rhombus の実行基盤）** — `lib("racket/base.rkt")` 経由で
-  `raise-syntax-error` などを直接呼んでいる（`driver.rhm`）。処理系自体は
-  `/Applications/Racket v9.3/` にインストールされたものを実行確認に使い続けた
-  （バージョン固定: v9.3）。
-
-### 設計の参考にした（このチャットでソースは見ていない、既存の公表された設計として）
-
-- **HOL Light** — カーネルの十個の基本推論規則、locally nameless の項表現、
-  等式変換（`conv.rhm` は `equal.ml` の設計を踏襲）、型の表現
-  （型変数と型構成子の適用の 2 構成子）。コードコメントに散在して明記済み
-  （`kernel.rhm`、`conv.rhm`、`htype.rhm`、`printer.rhm` など）。
-- **HOL4** — 論理定数の定義のしかたと、3 つの公理（ETA・SELECT・BOOL_CASES）の
-  選び方（HOL Light 式の `INFINITY_AX` を経由しない構成）。`bool.rhm` に明記済み。
-- **ACL2** — Waterfall（簡約・デストラクタ除去・一般化・帰納法の固定パイプライン）
-  の設計、置換可能な書き換え規則を発振させないための項順序（`order.rhm`）、
-  規則データベースが新しい規則を優先する順序（`ruledb.rhm`）。
-  複数のファイルのコメントに明記済み。
-- **QuickCheck**（の系譜のプロパティベーステスト全般） — `check_property` /
-  `qc.rhm` の設計（生成・収縮・反例の最小化）は QuickCheck の系譜の標準的な
-  仕組みを踏襲しているが、具体的な実装（Haskell 版・その他言語版いずれも）の
-  ソースコードを本セッションで直接参照したことはない。

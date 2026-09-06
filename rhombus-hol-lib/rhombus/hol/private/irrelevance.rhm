@@ -1,0 +1,70 @@
+#lang rhombus/static
+
+// A waterfall stage: elimination of irrelevance.
+//
+// ACL2 drops a hypothesis before induction when it shares no variable with
+// anything the goal actually needs: such a hypothesis cannot help prove the
+// conclusion, and it can only get in the way -- most often by giving the
+// induction-variable heuristic a reason to hesitate, or by the generalizer
+// treating a variable as constrained when it is really free to generalize.
+//
+// The relevance test is a fixpoint, not a one-shot check against the
+// conclusion: an assumption that shares a variable with a *kept* assumption
+// is transitively relevant even if it shares nothing with the conclusion
+// directly (`n === length(xs)` matters to a goal about `xs` even though `n`
+// itself never appears there).
+//
+// Dropping a hypothesis needs no proof step at all.  A `Thm`'s hypothesis
+// list records only what it actually used, and a theorem proved from *fewer*
+// assumptions is already usable wherever *more* are available -- so the
+// child's proof, unchanged, is the parent's proof.  What could go wrong is
+// dropping a hypothesis the rest of the proof actually needed, and that
+// shows up as the child goal being unprovable, i.e. as a residue -- never as
+// an unsound result.
+
+import:
+  rhombus/hol/private/term open
+  rhombus/hol/private/kernel open
+  "goal.rhm" open
+
+export:
+  eliminate_irrelevance_goal
+  relevant_hyps
+
+// The subset of `g.asms` that is relevant to proving `g.concl`, by the
+// fixpoint above.
+fun relevant_hyps(g :: Goal) :: List.of(Term):
+  fun vars_of(t :: Term) :: List.of(FVar): free_vars(t)
+  fun shares(a :: List.of(FVar), b :: List.of(FVar)) :: Boolean:
+    for any (v in a): b.contains(v)
+  let concl_vars = vars_of(g.concl)
+  recur grow (relevant :~ List = [], frontier :~ List.of(FVar) = concl_vars):
+    let newly = for values(acc :~ List = []) (a in g.asms):
+                  cond
+                  | relevant.contains(a): acc
+                  | shares(vars_of(a), frontier): acc ++ [a]
+                  | ~else: acc
+    cond
+    | newly.length() == 0: relevant
+    | ~else:
+        let new_vars = for values(acc :~ List.of(FVar) = []) (a in newly):
+                         acc ++ vars_of(a)
+        grow(relevant ++ newly, new_vars)
+
+fun eliminate_irrelevance_goal(g :: Goal) :: maybe(Step):
+  // `relevant_hyps` builds its result in the order it discovers relevance,
+  // not the goal's own order; re-filter `g.asms` so the subgoal's
+  // assumptions stay in source order like every other stage's do.
+  let relevant = relevant_hyps(g)
+  let kept = g.asms.filter(~keep: fun (a): relevant.contains(a))
+  cond
+  | kept.length() == g.asms.length(): #false // nothing dropped, no progress
+  | ~else:
+      let dropped = g.asms.filter(~skip: fun (a): kept.contains(a))
+      let subgoal = note(mk_goal(kept, g.concl),
+                         "drop " ++ to_string(dropped.length())
+                           ++ " hypothesis(es) irrelevant to the conclusion")
+      Step([subgoal],
+           fun (ths :: List.of(Thm)) :: Thm:
+             match ths
+             | [child]: child)

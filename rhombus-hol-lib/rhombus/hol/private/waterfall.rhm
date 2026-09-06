@@ -2,11 +2,19 @@
 
 // The waterfall: the driver that pushes a goal through the stages.
 //
-//   simplification -> destructor elimination -> generalization -> induction
+//   simplification -> destructor elimination -> fertilization ->
+//   generalization -> elimination of irrelevance -> induction
 //
 // A stage that makes progress restarts its subgoals at the top of the
 // pipeline; a goal that falls off the bottom is left open, and its trail
 // becomes the stuck-residue message.
+//
+// The order follows ACL2's own waterfall.  Fertilization sits right after
+// destructor elimination because its usual source is an induction
+// hypothesis of the shape `x === f(y)`, freshly exposed by the previous
+// induction step; elimination of irrelevance sits right before induction
+// because its whole purpose is to keep an unrelated hypothesis from
+// confusing the induction heuristics that come after it.
 //
 // Nothing here can produce a theorem on its own.  Each stage hands back a
 // `Step` carrying its own justification, and `run` composes them; the only
@@ -27,7 +35,9 @@ import:
   "goal.rhm" open
   "simp.rhm" open
   "destruct.rhm" open
+  "fertilize.rhm" open
   "general.rhm" open
+  "irrelevance.rhm" open
   "induct.rhm" open
 
 export:
@@ -69,8 +79,14 @@ fun stage_simplify(ctx :: Context, g :: Goal) :: maybe(Step):
 fun stage_eliminate(ctx :: Context, g :: Goal) :: maybe(Step):
   eliminate_goal(ctx.thy, ctx.dts, g)
 
+fun stage_fertilize(ctx :: Context, g :: Goal) :: maybe(Step):
+  fertilize_goal(ctx.thy, g)
+
 fun stage_generalize(ctx :: Context, g :: Goal) :: maybe(Step):
   generalize_goal(ctx.thy, ctx.ctors, g)
+
+fun stage_irrelevance(ctx :: Context, g :: Goal) :: maybe(Step):
+  eliminate_irrelevance_goal(g)
 
 fun stage_induct(ctx :: Context, g :: Goal, hint :: maybe(FVar)) :: maybe(Step):
   let vs = (cond
@@ -101,14 +117,20 @@ fun prove_goal(ctx :: Context, g :: Goal,
     | #false:
         match stage_eliminate(ctx, g)
         | #false:
-            match stage_generalize(ctx, g)
+            match stage_fertilize(ctx, g)
             | #false:
-                cond
-                | depth >= max_induction_depth: Open(g)
-                | ~else:
-                    match stage_induct(ctx, g, hint)
-                    | #false: Open(g)
-                    | st: descend(st :~ Step, depth + 1)
+                match stage_generalize(ctx, g)
+                | #false:
+                    match stage_irrelevance(ctx, g)
+                    | #false:
+                        cond
+                        | depth >= max_induction_depth: Open(g)
+                        | ~else:
+                            match stage_induct(ctx, g, hint)
+                            | #false: Open(g)
+                            | st: descend(st :~ Step, depth + 1)
+                    | st: descend(st :~ Step, depth)
+                | st: descend(st :~ Step, depth)
             | st: descend(st :~ Step, depth)
         | st: descend(st :~ Step, depth)
     | st: descend(st :~ Step, depth)

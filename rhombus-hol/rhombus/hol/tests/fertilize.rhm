@@ -1,0 +1,80 @@
+#lang rhombus/static
+
+// Fertilization.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/goal open
+  rhombus/hol/private/fertilize open
+  "spec_prelude.rhm" open
+
+def P = prelude
+def thy = P.thy
+
+def x = v(#'x, nat_ty)
+def y = v(#'y, nat_ty)
+def z = v(#'z, nat_ty)
+fun succ_(a): ap1(P.succ, a)
+
+// -- when the stage applies -------------------------------------------------
+
+check:
+  // `x === succ(y)` lets `x` be eliminated from the conclusion
+  let g = mk_goal([mk_eq(x, succ_(y))], mk_eq(x, x))
+  fertilization_candidates(g).map(fun ([v, t, _]): [(v :~ FVar).name, t])
+  ~is [[#'x, succ_(y)]]
+check:
+  // oriented the other way around, `t === x`, still recognised
+  let g = mk_goal([mk_eq(succ_(y), x)], mk_eq(x, x))
+  fertilization_candidates(g).map(fun ([v, t, _]): [(v :~ FVar).name, t])
+  ~is [[#'x, succ_(y)]]
+check:
+  // the occurs check: `x === succ(x)` is not a usable equation
+  let g = mk_goal([mk_eq(x, succ_(x))], mk_eq(x, x))
+  fertilization_candidates(g)
+  ~is []
+check:
+  // `x` does not occur in the conclusion: nothing to substitute
+  let g = mk_goal([mk_eq(x, succ_(y))], mk_eq(y, y))
+  fertilization_candidates(g)
+  ~is []
+
+// -- what it produces --------------------------------------------------------
+
+check:
+  let g = mk_goal([mk_eq(x, succ_(y))], mk_eq(x, succ_(y)))
+  let st = fertilize_goal(thy, g) :~ Step
+  show((st.subgoals[0] :~ Goal).concl)
+  ~is "succ(y) === succ(y)"
+
+// -- and that it really proves the original ----------------------------------
+
+check:
+  let g = mk_goal([mk_eq(x, succ_(y))], mk_eq(x, succ_(y)))
+  let st = fertilize_goal(thy, g) :~ Step
+  let child = REFL(thy, succ_(y))
+  let th = st.justify([child])
+  [hyps_of(th), concl_of(th)]
+  ~is [[mk_eq(x, succ_(y))], mk_eq(x, succ_(y))]
+
+// -- termination: a cycle of two defining equations must not loop forever ---
+//
+// `x === succ(y)` and `y === succ(x)` each pass the occurs check on their
+// own, but using them alternately reintroduces the variable the other one
+// just eliminated.  This is the regression the "drop the used equation"
+// comment in `fertilize.rhm` explains; it used to hang `raco test`.
+
+check:
+  let g0 = mk_goal([mk_eq(x, succ_(y)), mk_eq(y, succ_(x))], mk_eq(x, x))
+  recur loop (g :~ Goal = g0, steps = 0):
+    when steps > 10
+    | error(~who: #'test, "fertilize_goal did not stop")
+    match fertilize_goal(thy, g)
+    | #false: steps
+    | st :~ Step: loop(st.subgoals[0] :~ Goal, steps + 1)
+  ~is 2

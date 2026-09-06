@@ -1,0 +1,97 @@
+#lang rhombus/static
+
+// A waterfall stage: fertilization.
+//
+// ACL2's term for using an equality hypothesis as a substitution: an
+// assumption `x === t` (or `t === x`), with `x` a variable that does not
+// occur in `t`, lets every occurrence of `x` in the conclusion be replaced by
+// `t`.  It is what turns an induction hypothesis of the shape `x === f(y)`
+// into something the rest of the proof can rewrite with.  Its sibling
+// `irrelevance.rhm` adds the other stage ACL2's waterfall has that this one
+// originally lacked; see `waterfall.rhm` for where both are spliced into the
+// pipeline.
+//
+// Soundness has nothing to do with the heuristic that picks the hypothesis:
+// the step's justification builds `|- concl <=> concl[x := t]` as an ordinary
+// congruence proof over `x === t` (via `DEPTH_CONV`, exactly what the
+// simplifier already uses), so `x === t` reappears in the result as a
+// hypothesis automatically, through the kernel's own hypothesis-set
+// bookkeeping -- nothing here has to track that by hand.  A wrong choice of
+// hypothesis just fails to change the goal, which shows up as no progress,
+// never as an unsound step.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "goal.rhm" open
+
+export:
+  fertilize_goal
+  fertilization_candidates
+
+// An assumption oriented as `variable === replacement`, with the variable not
+// occurring in the replacement (an occurs check -- without it the "definition"
+// is circular and substituting away the variable proves nothing new) and
+// actually free in the conclusion (otherwise there is nothing to substitute).
+fun orient_for_fertilize(concl :: Term, asm :: Term) :: maybe(List.of(Term)):
+  match dest_eq(asm)
+  | #false: #false
+  | [l, r]:
+      cond
+      | l is_a FVar && !vfree_in(l :~ FVar, r) && vfree_in(l :~ FVar, concl):
+          [l, r]
+      | r is_a FVar && !vfree_in(r :~ FVar, l) && vfree_in(r :~ FVar, concl):
+          [r, l]
+      | ~else: #false
+
+// The assumptions usable for fertilization, each as `[variable, replacement,
+// original assumption term]`, in the order they appear.
+fun fertilization_candidates(g :: Goal) :: List:
+  for values(acc :~ List = []) (a in g.asms):
+    match orient_for_fertilize(g.concl, a)
+    | #false: acc
+    | [v, t]: acc ++ [[v, t, a]]
+
+// Replace literal occurrences of `x` by `t`, everywhere except inside a
+// binder that rebinds nothing -- there is nothing to rebind, `x` is free, so
+// ordinary depth-first replacement is exact.
+fun var_subst_conv(heq :: Thm, x :: Term):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    (if t == x | heq | #false)
+
+fun fertilize_goal(thy :: Theory, g :: Goal) :: maybe(Step):
+  match fertilization_candidates(g)
+  | []: #false
+  | List.cons([v, t, asm], _):
+      let heq:
+        match dest_eq(asm)
+        | [l, _] when l == v: ASSUME(thy, asm)
+        | ~else: SYM(thy, ASSUME(thy, asm))
+      let eqth = DEPTH_CONV(var_subst_conv(heq, v))(thy, g.concl)
+      cond
+      | is_refl_thm(eqth :~ Thm): #false
+      | ~else:
+          let new_concl = rhs_of(eqth :~ Thm)
+          // Drop `asm` itself from the child's assumptions -- not because the
+          // proof needs it gone (`eqth`'s own hypothesis-tracking brings
+          // `asm` back automatically, through the kernel's bookkeeping, no
+          // matter what the child goal's assumption list says) but because
+          // two equations `x === f(y)` and `y === g(x)` would otherwise let
+          // fertilization toggle between them forever: eliminating `x` can
+          // reintroduce `y`, whose own defining equation can reintroduce `x`,
+          // and neither use is ever a no-op.  Each goal can use a given
+          // equation once; a genuine cycle then runs out of equations to
+          // consume rather than looping.
+          let remaining = g.asms.filter(~skip: fun (a): a == asm)
+          let subgoal = note(mk_goal(remaining, new_concl),
+                             "fertilize using " ++ show(asm))
+          Step([subgoal],
+               fun (ths :: List.of(Thm)) :: Thm:
+                 match ths
+                 | [child]: EQ_MP(SYM(thy, eqth :~ Thm), child))

@@ -37,6 +37,7 @@ export:
   mk_exists1
   mk_select
   mk_cond
+  mk_wf
   // term destruction
   dest_conj
   dest_disj
@@ -103,6 +104,11 @@ fun mk_cond(c :: Term, t :: Term, e :: Term) :: Term:
   let ty = type_of(t)
   mk_comb(mk_comb(mk_comb(mk_const(c_cond, mk_fun(bool, binop_ty(ty))), c), t),
           e)
+
+// `WF(R)`, `R :: A -> A -> bool`.  The element type `A` is read off `r`'s own
+// type, the same way `mk_forall` reads it off the bound variable's.
+fun mk_wf(r :: Term) :: Term:
+  mk_comb(mk_const(c_wf, mk_fun(type_of(r), bool)), r)
 
 // -- term destruction ------------------------------------------------------
 
@@ -248,6 +254,27 @@ fun build_base() :: Base:
     define(thy, c_cond, mk_fun(bool, binop_ty(tyA)),
            mk_abs(tb, mk_abs(t1, mk_abs(t2, mk_select(xa, body)))))
 
+  // wf = \R. !P. (?x. P x) ==> ?m. P m and !y. R y m ==> not (P y)
+  //
+  // "Every nonempty set (given as a predicate) has an `R`-minimal element."
+  // Defined here, not axiomatic: it is a plain abbreviation over the
+  // kernel's logic, the same way `exists1` and `cond` are.  What is still
+  // owed -- see PLAN.md section 9.1 -- is the *derivation* that a
+  // datatype's own structural subterm relation (`subterm.rhm`) satisfies it,
+  // and the generic well-founded-recursion theorem that would let
+  // `recdef.rhm` stop postulating its clausal equations.  Defining `WF`
+  // itself needs no axiom and is a self-contained first step toward that.
+  let rel_ty :: HType = mk_fun(tyA, mk_fun(tyA, bool))
+  let rvar = mk_var(#'R, rel_ty)
+  let mvar = mk_var(#'m, tyA)
+  let yvar = mk_var(#'y, tyA)
+  let (thy, def_wf):
+    let ry_m = mk_comb(mk_comb(rvar, yvar), mvar)
+    let not_py = mk_neg(mk_comb(bigP, yvar))
+    let minimal = mk_conj(mk_comb(bigP, mvar), mk_forall(yvar, mk_imp(ry_m, not_py)))
+    let body = mk_imp(mk_exists(xa, mk_comb(bigP, xa)), mk_exists(mvar, minimal))
+    define(thy, c_wf, mk_fun(rel_ty, bool), mk_abs(rvar, mk_forall(bigP, body)))
+
   // -- the three axioms ----------------------------------------------------
 
   // ETA_AX: !f. (\x. f x) = f
@@ -271,7 +298,7 @@ fun build_base() :: Base:
        {c_true: def_true, c_conj: def_conj, c_imp: def_imp,
         c_forall: def_forall, c_exists: def_exists, c_disj: def_disj,
         c_false: def_false, c_neg: def_neg, c_exists1: def_exists1,
-        c_cond: def_cond},
+        c_cond: def_cond, c_wf: def_wf},
        {#'ETA_AX: ax_eta, #'SELECT_AX: ax_select,
         #'BOOL_CASES_AX: ax_bool_cases})
 

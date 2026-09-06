@@ -104,27 +104,53 @@ fun stage_induct(ctx :: Context, g :: Goal, hint :: maybe(FVar)) :: maybe(Step):
             | #false: loop(rest)
             | dtms: induction_step(ctx.thy, dtms :~ DatatypeThms, v, g)
 
+// The recognised `~do_not:` stage names -- see `elab.rhm`'s `parse_tactic`.
+def stage_names :: Set = {#'simplify, #'eliminate, #'fertilize, #'generalize,
+                          #'irrelevance, #'induct}
+
+fun check_do_not(do_not :: Set.of(Symbol)) :: Void:
+  for (n in do_not):
+    unless stage_names.contains(n)
+    | error(~who: #'proof, "no such waterfall stage to skip",
+            error.val(~label: "name", n),
+            error.val(~label: "understood", to_string(stage_names)))
+
+// A stage named in `do_not` is skipped as if it never applied -- the pipeline
+// falls through to the next one, exactly like an ordinary `#false`.  This can
+// only make a proof fail where it would otherwise have succeeded: skipping a
+// stage never changes what a `Step` is allowed to justify, only whether the
+// driver tries producing one.
+fun stage(do_not :: Set.of(Symbol), name :: Symbol,
+          thunk :: Function.of_arity(0)) :: maybe(Step):
+  cond
+  | do_not.contains(name): #false
+  | ~else: thunk()
+
 // `hint` forces the first induction variable; deeper inductions always choose
 // for themselves.
 fun prove_goal(ctx :: Context, g :: Goal,
-               ~induct: hint :: maybe(FVar) = #false) :: ProofNode:
+               ~induct: hint :: maybe(FVar) = #false,
+               ~do_not: do_not :: Set.of(Symbol) = Set()) :: ProofNode:
+  check_do_not(do_not)
   fun go(g :: Goal, depth :: Int, hint :: maybe(FVar)) :: ProofNode:
     fun descend(st :: Step, next_depth :: Int) :: ProofNode:
       Derived(st, st.subgoals.map(fun (s :: Goal): go(s, next_depth, #false)))
     // `#false` first in every one of these: `:~` is an assertion, not a
     // test, so a `Step`-annotated clause placed first would swallow `#false`.
-    match stage_simplify(ctx, g)
+    match stage(do_not, #'simplify, fun (): stage_simplify(ctx, g))
     | #false:
-        match stage_eliminate(ctx, g)
+        match stage(do_not, #'eliminate, fun (): stage_eliminate(ctx, g))
         | #false:
-            match stage_fertilize(ctx, g)
+            match stage(do_not, #'fertilize, fun (): stage_fertilize(ctx, g))
             | #false:
-                match stage_generalize(ctx, g)
+                match stage(do_not, #'generalize, fun (): stage_generalize(ctx, g))
                 | #false:
-                    match stage_irrelevance(ctx, g)
+                    match stage(do_not, #'irrelevance,
+                                fun (): stage_irrelevance(ctx, g))
                     | #false:
                         cond
                         | depth >= max_induction_depth: Open(g)
+                        | do_not.contains(#'induct): Open(g)
                         | ~else:
                             match stage_induct(ctx, g, hint)
                             | #false: Open(g)
@@ -149,7 +175,8 @@ fun prove_goal(ctx :: Context, g :: Goal,
 // which is fine for a machine-generated goal and unhelpful for a human one.
 fun prove(ctx :: Context, statement :: Term,
           ~names: names :: List.of(Symbol) = [],
-          ~induct: hint :: maybe(Symbol) = #false)
+          ~induct: hint :: maybe(Symbol) = #false,
+          ~do_not: do_not :: Set.of(Symbol) = Set())
      :: values(maybe(Thm), ProofNode):
   let thy = ctx.thy
   let (vars, matrix) = strip_forall_all(statement, names)
@@ -172,7 +199,8 @@ fun prove(ctx :: Context, statement :: Term,
                         | List.cons(v, rest):
                             (if (v :~ FVar).name == hint | v | loop(rest))
                   | ~else: #false)
-  let node = prove_goal(ctx, mk_goal([], matrix), ~induct: hint_var)
+  let node = prove_goal(ctx, mk_goal([], matrix), ~induct: hint_var,
+                        ~do_not: do_not)
   match run(node)
   | #false: values(#false, node)
   | th :~ Thm:

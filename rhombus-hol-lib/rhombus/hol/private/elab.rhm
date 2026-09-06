@@ -653,32 +653,43 @@ fun binder_name(b :: Syntax) :: Symbol:
 // Tactics
 // ============================================================================
 //
-// `auto`, `auto ~induct: x`, or `auto(~induct: x, ~using: [a, b])`.  The
-// parenthesised form exists because two `~kw:` blocks written in sequence
-// mis-nest: shrubbery reads `auto ~induct: xs ~using: [a]` as `~using:` inside
-// the `~induct:` block.
+// `auto`, `auto ~induct: x`, or `auto(~induct: x, ~using: [a, b], ~do_not:
+// [stage, ...])`.  The parenthesised form exists because two `~kw:` blocks
+// written in sequence mis-nest: shrubbery reads `auto ~induct: xs ~using:
+// [a]` as `~using:` inside the `~induct:` block.
 //
-// Returns `[induct_name_or_false, [using_name, ...]]`.
+// `~do_not:` names waterfall stages to skip for this proof only -- ACL2's own
+// `:do-not` hint -- as a rare escape hatch when a stage's heuristic gets in
+// the way (it changes what the prover tries, never what it is allowed to
+// conclude: a bad choice of `~do_not:` just produces a residue).  The
+// recognised names are `simplify`, `eliminate`, `fertilize`, `generalize`,
+// `irrelevance` and `induct`; see `waterfall.rhm`'s pipeline comment.
+//
+// Returns `[induct_name_or_false, [using_name, ...], [do_not_name, ...]]`.
 fun parse_tactic(stx :: maybe(Syntax)) :: List:
   match stx
-  | #false: [#false, []]
+  | #false: [#false, [], []]
   | s :~ Syntax:
       match s
-      | 'auto': [#false, []]
-      | 'auto ~induct: $(n :: Identifier)': [Syntax.unwrap(n), []]
+      | 'auto': [#false, [], []]
+      | 'auto ~induct: $(n :: Identifier)': [Syntax.unwrap(n), [], []]
       | 'auto ($opt, ...)': tactic_options([opt, ...], s)
       | 'auto: $g; ...': tactic_options(['$g; ...'], s)
       | ~else:
           syntax_error(#'proof,
                        "this version understands `auto`, `auto ~induct: x`, "
-                         ++ "and `auto(~induct: x, ~using: [t, ...])`",
+                         ++ "and `auto(~induct: x, ~using: [t, ...], "
+                         ++ "~do_not: [stage, ...])`",
                        s)
 
 fun tactic_options(opts :: List.of(Syntax), at :: Syntax) :: List:
-  for values(acc :~ List = [#false, []]) (o in opts):
+  for values(acc :~ List = [#false, [], []]) (o in opts):
     match o
-    | '~induct: $(n :: Identifier)': [Syntax.unwrap(n), acc[1]]
-    | '~using: [$(u :: Identifier), ...]': [acc[0], (acc[1] :~ List) ++ [Syntax.unwrap(u), ...]]
+    | '~induct: $(n :: Identifier)': [Syntax.unwrap(n), acc[1], acc[2]]
+    | '~using: [$(u :: Identifier), ...]':
+        [acc[0], (acc[1] :~ List) ++ [Syntax.unwrap(u), ...], acc[2]]
+    | '~do_not: [$(d :: Identifier), ...]':
+        [acc[0], acc[1], (acc[2] :~ List) ++ [Syntax.unwrap(d), ...]]
     | ~else: syntax_error(#'proof, "unknown proof option", o)
 
 // ============================================================================

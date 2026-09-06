@@ -1,6 +1,7 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 947 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 961 tests passed。
+§10 に外部レビュー対応の状況をまとめてある。
 
 ---
 
@@ -395,6 +396,45 @@ review が示唆する「`new_basic_type_definition` に置き換えれば済む
 この節の変更は `datatype.rhm` に一切触れずに完結する。9.2 が未着手のままでも
 `recdef.rhm` だけ先に閉じられる。
 
+### 9.1.1 進捗（本セッション）: `WF_INDUCTION` とその逆を導出、`WFREC` は未着手
+
+9.1 の 3 段のうち、段 1（`WF` の定義）は既に完了していた
+（`bool.rhm` の `mk_wf`/`c_wf`、"Add WF as a base logical constant" コミット）。
+本セッションで `rhombus-hol-lib/rhombus/hol/private/wellfounded.rhm` を追加し、
+段 2 が必要とする双方向の補題を両方とも**導出**（`new_axiom` なし、
+`drule.rhm` の `CCONTR`/`EXISTS`/`CHOOSE`/`GEN`/`SPEC`/`MP`/`DISCH` だけで）した:
+
+```text
+prove_wf_induction        : |- !R. WF(R) ==> !P. (!x. (!y. R y x ==> P y) ==> P x) ==> !x. P x
+prove_wf_from_induction    : ind_scheme(R) の証明を受け取り |- WF(R) を返す（規則）
+```
+
+`prove_wf_induction` は閉じた定理（仮説 0 個）。`prove_wf_from_induction` は
+段 2 が要求する向き（帰納法の公理 → `WF`）そのもので、`tests/wellfounded.rhm`
+で両方向とも実カーネルに対して確認済み（947 → 961 テスト）。
+
+**未着手、次に続ける人へ:**
+
+1. `prove_wf_from_induction` は「`!P. (!x. (!y. R y x ==> P y) ==> P x) ==> !x. P x`」
+   という**一般形**の証明を受け取る。`datatype.rhm`/`DatatypeThms.induction` は
+   コンストラクタごとの場合分け形（`(!args. P(C1(args))) and ... ==> !x. P(x)`、
+   各コンストラクタの再帰フィールドについて帰納法の仮定を伴う）なので、
+   これを一般形に変換する橋渡しの補題がまだない。橋渡しは
+   「`R` = "直近の子である"（`subterm_spec` の `T_lt` ではなく、コンストラクタの
+   再帰フィールドちょうど 1 段の関係）」を選び、コンストラクタごとの場合分けを
+   単一の `!x. (!y. R y x ==> P y) ==> P x` へ畳み込む、datatype ごとに
+   ほぼ機械的な変換になるはずである。
+2. `T_lt`（`subterm.rhm`）は「直近の子」ではなく**その推移閉包**（等しいか、
+   子孫か）。`WF(直近の子) ==> WF(推移閉包)` という汎用補題が別途要る
+   （one-time, `wellfounded.rhm` に足す）。
+3. **`WFREC` の存在定理**（9.1 の段 3）はまったく手つかず。これが一番大きく、
+   最も価値がある残作業: `RESTRICT(f, R, x)` の定義、近似の一意性論法、
+   `SELECT` を使った構成 --- 本格的な HOL4 `relationTheory.WF_RECURSION` 相当の
+   証明で、他の何よりも分量がある。`recdef.rhm` の `install_function` が
+   `new_axiom` をやめられるのはこれが揃ってから。
+4. 上記が揃うまで `recdef.rhm`/`datatype.rhm` は変更していない
+   （`new_axiom` は今もそのまま）。
+
 ### 9.2 `datatype`: 段階的に閉じる
 
 **フェーズ 1 (公理追加なし, 実利がすぐ出る)**: 自己再帰フィールドを一切持たない
@@ -444,3 +484,71 @@ cases は**構成による全射性**から、それぞれ定理として出る�
 （`datatype.rhm` 冒頭のコメント「Everything above this module depends
 solely on the statements in DatatypeThms, never on how they were obtained」
 の通り）ので、この一致確認が正しさの実用的な担保になる。
+
+---
+
+## 10. 外部レビュー（2026-09-07）への対応状況
+
+レビューは `rhombus-hol-kernel` を標準 HOL Light 型カーネルへ寄せ、
+`rhombus-hol-lib` を Rhombus/ACL2 側へ広げる、という非対称な方向性を
+提案した。15 項目のうち、本セッションで扱ったものの状況:
+
+| # | 項目 | 状況 |
+|---|---|---|
+| 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
+| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **未着手**（§9.2 のまま）。フェーズ 1（非再帰 datatype）ですら `unit`/`sum`/`prod` の構成から要り、複数セッション規模。 |
+| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **部分的**。`wellfounded.rhm` で `WF_INDUCTION` とその逆を導出（§9.1.1）。`WFREC` 本体（一番価値が高く、一番大きい部分）は未着手。`recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
+| 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
+| 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済みだが、hyp_insert 等の非公開化は未着手。 |
+| 6 | 公開 kernel API を HOL Light `fusion.ml` に揃える | 大枠は既に一致（十規則、同じ命名）。未着手部分は上記の printer/tracing 分離のみ。 |
+| 7 | `Surface → CoreExpr → HOL + Rhombus` の共通 IR | **未着手**。`elab.rhm`（HOL 側）と `module_block.rhm`（Rhombus 側）は今も同じソースを別々に読む二経路のまま。 |
+| 8 | `match`/`cond`/局所 `def`/入れ子パターンの追加 | **未着手**。現状は `elab.rhm` の `parse_body`/`parse_clause` が「1 引数につき 1 段」の制約を持ち、`terminate.rhm` の `descends_at` も同じ制約に依存しているため、単なる文法追加ではなく決定木コンパイラ相当の設計変更になる。 |
+| 11 | fertilization / irrelevance 除去 / induction pool | fertilization と irrelevance 除去は**完了**（本セッション以前）。induction pool は**試みて撤回**。下記参照。 |
+| 13 | rule classes | **未着手**（依頼したサブエージェントが基盤モデルの利用上限で失敗、本セッション内では再着手できず）。 |
+| 14 | conditional rewriting | **未着手**（同上）。 |
+| 15 | hints の拡充（`~cases`/`~expand`/`~in_theory`） | **未着手**（同上）。`~do_not:` は本セッション以前に追加済み。 |
+
+### `HType`（`TyVar`/`TyApp`）の raw construction は意図的に隠していない
+
+`Term` 側（`FVar`/`BVar`/`Const`/`Comb`/`Abs`）は `constructor ~none` +
+`internal` + testing 専用の `raw_fvar`/`raw_bvar`/`raw_const`/`raw_comb`/
+`raw_abs` で閉じた（`term.rhm`）。同じ手当てを `HType` にも、と検討したが
+見送った: `TyVar`/`TyApp` の生構築は `bool.rhm`・`datatype.rhm`・
+`subterm.rhm`・`elab.rhm`・`expand.rhm`・`terminate.rhm`・`kernel.rhm` 自身
+など 15 ファイル以上に、`mk_fun` 相当の「賢い構築子」なしで直接ちりばめ
+られており、レビューが実際に懸念していたのは（`BVar` の binder 型不一致の
+ような）型ではなく項固有の不変条件であって、型の生構築を隠す動機は
+「防御的 API・教育性」のみである。100+ 箇所の機械的だが広範なリネームを
+この一点の見た目のためだけに行うのは、費用対効果で見送るべきと判断した。
+着手する場合は `mk_tyvar`/`mk_tyapp` を `htype.rhm` に追加し、上記ファイル
+群の**構築**箇所（パターンマッチ箇所は触らなくてよい ── `constructor ~none`
+は構築だけを塞ぐ）を機械的に置き換える。
+
+### induction pool は実装して撤回した（性能退行）
+
+`waterfall.rhm` の `max_induction_depth = 2` を、繰り返しゴール検出
+（同じ `(asms, concl)` を持つゴールに再度帰納法を試みない）+ 大きめの
+安全弁（200）に置き換える版を実装し、`tests/decl_theorem.rhm` で検証した
+ところ、以前 29 秒で終わっていたファイルが 108 秒以上かかるようになった
+（`conditional_stuck.rhm`/`theorem_stuck.rhm` 等、意図的に失敗するはずの
+フィクスチャが、以前は深さ 2 ですぐ諦めていたのに対し、繰り返し検出が
+「進展なし」を捕まえられないケースでずっと深く帰納法を試すようになった
+ため）。各帰納法はコンストラクタの数だけ分岐するので、深さに対して
+作業量は指数的に増える。厳密な繰り返し一致だけでは ACL2 が実際に使っている
+「進展なし」ヒューリスティック（ゴールのサイズ・構造が悪化していないか等）
+の代わりにならず、安全弁を大きく取ると退行、小さく取ると元の 2 とほとんど
+変わらない。**この変更は撤回済み**（`waterfall.rhm` は元の固定深度 2 の
+ままで、リポジトリに退行は残っていない）。正しくやるなら、単純な深さや
+繰り返し検出ではなく、ACL2 の「進展があったかどうか」判定
+（生成された部分項の集合が真に増えたか、生成された仮定が本当に新しいか等）
+を実装する必要がある。
+
+### サブエージェント委譲について
+
+P2 の 4 項目（induction pool・rule classes・conditional rewriting・
+richer hints）をまとめて 4 並列のサブエージェントに委譲しようとしたが、
+基盤モデル（当時 `openai-codex/gpt-5.6-terra`）の利用上限に達しており
+即座に全滅した。再試行も同様に失敗したため、本セッションでは induction
+pool のみ自分で試みて上記の理由で撤回し、残り 3 項目には着手できなかった。
+次にこの作業を再開する際は、まずサブエージェント基盤が使えるか probe
+してから並列委譲するか、使えなければ逐次に自分で実装するかを判断すること。

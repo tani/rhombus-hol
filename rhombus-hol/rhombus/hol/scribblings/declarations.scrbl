@@ -112,7 +112,7 @@ attribute = ~rewrite_rule | ~simp
 
 tactic = auto
        | auto ~induct: Id
-       | auto(~induct: Id, ~using: [Id, ...])
+       | auto(~induct: Id, ~using: [Id, ...], ~do_not: [Id, ...])
 }
 
 States a proposition and proves it while the module compiles. The proposition
@@ -143,7 +143,11 @@ inside the first.
 
 @rhombus(~induct) names a variable to induct on. @rhombus(~using) names
 theorems to enable for this proof only, which is useful when a lemma is too
-aggressive to leave in the rewriter permanently.
+aggressive to leave in the rewriter permanently. @rhombus(~do_not) names
+waterfall stages --- @tt{simplify}, @tt{eliminate}, @tt{fertilize},
+@tt{generalize}, @tt{irrelevance}, @tt{induct} --- to skip for this proof
+only; see @secref("prover"). It changes what the prover tries, never what it
+is allowed to conclude.
 
 @section{@rhombus(disable_rules, ~datum) and @rhombus(enable_rules, ~datum)}
 

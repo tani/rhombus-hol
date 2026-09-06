@@ -9,7 +9,8 @@ off the bottom is left open, and the record of what was tried becomes the
 error message.
 
 @nested(~style: #'inset){
- @verbatim{simplification -> destructor elimination -> generalization -> induction}
+ @verbatim{simplification -> destructor elimination -> fertilization ->
+generalization -> elimination of irrelevance -> induction}
 }
 
 There is no search and no backtracking. The prover is a function of the goal
@@ -40,6 +41,21 @@ about its constructor instead: knowing @tt{is_Cons(xs)}, the goal is restated
 with @tt{xs} replaced by @tt{Cons(Cons_head(xs), Cons_tail(xs))}. This is what
 lets simplification proceed on a variable whose shape is known but not written.
 
+@section{Fertilization}
+
+An assumption of the shape @tt{x === t} or @tt{t === x}, with @tt{x} a
+variable that does not occur in @tt{t}, lets every occurrence of @tt{x} in the
+conclusion be rewritten to @tt{t}. Its usual source is an induction
+hypothesis freshly exposed by the previous case split, of exactly that shape.
+
+The hypothesis a fertilization step used is dropped from the resulting
+subgoal's own assumption list, so a given equation is used at most once along
+one branch. Two equations can otherwise be cyclic --- @tt{x === f(y)} and
+@tt{y === g(x)} each pass the occurs check alone, but eliminating @tt{x} can
+reintroduce @tt{y}, whose own equation reintroduces @tt{x} --- and without
+this, the two would toggle the goal back and forth forever instead of ever
+reaching the bottom of the pipeline.
+
 @section{Generalization}
 
 A subterm that appears on both sides of the goal and is not a constructor
@@ -49,6 +65,18 @@ it is what makes induction hypotheses strong enough to be useful.
 Only saturated application spines are candidates, and function-typed terms
 never are: generalizing a partial application produces a goal that is not just
 weaker but false.
+
+@section{Elimination of irrelevance}
+
+A hypothesis that shares no variable, even transitively through other kept
+hypotheses, with anything the conclusion needs is dropped before induction is
+attempted. Such a hypothesis cannot help prove the conclusion, and keeping it
+around can only confuse the heuristics that come after --- most often the
+choice of induction variable.
+
+Dropping it needs no proof step: a theorem proved from fewer assumptions is
+already usable wherever more are available, so the subgoal's proof, unchanged,
+is the parent goal's proof too.
 
 @section{Induction}
 
@@ -93,10 +121,15 @@ When a goal is instead a true statement the prover could not reach --- an
 instance of associativity, say --- the fix is to prove that statement as its
 own theorem and mark it @rhombus(~rewrite_rule).
 
-The three things to reach for, in order: prove the missing lemma and mark it a
+The things to reach for, in order: prove the missing lemma and mark it a
 rewrite rule; give @rhombus(~induct) when the prover picked the wrong variable;
 give @rhombus(~using) when a lemma is needed here but is too aggressive to
-leave enabled everywhere.
+leave enabled everywhere; give @rhombus(~do_not) --- ACL2's @tt{:do-not} ---
+to turn off one of @tt{simplify}, @tt{eliminate}, @tt{fertilize},
+@tt{generalize}, @tt{irrelevance} or @tt{induct} for this proof only, on the
+rare occasion a stage's heuristic is actively getting in the way. None of
+these can turn a false conjecture true or a wrong proof into a right one: a
+bad choice of any of them just changes what the residue looks like.
 
 @section{Justification}
 

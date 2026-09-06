@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 932 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 947 tests passed。
 
 ---
 
@@ -193,8 +193,8 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 | データ型 | `datatype`：正値性チェッカ + 公理スキーマ | `datatype` `positivity` |
 | 停止性 | `terminate`（辞書式構造的降下 + 測度）`recdef`（節形式の再帰定義） | `recdef` |
 | 書き換え | `tmatch` `ruledb` `simp`：一階マッチ、規則 DB、順序付き書き換え | `ruledb` |
-| 証明探索 | `goal` `induct` `waterfall`（簡約・デストラクタ除去・一般化・帰納法の固定パイプライン） | `spec_4_1` |
-| 一般化・デストラクタ除去 | `general` `destruct` | `spec_4_2` `destruct` |
+| 証明探索 | `goal` `induct` `waterfall`（簡約・デストラクタ除去・フェルティライズ・一般化・irrelevance 除去・帰納法の固定パイプライン、ACL2 準拠） | `spec_4_1` |
+| 一般化・デストラクタ除去・フェルティライズ・irrelevance 除去 | `general` `destruct` `fertilize` `irrelevance` | `spec_4_2` `destruct` `fertilize` `irrelevance` |
 | 表層構文 | `expand` `elab` `driver` `taut` `module_block` | `lang_state` `decl_type` `decl_fun` `decl_theorem` |
 | モジュール間の理論伝播 | 通常の `import` が理論を採用する（`Evaluator.module_is_declared` で検出） | `import_theory` |
 | プロパティテスト | `check_property`（実マクロ）+ `qc.rhm` の実行時レジストリ + 型ごとの生成器・縮小器 | `qc` |
@@ -218,6 +218,18 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 - **`max_induction_depth` は 2 に固定**（`waterfall.rhm`）。タクティクごとの
   fuel/timeout は入れない方針 — 帰納法は同じ型の新しい変数を作るので、
   上限がないと永遠に帰納法を試し続ける。
+- **フェルティライズは使った等式を子ゴールの仮定から落とす。** `x === f(y)` と
+  `y === g(x)` はそれぞれ単独では occurs check を通るが、交互に使うと
+  `x` を消しては `y` 経由で復活させ、を無限に繰り返せる。使った等式を
+  二度と使えなくする（`fertilize.rhm` 参照）と、この手の循環はどれだけ
+  複雑でも「使える等式が尽きる」で必ず止まる。ここで実際に `raco test` が
+  ハングする回帰を踏んだ — 新しいステージをパイプラインに足すときは、
+  他のステージが作る仮定の**形**まで見て、循環できないか確認すること。
+- **`auto(~do_not: [段階名, ...])`** で 1 つの証明だけ特定の段階（`simplify`
+  `eliminate` `fertilize` `generalize` `irrelevance` `induct`）を止められる。
+  ヒューリスティックが証明の邪魔をするときの逃げ道（ACL2 の `:do-not`）。
+  健全性には無関係 — 段階を止めても `Step` が正当化できることの意味は
+  変わらず、単に試さなくなるだけなので、悪い指定は残証拠になるだけ。
 
 ---
 
@@ -259,7 +271,7 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 | `type List('a)` | `type List(~a)` | `'` は syntax literal の開き括弧で字句解析できない |
 | `@rewrite_rule` | `theorem ~rewrite_rule name:` | `@` は at-記法として消え、別グループになる |
 | `theorem` + `proof` | `expand.rhm` が本体走査で 1 段先読み | 2 つの別グループとして解析される |
-| `auto ~induct: xs ~using: [a]` | 単独なら可。複数指定は `auto(~induct: xs, ~using: [a, b])` | 2 つ目の `~kw:` が 1 つ目のブロックに入れ子になる |
+| `auto ~induct: xs ~using: [a]` | 単独なら可。複数指定は `auto(~induct: xs, ~using: [a, b], ~do_not: [induct])` | 2 つ目の `~kw:` が 1 つ目のブロックに入れ子になる |
 | `fun app(...)` | `function app(...)` | 通常の Rhombus `fun` と衝突させない |
 | `and` / `or` / `not` | 命題専用の構文空間で定義 | 優先順位制御とエラーメッセージのため分離する |
 

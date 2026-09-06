@@ -11,7 +11,7 @@ export PATH="/Applications/Racket v9.3/bin:$PATH"
 cd /Users/tani/ghq/git.sr.ht/~tani/rhombus-hol
 
 # 初回のみ
-raco pkg install --batch --auto --link rhombus-hol-lib/ rhombus-hol/
+raco pkg install --batch --auto --link rhombus-hol-kernel/ rhombus-hol-lib/ rhombus-hol/
 
 # 通常のループ
 raco make rhombus-hol-lib/rhombus/hol.rkt        # 言語がコンパイルされるか
@@ -44,24 +44,27 @@ raco test rhombus-hol/rhombus/hol/tests/kernel.rhm  # 単体
 ```
 rhombus-hol/
 ├── PLAN.md                       ← このファイル
-├── rhombus-hol-lib/              実装（deps: base, rhombus-lib 1.1）
+├── rhombus-hol-kernel/            LCF カーネル（信頼境界①）。deps: base, rhombus-lib 1.1
+│   ├── info.rkt
+│   └── rhombus/hol/private/
+│       ├── names.rhm             論理定数の正準名（eq/imp/conj/…）
+│       ├── htype.rhm             型：TyVar / TyApp、subst・match・unify・order
+│       ├── term.rhm              項：locally nameless（下記 §2）
+│       ├── order.rhm             ACL2 term-order（順序付き書き換え用）
+│       ├── printer.rhm           De Bruijn → 名前付き逆変換
+│       └── kernel.rhm            十の基本推論規則、Thm/Theory の唯一の発行元
+├── rhombus-hol-lib/              派生層 + 言語面（deps: base, rhombus-lib 1.1, rhombus-hol-kernel）
 │   ├── info.rkt
 │   └── rhombus/
 │       ├── hol.rkt               #lang rhombus。言語本体 + reader サブモジュール
 │       ├── hol.rhm               #lang rhombus/lang_bridge → "hol.rkt"
 │       └── hol/private/
-│           ├── names.rhm         論理定数の正準名（eq/imp/conj/…）
-│           ├── htype.rhm         型：TyVar / TyApp、subst・match・unify・order
-│           ├── term.rhm          項：locally nameless（下記 §2）
-│           ├── order.rhm         ACL2 term-order（順序付き書き換え用）
-│           ├── printer.rhm       De Bruijn → 名前付き逆変換
-│           ├── kernel.rhm        LCF カーネル（信頼境界①）
 │           ├── bool.rhm          論理定数の定義 + 3 公理 + base_theory()
 │           ├── conv.rhm          変換（equal.ml 相当）
 │           ├── drule.rhm         派生規則（bool.ml + drule.ml 相当）
 │           ├── datatype.rhm      データ型の公理（信頼境界②）
 │           └── module_block.rhm  #%module_block 差し替え（現在は素通し）
-└── rhombus-hol/                  ドキュメント + テスト
+└── rhombus-hol/                  ドキュメント + テスト（deps: rhombus-hol-lib, rhombus-hol-kernel）
     ├── info.rkt
     └── rhombus/hol/
         ├── info.rkt, scribblings/rhombus-hol.scrbl（雛形のみ）
@@ -70,12 +73,21 @@ rhombus-hol/
                                   lang_meta lang_export
 ```
 
+`rhombus-hol-kernel/` の 6 ファイルは他パッケージの `private/` 内ファイルから、
+相対パスの文字列 (`"kernel.rhm"`) ではなく `rhombus/hol/private/kernel open`
+のようなコレクション相対のむき出しパスで参照する。同じコレクション
+`rhombus/hol/private/` に複数パッケージが合流する（`collection 'multi`）ため、
+これはファイル名が衝突しない限り問題なく解決される。テストパッケージが
+既にこの書き方で `rhombus-hol-lib` の中身を参照していたので、その慣習に
+合わせただけである。
+
 ### 位相（phase）の設計 — 最重要
 
 証明は**展開時**に走るのでカーネルは phase 1 で動く。しかしカーネル自体は
 `meta:` ブロックを一切含まない**通常の `#lang rhombus/static` モジュール**である。
-言語層（`hol.rkt` と今後の `decl_*.rhm`）だけが `import: meta: "private/kernel.rhm"`
-で位相を 1 ずらして取り込む。
+言語層（`hol.rkt` と今後の `decl_*.rhm`）だけが `import: meta: rhombus/hol/private/kernel open`
+で位相を 1 ずらして取り込む（`kernel.rhm` は `rhombus-hol-kernel` パッケージにあるので、
+相対パス文字列ではなくコレクション相対のむき出しパスで参照する）。
 
 このおかげで:
 1. カーネルのテストが素の phase 0 の `.rhm` で書ける（`raco test` がそのまま効く）

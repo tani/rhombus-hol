@@ -7,7 +7,7 @@ the native Rhombus kernel.
 
 ## Current design: verification tool, not a runtime dependency
 
-`rhombus-hol-lib/rhombus/hol/private/kernel.rhm` is 100% native Rhombus --
+`rhombus-hol-kernel/rhombus/hol/private/kernel.rhm` is 100% native Rhombus --
 the trust boundary Rhombus/HOL actually runs on. This directory is not
 `require`d by it, does not participate in `raco make`, and adds no runtime
 dependency to the Rhombus packages.
@@ -277,7 +277,7 @@ in `eq`'s generic type, and the representation variable
 those needs its own constructor. They are not privileged — a user may
 declare `a` or `r` too, and the bridge maps those to the same place, which
 is what keeps it injective. They mirror
-`rhombus-hol-lib/rhombus/hol/private/names.rhm`, which fixes the same names
+`rhombus-hol-kernel/rhombus/hol/private/names.rhm`, which fixes the same names
 on the Rhombus side. Everything a user declares is `NUser`, carrying
 a `Nat` rather than text -- which is what Rhombus `Symbol` equality
 actually *is*: interned identity, not a character-by-character comparison.

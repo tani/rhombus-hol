@@ -654,9 +654,9 @@ fun binder_name(b :: Syntax) :: Symbol:
 // ============================================================================
 //
 // `auto`, `auto ~induct: x`, or `auto(~induct: x, ~using: [a, b], ~do_not:
-// [stage, ...])`.  The parenthesised form exists because two `~kw:` blocks
-// written in sequence mis-nest: shrubbery reads `auto ~induct: xs ~using:
-// [a]` as `~using:` inside the `~induct:` block.
+// [stage, ...], ~in_theory: [rule, ...])`.  The parenthesised form exists
+// because two `~kw:` blocks written in sequence mis-nest: shrubbery reads
+// `auto ~induct: xs ~using: [a]` as `~using:` inside the `~induct:` block.
 //
 // `~do_not:` names waterfall stages to skip for this proof only -- ACL2's own
 // `:do-not` hint -- as a rare escape hatch when a stage's heuristic gets in
@@ -665,31 +665,44 @@ fun binder_name(b :: Syntax) :: Symbol:
 // recognised names are `simplify`, `eliminate`, `fertilize`, `generalize`,
 // `irrelevance` and `induct`; see `waterfall.rhm`'s pipeline comment.
 //
-// Returns `[induct_name_or_false, [using_name, ...], [do_not_name, ...]]`.
+// `~in_theory:` disables rules for this proof only -- ACL2's own
+// `:in-theory (disable ...)` -- layered on top of whatever a module-level
+// `disable_rules`/`enable_rules` already set: it can turn a rule off that
+// the module leaves enabled, but (like `~using:`, see `driver.rhm`) cannot
+// turn back on a rule the module disabled -- there is no
+// `~in_theory: enable [...]` in this version, only the module-level
+// declaration for that. Disabling a rule can only make the simplifier try
+// fewer rewrites, never more, so a bad choice just produces a residue, the
+// same as `~do_not:`.
+//
+// Returns `[induct_name_or_false, [using_name, ...], [do_not_name, ...],
+// [in_theory_name, ...]]`.
 fun parse_tactic(stx :: maybe(Syntax)) :: List:
   match stx
-  | #false: [#false, [], []]
+  | #false: [#false, [], [], []]
   | s :~ Syntax:
       match s
-      | 'auto': [#false, [], []]
-      | 'auto ~induct: $(n :: Identifier)': [Syntax.unwrap(n), [], []]
+      | 'auto': [#false, [], [], []]
+      | 'auto ~induct: $(n :: Identifier)': [Syntax.unwrap(n), [], [], []]
       | 'auto ($opt, ...)': tactic_options([opt, ...], s)
       | 'auto: $g; ...': tactic_options(['$g; ...'], s)
       | ~else:
           syntax_error(#'proof,
                        "this version understands `auto`, `auto ~induct: x`, "
                          ++ "and `auto(~induct: x, ~using: [t, ...], "
-                         ++ "~do_not: [stage, ...])`",
+                         ++ "~do_not: [stage, ...], ~in_theory: [rule, ...])`",
                        s)
 
 fun tactic_options(opts :: List.of(Syntax), at :: Syntax) :: List:
-  for values(acc :~ List = [#false, [], []]) (o in opts):
+  for values(acc :~ List = [#false, [], [], []]) (o in opts):
     match o
-    | '~induct: $(n :: Identifier)': [Syntax.unwrap(n), acc[1], acc[2]]
+    | '~induct: $(n :: Identifier)': [Syntax.unwrap(n), acc[1], acc[2], acc[3]]
     | '~using: [$(u :: Identifier), ...]':
-        [acc[0], (acc[1] :~ List) ++ [Syntax.unwrap(u), ...], acc[2]]
+        [acc[0], (acc[1] :~ List) ++ [Syntax.unwrap(u), ...], acc[2], acc[3]]
     | '~do_not: [$(d :: Identifier), ...]':
-        [acc[0], acc[1], (acc[2] :~ List) ++ [Syntax.unwrap(d), ...]]
+        [acc[0], acc[1], (acc[2] :~ List) ++ [Syntax.unwrap(d), ...], acc[3]]
+    | '~in_theory: [$(r :: Identifier), ...]':
+        [acc[0], acc[1], acc[2], (acc[3] :~ List) ++ [Syntax.unwrap(r), ...]]
     | ~else: syntax_error(#'proof, "unknown proof option", o)
 
 // ============================================================================

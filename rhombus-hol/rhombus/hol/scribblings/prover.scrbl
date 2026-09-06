@@ -124,12 +124,17 @@ own theorem and mark it @rhombus(~rewrite_rule).
 The things to reach for, in order: prove the missing lemma and mark it a
 rewrite rule; give @rhombus(~induct) when the prover picked the wrong variable;
 give @rhombus(~using) when a lemma is needed here but is too aggressive to
-leave enabled everywhere; give @rhombus(~do_not) --- ACL2's @tt{:do-not} ---
-to turn off one of @tt{simplify}, @tt{eliminate}, @tt{fertilize},
-@tt{generalize}, @tt{irrelevance} or @tt{induct} for this proof only, on the
-rare occasion a stage's heuristic is actively getting in the way. None of
-these can turn a false conjecture true or a wrong proof into a right one: a
-bad choice of any of them just changes what the residue looks like.
+leave enabled everywhere; give @rhombus(~in_theory) --- ACL2's
+@tt{:in-theory (disable ...)} --- to turn off a named rewrite rule for this
+proof only, layered on top of whatever a module-level
+@rhombus(disable_rules, ~datum) already turned off, on the occasion an
+enabled rule is firing where it should not; give @rhombus(~do_not) ---
+ACL2's @tt{:do-not} --- to turn off one of @tt{simplify}, @tt{eliminate},
+@tt{fertilize}, @tt{generalize}, @tt{irrelevance} or @tt{induct} for this
+proof only, on the rare occasion a stage's heuristic is actively getting in
+the way. None of these can turn a false conjecture true or a wrong proof
+into a right one: a bad choice of any of them just changes what the residue
+looks like.
 
 @section{Justification}
 

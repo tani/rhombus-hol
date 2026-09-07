@@ -116,6 +116,13 @@ recurse or recurses in a way the deriver handles --- is proved. Which one
 you get is decided by a check, not by a flag, and counting the axioms a
 module's theory ends up with is the way to tell (@tt{axioms_of}).
 
+You do not have to count, though, because the compiler does. Every
+declaration that takes a derived path checks that the theory it produced has
+the same number of axioms as the theory it started from, and refuses the
+declaration otherwise. So "derived" is an invariant rather than a claim: a
+path that quietly began postulating --- which is a way this has actually
+broken before --- fails at the declaration that did it, naming it.
+
 @bold{Datatypes.} A @rhombus(type, ~datum) is @emph{derived}, recursive or
 not. A non-recursive one --- any number of constructors, fields and type
 parameters --- is built as a sum of products of @tt{unit} over its field

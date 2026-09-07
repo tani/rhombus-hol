@@ -127,11 +127,24 @@ the axiom of infinity and carves @tt{num} out of it, deriving successor's
 injectivity, that no successor is zero, and induction --- three theorems, no
 hypotheses, for one axiom. Nothing imports it yet, so no theory reached
 through @tt{rhombus/hol} carries that axiom; a module's own
-@tt{axioms_of} count is what says whether it paid for one. It also derives
-@tt{WF(num_pred)} for @tt{num}'s successor relation, so recursion over
-@tt{num} is available on the same footing as recursion over a declared
-datatype. Carving recursive datatypes out of @tt{num} is the step that
-would use all of this, and is not written.
+@tt{axioms_of} count is what says whether it paid for one.
+
+What it derives for @tt{num} is every theorem a self-recursive
+@rhombus(type, ~datum) declaration postulates --- constructors injective,
+constructors distinct, every value built by one of them, and induction ---
+together with @tt{WF(num_pred)} for its successor relation, so recursion
+over @tt{num} stands on the same footing as recursion over a declared
+datatype. So the comparison is one axiom against thirteen: declaring the
+same type postulates its characterisation and its subterm relation's
+equations, and does so again for the next type, while the one axiom here is
+paid once and is not per-type.
+
+That makes @tt{num} the first self-recursive type in this system whose
+characterisation is proved rather than assumed. It is not yet the general
+construction: carving an @emph{arbitrary} recursive datatype out of
+@tt{num} needs a type of labelled trees over it and a recursion theorem,
+and is not written, so a self-recursive @rhombus(type, ~datum) in a module
+still postulates.
 
 @bold{Function definitions.} A @rhombus(function, ~datum) is @emph{derived}
 whenever the recursion it performs has a well-founded relation this version

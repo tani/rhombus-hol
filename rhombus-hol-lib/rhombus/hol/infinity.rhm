@@ -79,7 +79,7 @@ fun num_ty() :: HType: mk_tyapp(ty_num, [])
 class PeanoThms(suc_injective :: Thm, suc_not_zero :: Thm, induction :: Thm)
 
 class IndThms(suc_injective :: Thm, suc_not_zero :: Thm, induction :: Thm,
-              wf :: Thm)
+              wf :: Thm, cases :: Thm)
 
 // `|- P(@x. P x)` from `|- ?x. P x`.  The same derivation `wfrec.rhm` uses;
 // it is not exported from there, and duplicating six lines beats widening
@@ -217,8 +217,9 @@ fun build_ind(thy0 :: Theory) :: values(Theory, IndThms):
                  ind_suc, ind_0, num_rep, mk_num, dest_num,
                  zero, suc, ind_suc_inj, ind_suc_ne_0)
   let wf = derive_num_wf(thy9, def_pred, num_pred, zero, suc, nty, thms0)
+  let cases = derive_num_cases(thy9, zero, suc, nty, thms0)
   values(thy9, IndThms(thms0.suc_injective, thms0.suc_not_zero,
-                       thms0.induction, wf))
+                       thms0.induction, wf, cases))
 
 // `|- t = t'` where `t'` is `t` with `rhs` replaced by the constant `def`
 // introduces for it.  `def : |- c = rhs`, so rewriting is `cong_rewrite`
@@ -453,3 +454,31 @@ fun derive_num_wf(thy :: Theory, def_pred :: Thm, num_pred :: Term,
   let all_p = MP(thy, SPEC(thy, bigP :~ Term, thms.induction), ind_prem)
   let scheme = GEN(thy, bigP, DISCH(thy, step_stmt, all_p))
   prove_wf_from_induction(thy, num_pred, scheme)
+
+// `|- !n. n = zero or ?k. n = suc k`.
+//
+// Every `num` is one of the two constructors' -- the exhaustiveness half of
+// what a datatype declaration would postulate.  Straight from induction: the
+// base case is reflexivity, and the step case never even looks at its
+// hypothesis, since `suc k = suc k` settles the right disjunct on its own.
+fun derive_num_cases(thy :: Theory, zero :: Term, suc :: Term,
+                     nty :: HType, thms :: PeanoThms) :: Thm:
+  let n = mk_var(#'n, nty)
+  let k = mk_var(#'k, nty)
+  let j = mk_var(#'j, nty)
+  fun body(t :: Term) :: Term:
+    mk_disj(mk_eq(t, zero), mk_exists(j, mk_eq(t, mk_comb(suc, j))))
+  let pred = mk_abs(n, body(n :~ Term))
+
+  // Induction specialised at `pred` and beta-reduced once, so both the
+  // premise built below and the conclusion are in the shape they read in.
+  let ind_at = BETA_RULE(thy, SPEC(thy, pred, thms.induction))
+  let base:
+    DISJ1(thy, REFL(thy, zero), mk_exists(j, mk_eq(zero, mk_comb(suc, j))))
+  let step:
+    let sk = mk_comb(suc, k)
+    let ex = EXISTS(thy, mk_exists(j, mk_eq(sk, mk_comb(suc, j))), k :~ Term,
+                    REFL(thy, sk))
+    GEN(thy, k, DISCH(thy, body(k :~ Term),
+                      DISJ2(thy, mk_eq(sk, zero), ex)))
+  MP(thy, ind_at, CONJ(thy, base, step))

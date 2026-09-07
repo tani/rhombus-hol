@@ -182,10 +182,21 @@ class Thm(hyps :: List.of(Term),
   private implements Equatable
   // Terms are locally nameless, so structural equality is already equality up
   // to alpha; the stamp is provenance, not content.
+  //
+  // The hypothesis list is a *set*: its storage order carries no logical
+  // content, so equality compares membership rather than sequence.  It used
+  // to compare the lists directly, which was only correct while the lists
+  // were kept in a canonical order -- and keeping them so is exactly what
+  // went wrong (see `hyps` below).
   private override equals(other :: Thm, recur):
-    recur(concl, other.concl) && recur(hyps, other.hyps)
+    (recur(concl, other.concl)
+       && hyps.length() == other.hyps.length()
+       && (for all (h in hyps):
+             for any (k in other.hyps): recur(h, k)))
   private override hash_code(recur):
-    Equatable.hash_code_combine(recur(concl), recur(hyps))
+    // Addition is order-independent; collisions are harmless.
+    let hs = for values(acc = 0) (h in hyps): acc + recur(h)
+    Equatable.hash_code_combine(recur(concl), hyps.length(), hs)
 
 fun hyps_of(th :: Thm) :: List.of(Term): Thm.hyps(th)
 fun concl_of(th :: Thm) :: Term: Thm.concl(th)
@@ -193,9 +204,10 @@ fun stamp_of(th :: Thm) :: Stamp: th.stamp
 
 // -- hypothesis sets -------------------------------------------------------
 //
-// Kept as a list sorted by `term_ord` and deduplicated.  A sorted list beats
-// `Set.of(Term)` here: hypothesis sets are tiny and hashing terms is
-// expensive.
+// A duplicate-free list, in insertion order.  A list beats `Set.of(Term)`
+// here: hypothesis sets are tiny and hashing terms is expensive.  The order
+// is not canonical and carries no meaning -- `Thm`'s own equality compares
+// these as sets, so nothing downstream may depend on the sequence.
 
 namespace hyps:
   export:
@@ -204,30 +216,34 @@ namespace hyps:
     hyp_remove
     rehash_hyps
 
+  // Membership is decided by term equality and by nothing else.
+  //
+  // This list used to be kept sorted by `term_ord`, with `term_ord(t, h) == 0`
+  // as the duplicate test.  That is not equality.  `term_ord` compares
+  // constant and variable names with `<`/`>` on `Symbol`, which compares
+  // print names, and two uninterned symbols can print alike while being
+  // distinct.  So `ASSUME p` and `ASSUME q`, for two same-named but distinct
+  // `p` and `q`, produced a theorem with *one* hypothesis -- discharging an
+  // assumption nobody discharged.  `DEDUCT_ANTISYM_RULE` then yielded
+  // `|- false <=> true` with no hypotheses at all (`tests/kernel.rhm`).
+  //
+  // Order and identity are separate concerns.  `term_ord` remains a total
+  // order for display and for orienting permutative rewrites; it is not an
+  // equality test, here or anywhere else.
   fun hyp_insert(t :: Term, hs :: List.of(Term)) :: List.of(Term):
-    match hs
-    | []: [t]
-    | List.cons(h, rest):
-        let c = term_ord(t, h)
-        cond
-        | c == 0: hs
-        | c < 0: List.cons(t, hs)
-        | ~else: List.cons(h, hyp_insert(t, rest))
+    (if hs.contains(t) | hs | hs ++ [t])
 
   fun hyp_union(a :: List.of(Term), b :: List.of(Term)) :: List.of(Term):
     cond
     | a.length() == 0: b
     | b.length() == 0: a
-    | ~else: for values(acc :~ List = b) (t in a): hyp_insert(t, acc)
+    | ~else: for values(acc :~ List = a) (t in b): hyp_insert(t, acc)
 
   fun hyp_remove(t :: Term, hs :: List.of(Term)) :: List.of(Term):
     hs.filter(~skip: fun (h :: Term): h == t)
 
-  // Rebuild the canonical form of a hypothesis list.  Instantiation maps over
-  // the hypotheses pointwise, which can both reorder them and make two of them
-  // equal, so the result has to be re-sorted and deduplicated -- otherwise the
-  // invariant that hypothesis lists are canonical quietly breaks, and `==` on
-  // theorems starts reporting differences that are not there.
+  // Instantiation maps over the hypotheses pointwise, which can make two of
+  // them equal, so the result has to be deduplicated again.
   fun rehash_hyps(hs :: List.of(Term)) :: List.of(Term):
     for values(acc :~ List = []) (h in hs): hyp_insert(h, acc)
 

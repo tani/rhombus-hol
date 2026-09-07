@@ -7,6 +7,7 @@ import:
   rhombus/hol/kernel open
   // shadows rhombus's own `show`, which prints rather than returning a string
   rhombus/hol/printer open
+  lib("racket/base.rkt") as rkt
 
 def bl = mk_tyapp(ty_bool, [])
 def A = mk_tyvar(#'a)
@@ -411,11 +412,22 @@ check:
   let h2 = px(mk_comb(mk_abs(y, y), zero))
   hyps.hyp_remove(h2, [h1])
   ~is []
-// `hyps.rehash_hyps` restores the canonical order after a pointwise map
-check hyps.rehash_hyps([qx(x), px(x), qx(x)]) ~is hyps.hyp_union([px(x)], [qx(x)])
+// `hyps.rehash_hyps` removes the duplicates a pointwise map can introduce.
+// What it must preserve is the *set*; the storage order is not content, and
+// asserting it here would pin the very thing that used to be load-bearing.
+check hyps.rehash_hyps([qx(x), px(x), qx(x)]).length() ~is 2
+check:
+  let r = hyps.rehash_hyps([qx(x), px(x), qx(x)])
+  [r.contains(px(x)), r.contains(qx(x))]
+  ~is [#true, #true]
 check hyps.rehash_hyps([]) ~is []
-// the order is `term_ord`, so hypothesis lists are canonical
-check hyps.hyp_union([qx(x)], [px(x)]) ~is hyps.hyp_union([px(x)], [qx(x)])
+// union is the same set either way round
+check:
+  let ab = hyps.hyp_union([qx(x)], [px(x)])
+  let ba = hyps.hyp_union([px(x)], [qx(x)])
+  [ab.length(), ba.length(), ab.contains(px(x)), ab.contains(qx(x)),
+   ba.contains(px(x)), ba.contains(qx(x))]
+  ~is [2, 2, #true, #true, #true, #true]
 
 // ==========================================================================
 // Lineage: a theorem may only be used in the theory it was proved in, or an
@@ -621,3 +633,47 @@ check:
   let (thy_w, w) = new_axiom(thy, px(zero))
   new_basic_type_definition(thy_w, #'sub3, #'same, #'same, w)
   ~throws "same name"
+
+// ==========================================================================
+// hypothesis sets are sets of *terms*, not of print names
+// ==========================================================================
+//
+// A hypothesis list used to be kept sorted by `term_ord`, with
+// `term_ord(t, h) == 0` as the duplicate test.  That is not equality:
+// `term_ord` compares names with `<`/`>` on `Symbol`, which compares print
+// names, and two uninterned symbols can print alike while being distinct
+// terms.  Assuming both then produced a theorem with one hypothesis -- an
+// assumption discharged by nobody.
+//
+// The consequence was not cosmetic.  `DEDUCT_ANTISYM_RULE` over the two
+// assumptions, instantiated so that the surviving hypothesis is the provable
+// one, gave a closed `|- false <=> true` in the base theory through the
+// public API alone.  The derivation is reproduced here in full, so the check
+// is that it *stops*, not merely that a count looks right.
+
+def sym_p1 :: Symbol = rkt.#{string->uninterned-symbol}("hp")
+def sym_p2 :: Symbol = rkt.#{string->uninterned-symbol}("hp")
+
+// same print name, different symbols -- which is the whole premise
+check to_string(sym_p1) == to_string(sym_p2) ~is #true
+check sym_p1 == sym_p2 ~is #false
+
+def hv1 = mk_var(sym_p1, bl)
+def hv2 = mk_var(sym_p2, bl)
+check (hv1 :~ Term) == (hv2 :~ Term) ~is #false
+
+// `p, q |- p <=> q`: both assumptions survive
+def two_named:
+  DEDUCT_ANTISYM_RULE(ASSUME(thy, hv1), ASSUME(thy, hv2))
+check hyps_of(two_named).length() ~is 2
+check hyps_of(two_named).contains(hv1 :~ Term) ~is #true
+check hyps_of(two_named).contains(hv2 :~ Term) ~is #true
+
+// and the exploit no longer closes: instantiating `p := false`, `q := true`
+// leaves `false` standing as a hypothesis, which is exactly right.
+check:
+  let inst = INST(thy, [[px(x), hv1 :~ Term], [qx(x), hv2 :~ Term]],
+                  two_named)
+  [show(concl_of(inst)), hyps_of(inst).length(),
+   hyps_of(inst).contains(px(x)), hyps_of(inst).contains(qx(x))]
+  ~is ["p(x) <=> q(x)", 2, #true, #true]

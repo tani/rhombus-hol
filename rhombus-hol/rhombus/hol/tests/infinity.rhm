@@ -13,6 +13,7 @@ import:
   rhombus/hol/term open
   rhombus/hol/bool open
   rhombus/hol/drule open
+  rhombus/hol/conv open
   rhombus/hol/wellfounded open
   rhombus/hol/driver open
   "fixtures/nat_declared.rhm"!hol_theory as decl
@@ -124,3 +125,62 @@ check:
   [axioms_of(declared.thy).length() - axioms_of(base).length(),
    axioms_of(thy).length() - axioms_of(base).length()]
   ~is [13, 1]
+
+// -- recursion over num ------------------------------------------------------
+//
+// The primitive recursion theorem, and the named combinator it comes with.
+// This is what makes `num` a base to build on rather than a type with some
+// theorems attached: every function defined by recursion on the naturals is
+// an instance of it.  It is `WFREC` -- already derived in `wfrec.rhm` --
+// applied to `num_pred` and a step function, so it adds no axiom either.
+def (rthy, rec) = build_num_recursion(thy, thms)
+
+check axioms_of(rthy).length() ~is axioms_of(base).length() + 1
+check hyps_of(rec.existence) ~is []
+check hyps_of(rec.at_zero) ~is []
+check hyps_of(rec.at_suc) ~is []
+
+check:
+  show(concl_of(rec.existence))
+  ~is "forall (x :: 'b, y :: 'b -> num -> 'b): exists (z :: num -> 'b): z(zero_num) === x and forall (u :: num): z(suc_num(u)) === y(z(u), u)"
+check:
+  show(concl_of(rec.at_zero))
+  ~is "forall (x :: 'b, y :: 'b -> num -> 'b): num_rec(x, y, zero_num) === x"
+check:
+  show(concl_of(rec.at_suc))
+  ~is "forall (x :: 'b, y :: 'b -> num -> 'b, z :: num): num_rec(x, y, suc_num(z)) === y(num_rec(x, y, z), z)"
+
+// and it is usable: an actual recursive function over `num`, defined with
+// `new_basic_definition` and its two clausal equations *proved*.  Nothing
+// here is postulated, and the theory still carries the one axiom.
+check:
+  let nty = mk_tyapp(#'num, [])
+  let zero = mk_const(#'zero_num, nty)
+  let suc = mk_const(#'suc_num, mk_fun(nty, nty))
+  let a = mk_var(#'a, nty)
+  let n = mk_var(#'n, nty)
+  let step = mk_abs(a, mk_abs(n, mk_comb(suc, mk_comb(suc, a))))
+  let rec_ty = mk_fun(nty, mk_fun(mk_fun(nty, mk_fun(nty, nty)),
+                                  mk_fun(nty, nty)))
+  let num_rec = mk_const(#'num_rec, rec_ty)
+  let (dthy, def_dbl):
+    new_basic_definition(rthy, mk_eq(mk_var(#'double, mk_fun(nty, nty)),
+                                     list_mk_comb(num_rec, [zero, step])))
+  let at_n = SPEC(dthy, n,
+                  SPECL(dthy, [zero, step],
+                        INST_TYPE(dthy, {#'b: nty}, rec.at_suc)))
+  let eq_zero:
+    TRANS(unfold_def(dthy, def_dbl, [zero]),
+          SPECL(dthy, [zero, step],
+                INST_TYPE(dthy, {#'b: nty}, rec.at_zero)))
+  let eq_suc:
+    let unf_n = unfold_def(dthy, def_dbl, [n :~ Term])
+    TRANS(BETA_RULE(dthy, TRANS(unfold_def(dthy, def_dbl,
+                                           [mk_comb(suc, n)]), at_n)),
+          AP_TERM(dthy, suc, AP_TERM(dthy, suc, SYM(dthy, unf_n))))
+  [show(concl_of(eq_zero)), hyps_of(eq_zero).length(),
+   show(concl_of(eq_suc)), hyps_of(eq_suc).length(),
+   axioms_of(dthy).length() - axioms_of(base).length()]
+  ~is ["double(zero_num) === zero_num", 0,
+       "double(suc_num(n)) === suc_num(suc_num(double(n)))", 0,
+       1]

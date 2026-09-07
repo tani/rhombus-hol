@@ -139,12 +139,19 @@ same type postulates its characterisation and its subterm relation's
 equations, and does so again for the next type, while the one axiom here is
 paid once and is not per-type.
 
+It also derives the primitive recursion theorem for @tt{num}, and with it a
+named combinator @tt{num_rec} whose two equations let a function be defined
+by recursion on the naturals and its clauses @emph{proved}. That is
+@tt{WFREC} --- itself derived --- applied to @tt{num_pred}, so it adds no
+axiom either.
+
 That makes @tt{num} the first self-recursive type in this system whose
-characterisation is proved rather than assumed. It is not yet the general
-construction: carving an @emph{arbitrary} recursive datatype out of
-@tt{num} needs a type of labelled trees over it and a recursion theorem,
-and is not written, so a self-recursive @rhombus(type, ~datum) in a module
-still postulates.
+characterisation is proved rather than assumed, and the first over which
+recursion is available without postulating anything. It is not yet the
+general construction: carving an @emph{arbitrary} recursive datatype out of
+@tt{num} needs a type of labelled trees over it, whose encoding needs
+arithmetic, and that is not written --- so a self-recursive
+@rhombus(type, ~datum) in a module still postulates.
 
 @bold{Function definitions.} A @rhombus(function, ~datum) is @emph{derived}
 whenever the recursion it performs has a well-founded relation this version

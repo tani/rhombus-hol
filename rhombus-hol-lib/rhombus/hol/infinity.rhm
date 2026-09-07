@@ -39,6 +39,8 @@ import:
   rhombus/hol/names open
   rhombus/hol/kernel open
   "wellfounded.rhm" open
+  "wfrec.rhm" open
+  "taut.rhm" open
   rhombus/hol/printer open
   "bool.rhm" open
   "conv.rhm" open
@@ -50,9 +52,13 @@ export:
   c_zero
   c_suc
   c_num_pred
+  c_pre
+  c_num_rec
   num_ty
   IndThms
+  NumRec
   build_ind
+  build_num_recursion
 
 def ty_ind :: Symbol = #'ind
 def ty_num :: Symbol = #'num
@@ -64,6 +70,9 @@ def c_dest_num :: Symbol = #'dest_num
 def c_zero :: Symbol = #'zero_num
 def c_suc :: Symbol = #'suc_num
 def c_num_pred :: Symbol = #'num_pred
+def c_pre :: Symbol = #'pre_num
+def c_rec_step :: Symbol = #'num_rec_step
+def c_num_rec :: Symbol = #'num_rec
 
 fun ind_ty() :: HType: mk_tyapp(ty_ind, [])
 fun num_ty() :: HType: mk_tyapp(ty_num, [])
@@ -78,8 +87,15 @@ fun num_ty() :: HType: mk_tyapp(ty_num, [])
 //   `induction`      |- !P. P zero and (!n. P n ==> P (suc n)) ==> !n. P n
 class PeanoThms(suc_injective :: Thm, suc_not_zero :: Thm, induction :: Thm)
 
+// `existence` is the recursion theorem as it is usually stated.  `at_zero`
+// and `at_suc` are the same content about the named combinator `num_rec`,
+// which is what a caller defining a function by recursion actually wants:
+// `num_rec e f` *is* the function, so there is no existential to eliminate
+// and no `CHOOSE` in the way.
+class NumRec(existence :: Thm, at_zero :: Thm, at_suc :: Thm)
+
 class IndThms(suc_injective :: Thm, suc_not_zero :: Thm, induction :: Thm,
-              wf :: Thm, cases :: Thm)
+              wf :: Thm, cases :: Thm, pre_suc :: Thm, pred_def :: Thm)
 
 // `|- P(@x. P x)` from `|- ?x. P x`.  The same derivation `wfrec.rhm` uses;
 // it is not exported from there, and duplicating six lines beats widening
@@ -218,8 +234,19 @@ fun build_ind(thy0 :: Theory) :: values(Theory, IndThms):
                  zero, suc, ind_suc_inj, ind_suc_ne_0)
   let wf = derive_num_wf(thy9, def_pred, num_pred, zero, suc, nty, thms0)
   let cases = derive_num_cases(thy9, zero, suc, nty, thms0)
-  values(thy9, IndThms(thms0.suc_injective, thms0.suc_not_zero,
-                       thms0.induction, wf, cases))
+  // The predecessor, as a partial inverse pinned down by choice: `pre_num n`
+  // is the `k` with `n = suc k`, and `suc`'s injectivity is what makes that
+  // `k` unique, so the equation below is provable rather than stipulated.
+  // At `zero` the choice is unconstrained and nothing here says what it is.
+  let kv = mk_var(#'k, nty)
+  let pre_rhs = mk_abs(nv, mk_select(kv, mk_eq(nv :~ Term, mk_comb(suc, kv))))
+  let (thy10, def_pre):
+    new_basic_definition(thy9, mk_eq(mk_var(c_pre, mk_fun(nty, nty)), pre_rhs))
+  let pre_suc:
+    derive_pre_suc(thy10, def_pre, mk_const(c_pre, mk_fun(nty, nty)),
+                   suc, nty, thms0)
+  values(thy10, IndThms(thms0.suc_injective, thms0.suc_not_zero,
+                        thms0.induction, wf, cases, pre_suc, def_pred))
 
 // `|- t = t'` where `t'` is `t` with `rhs` replaced by the constant `def`
 // introduces for it.  `def : |- c = rhs`, so rewriting is `cong_rewrite`
@@ -482,3 +509,201 @@ fun derive_num_cases(thy :: Theory, zero :: Term, suc :: Term,
     GEN(thy, k, DISCH(thy, body(k :~ Term),
                       DISJ2(thy, mk_eq(sk, zero), ex)))
   MP(thy, ind_at, CONJ(thy, base, step))
+
+// `|- !j. pre_num(suc_num j) = j`.
+//
+// `pre_num(suc j)` unfolds to `@k. suc j = suc k`.  By `suc`'s injectivity
+// that predicate holds of `k` exactly when `k = j`, so choice has no room:
+// `SELECT_UNIQUE` turns "holds at `j`, and holds only at `j`" into the
+// equation.
+fun derive_pre_suc(thy :: Theory, def_pre :: Thm, pre :: Term, suc :: Term,
+                   nty :: HType, thms :: PeanoThms) :: Thm:
+  let j = mk_var(#'j, nty)
+  let k = mk_var(#'k, nty)
+  let sj = mk_comb(suc, j)
+  let body = mk_eq(sj, mk_comb(suc, k))
+  // `|- suc j = suc j`, the witness, in the unreduced shape `SELECT_UNIQUE`
+  // asks for.
+  let pred = mk_abs(k, body)
+  let beta_j = (match BETA_CONV(thy, mk_comb(pred, j :~ Term))
+                | th :: Thm: th
+                | ~else: error(~who: #'derive_pre_suc, "beta failed"))
+  let pa = EQ_MP(SYM(thy, beta_j), REFL(thy, sj))
+  // `|- !k. suc j = suc k ==> k = j`
+  let uniq:
+    let asm = ASSUME(thy, body)
+    let j_is_k = EQ_MP(SPEC(thy, k, SPEC(thy, j, thms.suc_injective)), asm)
+    GEN(thy, k, DISCH(thy, body, SYM(thy, j_is_k)))
+  let sel_eq = SELECT_UNIQUE(thy, k, body, j :~ Term, pa, uniq)
+  GEN(thy, j, TRANS(unfold_def(thy, def_pre, [sj]), sel_eq))
+
+// The primitive recursion theorem for `num`:
+//
+//   |- !e f. ?fn. fn(zero_num) = e and !n. fn(suc_num n) = f (fn n) n
+//
+// This is what makes `num` a base to build on rather than a type with some
+// theorems about it: every function defined by recursion on the naturals --
+// addition, multiplication, the pairing a general recursive-datatype
+// construction needs -- comes from an instance of it.
+//
+// It is not postulated and it is not a new principle.  It is `WFREC`, the
+// existence theorem already derived in `wfrec.rhm`, applied to the
+// well-founded relation `num_pred` from `derive_num_wf` and the step function
+//
+//   H = \g n. if n = zero_num then e else f (g (pre_num n)) (pre_num n)
+//
+// with the congruence hypothesis `WFREC` asks for proved by splitting `n`
+// with the `cases` theorem: at `zero_num` neither side makes a recursive
+// call, and at `suc_num k` both make exactly the call the hypothesis covers.
+fun build_num_recursion(thy0 :: Theory, thms :: IndThms) :: values(Theory, NumRec):
+  let (thy, wr_def) = build_wfrec_rel(thy0)
+  let nty = num_ty()
+  let tyB :: HType = mk_tyvar(#'b)
+  let zero = mk_const(c_zero, nty)
+  let suc = mk_const(c_suc, mk_fun(nty, nty))
+  let pre = mk_const(c_pre, mk_fun(nty, nty))
+  let num_pred = mk_const(c_num_pred, mk_fun(nty, mk_fun(nty, bool)))
+
+  let e = mk_var(#'e, tyB)
+  let f = mk_var(#'f, mk_fun(tyB, mk_fun(nty, tyB)))
+  let gty = mk_fun(nty, tyB)
+  let g = mk_var(#'g, gty)
+  let n = mk_var(#'n, nty)
+  let k = mk_var(#'k, nty)
+  let x = mk_var(#'x, nty)
+  let f1 = mk_var(#'f1, gty)
+  let f2 = mk_var(#'f2, gty)
+
+  // The step function gets a name of its own before `WFREC` sees it.  That is
+  // not decoration: `WFREC` compares terms of the form `H f x` structurally,
+  // and a lambda `H` makes every one of them a redex, so the ones that get
+  // reduced along the way stop matching the ones that do not.  It rejects a
+  // lambda outright for that reason.
+  fun step_body(gv :: Term, nv :: Term) :: Term:
+    mk_cond(mk_eq(nv, zero), e :~ Term,
+            list_mk_comb(f, [mk_comb(gv, mk_comb(pre, nv)),
+                             mk_comb(pre, nv)]))
+  let step_ty = mk_fun(tyB, mk_fun(type_of(f :~ Term),
+                                   mk_fun(gty, mk_fun(nty, tyB))))
+  let step_rhs:
+    mk_abs(e, mk_abs(f, mk_abs(g, mk_abs(n, step_body(g :~ Term, n :~ Term)))))
+  let (thy, def_step):
+    new_basic_definition(thy, mk_eq(mk_var(c_rec_step, step_ty), step_rhs))
+  let step_c = mk_const(c_rec_step, step_ty)
+  let bigH = list_mk_comb(step_c, [e :~ Term, f :~ Term])
+
+  // `|- H gv t = if t = zero then e else f (gv (pre t)) (pre t)`, the two
+  // beta steps done by hand so the result is the reduced shape and not a
+  // theorem whose both sides were reduced.
+  fun unfold_h(th :: Theory, gv :: Term, t :: Term) :: Thm:
+    unfold_def(th, def_step, [e :~ Term, f :~ Term, gv, t])
+
+  let [cond_t0, cond_f0] = conditionals(thy)
+  let cond_t = INST_TYPE(thy, {#'a: tyB}, cond_t0)
+  let cond_f = INST_TYPE(thy, {#'a: tyB}, cond_f0)
+
+  // `|- (if c then a else b) = a` given `|- c = true`, and dually.
+  fun cond_at(th :: Theory, c_eq :: Thm, which :: Boolean,
+              a :: Term, b :: Term) :: Thm:
+    let lit = (if which | tm_true | tm_false)
+    let rule = (if which | cond_t | cond_f)
+    let to_lit = AP_THM(th, AP_THM(th, AP_TERM(th, mk_const(c_cond, mk_fun(bool, mk_fun(tyB, mk_fun(tyB, tyB)))), c_eq), a), b)
+    TRANS(to_lit, SPECL(th, [a, b], rule))
+
+  // `|- H gv t = e` when `t` is `zero_num`.
+  fun h_at_zero(th :: Theory, gv :: Term) :: Thm:
+    let branch = list_mk_comb(f, [mk_comb(gv, mk_comb(pre, zero)),
+                                  mk_comb(pre, zero)])
+    TRANS(unfold_h(th, gv, zero),
+          cond_at(th, EQT_INTRO(th, REFL(th, zero)), #true, e :~ Term, branch))
+
+  // `|- H gv (suc t) = f (gv t) t`.
+  fun h_at_suc(th :: Theory, gv :: Term, t :: Term) :: Thm:
+    let st = mk_comb(suc, t)
+    let branch = list_mk_comb(f, [mk_comb(gv, mk_comb(pre, st)),
+                                  mk_comb(pre, st)])
+    let taken = cond_at(th, EQF_INTRO(th, SPEC(th, t, thms.suc_not_zero)),
+                        #false, e :~ Term, branch)
+    let pre_t = SPEC(th, t, thms.pre_suc)
+    let fix = MK_COMB(AP_TERM(th, f, AP_TERM(th, gv, pre_t)), pre_t)
+    TRANS(unfold_h(th, gv, st), TRANS(taken, fix))
+
+  // -- the congruence hypothesis -------------------------------------------
+  let congr:
+    let hyp_term = mk_forall(k, mk_imp(list_mk_comb(num_pred, [k :~ Term, x]),
+                                       mk_eq(mk_comb(f1, k), mk_comb(f2, k))))
+    let hyp = ASSUME(thy, hyp_term)
+    let goal_lhs = mk_comb(mk_comb(bigH, f1 :~ Term), x :~ Term)
+    let goal_rhs = mk_comb(mk_comb(bigH, f2 :~ Term), x :~ Term)
+    let goal = mk_eq(goal_lhs, goal_rhs)
+
+    // `x = zero_num`: neither side calls, both are `e`.
+    let case_zero:
+      let asm = ASSUME(thy, mk_eq(x :~ Term, zero))
+      fun side(fi :: Term) :: Thm:
+        TRANS(AP_TERM(thy, mk_comb(bigH, fi), asm), h_at_zero(thy, fi))
+      TRANS(side(f1 :~ Term), SYM(thy, side(f2 :~ Term)))
+
+    // `x = suc k`: both call at `k`, which the hypothesis covers because
+    // `num_pred k x` unfolds to exactly `x = suc k`.
+    let case_suc:
+      let asm = ASSUME(thy, mk_eq(x :~ Term, mk_comb(suc, k)))
+      let pred_kx = EQ_MP(SYM(thy, unfold_def(thy, thms.pred_def,
+                                              [k :~ Term, x :~ Term])),
+                          asm)
+      let fk_eq = MP(thy, SPEC(thy, k, hyp), pred_kx)
+      let bodies = AP_THM(thy, AP_TERM(thy, f, fk_eq), k :~ Term)
+      fun side(fi :: Term) :: Thm:
+        TRANS(AP_TERM(thy, mk_comb(bigH, fi), asm), h_at_suc(thy, fi, k :~ Term))
+      TRANS(side(f1 :~ Term),
+            TRANS(bodies, SYM(thy, side(f2 :~ Term))))
+
+    let split = SPEC(thy, x, thms.cases)
+    let chosen = CHOOSE(thy, k, ASSUME(thy, mk_exists(k, mk_eq(x :~ Term,
+                                                               mk_comb(suc, k)))),
+                        case_suc)
+    let both = DISJ_CASES(thy, split, case_zero, chosen)
+    GENL(thy, [f1, f2, x], DISCH(thy, hyp_term, both))
+
+  let (soln, sat) = WFREC(thy, wr_def, num_pred, bigH, thms.wf, congr)
+
+  // The solution gets a name too, for the same reason the step function did:
+  // `WFREC` hands back a lambda, so every `soln t` is a redex, and the
+  // equations below would be stated about a term that beta-reduces out from
+  // under them.  `num_rec e f` is the recursion combinator callers want to
+  // see anyway.
+  let rec_ty = mk_fun(tyB, mk_fun(type_of(f :~ Term), gty))
+  let (thy2, def_rec):
+    new_basic_definition(thy, mk_eq(mk_var(c_num_rec, rec_ty),
+                                    mk_abs(e, mk_abs(f, soln))))
+  let rec_c = mk_const(c_num_rec, rec_ty)
+  let rec_ef = list_mk_comb(rec_c, [e :~ Term, f :~ Term])
+
+  // Restate the fixed-point equation about the *name* before reading
+  // anything off it.  `|- num_rec e f = soln` lets every `soln t` -- a redex,
+  // since `soln` is a lambda -- be replaced by `num_rec e f t`, which is not.
+  // After this nothing in the derivation can beta-reduce out from under an
+  // equation.
+  let rec_eq_soln = unfold_def(thy2, def_rec, [e :~ Term, f :~ Term])
+  let sat_named:
+    EQ_MP(cong_replace(thy2, soln, rec_ef, SYM(thy2, rec_eq_soln),
+                       concl_of(sat)),
+          sat)
+
+  let at_zero:
+    TRANS(SPEC(thy2, zero, sat_named), h_at_zero(thy2, rec_ef))
+  let at_suc:
+    let sn = mk_comb(suc, n)
+    GEN(thy2, n, TRANS(SPEC(thy2, sn, sat_named), h_at_suc(thy2, rec_ef, n :~ Term)))
+  let both = CONJ(thy2, at_zero, at_suc)
+
+  let fnv = mk_var(#'fn, gty)
+  let target:
+    mk_exists(fnv,
+              mk_conj(mk_eq(mk_comb(fnv, zero), e :~ Term),
+                      mk_forall(n, mk_eq(mk_comb(fnv, mk_comb(suc, n)),
+                                         list_mk_comb(f, [mk_comb(fnv, n), n :~ Term])))))
+  values(thy2,
+         NumRec(GENL(thy2, [e, f], EXISTS(thy2, target, rec_ef, both)),
+                GENL(thy2, [e, f], at_zero),
+                GENL(thy2, [e, f], at_suc)))

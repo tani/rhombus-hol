@@ -56,6 +56,7 @@ export:
   EXISTS
   CHOOSE
   ETA_CONV
+  SELECT_UNIQUE
   PROVE_HYP
   ADD_ASSUM
   unfold_def
@@ -153,10 +154,24 @@ fun project(thy :: Theory, th :: Thm, take_first :: Boolean) :: Thm:
       let b = mk_var(#'b, bool_ty_)
       let sel = mk_abs(a, mk_abs(b, (if take_first | a | b)))
       let applied = AP_THM(thy, eqth, sel)
-      // Reduce only the two applications we just made: a full beta traversal
-      // would also reduce redexes inside `p` and `q`, changing the very terms
-      // the caller is trying to project out.
-      match BINOP_CONV(HEAD_BETA_CONV)(thy, concl_of(applied))
+      // Reduce exactly the three redexes `sel`'s own application chain
+      // introduces here -- the outer `(\f. ...)(sel)` application, then
+      // `sel`'s own two argument applications -- and stop there.
+      // `HEAD_BETA_CONV`'s open-ended head-spine search has no way to know
+      // to stop once it reaches `p`/`q` themselves: if either is *itself* a
+      // redex it keeps reducing into the very term being projected out.
+      fun three_step(thy2 :: Theory, t :: Term) :: maybe(Thm):
+        match BETA_CONV(thy2, t)
+        | #false: #false
+        | th1 :~ Thm:
+            match RATOR_CONV(BETA_CONV)(thy2, rhs_of(th1))
+            | #false: #false
+            | th2 :~ Thm:
+                let combined = TRANS(th1, th2)
+                match BETA_CONV(thy2, rhs_of(combined))
+                | #false: #false
+                | th3 :~ Thm: TRANS(combined, th3)
+      match BINOP_CONV(three_step)(thy, concl_of(applied))
       | #false: error(~who: #'project, "beta reduction failed")
       | red :~ Thm: EQT_ELIM(thy, EQ_MP(red, applied))
 
@@ -422,8 +437,16 @@ fun EXISTS(thy :: Theory, target :: Term, witness :: Term, th :: Thm) :: Thm:
       let pred = mk_abs(v, body)
       let ufd = unfold_exists(thy, pred)
       let unfolded = rhs_of(ufd)
-      let [qv, _] = (match dest_forall(unfolded) | l: l)
-      let qv :~ FVar = qv
+      let [qv0, _] = (match dest_forall(unfolded) | l: l)
+      let qv0 :~ FVar = qv0
+      // `qv0`'s name comes from `fresh_for`, independently of `v`'s own --
+      // when both happen to share a type (e.g. `v :: bool`, matching
+      // `exists`'s own CPS-encoding answer variable, which is *always*
+      // `bool` regardless of what is being quantified), they can collide,
+      // silently capturing `qv0` inside `v`'s own scope in `inner` below.
+      // `genvar` draws from a namespace disjoint from `fresh_for`'s, so it
+      // can never coincide with `v`.
+      let qv = (if v == qv0 | genvar(qv0.ty) | qv0)
       let inner = mk_forall(v, mk_imp(mk_comb(pred, v), qv))
       let a = ASSUME(thy, inner)
       let spec = SPEC(thy, witness, a)
@@ -485,3 +508,24 @@ fun ETA_CONV(thy :: Theory, t :: Term) :: maybe(Thm):
           let ax = INST_TYPE(thy, {#'a: dom, #'b: rng}, base_axiom(#'ETA_AX))
           SPEC(thy, f, ax)
   | ~else: #false
+
+// -- choice --------------------------------------------------------------
+
+// `|- pred(a)`  (unreduced, i.e. `mk_comb(mk_abs(v,body), a)`)
+// `|- forall v. body[v/bound of pred] ==> v = a`  (*reduced* antecedent --
+// `DISCH`/`CONJUNCT1`'s own beta-conversion plumbing keeps reducing an
+// antecedent that is itself already a redex, so a caller must not build
+// `uniq` by discharging the raw `mk_comb(pred, v)` form; ordinary `GEN`
+// over a naturally-stated implication is what every call site does)
+//   ==>  `|- select(pred) = a`, via `SELECT_AX`.
+fun SELECT_UNIQUE(thy :: Theory, v :: FVar, body :: Term, a :: Term, pa :: Thm, uniq :: Thm) :: Thm:
+  let pred = mk_abs(v, body)
+  let sel = mk_select(v, body)
+  let ax = INST_TYPE(thy, {#'a: v.ty}, base_axiom(#'SELECT_AX))
+  let ax_at_a = SPEC(thy, a, SPEC(thy, pred, ax))
+  let p_sel_unreduced = MP(thy, ax_at_a, pa)
+  let beta_sel = (match BETA_CONV(thy, mk_comb(pred, sel))
+                  | th :~ Thm: th
+                  | #false: error(~who: #'SELECT_UNIQUE, "beta failed"))
+  let p_sel_reduced = EQ_MP(beta_sel, p_sel_unreduced)
+  MP(thy, SPEC(thy, sel, uniq), p_sel_reduced)

@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1112 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1116 tests passed。
 §10 に外部レビュー対応の状況をまとめてある。
 
 ---
@@ -518,17 +518,8 @@ specialize した箇所まで簡約してしまい、後続で組み立てる「
 作業項目になることを確認した（`install_function`/`terminate.rhm` を
 読んで具体的に特定 --- 前回セッションの見立てより詳細化）:
 
-1. **`terminate.rhm` が実際の discharge 証明を捨てている。**
-   `check_measure` は `measure.discharge(obligation)` の戻り値を
-   「`#false` = 成功／それ以外 = 失敗メッセージ」という**真偽値的な
-   プロトコル**としてしか使っておらず、成功時に得られたはずの
-   `T_lt(measure(args), measure(pats))` の実際の `Thm` を握り潰している。
-   `WFREC` の congruence 証明にはこの `Thm` 自体（各再帰呼び出し位置で
-   引数が `Rwf`-下位であることの本物の証拠）が要るので、まず
-   `check_termination`/`check_measure`/`Measure.discharge` のシグネチャを
-   「成功／失敗メッセージ」から「`Thm` を返す／エラー」へ変更する
-   API 変更が前提になる。これは prover 側（waterfall 経由の discharge
-   コールバック）にも影響する。
+1. **`terminate.rhm` が実際の discharge 証明を捨てている** -- **本セッションで解消**。
+   §9.1.3 参照。
 2. **datatype 帰納法 → 汎用 WF スキームの橋渡し補題がまだ無い**（§9.1.1
    項目 1）。構造的降下の場合、`Rwf` は datatype の `T_lt`（`subterm.rhm`、
    これ自体まだ `install_function`/`new_axiom` 経由で導出されている）だが、
@@ -552,11 +543,60 @@ specialize した箇所まで簡約してしまい、後続で組み立てる「
    必要がある（`check_coverage` 自体は §9.4 の入れ子パターン課題と同じ
    決定木コンパイラ基盤を必要とする可能性が高い）。
 
-以上 5 点はいずれも独立に大きく、特に項目 1（API 変更）と項目 5（決定木
+以上のうち残る 4 点（datatype 帰納法の橋渡し・pullback 補題・多引数
+タプル化・`H` の決定木コンパイル）はいずれも独立に大きく、項目 5（決定木
 コンパイラ）は §9.4 で入れ子パターンについて記録したのと同種の
 ソウンドネス隣接の設計判断を伴う。したがって配線自体は本セッションでは
-着手せず、`WFREC` という**汎用定理の完成**をこのセッションの成果として
-確定し、配線は独立したセッション規模の作業として次に持ち越す。
+完了させず、`WFREC` という**汎用定理の完成**と項目 1 の解消をこの
+セッションの成果として確定し、残りは独立したセッション規模の作業として
+次に持ち越す。
+
+### 9.1.3 進捗（本セッション）: `terminate.rhm` に実際の discharge 証明を保持させた
+
+§9.1.2 の残作業リスト項目 1 を解消した。`terminate.rhm`/`driver.rhm` を
+読み直したところ、`driver.rhm` の `discharger` は既に `prove(...)` から
+**本物の `Thm`** を受け取っていた -- ただし `match th | #false: ... | _:
+#false` で成功時に**その場で握り潰し**、`check_measure` 側へは
+「成功／失敗メッセージ」という真偽値的なプロトコルしか伝えていなかった。
+つまり証明自体は既に waterfall がやっており、握り潰しているのは
+**プロトコルの形**だけだったので、waterfall には一切触れずに直せた:
+
+```text
+Measure.discharge :: (Term) -> maybe(String)                    -- 旧
+Measure.discharge :: (Term) -> values(maybe(Thm), maybe(String)) -- 新
+RecursionInfo(positions, method, sites)                          -- 旧
+RecursionInfo(positions, method, sites, decrease_proofs)         -- 新
+```
+
+`decrease_proofs` は測度ベースの呼び出し箇所ごとに 1 つ、`sites` と同じ
+順序で実際の `Thm`（各々の結論はその呼び出し箇所の decrease obligation
+そのもの）を保持する。構造的降下は今も純粋に構文的な事実
+（`descends_at`）であり対応する `Thm` は存在しないので空リストのまま。
+`driver.rhm` の唯一の呼び出し元（`discharger`）を更新し、
+`tests/terminate.rhm` に `RecursionInfo` の 4 フィールド目を追加、
+さらに新規に、実際の discharge callback（`ASSUME` で本物の `Thm` を返す）
+を渡して `decrease_proofs` の**長さ**と**結論の文字列**の両方を検証する
+テストを追加した（実カーネルに対して確認済み、1112 → 1116 テスト）。
+
+踏んだ罠: `match th_opt | th :~ Thm: th | #false: error(...)` という
+アーム順序で書いたところ、`~false` 側の測度失敗ケースで**`error` が
+呼ばれずに `#false` がそのまま返る**という回帰を smoke test で踏んだ
+（`measure.rhm` の `bad(#'constant)` が「例外を投げる」代わりに
+「`result does not satisfy annotation`」で落ちた）。原因は `:~` が
+**実行時判別をしないアノテーション**であること: `th :~ Thm: th` は
+文字通り「何にでもマッチして `th` に束縛する」パターンであり、`Thm`
+条件を検査しない。したがって最初のアームに置くと後続のアーム
+（ここでは `#false`）が到達不能になる。判別が要る場合は、リテラル
+パターン（`#false`）を**先に**書き、`:~` は「もう他の可能性がない」
+ことが分かっている最後のアームでのみ使うこと -- この codebase 全体の
+既存コードは一貫してこの順序（例: 直前の `check_measure` 自身の旧コード
+`match ... | #false: ... | residue: ...`）を守っており、今回はそれを
+破って書いてしまった。
+
+**残作業（§9.1.2 参照）**: 4 点。特に項目 2（datatype 帰納法 → 汎用 WF
+スキームの橋渡し）と項目 5（`H` の決定木コンパイル）が次に着手すべき
+最有力候補 -- 項目 3・4 はそれぞれ比較的独立した one-time の補題/エンコー
+ディング作業。
 
 ### 9.2 `datatype`: 段階的に閉じる
 
@@ -930,7 +970,7 @@ namespace・複数 theory import」を調査した。現状の制約
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
 | 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype（フェーズ 2・3、無限公理が必要）は未着手 -- なお複数セッション規模。 |
-| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **`WFREC` 存在定理は完全導出**（§9.1.2）。`wellfounded.rhm` の `WF_INDUCTION`/逆方向（§9.1.1）に加え、汎用 inductive-relations パッケージなしで単一の最小不動点関係 `wfrec_rel` を直接構成し、closure/inversion/uniqueness/existence を経て `soln x = H soln x`（`WF(Rwf)`・congruence を仮説に）を導出（`wfrec.rhm`、1106 → 1112 テスト）。**残るのは `recdef.rhm` への配線のみ**（節→ステップ関数、測度→整礎性、congruence 側条件の構成。§9.1.2 参照）-- `recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
+| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **`WFREC` 存在定理は完全導出**（§9.1.2）。`wellfounded.rhm` の `WF_INDUCTION`/逆方向（§9.1.1）に加え、汎用 inductive-relations パッケージなしで単一の最小不動点関係 `wfrec_rel` を直接構成し、closure/inversion/uniqueness/existence を経て `soln x = H soln x`（`WF(Rwf)`・congruence を仮説に）を導出（`wfrec.rhm`）。配線の前提だった `terminate.rhm` の discharge 証明保持も解消（§9.1.3、1112 → 1116 テスト）。**残るのは `recdef.rhm` への配線 4 点のみ**（datatype 帰納法→汎用WFの橋渡し、pullback 補題、多引数タプル化、`H` の決定木コンパイル。§9.1.2/9.1.3 参照）-- `recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
 | 4 | 内部は locally nameless、外部 API は標準 HOL にする | **`mk_abs`/`dest_abs` により実質的に達成済みと判断**。詳細下記。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済み。`hyp_insert`/`hyp_union`/`hyp_remove`/`rehash_hyps` の非公開化は**調査済み、現状維持と判断**: `rhombus-hol-lib` のどこからも実際には呼ばれておらず（`Thm` は raw hyps リストではなく既に不可侵なので、これらは項リスト上の純粋なユーティリティであり公開してもソウンドネスに影響しない）、唯一の外部利用者は `rhombus-hol-kernel` に対応するテストパッケージが無いために `tests/kernel.rhm`/`tests/drule.rhm`（外側の `rhombus-hol` パッケージ）に置かれている kernel 自身の単体テスト。非公開化には kernel 専用のテストパッケージ新設が要り、得られる利益（API 美観）に見合わないと判断した。 |

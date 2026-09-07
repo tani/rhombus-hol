@@ -50,14 +50,23 @@ class RecursionInfo(// argument positions that strictly decrease, or -- for a
                     // non-recursive definition
                     positions :: List.of(Int),
                     method :: Symbol,          // #'none | #'structural | #'measure
-                    sites :: List.of(CallSite))
+                    sites :: List.of(CallSite),
+                    // The actual decrease proof discharged at each measure
+                    // call site, in the same order as `sites` -- empty for
+                    // `#'none`/`#'structural`, where descent is a syntactic
+                    // fact (`descends_at`) rather than a kernel theorem.
+                    // This is what a `WFREC`-based derivation needs for its
+                    // congruence obligation; PLAN.md section 9.1.2 tracks
+                    // the remaining wiring.
+                    decrease_proofs :: List.of(Thm))
 
 // `term` is `fun (p1, ..., pn): e`, an abstraction over the parameters, so
 // that instantiating it at a clause's patterns or at a call's arguments is
 // just application -- no substitution and no capture to worry about.
 //
-// `discharge` returns `#false` when it proved the obligation, and otherwise a
-// message describing what was left over.
+// `discharge` returns `values(th, #false)` with the actual proof when it
+// discharged the obligation, and `values(#false, message)` with a message
+// describing what was left over otherwise.
 class Measure(term :: Term,
               discharge :: Function.of_arity(1))
 
@@ -99,16 +108,16 @@ fun check_termination(who :: Symbol,
                     acc ++ calls.map(fun ([conds, args]): [pats, conds, args])
   cond
   | all_sites.length() == 0:
-      RecursionInfo([], #'none, [])
+      RecursionInfo([], #'none, [], [])
   | ~else:
       let sites = all_sites.map(fun ([_, _, args]): CallSite(args :~ List))
       let order = lexicographic_order(arity, all_sites)
       cond
-      | order: RecursionInfo(order :~ List, #'structural, sites)
+      | order: RecursionInfo(order :~ List, #'structural, sites, [])
       | measure:
           let m :~ Measure = measure
-          check_measure(who, name, arity, fn, m, all_sites)
-          RecursionInfo(measure_positions(arity, m.term), #'measure, sites)
+          let proofs = check_measure(who, name, arity, fn, m, all_sites)
+          RecursionInfo(measure_positions(arity, m.term), #'measure, sites, proofs)
       | ~else:
           let [pats, _, args] = all_sites[0]
           error(~who: who,
@@ -220,7 +229,7 @@ fun measure_at(m :: Term, args :: List.of(Term)) :: Term:
 // exactly the statement that it has no infinite descending chains; see
 // `subterm.rhm`.
 fun check_measure(who :: Symbol, name :: Symbol, arity :: Int, fn :: Term,
-                  measure :: Measure, all_sites :: List) :: Void:
+                  measure :: Measure, all_sites :: List) :: List.of(Thm):
   let mty = measure_type(who, name, arity, measure.term)
   let tyname = (match mty
                 | TyApp(n, _) when n != ty_fun && n != ty_bool: n
@@ -232,7 +241,7 @@ fun check_measure(who :: Symbol, name :: Symbol, arity :: Int, fn :: Term,
                                     type_to_string(mty))))
   let relname = subterm_relation_name(tyname)
   let rel = mk_const(relname, mk_fun(mty, mk_fun(mty, bool)))
-  for ([pats, conds, args] in all_sites):
+  for List ([pats, conds, args] in all_sites):
     let pats :~ List = pats
     let args :~ List = args
     // The obligation would mention `fn`, which is not a constant yet.
@@ -251,9 +260,9 @@ fun check_measure(who :: Symbol, name :: Symbol, arity :: Int, fn :: Term,
     let guarded = for values(acc :~ Term = core) (c in (conds :~ List).reverse()):
                     mk_imp(c, acc)
     let obligation = mk_forall_list(free_vars(guarded), guarded)
-    match measure.discharge(obligation)
-    | #false: #void
-    | residue:
+    let (th_opt, residue) = measure.discharge(obligation)
+    match th_opt
+    | #false:
         error(~who: who,
               "cannot see that the measure decreases",
               error.val(~label: "name", name),
@@ -263,6 +272,7 @@ fun check_measure(who :: Symbol, name :: Symbol, arity :: Int, fn :: Term,
                         show(list_mk_comb(fn, args))),
               error.val(~label: "obligation", show(obligation)),
               error.val(~label: "residue", residue))
+    | th :~ Thm: th
 
 // The measure's result type, checking on the way that it really is an
 // abstraction over every parameter.

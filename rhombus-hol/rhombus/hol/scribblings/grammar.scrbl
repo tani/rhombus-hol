@@ -27,7 +27,12 @@ purpose: everything in it is total and pure, which is what lets a definition be
 read as a set of equations.
 
 @verbatim{
-expr = Id                          a parameter or pattern variable
+body = expr                        the value of the body
+     | let Id = expr               a local definition, then the rest
+       body
+     | match Id | clause | ...     on a parameter or a pattern variable
+
+expr = Id                          a parameter, pattern variable or local
      | Id(expr, ...)               a constructor, or a declared function
      | #true | #false
      | !expr
@@ -36,7 +41,6 @@ expr = Id                          a parameter or pattern variable
      | expr == expr
      | if expr | expr | expr
      | (expr)
-     | match Id | clause | ...     at the top of a body, or under a clause
 
 clause = CtorId(Id, ...): body
        | CtorId: body
@@ -44,6 +48,11 @@ clause = CtorId(Id, ...): body
 row = (pattern, ...): body      on the declaration, one per argument
     | pattern: body             at one argument, parentheses optional
 }
+
+@rhombus(let) and @rhombus(match) are forms of a @emph{body}, not of an
+expression: a @rhombus(let) is a statement followed by the rest of the body,
+and there is no @rhombus(let) inside the operand of a @rhombus(&&). That is
+not a notational choice --- it is what the elaborator accepts.
 
 The operators are Rhombus's own, and they mean in the logic what they mean in
 Rhombus: @rhombus(#true) and @rhombus(#false) are the truth values,
@@ -57,8 +66,29 @@ logical @tt{and} and @tt{or} are strict. Nothing can tell the difference,
 because every function in this grammar is total.
 
 Anything outside the grammar is a compile error that names the offending
-expression. Arithmetic, string literals, @rhombus(let) and @rhombus(block) are
-all outside it in this version.
+expression. Arithmetic, string literals and @rhombus(block) are all outside
+it in this version.
+
+@subsection{Local definitions}
+
+A @rhombus(let) is @emph{substituted} in the logical reading: the equation is
+about the value, and it mentions the initializer only where the body reads the
+variable.
+
+@rhombusblock(
+  function unread(n :: Nat) :: Nat:
+    match n
+    | zero(): zero()
+    | succ(k):
+        let ignored = unread(k)
+        succ(zero())
+)
+
+states @tt{unread(succ(k)) === succ(zero)}, with no @rhombus(unread) on the
+right. The compiled program still evaluates the initializer, though, so
+termination is checked against @emph{both} readings: the call above has to
+descend even though the equation does not mention it, and one that does not
+is refused. See @secref("trust") for why the two readings are kept apart.
 
 @subsection{Matching}
 

@@ -379,3 +379,56 @@ check norm_c(db_c_only, plus_(cc, m)) ~is "plus(zero, m)"
 // are still absent from this database, so reaching `m` is the conditional
 // rule's doing alone, not a `c`-then-zero-clause chain.
 check norm_c(db_cond, plus_(cc, m)) ~is "m"
+
+// ==========================================================================
+// a conditional rule at a type other than the one it was stated at
+// ==========================================================================
+//
+// The side conditions used to be instantiated separately from the theorem,
+// and in the opposite order: `inst_type(tyin, inst_fvar(theta, c))` against
+// the theorem's own `INST(theta, INST_TYPE(tyin, src))`.  `theta`'s
+// replacements are already at the instantiated types, so for a polymorphic
+// rule the separately built condition came out at the wrong type and could
+// never be discharged -- the rule simply never fired at a concrete type, even
+// with its condition in the database.  A monomorphic test cannot see this,
+// because there the two orders agree.
+//
+// Conditions are now read off the instantiated theorem, so there is no second
+// copy to get out of step.
+
+def polyA :: HType = mk_tyvar(#'a)
+def pnat_ty = mk_tyapp(#'pnat, [])
+def pthy:
+  let t0 = new_type(base_theory(), #'pnat, 0)
+  let t1 = new_constant(t0, #'Pp, mk_fun(polyA, bool))
+  let t2 = new_constant(t1, #'fp, mk_fun(polyA, polyA))
+  let t3 = new_constant(t2, #'gp, mk_fun(polyA, polyA))
+  new_constant(t3, #'pcc, pnat_ty)
+
+def poly_rule:
+  let xv = mk_var(#'x, polyA)
+  ASSUME(pthy,
+         mk_forall(xv,
+                   mk_imp(mk_comb(mk_const(#'Pp, mk_fun(polyA, bool)), xv),
+                          mk_eq(mk_comb(mk_const(#'fp, mk_fun(polyA, polyA)), xv),
+                                mk_comb(mk_const(#'gp, mk_fun(polyA, polyA)), xv)))))
+
+def pcc = mk_const(#'pcc, pnat_ty)
+def f_cc = mk_comb(mk_const(#'fp, mk_fun(pnat_ty, pnat_ty)), pcc)
+def poly_db = add_thm(pthy, empty_db, #'poly_rule, poly_rule)
+
+// without the condition, the rule must not fire
+check:
+  match simp_conv(poly_db)(pthy, f_cc)
+  | #false: "no rewrite"
+  | th :: Thm: show(concl_of(th))
+  ~is "fp(pcc) === fp(pcc)"
+
+// with the condition at the concrete type, it must
+check:
+  let db2 = add_thm(pthy, poly_db, #'p_cc,
+                    ASSUME(pthy, mk_comb(mk_const(#'Pp, mk_fun(pnat_ty, bool)), pcc)))
+  match simp_conv(db2)(pthy, f_cc)
+  | #false: "no rewrite"
+  | th :: Thm: show(concl_of(th))
+  ~is "fp(pcc) === gp(pcc)"

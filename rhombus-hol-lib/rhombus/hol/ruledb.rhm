@@ -299,22 +299,43 @@ fun apply_rule(r :: RewriteRule, thy :: Theory, db :: RuleDB, t :: Term)
   match term_match(r.vars, r.lhs, t)
   | #false: #false
   | m :~ MatchResult:
-      let inst_conds = r.conds.map(
-        fun (c :: Term): inst_type(m.tyin, inst_fvar(m.theta, c)))
+      // Instantiate the theorem first, then read the conditions off *it*.
+      //
+      // The conditions used to be instantiated separately, as
+      // `inst_type(m.tyin, inst_fvar(m.theta, c))` -- terms before types,
+      // which is the opposite order from the theorem's own
+      // `INST(theta, INST_TYPE(tyin, src))`.  `m.theta`'s replacements are
+      // already at the instantiated types, so for a polymorphic rule the
+      // separately built condition came out at the wrong type and could
+      // never be discharged: `!x:'a. P x ==> f x = g x` simply never fired
+      // at a concrete type, even with `P(c)` in the database.
+      //
+      // Reading them back from the instantiated theorem removes the second
+      // copy entirely, so there is no order left to get wrong.  `r.conds`
+      // stays as an index for display and admission checks.
+      let inst_th = INST(thy, m.theta, INST_TYPE(thy, m.tyin, r.src))
+      let (inst_conds, _) = strip_imp(concl_of(inst_th))
       match discharge_all(thy, disable(db, [r.name]), inst_conds)
       | #false: #false
       | proofs :~ List:
-          let inst_th = INST(thy, m.theta, INST_TYPE(thy, m.tyin, r.src))
           let th = for values(acc :~ Thm = inst_th) (p in proofs): MP(thy, acc, p :~ Thm)
-          let [l, rr] = (match dest_eq(concl_of(th)) | pair: pair)
-          cond
-          // The match should have produced exactly this term; if it did not,
-          // the rule would silently rewrite something else.
-          | l != t: #false
-          // A permutative rule fires only when it strictly decreases the
-          // term, so it cannot oscillate.
-          | r.permutative && !term_lt(rr, l): #false
-          | ~else: th
+          // Stripping implications off the instantiated theorem can in
+          // principle leave something that is not an equation; that is a
+          // rule that does not apply, not an internal error.
+          match dest_eq(concl_of(th))
+          // Stripping implications off the instantiated theorem can in
+          // principle leave something that is not an equation; that is a
+          // rule which does not apply, not an internal error.
+          | #false: #false
+          | [l, rr]:
+              cond
+              // The match should have produced exactly this term; if it did
+              // not, the rule would silently rewrite something else.
+              | l != t: #false
+              // A permutative rule fires only when it strictly decreases the
+              // term, so it cannot oscillate.
+              | r.permutative && !term_lt(rr, l): #false
+              | ~else: th
 
 // A proof of each condition in order, or `#false` if any one does not
 // simplify all the way to `true`.

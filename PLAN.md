@@ -1551,6 +1551,36 @@ measure 適用判定テストを追加。フルスイート 1193 -> 1206。
 `calls(e1) ∪ calls(e2)`、`x` が `e2` に現れなくても捨てない）に対して停止性
 を見るべきである。回帰は `tests/let_obligations.rhm`。
 
+### 9.27 進捗（本セッション）: 条件付き書き換えの型具体化と、`disable_rules` が動いていなかった件
+
+第三次レビュー項目 4。`apply_rule` は side condition を
+`inst_type(m.tyin, inst_fvar(m.theta, c))` で別途具体化していた。定理本体は
+`INST(theta, INST_TYPE(tyin, src))` なので**順序が逆**である。`m.theta` の
+置換項は既に型具体化済みなので、多相規則では条件だけが誤った型で組まれ、
+**決して discharge できない**。
+
+実測: `!x:'a. Pp(x) ==> fp(x) = gp(x)` を `nat` の項に当てると、
+`Pp(cc)` をデータベースに入れても書き換えが起きなかった。**単相テストでは
+両順序が一致するので検出できない。**
+
+修正は順序を入れ替えるのではなく、**条件の第二の写しをなくす**こと -- 定理を
+具体化し、その結論から `strip_imp` で条件を読む。`r.conds` は表示・索引用に
+残る。回帰は `tests/ruledb.rhm`（多相規則、条件なしでは発火せず、
+具体型の条件があれば発火する）。
+
+**副産物: `disable_rules` / `enable_rules` はそもそも展開に失敗していた。**
+`module_block.rhm` の `rule_step` が 2 値を返すのに `emit_one` は 3 値
+（実行時フォーム・コンパイル時フォーム・カウンタ）を要求する。文法にあり
+ドキュメントにもあるのに**スイートが一度も使っていなかった**ので誰も
+気づいていなかった。あわせて修正した。
+
+さらに `~using` は「module-level の `disable_rules` を上書きする」と
+コメントに書いてありながら、`add_thm` は `disabled` に触らないので
+**上書きしていなかった**。明示的に `enable` するようにした。回帰
+（`tests/rules_control.rhm`）は、`plus_zero_r` を disable した上で
+`~do_not: [induct]` を付けた証明を通す -- 上書きが本物でなければ通らない
+（修正前は実際に "could not prove" で落ちることを確認済み）。
+
 ## 10. 外部レビュー（2026-09-07）への対応状況
 
 レビューは `rhombus-hol-kernel` を標準 HOL Light 型カーネルへ寄せ、

@@ -44,6 +44,10 @@ export:
   rep_ty
   mk_node
   prove_node_injective
+  num_lit
+  prove_lit_distinct
+  mk_kids
+  prove_kids_injective
 
 fun path_ty() :: HType: mk_fun(num_ty(), num_ty())
 
@@ -184,3 +188,106 @@ fun prove_node_injective(thy :: Theory, ind :: IndThms, inl :: Term,
     DISCH(thy, both, ABS(thy, p, body))
 
   GENL(thy, [l1, k1, l2, k2], IMP_ANTISYM_RULE(thy, forward, backward))
+
+// -- constructor arities ------------------------------------------------------
+//
+// `node` takes its children as a function `num -> Rep`, but a constructor has
+// a fixed finite number of them.  `mk_kids` packs `n` children into such a
+// function, filling every index at or past `n` with a junk value the caller
+// supplies -- which never has to be a real tree, because nothing ever reads
+// those slots.  Injectivity only needs the `n` slots that are read.
+
+// `suc_num(...(zero_num))`, `m` times.
+fun num_lit(m :: Int) :: Term:
+  let nty = num_ty()
+  let suc = mk_const(c_suc, mk_fun(nty, nty))
+  recur loop (k = m, acc :~ Term = mk_const(c_zero, nty)):
+    cond
+    | k == 0: acc
+    | ~else: loop(k - 1, mk_comb(suc, acc))
+
+// `|- (num_lit(a) === num_lit(b)) = false` for `a /= b`, by peeling `suc`s
+// with injectivity until one side is `zero_num` and the other is not.
+fun prove_lit_distinct(thy :: Theory, ind :: IndThms,
+                       a :: Int, b :: Int) :: Thm:
+  let nty = num_ty()
+  let zero = mk_const(c_zero, nty)
+  let suc = mk_const(c_suc, mk_fun(nty, nty))
+  when a == b
+  | error(~who: #'prove_lit_distinct, "indices are equal")
+  recur loop (i = a, j = b):
+    cond
+    | i == 0:
+        // `zero = suc ...` is false: `suc_not_zero` the other way round
+        let t = num_lit(j - 1)
+        let stmt = mk_eq(zero, mk_comb(suc, t))
+        let contra = MP(thy, NOT_ELIM(thy, SPEC(thy, t, ind.suc_not_zero)),
+                        SYM(thy, ASSUME(thy, stmt)))
+        EQF_INTRO(thy, NOT_INTRO(thy, DISCH(thy, stmt, contra)))
+    | j == 0:
+        let t = num_lit(i - 1)
+        EQF_INTRO(thy, SPEC(thy, t, ind.suc_not_zero))
+    | ~else:
+        // peel: `suc x = suc y <=> x = y`, so the outer equation is the inner
+        let inner = loop(i - 1, j - 1)
+        TRANS(SPECL(thy, [num_lit(i - 1), num_lit(j - 1)], ind.suc_injective),
+              inner)
+
+// `\j. if j = 0 then t0 else if j = 1 then t1 else ... else junk`
+fun mk_kids(junk :: Term, ts :: List.of(Term)) :: Term:
+  let nty = num_ty()
+  let j = mk_var(#'j, nty)
+  let body:
+    recur loop (i = ts.length() - 1, acc :~ Term = junk):
+      cond
+      | i < 0: acc
+      | ~else: loop(i - 1, mk_cond(mk_eq(j :~ Term, num_lit(i)), ts[i], acc))
+  mk_abs(j, body)
+
+// `|- mk_kids(junk, ts) (num_lit m) = ts[m]`, the only fact about the packing
+// that anything downstream needs.
+fun prove_kids_at(thy :: Theory, ind :: IndThms, junk :: Term,
+                  ts :: List.of(Term), m :: Int) :: Thm:
+  let nty = num_ty()
+  let rty = type_of(junk)
+  let j = mk_var(#'j, nty)
+  let lit = num_lit(m)
+  let [cond_t, cond_f] = conditionals(thy)
+  fun pick(c_eq :: Thm, which :: Boolean, x :: Term, y :: Term) :: Thm:
+    let rule = INST_TYPE(thy, {#'a: rty}, (if which | cond_t | cond_f))
+    let cc = mk_const(c_cond, mk_fun(bool, mk_fun(rty, mk_fun(rty, rty))))
+    TRANS(AP_THM(thy, AP_THM(thy, AP_TERM(thy, cc, c_eq), x), y),
+          SPECL(thy, [x, y], rule))
+  let beta:
+    match BETA_CONV(thy, mk_comb(mk_kids(junk, ts), lit))
+    | th :: Thm: th
+    | ~else: error(~who: #'prove_kids_at, "beta failed")
+  // walk the cond chain from the outside in, taking the false branch until
+  // the index matches
+  let walk:
+    recur loop (i = 0, acc :~ Thm = beta):
+      let rest:
+        recur build (k = ts.length() - 1, a :~ Term = junk):
+          cond
+          | k < i + 1: a
+          | ~else: build(k - 1, mk_cond(mk_eq(lit, num_lit(k)), ts[k], a))
+      cond
+      | i == m: TRANS(acc, pick(EQT_INTRO(thy, REFL(thy, lit)), #true,
+                                ts[i], rest))
+      | ~else:
+          loop(i + 1,
+               TRANS(acc, pick(prove_lit_distinct(thy, ind, m, i), #false,
+                               ts[i], rest)))
+  walk
+
+// `|- mk_kids(junk, ts) = mk_kids(junk, us)  ==>  ts[m] = us[m]`, for each
+// slot the constructor actually uses.
+fun prove_kids_injective(thy :: Theory, ind :: IndThms, junk :: Term,
+                         ts :: List.of(Term), us :: List.of(Term),
+                         m :: Int) :: Thm:
+  let eq_term = mk_eq(mk_kids(junk, ts), mk_kids(junk, us))
+  let asm = ASSUME(thy, eq_term)
+  let at = AP_THM(thy, asm, num_lit(m))
+  DISCH(thy, eq_term,
+        TRANS(SYM(thy, prove_kids_at(thy, ind, junk, ts, m)),
+              TRANS(at, prove_kids_at(thy, ind, junk, us, m))))

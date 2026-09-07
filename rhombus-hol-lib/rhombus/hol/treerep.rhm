@@ -1,0 +1,186 @@
+#lang rhombus/static
+
+// The representation a recursive datatype gets carved out of (PLAN.md
+// section 9.2 phase 3, design settled in 9.21).
+//
+// A value of a self-recursive datatype is a finite tree.  Trees are indexed
+// by *paths* rather than by node numbers:
+//
+//   Path = num -> num     a digit sequence; `0` ends the path, and `d > 0`
+//                         descends into child `d - 1`
+//   Rep  = Path -> Opt    `Opt` is the label type plus a marker for "no node
+//                         here", which the caller supplies as a sum
+//
+//   node(lab, kids) = \p. if p(0) = 0 then inl(lab)
+//                         else kids(pre_num(p 0))(\i. p(suc_num i))
+//
+// Paths, not numbers, is the whole design decision.  Numbering nodes
+// breadth-first also works for *building* a node, but grafting needs the
+// inverse -- given an index, which subtree and which position -- so it needs
+// division with a uniqueness theorem.  Descending a path needs only
+// `pre_num(suc n) = n` and `suc n /= 0`, both of which `infinity.rhm` already
+// proves.  That is also why no pairing function appears here: HOL Light's
+// `NUMPAIR` exists to fold a (tag, index) pair back into `num`, and nothing
+// here ever needs to.
+//
+// What this module supplies is the one load-bearing fact about `node`: it is
+// injective in both arguments.  Everything the carving does afterwards --
+// injectivity of the datatype's own constructors, distinctness from the
+// labels, induction from the minimality of the carved set -- rests on it.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/names open
+  rhombus/hol/kernel open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "taut.rhm" open
+  "infinity.rhm" open
+
+export:
+  path_ty
+  rep_ty
+  mk_node
+  prove_node_injective
+
+fun path_ty() :: HType: mk_fun(num_ty(), num_ty())
+
+// `Rep` over an option type `oty` the caller chose: `Path -> oty`.
+fun rep_ty(oty :: HType) :: HType: mk_fun(path_ty(), oty)
+
+// `node(lab, kids)`, given the injection `inl : lty -> oty` that marks a
+// present node.
+fun mk_node(inl :: Term, lab :: Term, kids :: Term) :: Term:
+  let nty = num_ty()
+  let zero = mk_const(c_zero, nty)
+  let suc = mk_const(c_suc, mk_fun(nty, nty))
+  let pre = mk_const(c_pre, mk_fun(nty, nty))
+  let p = mk_var(#'p, path_ty())
+  let i = mk_var(#'i, nty)
+  mk_abs(p, mk_cond(mk_eq(mk_comb(p, zero), zero),
+                    mk_comb(inl, lab),
+                    mk_comb(mk_comb(kids, mk_comb(pre, mk_comb(p, zero))),
+                            mk_abs(i, mk_comb(p, mk_comb(suc, i))))))
+
+// `|- !l1 k1 l2 k2. node(l1,k1) = node(l2,k2) <=> l1 = l2 and k1 = k2`.
+//
+// Forward, the two halves read the equation at two paths chosen to select
+// them:
+//
+//   the empty path `\i. 0` takes the `then` branch, leaving `inl l1 = inl l2`,
+//   which `inl_inj` opens;
+//
+//   the path `\i. if i = 0 then suc j else q(pre_num i)` takes the `else`
+//   branch, and is built so that `pre_num` of its head is `j` and its tail is
+//   `q` -- so it leaves `k1 j q = k2 j q` for arbitrary `j` and `q`, and
+//   extensionality closes that into `k1 = k2`.  Every path is reachable this
+//   way, which is why injectivity in `kids` holds for the whole function and
+//   not just below some arity.
+//
+// `inl_inj` is `!x y. inl x = inl y <=> x = y`, already instantiated at the
+// caller's label and marker types.
+fun prove_node_injective(thy :: Theory, ind :: IndThms, inl :: Term,
+                         inl_inj :: Thm) :: Thm:
+  let nty = num_ty()
+  let zero = mk_const(c_zero, nty)
+  let suc = mk_const(c_suc, mk_fun(nty, nty))
+  let pre = mk_const(c_pre, mk_fun(nty, nty))
+  let (lty, oty) = dest_fun(type_of(inl))
+  let kty = mk_fun(nty, rep_ty(oty))
+
+  let i = mk_var(#'i, nty)
+  let j = mk_var(#'j, nty)
+  let q = mk_var(#'q, path_ty())
+  let l1 = mk_var(#'l1, lty)
+  let l2 = mk_var(#'l2, lty)
+  let k1 = mk_var(#'k1, kty)
+  let k2 = mk_var(#'k2, kty)
+
+  fun node(lab :: Term, kids :: Term) :: Term: mk_node(inl, lab, kids)
+  fun beta(t :: Term) :: Thm:
+    match BETA_CONV(thy, t)
+    | th :: Thm: th
+    | ~else: error(~who: #'prove_node_injective, "beta failed")
+
+  let [cond_t, cond_f] = conditionals(thy)
+  fun cond_pick(ty :: HType, c_eq :: Thm, which :: Boolean,
+                a :: Term, b :: Term) :: Thm:
+    let rule = INST_TYPE(thy, {#'a: ty}, (if which | cond_t | cond_f))
+    let cc = mk_const(c_cond, mk_fun(bool, mk_fun(ty, mk_fun(ty, ty))))
+    TRANS(AP_THM(thy, AP_THM(thy, AP_TERM(thy, cc, c_eq), a), b),
+          SPECL(thy, [a, b], rule))
+
+  let eq_c = mk_const(c_eq, mk_fun(nty, mk_fun(nty, bool)))
+  let asm_term = mk_eq(node(l1 :~ Term, k1 :~ Term), node(l2 :~ Term, k2 :~ Term))
+  let asm = ASSUME(thy, asm_term)
+
+  // -- the label, read at the empty path ------------------------------------
+  let empty = mk_abs(i, zero)
+  let label_eq:
+    let c_true = EQT_INTRO(thy, beta(mk_comb(empty, zero)))
+    fun side(lab :: Term, kids :: Term) :: Thm:
+      let branch = mk_comb(mk_comb(kids, mk_comb(pre, mk_comb(empty, zero))),
+                           mk_abs(i, mk_comb(empty, mk_comb(suc, i))))
+      TRANS(beta(mk_comb(node(lab, kids), empty)),
+            cond_pick(oty, c_true, #true, mk_comb(inl, lab), branch))
+    let inls = TRANS(SYM(thy, side(l1 :~ Term, k1 :~ Term)),
+                     TRANS(AP_THM(thy, asm, empty),
+                           side(l2 :~ Term, k2 :~ Term)))
+    EQ_MP(SPECL(thy, [l1 :~ Term, l2 :~ Term], inl_inj), inls)
+
+  // -- the children, read at a path that descends into `j` and then is `q` --
+  let descend = mk_abs(i, mk_cond(mk_eq(i :~ Term, zero), mk_comb(suc, j),
+                                  mk_comb(q, mk_comb(pre, i))))
+  let head_eq:
+    TRANS(beta(mk_comb(descend, zero)),
+          cond_pick(nty, EQT_INTRO(thy, REFL(thy, zero)), #true,
+                    mk_comb(suc, j), mk_comb(q, mk_comb(pre, zero))))
+  let tail_eq:
+    let si = mk_comb(suc, i)
+    let step:
+      TRANS(beta(mk_comb(descend, si)),
+            cond_pick(nty, EQF_INTRO(thy, SPEC(thy, i, ind.suc_not_zero)),
+                      #false, mk_comb(suc, j), mk_comb(q, mk_comb(pre, si))))
+    EXT(thy, i, TRANS(step, AP_TERM(thy, q, SPEC(thy, i, ind.pre_suc))))
+
+  let kids_eq:
+    fun side(lab :: Term, kids :: Term) :: Thm:
+      let branch = mk_comb(mk_comb(kids, mk_comb(pre, mk_comb(descend, zero))),
+                           mk_abs(i, mk_comb(descend, mk_comb(suc, i))))
+      let c_false:
+        TRANS(AP_THM(thy, AP_TERM(thy, eq_c, head_eq), zero),
+              EQF_INTRO(thy, SPEC(thy, j, ind.suc_not_zero)))
+      let taken = TRANS(beta(mk_comb(node(lab, kids), descend)),
+                        cond_pick(oty, c_false, #false, mk_comb(inl, lab),
+                                  branch))
+      let idx = TRANS(AP_TERM(thy, pre, head_eq), SPEC(thy, j, ind.pre_suc))
+      TRANS(taken, MK_COMB(AP_TERM(thy, kids, idx), tail_eq))
+    EXT(thy, j,
+        EXT(thy, q,
+            TRANS(SYM(thy, side(l1 :~ Term, k1 :~ Term)),
+                  TRANS(AP_THM(thy, asm, descend),
+                        side(l2 :~ Term, k2 :~ Term)))))
+
+  let forward = DISCH(thy, asm_term, CONJ(thy, label_eq, kids_eq))
+
+  // -- and the converse, which is just congruence ---------------------------
+  let backward:
+    let both = mk_conj(mk_eq(l1 :~ Term, l2), mk_eq(k1 :~ Term, k2))
+    let a = ASSUME(thy, both)
+    let p = mk_var(#'p, path_ty())
+    let le = CONJUNCT1(thy, a)
+    let ke = CONJUNCT2(thy, a)
+    let body:
+      let head = mk_eq(mk_comb(p, zero), zero)
+      let branch_eq:
+        MK_COMB(MK_COMB(ke, REFL(thy, mk_comb(pre, mk_comb(p, zero)))),
+                REFL(thy, mk_abs(i, mk_comb(p, mk_comb(suc, i)))))
+      let cc = mk_const(c_cond, mk_fun(bool, mk_fun(oty, mk_fun(oty, oty))))
+      MK_COMB(MK_COMB(AP_TERM(thy, cc, REFL(thy, head)),
+                      AP_TERM(thy, inl, le)),
+              branch_eq)
+    DISCH(thy, both, ABS(thy, p, body))
+
+  GENL(thy, [l1, k1, l2, k2], IMP_ANTISYM_RULE(thy, forward, backward))

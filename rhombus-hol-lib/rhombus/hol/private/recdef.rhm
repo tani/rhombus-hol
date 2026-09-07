@@ -58,10 +58,14 @@ fun fun_type(spec :: FunSpec) :: HType:
 
 // -- pattern checking ------------------------------------------------------
 
-// A pattern is a variable, or a constructor applied to distinct variables.
-// Deeper patterns are a v0.1 scope cut: the induction schemes this version
-// derives are one constructor deep, so admitting deeper patterns would produce
-// definitions no scheme matches.
+// A pattern is a variable, or a constructor applied to patterns -- which may
+// themselves be variables or further constructor patterns, nested to any
+// depth (`Cons(x, Cons(y, zs))` is as much a pattern as `Cons(x, zs)`).  What
+// is *not* a pattern is a constructor applied to a general term: patterns
+// describe a shape to test and destructure, and only variables and nested
+// constructor applications are shapes -- an arbitrary computed term has no
+// well-defined "which constructor, at which arguments" to check exhaustion
+// or overlap against.
 fun pattern_vars(who :: Symbol, p :: Term) :: List.of(FVar):
   match p
   | FVar(_, _): [p :~ FVar]
@@ -69,12 +73,8 @@ fun pattern_vars(who :: Symbol, p :: Term) :: List.of(FVar):
       let (head, args) = strip_comb(p)
       match head
       | Const(_, _):
-          for (a in args):
-            unless a is_a FVar
-            | error(~who: who,
-                    "constructor pattern must be applied to distinct variables",
-                    error.val(~label: "pattern", show(p)))
-          args.map(fun (a): a :~ FVar)
+          for values(acc :~ List = []) (a in args):
+            acc ++ pattern_vars(who, a)
       | ~else:
           error(~who: who, "not a pattern",
                 error.val(~label: "pattern", show(p)))
@@ -205,88 +205,114 @@ fun install_function(thy :: Theory,
 fun clause_vars(who :: Symbol, cl :: DefClause) :: List.of(FVar):
   for values(acc :~ List = []) (p in cl.pats): acc ++ pattern_vars(who, p)
 
-// Exhaustiveness and non-overlap, over the whole pattern matrix.
+// Exhaustiveness and non-overlap, over the whole pattern matrix -- now a
+// genuine decision tree, not a flat table.  A "position" is a slot in a
+// row's node list; initially there is one position per argument, holding
+// that argument's own (possibly deeply nested) pattern.  Checking finds a
+// position where some row has a constructor test, requires every
+// constructor of that position's type to be covered, and recurs into each
+// branch with that position *replaced by its fields* -- spliced into the
+// row in place, since a constructor's own fields are new positions to
+// check exactly the same way.  A row that is a bare variable there matches
+// every constructor, so it is refined with fresh placeholder fields of its
+// own (their identity never matters -- coverage checking only asks
+// "variable or which constructor" at a position, never what a variable is
+// named) rather than dropped, so it stays eligible in every branch and the
+// row list's width stays uniform across branches.  A leaf -- no position
+// left with a constructor anywhere -- must be a single row, or two clauses
+// match the same arguments.
 //
-// The matrix comes from nested `match`es, so it is a decision tree flattened
-// into rows.  Checking it is the same descent: find a column every row splits
-// on, require the split to name each constructor of that type exactly once,
-// and recur into each branch with that column spent.  A leaf -- no column left
-// to split on -- must be a single row, or two clauses match the same
-// arguments.
-//
-// The column is *searched for* rather than taken left to right, because the
-// nesting need not follow the parameter order: `match n` outer and `match m`
-// inner leaves a matrix that only splits cleanly on the second column first.
+// A position is *searched for* rather than taken left to right, because
+// nesting need not follow argument order: `match n` outer and `match m`
+// inner leaves a matrix that only splits cleanly on the second argument
+// first.
+class Row(nodes :: List.of(Term), clause :: DefClause)
+
 fun check_coverage(who :: Symbol, spec :: FunSpec,
                    dts :: Map.of(Symbol, DatatypeSpec)) :: Void:
-  let n = spec.arg_types.length()
-  cover(who, spec, dts, spec.clauses, List.iota(n))
+  let rows = spec.clauses.map(fun (cl :: DefClause): Row(cl.pats, cl))
+  cover(who, spec, dts, rows)
 
 fun cover(who :: Symbol, spec :: FunSpec, dts :: Map.of(Symbol, DatatypeSpec),
-          rows :: List.of(DefClause), cols :: List.of(Int)) :: Void:
-  match split_column(rows, cols)
+          rows :: List.of(Row)) :: Void:
+  match find_splittable(rows)
   | #false:
-      // Nothing left to split on.  Either some column mixes a variable in
-      // with constructors -- a fall-through clause, which this version does
-      // not compile because it does not order clauses -- or every remaining
-      // row matches the same arguments, and there had better be only one.
-      when (for any (col in cols): is_mixed(rows, col))
-      | error(~who: who,
-              "a variable pattern mixed with constructor patterns",
-              error.val(~label: "name", spec.name),
-              error.val(~label: "hint",
-                        "give every clause a constructor pattern in the "
-                          ++ "matched position"))
+      // Nothing left to split on: every row is a variable at every
+      // position.  More than one such row is an unconditional overlap --
+      // nothing left distinguishes them, including a row that started out
+      // a bare catch-all variable next to a more specific one.
       unless rows.length() == 1
       | error(~who: who, "two clauses match the same arguments",
               error.val(~label: "name", spec.name),
-              error.val(~label: "clause", show(list_mk_comb(
-                                            mk_const(spec.name, fun_type(spec)),
-                                            (rows[0] :~ DefClause).pats))))
-  | col:
-      let col :~ Int = col
-      let dt = datatype_at(who, spec, dts, col)
-      let groups = for values(m :~ Map = {}) (r in rows):
-                     let c = pattern_ctor((r :~ DefClause).pats[col]) :~ Symbol
-                     m ++ {c: (m.get(c, []) :~ List) ++ [r]}
+              error.val(~label: "clause",
+                        show(list_mk_comb(mk_const(spec.name, fun_type(spec)),
+                                          (rows[0] :~ Row).clause.pats))))
+  | idx:
+      let idx :~ Int = idx
+      let self_ty = type_of((rows[0] :~ Row).nodes[idx])
+      let dt = datatype_at_type(who, spec, dts, self_ty)
+      for (r in rows):
+        let r :~ Row = r
+        match pattern_ctor(r.nodes[idx])
+        | #false: #void
+        | c:
+            unless (for any (k in dt.ctors): (k :~ Ctor).name == (c :~ Symbol))
+            | error(~who: who,
+                    "a constructor that does not build the matched type",
+                    error.val(~label: "constructor", c))
       for (c in dt.ctors):
         let c :~ Ctor = c
-        match groups.get(c.name, #false)
-        | #false:
-            error(~who: who, "definition is not exhaustive",
-                  error.val(~label: "name", spec.name),
-                  error.val(~label: "missing constructor", c.name))
-        | group:
-            cover(who, spec, dts, group :~ List, cols.remove(col))
-      for ((c, _) in groups):
-        unless (for any (k in dt.ctors): (k :~ Ctor).name == c)
-        | error(~who: who,
-                "a constructor that does not build the matched type",
-                error.val(~label: "constructor", c))
+        let field_tys = ctor_field_types(dt, self_ty, c)
+        let branch = for values(acc :~ List = []) (r in rows):
+                       let r :~ Row = r
+                       match pattern_ctor(r.nodes[idx])
+                       | #false:
+                           let placeholders = field_tys.map(
+                             fun (ty): mk_var(#'_wild, ty :~ HType) :~ Term)
+                           acc ++ [Row(splice(r.nodes, idx, placeholders), r.clause)]
+                       | cn when cn == c.name:
+                           let (_, args) = strip_comb(r.nodes[idx])
+                           acc ++ [Row(splice(r.nodes, idx, args), r.clause)]
+                       | ~else: acc
+        when branch.length() == 0
+        | error(~who: who, "definition is not exhaustive",
+                error.val(~label: "name", spec.name),
+                error.val(~label: "missing constructor", c.name))
+        cover(who, spec, dts, branch)
 
-// A column every row splits on, or `#false` if there is none.  A column that
-// no row splits on is not a candidate; one that only *some* rows split on is
-// rejected outright, because a row with a variable there is a wildcard and
-// this version does not order clauses.
-fun split_column(rows :: List.of(DefClause),
-                 cols :: List.of(Int)) :: maybe(Int):
-  recur loop (cs :~ List = cols):
-    match cs
-    | []: #false
-    | List.cons(col, rest):
-        let ctors = rows.map(fun (r :: DefClause): pattern_ctor(r.pats[col]))
-        cond
-        | (for all (c in ctors): c != #false): col
-        | ~else: loop(rest)
+// A position where some row has a constructor test, or `#false` if every
+// row is a variable at every position (nothing left to split).
+fun find_splittable(rows :: List.of(Row)) :: maybe(Int):
+  let width = (rows[0] :~ Row).nodes.length()
+  recur loop (i = 0):
+    cond
+    | i >= width: #false
+    | ~else:
+        let has_ctor = for any (r in rows): pattern_ctor((r :~ Row).nodes[i]) != #false
+        (if has_ctor | i | loop(i + 1))
 
-// Some row splits on this column and some does not.
-fun is_mixed(rows :: List.of(DefClause), col :: Int) :: Boolean:
-  let ctors = rows.map(fun (r :: DefClause): pattern_ctor(r.pats[col]))
-  (for any (c in ctors): c != #false) && (for any (c in ctors): c == #false)
+// `xs` with the element at `i` replaced by every element of `repl` --
+// `repl.length() == 1` keeps the list the same length, `== 0` shrinks it by
+// one, and anything longer splices in that many new positions.
+fun splice(xs :: List.of(Term), i :: Int, repl :: List.of(Term)) :: List.of(Term):
+  for values(acc :~ List = []) (x in xs, k in List.iota(xs.length())):
+    (if k == i | acc ++ repl | acc ++ [x])
 
-fun datatype_at(who :: Symbol, spec :: FunSpec,
-                dts :: Map.of(Symbol, DatatypeSpec), col :: Int) :: DatatypeSpec:
-  let ty = spec.arg_types[col]
+// `c`'s field types, instantiated at the concrete type arguments `self_ty`
+// actually carries -- `dt`'s own parameters name the constructor's generic
+// field types, so a positional substitution turns them concrete (`List(~a)`
+// instantiated at `List(Nat)` turns `Cons`'s `tail :: List(~a)` field into
+// `List(Nat)`, matching the type the placeholder or nested sub-pattern at
+// that position actually has).
+fun ctor_field_types(dt :: DatatypeSpec, self_ty :: HType,
+                     c :: Ctor) :: List.of(HType):
+  let args :~ List = (match self_ty | TyApp(_, a): a | ~else: [])
+  let theta = for values(m :~ Map = {}) (p in dt.params, a in args):
+                m ++ {p :~ Symbol: a :~ HType}
+  c.fields.map(fun (f :: Field): type_subst(theta, f.ty))
+
+fun datatype_at_type(who :: Symbol, spec :: FunSpec,
+                     dts :: Map.of(Symbol, DatatypeSpec), ty :: HType) :: DatatypeSpec:
   let tyname = (match ty
                 | TyApp(n, _): n
                 | ~else:
@@ -298,4 +324,3 @@ fun datatype_at(who :: Symbol, spec :: FunSpec,
       error(~who: who, "no datatype declaration for the matched type",
             error.val(~label: "type", tyname))
   | d: d :~ DatatypeSpec
-

@@ -157,27 +157,59 @@ check:
                    P.dts)
   ~throws "two clauses match the same arguments"
 check:
-  // a variable pattern mixed in with constructor patterns is a fall-through,
-  // which this version does not compile
+  // An un-refined variable next to a specific constructor pattern for the
+  // same position is a catch-all overlapping every clause that names a
+  // constructor there -- there is no clause ordering to make the variable
+  // a fallback, so this is exactly as overlapping as writing the same
+  // constructor twice.
   let f = mk_const(#'mixed, mk_fun(list_ty(A), nat_ty))
   install_function(thy, FunSpec(#'mixed, [list_ty(A)], nat_ty,
                                 [DefClause([P.nil], P.zero),
                                  DefClause([xs], P.zero)]),
                    P.dts)
-  ~throws "variable pattern mixed"
+  ~throws "two clauses match the same arguments"
 
 // -- pattern shape ---------------------------------------------------------
 
 check:
-  // nested constructor patterns are beyond what the induction schemes of this
-  // version can follow
-  let f = mk_const(#'nested, mk_fun(list_ty(A), nat_ty))
+  // Nested constructor patterns -- matching further into a field an
+  // enclosing pattern already destructured -- are genuinely supported:
+  // `Cons(hd, Nil())`, `Cons(hd, Cons(hd2, tl))`, and `Nil()` exhaustively
+  // cover every list, distinguishing length 0, exactly 1, and 2-or-more.
+  let hd2 = v(#'y, A)
+  let one_elem = ap2(P.cons, hd, P.nil)
+  let two_or_more = ap2(P.cons, hd, ap2(P.cons, hd2, tl))
+  let (_, info) = install_function(
+    thy, FunSpec(#'by_length, [list_ty(A)], nat_ty,
+                 [DefClause([P.nil], P.zero),
+                  DefClause([one_elem], ap1(P.succ, P.zero)),
+                  DefClause([two_or_more],
+                            ap1(P.succ, ap1(P.succ, P.zero)))]),
+    P.dts)
+  (info :~ FunInfo).equations.length()
+  ~is 3
+check:
+  // The same shape missing the 2-or-more-element case: still caught as not
+  // exhaustive, one nesting level deeper than a flat coverage check would
+  // reach.
+  let one_elem = ap2(P.cons, hd, P.nil)
+  install_function(
+    thy, FunSpec(#'by_length2, [list_ty(A)], nat_ty,
+                 [DefClause([P.nil], P.zero),
+                  DefClause([one_elem], ap1(P.succ, P.zero))]),
+    P.dts)
+  ~throws "not exhaustive"
+check:
+  // Reusing one variable at two different nested positions is still
+  // rejected as a repeated pattern variable, whether the two positions are
+  // at the same depth or not.
+  let f = mk_const(#'nested_reused, mk_fun(list_ty(A), nat_ty))
   let deep = ap2(P.cons, hd, ap2(P.cons, hd, tl))
-  install_function(thy, FunSpec(#'nested, [list_ty(A)], nat_ty,
+  install_function(thy, FunSpec(#'nested_reused, [list_ty(A)], nat_ty,
                                 [DefClause([P.nil], P.zero),
                                  DefClause([deep], P.zero)]),
                    P.dts)
-  ~throws "distinct variables"
+  ~throws "pattern variable is repeated"
 check:
   let f = mk_const(#'rep, mk_fun(list_ty(A), list_ty(A)))
   let same = ap2(P.cons, hd, tl)

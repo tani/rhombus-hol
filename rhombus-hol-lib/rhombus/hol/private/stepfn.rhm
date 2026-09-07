@@ -49,10 +49,33 @@ export:
 fun self_type(spec :: DatatypeSpec) :: HType:
   TyApp(spec.name, spec.params.map(fun (p :: Symbol): TyVar(p) :~ HType))
 
-// Whether this module's derivation applies: single argument, and
-// termination settled by plain structural descent (no measure).
+// Whether this module's derivation applies: single argument, termination
+// settled by plain structural descent (no measure), and every clause's
+// pattern exactly one constructor level deep.
+//
+// `recdef.rhm`'s coverage checker and `terminate.rhm`'s `descends_at` both
+// admit nested patterns (`Cons(x, Cons(y, zs))`), but `build_step_body`
+// below zips a clause's pattern variables against its own constructor's
+// *top-level* fields one-for-one (`leaf_for`, below) -- a nested pattern
+// has more leaf variables than the top-level constructor has fields, which
+// `for List` would silently zip short rather than raise, quietly dropping
+// a substitution rather than building the wrong `H`.  Rejecting depth
+// beyond one level here keeps that mismatch from ever being reached;
+// `install_function` (`recdef.rhm`)'s `new_axiom` postulation handles
+// nested patterns at any depth just fine, so a nested-pattern definition
+// still installs, just without this module's `new_axiom`-free derivation.
 fun can_derive_structurally(spec :: FunSpec, recinfo :: RecursionInfo) :: Boolean:
   spec.arg_types.length() == 1 && recinfo.method == #'structural
+    && (for all (cl in spec.clauses): is_shallow_pattern((cl :~ DefClause).pats[0]))
+
+fun is_shallow_pattern(p :: Term) :: Boolean:
+  match p
+  | FVar(_, _): #true
+  | ~else:
+      let (head, args) = strip_comb(p)
+      match head
+      | Const(_, _): for all (a in args): a is_a FVar
+      | ~else: #false
 
 // -- building `H` ------------------------------------------------------
 

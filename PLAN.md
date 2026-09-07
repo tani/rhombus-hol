@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1129 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1149 tests passed。
 §10 に外部レビュー対応の状況をまとめてある。
 
 ---
@@ -249,9 +249,15 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 - `@doc` ブロックが使えていない（`check_property` 以外）。上記の理由で
   for-label 束縛を要求する `@doc` に載らないため、`@verbatim` の文法表示 +
   `@section` で代用している。
-- `function` の本体は `match` / `if` / 変数 / 名前付き適用 / Boolean 演算子と
-  `#true` / `#false` のみ。`let` / 算術 / リテラルは文法外でコンパイルエラーになる。
-- `match` の入れ子は 1 引数につき 1 段。ワイルドカード節・構築子パターンの入れ子は不可。
+- `function` の本体は `match` / `if` / `cond` / 局所 `let` / 変数 / 名前付き適用 /
+  Boolean 演算子と `#true` / `#false` のみ。算術・リテラルは文法外でコンパイル
+  エラーになる。
+- `match` は任意深さの入れ子コンストラクタパターンに対応済み（節の頭に直接
+  書く入れ子・本体中の別 `match` によるさらなる精緻化のどちらも可、§9.4.1）。
+  `_` によるワイルドカード節と節順序依存（first-match-wins）の意味論は
+  依然未対応 -- 現行は変数パターンも構築子パターンと同じ位置で共存できるが、
+  複数行が同じ葉に達したら無条件にオーバーラップとしてエラーにする、
+  順序なしの網羅性検査のまま。
 - 測度は宣言済みデータ型に着地しなければならない。入れ子再帰には義務を立てられない。
 - 構造的降下が成立する定義では `~measure` は検査されない（健全性の問題ではないが、
   誤った測度を書いても黙って通る）。
@@ -1090,6 +1096,99 @@ function classify(b1 :: Boolean, b2 :: Boolean, m :: Nat, n :: Nat, k :: Nat) ::
 だけ、コンストラクタ1段だけ」という前提に依存しているため、あわせて
 一般化が必要になる可能性が高い。
 
+### 9.4.1 進捗（後続セッション）: 入れ子パターンを実装 -- 上記の罠を踏まえた決定木コンパイラで解消
+
+上記の罠分析（「パース面だけの変更では安全に実現できない」）を踏まえ、
+`recdef.rhm`/`terminate.rhm`/`elab.rhm`/`stepfn.rhm` を一貫して一般化した。
+
+**`recdef.rhm`（`check_coverage`/`cover`）**: 列インデックスの固定表
+から、`Row(nodes, clause)` を単位とする本物の決定木コンパイラへ書き換えた。
+「列」は固定引数位置ではなく**位置**（引数のどこか、任意の深さの
+パターン木の中の1ノード）になり、ある位置でコンストラクタパターンを
+持つ行が1つでもあれば、その datatype の全コンストラクタについて
+「その位置をコンストラクタのフィールド群で置き換えた」新しい行集合を
+作って再帰する。変数（まだ割れていない）だった行は、そのコンストラクタの
+フィールド型に合わせた**プレースホルダ変数**で埋めて全分岐に持ち越す
+（識別子は使い捨てで、網羅性検査は「変数かどの構築子か」しか見ない）。
+葉（もう割れる位置がない）に複数行が残れば「同じ引数に2つの節が
+マッチする」というオーバーラップ。列を選ぶたびに `type_subst` で
+`dt.params`（datatype 自身の型変数）を `self_ty`（実際に使われている
+具体型引数）へ具体化してフィールド型を求める（`List(~a)` を
+`List(Nat)` へ特殊化した `tail :: List(~a)` が `List(Nat)` になる、
+という具合）。
+
+**`terminate.rhm`（`descends_at`）**: 「`pat` の直近の1フィールドと
+`arg` が一致するか」から、「`pat` 自身の**再帰フィールド**（型が
+`pat` 自身と同じフィールド）を辿るチェーンのどこかで `arg` に一致するか」
+へ一般化した。これは`subterm.rhm`の`T_lt`の定義そのもの
+（`T_lt(v, C(...)) <=> v === xi or T_lt(v, xi) or ...`、再帰
+フィールド`xi`のみを辿る）と正確に対応しており、1段だけの旧実装は
+この一般形の特殊ケースになる（既存の`tests/recdef.rhm`の
+`descends_at`回帰テストは無変更で全通過）。
+
+**`elab.rhm`（`parse_body`/`ctor_pattern`）**: 列インデックスベースの
+`matched_index`/`index_of_param`を、**名前ベース**の
+`matched_var`/`pattern_var_live`/`refine_pats`に置き換えた。`match n`は
+「`n`という名前が現在`env`の中で指している`FVar`が、`pats`の木の中に
+まだ生きて（未精緻化のまま）残っているか」で判定し、見つかればその
+occurrence だけを新パターンで置換する（構築子適用位置への構造的
+置換）。これにより:
+
+1. **既存の複数引数対応**（`match m | ... | succ(p): match n | ...`）は
+   完全に不変（列という概念自体を捨てても、名前ベースの探索が同じ結果を
+   出す）。
+2. **本体中の別の`match`文で、既にパターン束縛された変数をさらに
+   `match`できる**（`match xs | Cons(x, rest): match rest | Nil(): ...
+   | Cons(y, ys): ...`）。
+3. さらに`ctor_pattern`自身も、コンストラクタの各引数位置が**裸の
+   識別子**（新鮮な変数を束縛、従来通り）だけでなく**入れ子の
+   コンストラクタパターン自身**（`SubC(sv, ...)`、再帰的に同じ関数で
+   解析）であることを許すよう一般化した（`parse_sub_pattern`）。これに
+   より、レビュー項目8が例示した**1つの`match`節の頭に直接書く**
+   入れ子構文（`match xs | Nil(): ... | Cons(x, Nil()): ... |
+   Cons(x, Cons(y, rest)): ... `）も、別立ての`match`文による入れ子
+   （2番目の項目）と**全く同じ`Term`表現**を生成する -- どちらの表面
+   構文で書いても、`recdef.rhm`/`terminate.rhm`は表面形式を区別しない。
+
+**`stepfn.rhm`（P0ソウンドネス境界の維持）**: `pattern_vars`が再帰的に
+なったことで、`build_step_body`の`leaf_for`が
+`pattern_vars(#'function, cl.pats[0])`（葉変数を集める）と
+`c.fields`（コンストラクタ自身の直下フィールド）を`for List`で
+**ゼロ詰めzip**していた箇所が、入れ子パターンでは長さが食い違い、
+`for List`は**エラーにせず黙って短い方に切り詰める**ため、深い変数への
+置換が silently 欠落した`H`を組み立ててしまう実装上の罠を発見した
+（実害はカーネルに到達する前の`build_step_body`の内部でのみ生じ、
+kernel自体は健全なままだが、生成される`WFREC`由来の等式が**間違った
+項**になりうるという、`install_function`経路にはない新規の危険だった）。
+`can_derive_structurally`に「全節のパターンがちょうど1構築子段だけ
+（`is_shallow_pattern`）」という明示ガードを追加してこの危険を
+未然に防いだ -- 入れ子パターンを持つ単一引数の再帰的定義は
+`recinfo.method == #'structural`であっても`WFREC`導出には進まず、
+`install_function`の`new_axiom`スキーマへ確実にフォールバックする
+（実カーネルに対し、`axioms_of`の個数が実際に増えることを確認済み）。
+
+**回帰テスト**: `tests/recdef.rhm`に6件追加・2件更新
+（`FunSpec`直接構築での網羅性/オーバーラップ/変数再利用のテスト）、
+`tests/lexicographic.rhm`の`lexicographic_rematch.rhm`フィクスチャを
+「入れ子`match`が失敗する例」から「入れ子`match`が正しく動く例」へ
+repurpose し、新規`lexicographic_rematch_same.rhm`で「同じ位置への
+再マッチ（rebind なし）はいまも拒否される」ことを確認、
+新規`tests/nested_match.rhm`/`fixtures/nested_match_ok.rhm`で
+実際の`#lang rhombus/hol`ソースから入れ子パターン付き`function`を
+宣言し実行時に正しく計算すること、`fixtures/nested_match_partial.rhm`
+で入れ子2段目のケース抜けが`"not exhaustive"`として検出されることを
+確認した。フルテストスイート 1139 → 1149（既存1139は無変更で全通過）。
+
+**残る意図的な非対応**: `_`によるワイルドカード節・`match`節の
+順序依存（first-match-wins）意味論は今回も導入していない
+（レビュー項目8の例が挙げる`| _: ...`）。現行のシステムは依然として
+「変数パターンは他の構築子パターンと同じ位置で共存できるが、その位置に
+到達する行が2つ以上残れば無条件にオーバーラップとしてエラーにする」
+という、**順序なし**の網羅性・非オーバーラップ検査を保っている
+（`mixed`テストが実例）。ワイルドカード＋節順序を導入するには、
+`check_coverage`に「最初にマッチする節を優先」という別の意味論を
+設計する必要があり、今回は着手しなかった。
+
 ### 9.5 進捗（本セッション）: Core IR 調査 -- 現行の反映範囲では未着手のままでよい
 
 レビュー項目 7（`Surface -> CoreExpr -> HOL + Rhombus` の共通 IR）を、
@@ -1188,8 +1287,8 @@ namespace・複数 theory import」を調査した。現状の制約
 | 6 | 公開 kernel API を HOL Light `fusion.ml` に揃える | 大枠は既に一致（十規則、同じ命名）。**`BETA` の trivial-redex 化は検討し、見送りと判断**（詳細下記）。残る未着手部分は printer/tracing 分離のみ（§5 で対応済みと説明）。 |
 | 6b | base logic は HOL Light型かHOL4型かを明示する | **既に明示済み**。`bool.rhm` 冒頭のコメントが "ETA, SELECT and BOOL_CASES -- following HOL4 rather than HOL Light" と明記し、`kernel.rhm`/PLAN.md §1 が原始規則は HOL Light 型（十規則）であることを明記している。レビューが望む「どちらの型を実装しているか」の明示は既存のドキュメントで満たされている。 |
 | 7 | `Surface → CoreExpr → HOL + Rhombus` の共通 IR | **調査済み、現行範囲では不要と判断**。`module_block.rhm`の実行側emitは`body`を一切解釈しない逐語コピーで、独自の第二の意味論を持たない。裸の識別子・ハードコード演算子表のみの現行反映範囲では名前ベース(elab.rhm)と束縛ベース(Rhombus)の解決が食い違い得ない。共通IRが要る具体的な引き金（インポート別名越しの参照・ユーザー定義演算子）を§9.5に記録した。 |
-| 8 | `match`/`cond`/局所 `def`/入れ子パターンの追加 | **`cond`/局所 `let` は完了、入れ子パターンは未着手**。詳細と、入れ子パターンを安全に進めるための必須の前提条件（下記参照）は §9.4 にまとめた。 |
-| 9 | `function` はロジック性マーカーのみとし、grammar は Rhombus `fun` を再利用 | **設計判断として達成、コード内に既存の理由コメントあり**。`elab.rhm` 冒頭が「`fun` を intercept せず別キーワードにする」理由を明記済み。宣言レベルの多節 `\|` 構文（Rhombus 本来の `fun` の書き方）への接近は §8/§9.4 の入れ子パターン課題と同じ決定木コンパイラを要求するため、そちらに一本化して追跡する。 |
+| 8 | `match`/`cond`/局所 `def`/入れ子パターンの追加 | **完了**。`cond`/局所 `let` に加え、入れ子パターン（コンストラクタパターンの中にさらにコンストラクタパターン、または本体中の別の `match` によるさらなる精緻化）を実装した。`recdef.rhm` の `check_coverage` を列インデックス固定表から本物の決定木コンパイラへ、`terminate.rhm` の `descends_at` を「直近1フィールド」から「再帰フィールドのチェーンを辿る」へ、`elab.rhm` の `match` パーサを列インデックスベースから名前ベース（`matched_var`/`refine_pats`）へ一般化した。詳細と踏んだ罠（`stepfn.rhm` の zip 長不一致）は §9.4.1 にまとめた。`_` ワイルドカード・節順序依存は今回も未着手（意図的、§9.4.1 末尾）。 |
+| 9 | `function` はロジック性マーカーのみとし、grammar は Rhombus `fun` を再利用 | **設計判断として達成、コード内に既存の理由コメントあり**。`elab.rhm` 冒頭が「`fun` を intercept せず別キーワードにする」理由を明記済み。宣言レベルの多節 `\|` 構文（Rhombus 本来の `fun` の書き方）への接近は、項目8で完了した決定木コンパイラを流用できるため、以前考えていたより着手しやすくなったが、`function`自体の宣言文法を変えるかどうかは別の設計判断であり今回は着手しなかった。 |
 | 10 | user-defined operator に logical interpretation を登録可能にする | **調査済み、v0.1 の範囲では不要と判断（既存コメントあり）**。`elab.rhm` の手書き precedence parser 自体が "What `space.enforest` would buy is user extensibility, which v0.1 does not need" と明記しており、固定・小さい命題文法である現状ではレビューが望む拡張性の需要が実際に発生していない。§9.5 の Core IR 同様、需要が生じた時点（ユーザー定義演算子が実際に使われる時点）で再検討する。 |
 | 11 | fertilization / irrelevance 除去 / induction pool | fertilization と irrelevance 除去は**完了**（本セッション以前）。induction pool は**試みて撤回**。下記参照。 |
 | 13 | rule classes | **完了**。`ruledb.rhm` の `RuleDB` が type-prescription 事実を rewrite ルールと独立に分類・保持（`type_facts_of`）、`general.rhm` の `generalize_goal` が一般化時にそれを消費する。 |

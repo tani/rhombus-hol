@@ -264,8 +264,16 @@ fun elab_expr(thy :: Theory, self_name :: Symbol, self :: Term,
 
 // -- clauses -----------------------------------------------------------------
 
-// `C(v, ...)` as a pattern term, plus the variables it binds, at the type the
-// scrutinee actually has.
+// `C(v, ...)` as a pattern term, plus the variables it binds, at the type
+// the scrutinee actually has.  Each `v` is a bare identifier (a fresh
+// variable, as ever) or itself `SubC(...)` -- a nested constructor
+// pattern written directly in the clause head (`Cons(x, Nil())`), parsed
+// the same recursive way, at that field's own type.  This is a second,
+// independent route to a nested pattern beside a separate nested `match`
+// statement in the body (`parse_body`'s `matched_var`/`refine_pats`) --
+// both build the same kind of nested `Term`, and neither the coverage
+// checker nor the termination checker cares which surface form produced
+// it.
 fun ctor_pattern(thy :: Theory, cname :: Symbol, vids :: List.of(Syntax),
                  scrut_ty :: HType, at :: Syntax) :: values(Term, List.of(FVar)):
   let gty = (match const_type(thy, cname)
@@ -277,11 +285,29 @@ fun ctor_pattern(thy :: Theory, cname :: Symbol, vids :: List.of(Syntax),
                   syntax_error(#'function,
                                "constructor does not build the matched type", at)
               | m: m)
-  let vars = for List (v in vids, d in doms):
-               mk_var(Syntax.unwrap(v), type_subst(tyin, d))
-  values(list_mk_comb(mk_const(cname, type_subst(tyin, gty)),
-                      vars.map(fun (v :: FVar): v :~ Term)),
-         vars)
+  let field_tys = doms.map(fun (d :: HType): type_subst(tyin, d))
+  let parsed = for List (v in vids, ty in field_tys):
+                 parse_sub_pattern(thy, v, ty :~ HType)
+  let subpats = parsed.map(fun (pr :: List): pr[0] :~ Term)
+  let bound = for values(acc :~ List = []) (pr in parsed):
+                acc ++ (pr :~ List)[1]
+  values(list_mk_comb(mk_const(cname, type_subst(tyin, gty)), subpats),
+         bound)
+
+// One constructor-argument position: a bare identifier (a fresh variable),
+// or `SubC(sv, ...)` -- a further nested pattern, recursing into
+// `ctor_pattern` at `SubC`'s own matched type.
+fun parse_sub_pattern(thy :: Theory, v :: Syntax,
+                      ty :: HType) :: List:
+  match v
+  | '$(n :: Identifier)($sv, ...)':
+      let (pat, bound) = ctor_pattern(thy, Syntax.unwrap(n), [sv, ...], ty, v)
+      [pat, bound]
+  | '$(n :: Identifier)':
+      let fv = mk_var(Syntax.unwrap(n), ty)
+      [fv :~ Term, [fv]]
+  | ~else:
+      syntax_error(#'function, "malformed pattern", v)
 
 fun peel_fun(ty :: HType, n :: Int) :: values(List.of(HType), HType):
   recur loop (ty :~ HType = ty, k = n, acc :~ List = []):
@@ -314,42 +340,39 @@ fun parse_function_decl(thy :: Theory, stx :: Syntax) :: FunSpec:
         let e = parse_group(PEnv(thy, tyvars, env0, #'expr, #false, #false),
                             ms :~ Syntax)
         list_mk_abs(pvars, e)
-  let clauses = parse_body(thy, name, self, pvars,
+  let clauses = parse_body(thy, name, self,
                            pvars.map(fun (v :: FVar): v :~ Term),
                            env0, body :~ Syntax, stx)
   FunSpec(name, arg_tys, rty, clauses, measure)
 
-fun index_of_param(pvars :: List.of(FVar), n :: Symbol, at :: Syntax) :: Int:
-  recur loop (i = 0):
-    cond
-    | i >= pvars.length():
-        syntax_error(#'function, "the matched name is not a parameter", at)
-    | (pvars[i] :~ FVar).name == n: i
-    | ~else: loop(i + 1)
-
 // A body, as the clauses it stands for.
 //
-// `match` may be nested, one argument per level, and the nesting is flattened
-// into a pattern matrix: `match m | zero(): ... | succ(p): match n | ...`
-// becomes `[zero(), n]`, `[succ(p), zero()]`, `[succ(p), succ(q)]`.  That is
-// what lets a definition descend on more than one argument -- `install_function`
-// checks the matrix for coverage, and the termination checker looks for a
-// descending column across the whole of it.
+// `match` may be nested to any depth, on any parameter or on a variable a
+// prior pattern in the same clause already bound, and the nesting is
+// flattened into a pattern matrix: `match m | zero(): ... | succ(p): match n
+// | ...` becomes `[zero(), n]`, `[succ(p), zero()]`, `[succ(p), succ(q)]`;
+// `match xs | Cons(x, rest): match rest | Nil(): ... | Cons(y, ys): ...`
+// refines the *tail* of `Cons(x, rest)` in place, becoming `[Cons(x, Nil())]`,
+// `[Cons(x, Cons(y, ys))]`.  That is what lets a definition descend on more
+// than one argument, and into more than one level of a single argument --
+// `check_coverage` (`recdef.rhm`) checks the whole tree for exhaustiveness
+// and non-overlap, and the termination checker looks for a descending
+// position anywhere in it.
 //
 // `pats` is the row built so far: initially the bare parameters, refined one
-// column at a time as the nesting is descended.
+// position at a time -- possibly nested inside an earlier refinement -- as
+// the matching descends.
 fun parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
-               pvars :: List.of(FVar), pats :: List.of(Term),
-               env :: Map.of(Symbol, Term), body :: Syntax,
-               at :: Syntax) :: List.of(DefClause):
+               pats :: List.of(Term), env :: Map.of(Symbol, Term),
+               body :: Syntax, at :: Syntax) :: List.of(DefClause):
   match body
   | 'match $(sv :: Identifier)
      | $c
      | ...':
-      let col = matched_index(pvars, pats, Syntax.unwrap(sv), body)
+      let v = matched_var(env, pats, Syntax.unwrap(sv), body)
       let cs = [c, ...]
       for values(acc :~ List = []) (c in cs):
-        acc ++ parse_clause(thy, self_name, self, pvars, pats, col, env, c, at)
+        acc ++ parse_clause(thy, self_name, self, pats, v, env, c, at)
   | 'let $(n :: Identifier) = $rhs ...
      $more; ...':
       // A multi-statement body's first statement must be `let name = expr`;
@@ -357,37 +380,75 @@ fun parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
       // error below, the same as any other unrecognised body shape.
       let v = elab_expr(thy, self_name, self, env, '$rhs ...')
       let env2 = env ++ {Syntax.unwrap(n): v}
-      parse_body(thy, self_name, self, pvars, pats, env2, '$more; ...', at)
+      parse_body(thy, self_name, self, pats, env2, '$more; ...', at)
   | ~else:
       [DefClause(pats, elab_expr(thy, self_name, self, env, body))]
 
-// The column a nested `match` refines, refusing to refine one twice.
+// The pattern variable a `match` refines: `n` must name something still a
+// *live*, unrefined position somewhere in `pats` -- a top-level parameter
+// not yet matched, or a variable an enclosing pattern in this same clause
+// just bound.  Refusing anything else catches every way `n` could fail to
+// denote a fresh scrutinee: unbound entirely, already matched (its own name
+// lingers in `env` after refinement, since `env` only ever grows), or bound
+// by `let` to a computed term rather than a pattern position (matching on a
+// computed value has no constructor test to check exhaustively against).
 //
 // A pattern variable may shadow a parameter -- `function f(n)` with a clause
-// `succ(n)` -- and without this check `match n` inside that clause would look
-// like a second match on the parameter and silently discard the first.
-fun matched_index(pvars :: List.of(FVar), pats :: List.of(Term),
-                  n :: Symbol, at :: Syntax) :: Int:
-  let col = index_of_param(pvars, n, at)
-  unless pats[col] == (pvars[col] :~ Term)
-  | syntax_error(#'function,
-                 "this argument has already been matched; a nested `match` "
-                   ++ "must be on a different parameter",
-                 at)
-  col
+// `succ(n)` -- and without checking liveness in `pats` (not just presence in
+// `env`) a nested `match n` after that would look like a fresh match on the
+// now-inaccessible outer `n` and silently refine nothing.
+fun matched_var(env :: Map.of(Symbol, Term), pats :: List.of(Term),
+                n :: Symbol, at :: Syntax) :: FVar:
+  match env.get(n, #false)
+  | #false:
+      syntax_error(#'function, "the matched name is not in scope", at)
+  | v when !(v is_a FVar):
+      syntax_error(#'function,
+                   "this name is not a pattern variable to match on", at)
+  | v0:
+      let v :~ FVar = v0
+      unless pattern_var_live(pats, v)
+      | syntax_error(#'function,
+                     "this argument has already been matched; a nested "
+                       ++ "`match` must be on a still-unmatched variable",
+                     at)
+      v
+
+// Whether `v` occurs, unrefined, somewhere in `pats`'s pattern trees.
+fun pattern_var_live(pats :: List.of(Term), v :: FVar) :: Boolean:
+  fun walk(t :: Term) :: Boolean:
+    match t
+    | FVar(_, _): t == (v :~ Term)
+    | ~else:
+        let (head, args) = strip_comb(t)
+        match head
+        | Const(_, _): for any (a in args): walk(a)
+        | ~else: #false
+  for any (p in pats): walk(p)
+
+// `pats` with the one live occurrence of `v` replaced by `new_pat`.
+fun refine_pats(pats :: List.of(Term), v :: FVar,
+                new_pat :: Term) :: List.of(Term):
+  fun walk(t :: Term) :: Term:
+    match t
+    | FVar(_, _): (if t == (v :~ Term) | new_pat | t)
+    | ~else:
+        let (head, args) = strip_comb(t)
+        match head
+        | Const(_, _): list_mk_comb(head, args.map(walk))
+        | ~else: t
+  pats.map(walk)
 
 fun parse_clause(thy :: Theory, self_name :: Symbol, self :: Term,
-                 pvars :: List.of(FVar), pats :: List.of(Term), col :: Int,
+                 pats :: List.of(Term), v :: FVar,
                  env0 :: Map.of(Symbol, Term), c :: Syntax,
                  at :: Syntax) :: List.of(DefClause):
   let (cname, vids, body) = clause_parts(c)
-  let scrut_ty = (pvars[col] :~ FVar).ty
-  let (pat, bound) = ctor_pattern(thy, cname, vids, scrut_ty, c)
-  let env = for values(m :~ Map = env0) (v in bound):
-              m ++ {(v :~ FVar).name: v :~ Term}
-  let pats2 = for List (p in pats, i in List.iota(pats.length())):
-                (if i == col | pat | p)
-  parse_body(thy, self_name, self, pvars, pats2, env, body, at)
+  let (pat, bound) = ctor_pattern(thy, cname, vids, v.ty, c)
+  let env = for values(m :~ Map = env0) (bv in bound):
+              m ++ {(bv :~ FVar).name: bv :~ Term}
+  let pats2 = refine_pats(pats, v, pat)
+  parse_body(thy, self_name, self, pats2, env, body, at)
 
 fun clause_parts(c :: Syntax) :: values(Symbol, List.of(Syntax), Syntax):
   match c

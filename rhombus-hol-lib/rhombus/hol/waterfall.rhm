@@ -66,14 +66,30 @@ fun mk_context(thy :: Theory,
                   a ++ {(c :~ Ctor).name}
   Context(thy, db, dts, funs, ctors)
 
-// How many nested inductions the driver will attempt.
+// How long a chain of nested inductions the driver will follow.
 //
-// This is not a tunable budget, it is what makes the driver a function rather
-// than a search: each induction replaces a variable by constructor patterns
-// that introduce *new* variables of the same type, so without a bound the
-// driver would keep finding something to induct on forever.  Two levels is
-// what ACL2 uses and what the specification's examples need.
-def max_induction_depth = 2
+// This is the termination argument, not a tunable budget.  Each induction
+// replaces a variable by constructor patterns that introduce *new* variables
+// of the same type, so `candidate_vars` will suggest one again on every
+// subgoal, forever.  Duplicate detection cannot save this on its own -- the
+// subgoals are genuinely different terms each time, not repeats -- so a
+// limit on the length of an induction branch is what makes the driver a
+// function rather than a search.  ACL2 bounds its own search the same way,
+// with subgoal path limits; it does *not* use a fixed depth of two, and an
+// earlier comment here saying so was wrong about its architecture.
+//
+// The value is set by measurement, not by principle.  On
+// `tests/decl_theorem.rhm`, which is where the stuck fixtures live:
+//
+//     limit    2     3     4     5     6      20      100
+//     time   3.19  3.07  3.06  3.05  3.08    5.75   does not finish
+//
+// Six is three times what the specification's examples need and still free;
+// past that each further level multiplies the work on goals that are going
+// to get stuck anyway by the number of constructors.  The duplicate check
+// prunes real repeats but is not what bounds the search -- the `100` column
+// is what that claim rests on.
+def max_induction_path = 6
 
 fun stage_simplify(ctx :: Context, g :: Goal) :: maybe(Step):
   simplify_goal(ctx.thy, ctx.db, g)
@@ -134,9 +150,14 @@ fun prove_goal(ctx :: Context, g :: Goal,
                ~induct: hint :: maybe(FVar) = #false,
                ~do_not: do_not :: Set.of(Symbol) = Set()) :: ProofNode:
   check_do_not(do_not)
-  fun go(g :: Goal, depth :: Int, hint :: maybe(FVar)) :: ProofNode:
-    fun descend(st :: Step, next_depth :: Int) :: ProofNode:
-      Derived(st, st.subgoals.map(fun (s :: Goal): go(s, next_depth, #false)))
+  // `inducted` is the goals already inducted on along this branch, oldest
+  // first: its length is the branch limit above, and membership is the
+  // duplicate check.  A goal that comes back around unchanged would induct
+  // to the same subgoals and get stuck the same way, so trying again only
+  // costs time.
+  fun go(g :: Goal, inducted :: List, hint :: maybe(FVar)) :: ProofNode:
+    fun descend(st :: Step, next :: List) :: ProofNode:
+      Derived(st, st.subgoals.map(fun (s :: Goal): go(s, next, #false)))
     // `#false` first in every one of these: `:~` is an assertion, not a
     // test, so a `Step`-annotated clause placed first would swallow `#false`.
     match stage(do_not, #'simplify, fun (): stage_simplify(ctx, g))
@@ -150,19 +171,21 @@ fun prove_goal(ctx :: Context, g :: Goal,
                     match stage(do_not, #'irrelevance,
                                 fun (): stage_irrelevance(ctx, g))
                     | #false:
+                        let key = [g.asms, g.concl]
                         cond
-                        | depth >= max_induction_depth: Open(g)
+                        | inducted.length() >= max_induction_path: Open(g)
+                        | inducted.contains(key): Open(g)
                         | do_not.contains(#'induct): Open(g)
                         | ~else:
                             match stage_induct(ctx, g, hint)
                             | #false: Open(g)
-                            | st: descend(st :~ Step, depth + 1)
-                    | st: descend(st :~ Step, depth)
-                | st: descend(st :~ Step, depth)
-            | st: descend(st :~ Step, depth)
-        | st: descend(st :~ Step, depth)
-    | st: descend(st :~ Step, depth)
-  go(g, 0, hint)
+                            | st: descend(st :~ Step, inducted ++ [key])
+                    | st: descend(st :~ Step, inducted)
+                | st: descend(st :~ Step, inducted)
+            | st: descend(st :~ Step, inducted)
+        | st: descend(st :~ Step, inducted)
+    | st: descend(st :~ Step, inducted)
+  go(g, [], hint)
 
 // Prove a closed proposition.  Leading universal quantifiers are stripped
 // first -- the prover works on the matrix and puts the quantifiers back --

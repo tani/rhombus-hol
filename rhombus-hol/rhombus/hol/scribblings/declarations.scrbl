@@ -303,10 +303,16 @@ are visible, not because a proof development needs them.
 @section{@rhombus(axiomatic_function, ~datum)}
 
 The same grammar as @rhombus(function, ~datum), and a different contract: it
-@emph{postulates} its clausal equations instead of deriving them.
+@emph{postulates} its clausal equations rather than deriving them. Always ---
+not only when the derivation would have failed. A form whose meaning depended
+on which recursion schemes this version happens to handle is the thing having
+two forms is for.
+
+Termination, exhaustiveness and non-overlap are still checked, because those
+are what make postulating the equations a conservative extension; see
+@secref("termination"). What is skipped is the proof.
 
 @rhombus(function, ~datum) refuses a definition whose recursion it cannot
-build a well-founded order for, so that an ordinary declaration never extends
-the theory by assumption. This is the form to write when the definition is
-exhaustive and terminating and you want it anyway; see @secref("trust") for
-what that costs and @secref("termination") for when it is conservative.
+build a well-founded order for, so an ordinary declaration never extends the
+theory by assumption. This is the form to write when you want one anyway; see
+@secref("trust") for what it costs.

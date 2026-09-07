@@ -1,11 +1,11 @@
 #lang rhombus/static
 
-// `function` never adds an axiom (PLAN.md section 9.33).
+// `function` never adds an axiom (PLAN.md sections 9.33 and 9.36).
 //
-// Whether a declaration is derived used to depend on which recursion scheme
-// this version happens to handle, and a scheme it did not handle was
-// postulated silently.  Now the ordinary form refuses, naming what it could
-// not do, and `axiomatic_function` is the word for "assume these equations".
+// Whether a declaration was derived used to depend on which recursion scheme
+// this version happened to handle, and a scheme it did not handle was
+// postulated silently.  Now the ordinary form refuses and says what is wrong,
+// and `axiomatic_function` is the word for "assume these equations".
 
 import:
   rhombus/hol/kernel open
@@ -13,35 +13,44 @@ import:
   rhombus/hol/driver open
   rhombus/meta open
   "fixtures/axiomatic_ok.rhm"!hol_theory as axiomatic
+  "fixtures/derived_twin.rhm"!hol_theory as derived
 
-// -- the ordinary form refuses, and says why ---------------------------------
+fun load(mp :: ModulePath):
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }: Evaluator.instantiate(mp)
+
+// -- the same declaration, two words -----------------------------------------
+//
+// Identical equations, and that is the point: the two forms differ in what
+// they assume, not in what they mean.
+
+def ax :~ HolState = axiomatic.theory
+def dv :~ HolState = derived.theory
+
+check:
+  ax.funs[#'dbl].equations.map(fun (t :: Thm): show(concl_of(t)))
+  ~is dv.funs[#'dbl].equations.map(fun (t :: Thm): show(concl_of(t)))
+
+// Two leaves, two axioms; the derived twin pays nothing beyond the base
+// logic's four.
+check axioms_of(ax.thy).length() ~is 4 + 2
+check axioms_of(dv.thy).length() ~is 4
+
+// -- and a refusal names its real cause --------------------------------------
+//
+// `fixtures/function_unsupported.rhm` rests on a `~measure` landing in a
+// non-recursive datatype.  The message says that, rather than reporting an
+// undeclared `Colour_lt` -- true, and no use to the author -- or blaming
+// something that stopped being a reason to refuse.
 
 check:
   try:
     block:
-      let e = Evaluator.make_rhombus()
-      parameterize { Evaluator.current: e }:
-        Evaluator.instantiate(
-          ModulePath'lib("rhombus/hol/tests/fixtures/function_unsupported.rhm")')
+      load(ModulePath'lib("rhombus/hol/tests/fixtures/function_unsupported.rhm")')
       "compiled"
     ~catch e :: Exn.Fail:
       cond
-      | e.message.contains("no proof-producing definition compiler")
-          && e.message.contains("axiomatic_function"): "refused, with advice"
+      | e.message.contains("must land in a declared datatype that recurses")
+          && e.message.contains("Colour"): "refused, naming the measure"
       | ~else: "refused: " ++ e.message
-  ~is "refused, with advice"
-
-// -- and the explicit form still postulates ----------------------------------
-//
-// Same declaration, different word.  Two leaves, two axioms above the base
-// logic's four -- which is exactly the cost the ordinary form now declines
-// to pay on your behalf.
-
-def st :~ HolState = axiomatic.theory
-
-check axioms_of(st.thy).length() ~is 4 + 2
-
-check:
-  st.funs[#'f].equations.map(fun (t :: Thm): show(concl_of(t)))
-  ~is ["forall (x :: Colour): f(x, zero) === zero",
-       "forall (x :: Colour, y :: Nat): f(x, succ(y)) === f(x, y)"]
+  ~is "refused, naming the measure"

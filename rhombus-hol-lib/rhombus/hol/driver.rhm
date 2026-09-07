@@ -235,33 +235,59 @@ fun install_declared_function(st :: HolState, form :: Syntax, at :: Syntax,
   let arity = spec.arg_types.length()
   let derivable:
     cond
-    | arity == 0: #false
+    | arity == 0: NoArguments()
     | ~else:
         let fn_ph = mk_const(spec.name, fun_type(spec))
+        // A measure can only be discharged against the subterm relation of
+        // the type it lands in, so one landing anywhere else is not offered
+        // to the termination checker at all.  Handing it over anyway asks
+        // the checker to build a relation that was never declared, and the
+        // failure surfaces as an undeclared constant naming an internal
+        // spelling -- true, and no use to the author.
+        let measure_ty:
+          cond
+          | spec.measure: measure_result_type(spec)
+          | ~else: #false
+        let measure_usable = !spec.measure || has_subterm_relation(st, measure_ty)
         let measure:
-          match spec.measure
-          | #false: #false
-          | m: Measure(m :~ Term, discharger(st))
+          cond
+          | spec.measure && measure_usable:
+              Measure(spec.measure :~ Term, discharger(st))
+          | ~else: #false
         let recinfo = try:
                         check_termination(#'function, spec.name, arity,
                                           spec.clauses.map(fun (cl :: DefClause): [cl.pats, clause_terms(cl)]),
                                           fn_ph,
                                           ~measure: measure)
-                        ~catch e :: Exn.Fail: hol_reraise(e, at)
+                        // The definition may still descend structurally, in
+                        // which case the unusable measure never mattered.
+                        // If it does not, the measure is what the author
+                        // was relying on, so say what is wrong with it.
+                        ~catch e :: Exn.Fail:
+                          cond
+                          | measure_usable: hol_reraise(e, at)
+                          | ~else:
+                              hol_error(#'function,
+                                        "a measure must land in a declared "
+                                          ++ "datatype that recurses: "
+                                          ++ type_to_string(measure_ty)
+                                          ++ " has no subterm relation for it "
+                                          ++ "to decrease in",
+                                        at)
         // The same tree `check_function_spec` just checked, kept this time:
         // `stepfn.rhm` builds `H` and its congruence proof from it, so the
         // logical and executable readings of the patterns cannot drift.
         let tree = try:
                      function_decision_tree(#'function, spec, dt_specs)
                      ~catch e :: Exn.Fail: hol_reraise(e, at)
-        cond
-        | !can_derive_structurally(spec, recinfo, tree, st.dts): #false
+        match derivation_failure(spec, recinfo, tree, st.dts)
+        | f :: DeriveFailure: f
         | ~else:
-            // `can_derive_structurally` has already checked that every type
-            // the order compares in is a declared datatype at its own
-            // schematic self type; what is left is that each one's subterm
-            // relation was actually installed, which it is for every
-            // datatype `add_type` declared.
+            // `derivation_failure` has already checked that every type the
+            // order compares in is an instance of a datatype declared here;
+            // what is left is that each one's subterm relation was actually
+            // installed, which it is for every *recursive* datatype
+            // `add_type` declared.
             //
             // The types the order compares in: the measure's result type
             // for a `~measure`, the descending column's for structural
@@ -273,7 +299,8 @@ fun install_declared_function(st :: HolState, form :: Syntax, at :: Syntax,
             // definitional path instead.
             let order_tys:
               cond
-              | spec.measure: [measure_result_type(spec)]
+              | (recinfo :~ RecursionInfo).method == #'measure:
+                  [measure_result_type(spec)]
               | ~else:
                   match descent_column(spec, fn_ph,
                                        ~usable: fun (ty :: HType):
@@ -284,9 +311,13 @@ fun install_declared_function(st :: HolState, form :: Syntax, at :: Syntax,
                       | ks :: List: for List (k in ks): spec.arg_types[k]
                       | ~else: #false
             cond
-            | !order_tys: #false
+            | !order_tys: NoOrder()
             | !(for all (ty in order_tys :~ List): has_subterm_relation(st, ty)):
-                #false
+                let missing = for values(acc :~ List = []) (ty in order_tys :~ List):
+                                if has_subterm_relation(st, ty)
+                                | acc
+                                | acc ++ [ty]
+                NoInstalledOrder(missing)
             | ~else:
                 let tyname = (match (order_tys :~ List)[0] | TyApp(n, _): n)
                 [st.dts[tyname] :~ DatatypeThms, all_subterm_equations(st),
@@ -294,16 +325,27 @@ fun install_declared_function(st :: HolState, form :: Syntax, at :: Syntax,
   // Refused here rather than inside the `try` below: this is not a failure
   // of the logical layer to be re-raised, it is this declaration form saying
   // no.
-  unless postulate || derivable || nonrecursive_function(st, spec)
+  // `axiomatic_function` postulates, full stop -- it does not quietly derive
+  // the ones it could.  A form whose meaning depends on which recursion
+  // schemes this version happens to handle is exactly what splitting the two
+  // forms was for, and it would be no better spelled this way round.
+  let plan = (if postulate || (derivable is_a DeriveFailure)
+              | #false
+              | derivable)
+  unless postulate || plan || nonrecursive_function(st, spec)
   | hol_error(#'function,
               "the termination analysis succeeded, but this version has no "
                 ++ "proof-producing definition compiler for this recursion "
-                ++ "scheme: " ++ undecidable_reason(st, spec)
+                ++ "scheme: "
+                ++ (match derivable
+                    | NoInstalledOrder(tys): describe_no_order(tys :~ List)
+                    | f :: DeriveFailure: describe_failure(f)
+                    | ~else: "the derivation does not apply")
                 ++ "; write `axiomatic_function` to postulate the equations "
                 ++ "instead",
               at)
   let (thy2, info0) = try:
-                        match derivable
+                        match plan
                         | [thms, t_lt_equations, recinfo, tree]:
                             install_structural_function(st.thy, st.wfrec_def, spec,
                                                         thms :~ DatatypeThms,
@@ -321,7 +363,7 @@ fun install_declared_function(st :: HolState, form :: Syntax, at :: Syntax,
                             // cannot handle still reaches the postulating
                             // seam.
                             cond
-                            | nonrecursive_function(st, spec):
+                            | !postulate && nonrecursive_function(st, spec):
                                 let tree = function_decision_tree(#'function,
                                                                   spec,
                                                                   dt_specs)
@@ -348,31 +390,20 @@ fun install_declared_function(st :: HolState, form :: Syntax, at :: Syntax,
   HolState(thy2, db2, st.dts, st.funs ++ {spec.name: info}, st.thms,
            st.names ++ [spec.name], st.wfrec_def)
 
-// Why the deriver could not take this definition, as a phrase to finish
-// "no proof-producing definition compiler for this recursion scheme: ...".
-// Guessing is not good enough here: the difference between "give it a
-// `~measure`" and "this type is not one I can recurse in" is the difference
-// between a fixable declaration and one that has to wait for the compiler.
-fun undecidable_reason(st :: HolState, spec :: FunSpec) :: String:
-  let fn_ph = mk_const(spec.name, fun_type(spec))
-  let undeclared = for values(acc :~ List = []) (ty in spec.arg_types):
-                     if has_subterm_relation(st, ty :~ HType)
-                     | acc
-                     | acc ++ [type_to_string(ty :~ HType)]
-  cond
-  | spec.measure:
-      "the measure lands in "
-        ++ type_to_string(measure_result_type(spec))
-        ++ ", which is not a recursive datatype declared here"
-  | !no_nested_calls(spec, fn_ph):
-      "a recursive call appears inside another recursive call's arguments"
-  | undeclared.length() == spec.arg_types.length():
-      "no argument type is a recursive datatype declared here (saw "
-        ++ String.join(undeclared, ", ") ++ ")"
-  | ~else:
-      "no argument column descends at every call, and no lexicographic "
-        ++ "order over the columns whose types are recursive datatypes "
-        ++ "declared here settles them either"
+// The driver's own reason, beside `stepfn.rhm`'s: the order's type is a
+// datatype declared here, but a *non-recursive* one, so it has no subterm
+// relation to descend in.  `stepfn.rhm` cannot see this -- whether a
+// relation was installed is a fact about this module's state, not about the
+// definition.
+class NoInstalledOrder(types :: List.of(HType)):
+  extends DeriveFailure
+
+fun describe_no_order(tys :: List.of(HType)) :: String:
+  "the order would have to compare in "
+    ++ String.join(tys.map(fun (ty :: HType): type_to_string(ty)), ", ")
+    ++ ", which "
+    ++ (if tys.length() == 1 | "is not a recursive datatype" | "are not recursive datatypes")
+    ++ " declared here, so there is no subterm relation to descend in"
 
 // A type this module declared as a datatype, at its own schematic self type.
 fun declared_datatype(st :: HolState, ty :: HType) :: Boolean:

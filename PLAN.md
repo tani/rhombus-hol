@@ -1957,6 +1957,67 @@ properties を postulate する / この file が trust boundary」と書いた�
 いた -- どちらも導出する。`subterm.rhm`・`trust.scrbl`・`declarations.scrbl`
 も合わせ、`axiomatic_function` を docs に追加した。
 
+### 9.36 進捗（本セッション）: 診断を判定と同じ walk にする
+
+第五次レビュー。指摘されたのは「derivation failure の診断が古い」こと
+だったが、追ってみると**なぜ古くなったか**の方が本体だった。
+
+`undecidable_reason` は判定（`can_derive_structurally`）とは別に理由を
+組み立て直していた。二つある以上ずれる -- 実際 nested recursive call が
+拒否理由でなくなった後も、診断だけが nesting を名指ししていた。
+判定と説明を一つの walk にした:
+
+```text
+derivation_failure : ... -> maybe(DeriveFailure)
+can_derive_structurally = derivation_failure(...) == #false
+describe_failure : DeriveFailure -> String
+```
+
+`switch_types_ok` は `bad_switch_type`（失敗した型を返す）にした。
+不要になった `no_nested_calls` は削除。
+
+**その過程で本物の食い違いを見つけた。** carrier 選択は `spec.measure`
+（作者が書いたか）で分岐し、適用判定は `recinfo.method`（停止性検査が実際に
+何を使ったか）で分岐していた。`check_termination` は構造的順序を優先し
+measure を無視することがあるので、両者は別物である。全部 `recinfo` に
+揃えた -- 実際に選ばれた順序に従うのが正しい。副作用として
+「構造的にも降下する定義に余計な `~measure` が付いている」ケースが
+導出できるようになった。
+
+**`~measure` の着地型の検査を前に出した。** 宣言された非再帰 datatype に
+着地する measure は `Colour_lt` という未宣言定数のエラーになっていた --
+真ではあるが作者の役に立たない。driver が先に弾く。文言は
+`terminate.rhm` 側と揃えた（"must land in a declared datatype that
+recurses"）。
+
+**`axiomatic_function` は常に postulate するようにした。** 導出できる時は
+黙って導出していたが、それは「どの再帰スキームをこの版が扱えるかで意味が
+変わる form」であり、二つの form に分けた理由そのものである。停止性・
+網羅性・非重複は引き続き検査する（それが保存拡大の根拠だから）。省くのは
+証明だけ。
+
+**Core obligation の重複を、guard 込みで除去した。** `let` initializer は
+obligation としても、body が読むなら右辺の部分項としても見つかるので、
+同じ呼び出しが二度数えられていた（`dbl`: 実際 1 呼び出しに対し sites=2）。
+site 全体（patterns と guards 込み）で dedup する。呼び出しだけで潰しては
+いけない:
+
+```rhombus
+let x = pick(k, b)
+if b | x | zero()
+```
+
+は `pick(k,b)` が guard 無しで走り、`if` の中の occurrence は `b` の下 --
+別の site である（回帰で sites=2 を固定）。
+
+stale comment: `datatype.rhm` の `type Inf | lim(num -> Inf)` は「無限公理が
+無いので矛盾」と書いてあったが、無限公理は今ある。本質は有限分岐の
+直接再帰フラグメントの外だということ。`stepfn.rhm` の「schematic self type
+でなければならない / concrete instance は cases の instantiate が要るが
+この版はやらない」も削除。`recdef.rhm` 冒頭も現在の役割（`axiomatic_function`
+のための seam）に書き直した。`trust.scrbl` の `T_lt`「two equations per
+datatype」は constructor ごとに 1 本なので "constructor equations" に修正。
+
 ## 10. 外部レビュー（2026-09-07）への対応状況
 
 レビューは `rhombus-hol-kernel` を標準 HOL Light 型カーネルへ寄せ、

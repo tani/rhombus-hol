@@ -108,8 +108,8 @@ A datatype's subterm relation @tt{T_lt} is derived twice over, and both
 halves matter because so much rests on them. That @tt{T_lt} is @emph{well
 founded} is proved from the datatype's own induction principle
 (@tt{prove_wf_t_lt}); it is what every derived recursive function recurses
-in. That @tt{T_lt} @emph{is} the subterm relation --- its two equations per
-datatype --- is proved as well: the relation is defined as @tt{TC T_child},
+in. That @tt{T_lt} @emph{is} the subterm relation --- its constructor
+equations, one per constructor --- is proved as well: the relation is defined as @tt{TC T_child},
 the transitive closure of a direct-child predicate spelled with the
 datatype's own discriminators and selectors, so neither the closure nor the
 child predicate is a recursive definition and neither needs a recursion
@@ -186,13 +186,14 @@ it was given, checks that the second extends the first, and checks that every
 equation it registered is hypothesis-free and belongs to that theory.
 
 @rhombus(axiomatic_function, ~datum) is the escape hatch, with the same
-grammar and a different contract: it postulates the equations of a definition
-that is exhaustive and terminating but that the compiler cannot derive. That
-is a conservative extension exactly when those two conditions hold, which is
-what @secref("termination") is about. It is a separate word so that a reader
-scanning a module can see which declarations extended the theory by
-assumption without having to know which recursion schemes this version
-happens to handle.
+grammar and a different contract: it postulates its equations rather than
+deriving them, and it does so unconditionally --- a declaration written that
+way assumes its equations even if the derivation would have succeeded.
+Termination, exhaustiveness and non-overlap are still checked, which is what
+makes the postulation a conservative extension; see @secref("termination").
+It is a separate word so that a reader scanning a module can see which
+declarations extended the theory by assumption without having to know which
+recursion schemes this version happens to handle.
 
 None of these derivations changed anything above them: the theorems have the
 same statements, so the rule database, the waterfall and @rhombus(match)

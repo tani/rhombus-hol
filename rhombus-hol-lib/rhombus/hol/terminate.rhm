@@ -114,11 +114,29 @@ fun check_termination(who :: Symbol,
   // equation states: a `let` initializer whose value the equation drops is
   // still run, and a recursive call in it still has to descend (`core.rhm`,
   // PLAN.md 9.34).
+  // A `let` initializer is an obligation *and*, where the body reads it, a
+  // subterm of the right-hand side, so the same call is found twice.  The
+  // duplicate is one call, and discharging its obligation twice is wasted
+  // work -- for a `~measure` it is a second proof of the same thing.
+  //
+  // Deduplicated on the whole site, patterns and guards included, never on
+  // the call alone.  The two are genuinely different sites when the guards
+  // differ: in
+  //
+  //   let x = f(k)
+  //   if p | x | zero()
+  //
+  // `f(k)` runs unconditionally, and the occurrence inside the `if` runs
+  // under `p`.  Keeping only the guarded one would be unsound; keeping only
+  // the unguarded one happens to be right here and is not right in general,
+  // so neither is dropped.
   let all_sites = for values(acc :~ List = []) ([pats, terms] in clauses):
                     for values(a :~ List = acc) (t in terms :~ List):
                       let calls = call_sites_in(who, name, fn, arity,
                                                 t :~ Term)
-                      a ++ calls.map(fun ([conds, args]): [pats, conds, args])
+                      for values(b :~ List = a) ([conds, args] in calls):
+                        let site = [pats, conds, args]
+                        if b.contains(site) | b | b ++ [site]
   cond
   | all_sites.length() == 0:
       RecursionInfo([], #'none, [], [])
@@ -248,7 +266,7 @@ fun check_measure(who :: Symbol, name :: Symbol, arity :: Int, fn :: Term,
                 | TyApp(n, _) when n != ty_fun && n != ty_bool: n
                 | ~else:
                     error(~who: who,
-                          "a measure must land in a declared datatype",
+                          "a measure must land in a declared datatype that recurses",
                           error.val(~label: "name", name),
                           error.val(~label: "measure type",
                                     type_to_string(mty))))

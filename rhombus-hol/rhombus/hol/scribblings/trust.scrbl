@@ -132,6 +132,11 @@ recursion theorem for an arbitrary datatype, and this version does not have
 one. So a module declaring two recursive datatypes assumes eight things: the
 base logic's three, infinity, and two subterm equations apiece.
 
+There is no third case and no fallback: a field either is the type itself or
+it is not, so the axiom schema is no longer on the declaration path at all.
+It survives only as the baseline the derivations are differentially tested
+against.
+
 The @tech{strict positivity} check still guards the declaration, but it no
 longer guards a consistency claim about axioms nobody proved --- an
 ill-founded declaration now fails to be carved rather than being assumed.

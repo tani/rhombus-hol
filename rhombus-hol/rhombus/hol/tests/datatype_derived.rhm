@@ -1,0 +1,70 @@
+#lang rhombus/static
+
+// PLAN.md section 9.2.1's differential test: `build_enum_thms`
+// (`datatype_derived.rhm`) derives `DatatypeThms` for a nullary-only
+// (enum) `DatatypeSpec` via `unit`/`sum` composition, with zero
+// `new_axiom` calls.  `datatype_axioms` (`datatype.rhm`) derives the same
+// shape axiomatically.  Every field of `DatatypeThms` -- injectivity,
+// distinctness, induction, cases, discriminators, selectors, elim_rules --
+// must agree between the two, *as printed statements*, and every theorem
+// the derived side produces must carry zero hypotheses: proof that the
+// axiom-free construction is not merely "close" but produces the identical
+// theory a future `type`/`check_spec` could adopt outright for this
+// sub-case of phase 1 (PLAN.md section 9.2).
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/datatype open
+  rhombus/hol/private/datatype_derived open
+
+fun show_list(ths :: List.of(Thm)) :: String:
+  String.join(ths.map(fun (t :: Thm): show(concl_of(t))), " | ")
+
+fun all_zero_hyps(thms :: DatatypeThms) :: Boolean:
+  hyps_of(thms.induction).length() == 0
+    && hyps_of(thms.cases).length() == 0
+    && (for all (t in thms.distinctness): hyps_of(t).length() == 0)
+    && (for all (t in thms.discriminators): hyps_of(t).length() == 0)
+    && (for all (t in thms.selectors): hyps_of(t).length() == 0)
+    && (for all (t in thms.elim_rules): hyps_of(t).length() == 0)
+    && (for all (n in thms.injectivity.keys()): hyps_of(thms.injectivity[n]).length() == 0)
+
+fun check_enum(n :: Int) :: Void:
+  let tyname = Symbol.from_string("Enum" ++ to_string(n))
+  let ctors = for List (i in List.iota(n)): Ctor(Symbol.from_string("K" ++ to_string(i)), [])
+  let spec = DatatypeSpec(tyname, [], ctors)
+  let (_, ax) = datatype_axioms(base_theory(), spec)
+  let (_, dv) = build_enum_thms(base_theory(), spec)
+  check all_zero_hyps(dv) ~is #true
+  check show(concl_of(ax.induction)) ~is show(concl_of(dv.induction))
+  check show(concl_of(ax.cases)) ~is show(concl_of(dv.cases))
+  check show_list(ax.distinctness) ~is show_list(dv.distinctness)
+  check show_list(ax.discriminators) ~is show_list(dv.discriminators)
+  check show_list(ax.elim_rules) ~is show_list(dv.elim_rules)
+  check ax.injectivity.length() ~is dv.injectivity.length()
+  check ax.selectors.length() ~is dv.selectors.length()
+
+// A single nullary constructor, two (the minimum needing `sum` at all),
+// three (the "typical" small enum), and larger ones (four, five) to
+// exercise the recursive encoding beyond one level of `sum` nesting.
+check_enum(1)
+check_enum(2)
+check_enum(3)
+check_enum(4)
+check_enum(5)
+
+// `is_nullary_spec` rejects specs with fields, and `build_enum_thms`
+// refuses them outright rather than silently producing something wrong.
+def field_spec = DatatypeSpec(#'Pair2, [], [Ctor(#'MkPair, [Field(#'fst, bool)])])
+check is_nullary_spec(field_spec) ~is #false
+fun rejects_field_spec() :: Boolean:
+  try:
+    build_enum_thms(base_theory(), field_spec)
+    #false
+    ~catch _: #true
+
+check rejects_field_spec() ~is #true

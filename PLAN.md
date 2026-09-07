@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1005 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1047 tests passed。
 §10 に外部レビュー対応の状況をまとめてある。
 
 ---
@@ -70,6 +70,7 @@ rhombus-hol/
 │           ├── drule.rhm         派生規則（bool.ml + drule.ml 相当）
 │           ├── datatype.rhm      データ型の公理（信頼境界②）
 │           ├── algebra.rhm       `unit`/`prod`/`sum` の導出（datatype 公理の代替、フェーズ1土台完成、§9.2.1）
+│           ├── datatype_derived.rhm  enum 限定の `DatatypeSpec -> DatatypeThms`（axiom-free、§9.2.1）
 │           ├── order.rhm         ACL2 term-order（順序付き書き換え用、ruledb.rhm 専用）
 │           └── module_block.rhm  #%module_block 差し替え
 └── rhombus-hol/                  ドキュメント + テスト（deps: rhombus-hol-lib, rhombus-hol-kernel）
@@ -193,7 +194,7 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 | カーネル | `Theory` `Stamp`（祖先集合）不可侵 `Thm`、基本 10 規則、理論拡張原理 | `kernel` |
 | 論理定数 | `bool`（Church 流定数 + ETA/SELECT/BOOL_CASES）`conv` `drule` | `bool` `conv` `drule` |
 | データ型 | `datatype`：正値性チェッカ + 公理スキーマ | `datatype` `positivity` |
-| 非公理的型構成子 | `algebra`：`unit`/`prod`/`sum` を `new_basic_type_definition` から導出（フェーズ1土台完成、`datatype.rhm` への配線は未着手、§9.2.1） | `algebra` |
+| 非公理的型構成子 | `algebra`：`unit`/`prod`/`sum` を `new_basic_type_definition` から導出（フェーズ1土台完成、§9.2.1）。`datatype_derived`：enum（0引数コンストラクタのみ）を `DatatypeThms` まで配線、`datatype_axioms` と差分テストで完全一致 | `algebra` `datatype_derived` |
 | 停止性 | `terminate`（辞書式構造的降下 + 測度）`recdef`（節形式の再帰定義） | `recdef` |
 | 書き換え | `tmatch` `ruledb` `simp`：一階マッチ、規則 DB（rewrite ルール + type-prescription 事実の二重分類）、順序付き書き換え | `ruledb` |
 | 証明探索 | `goal` `induct` `waterfall`（簡約・デストラクタ除去・フェルティライズ・一般化・irrelevance 除去・帰納法の固定パイプライン、ACL2 準拠） | `spec_4_1` |
@@ -450,7 +451,7 @@ cases/induction/discriminators/selectors はすべて sum と prod のその性�
 （一度だけ証明する）から**定理として**出る。`check_spec` の
 `nonrecursive_ctors` チェックは既にこの場合分けの入り口になっている。
 
-### 9.2.1 進捗（本セッション）: `unit`/`prod`/`sum` を導出、`datatype.rhm` への配線は未着手
+### 9.2.1 進捗（本セッション）: `unit`/`prod`/`sum` を導出し、enum の全数列を配線して差分テスト
 
 フェーズ 1 が要求する 3 つの型構成子（`unit`/`prod`/`sum`）をすべて
 `rhombus-hol-lib/rhombus/hol/private/algebra.rhm` に実装し、
@@ -497,17 +498,54 @@ t and x===a`、`mk_inr_rep(b) := \x y t. (not t) and y===b` という 2 つの
 証明では最初からこの区別を意識して `unfold_def` を使ったため、同じ罠は
 踏まなかった。
 
-**残作業**: `unit`/`prod`/`sum` は互いに独立した道具として実装しただけで、
-`datatype.rhm`/`check_spec` の `new_axiom` 経路にはまだ一切配線していない。
-残るのは
-1. 任意の非再帰 `DatatypeSpec` を `sum(prod(F1_1,...), sum(prod(F2_1,...), ...))`
-   へ機械的にエンコードする変換（コンストラクタ→`inl`/`inr`/`pair` の合成）。
-2. そのエンコードから `DatatypeThms`（injectivity/distinctness/cases/induction/
-   discriminators/selectors）を、上記 4 定理の合成として導出する層。
-3. 9.3 の差分テスト -- 同じ `DatatypeSpec` について旧（公理的）実装と
-   新（導出）実装の `DatatypeThms` の命題（`show` した文字列）が一致することを
-   確認してから、`datatype.rhm` の `new_axiom` 経路を消す。
-`check_spec` の `nonrecursive_ctors` チェックが既にこの場合分けの入り口。
+**残作業**: `unit`/`prod`/`sum` に加え、それらを実際に `DatatypeSpec` へ
+配線する第一例を `rhombus-hol-lib/rhombus/hol/private/datatype_derived.rhm`
+に実装した -- **全コンストラクタが 0 引数（enum）の場合限定**で、
+`build_enum_thms(thy, spec)` が `DatatypeThms` を丸ごと導出する:
+
+```text
+E(1)   := unit
+E(n)   := sum(unit, E(n-1))                         -- n個の値を持つ表現型
+Ci     := abs(inj(n, i))                            -- abs/rep は真の全単射
+          (predicate `\e. true` -- E(n) は n 個の値しかなく、n 個のコンス
+          トラクタで使い切るので、部分集合ではなく全体との全単射になる)
+is_Ci  := \x. x === Ci                                -- 0引数なので判別子はこれで十分
+```
+
+`distinctness`/`cases` は `enum_inject` の入れ子（右結合の `sum` チェーン）
+を再帰的に辿って導出するが、`datatype.rhm` の `build_cases`/`build_distinctness`
+は結合を**左**に畳む（`for values(acc=a0)(a in rest): mk_disj(acc,a)`）。
+これは実装中に踏んだ 2 つ目の罠で、最初は右結合のまま作って
+`tests/datatype_derived.rhm` の差分テストで「命題としては等価だが `show` の
+文字列が食い違う」ことが判明した。任意の右結合の論理式を左結合へ変換する
+一般的な再結合補題は書かずに済んだ -- `to_ctor_eq` の各葉が「位置 `i` で
+`x === Ci` が成り立つ」という**具体的にどの選言肢か分かっている事実**を
+持っているので、それを目的の左結合の式へ直接 `DISJ1`/`DISJ2` で埋め込む方が
+（既存の証明を後から組み替えるより）ずっと単純だった。
+
+`tests/datatype_derived.rhm` は `n = 1, 2, 3, 4, 5` について、
+`datatype_axioms`（公理的）と `build_enum_thms`（導出）の両方から
+`DatatypeThms` を作り、`injectivity`（両方空）/`distinctness`/`induction`/
+`cases`/`discriminators`/`selectors`（両方空）/`elim_rules` の**すべての
+フィールドが `show` した文字列として完全一致し**、導出側のすべての定理が
+**仮説 0 個**であることを確認している（1005 → 1047 テスト）。これは
+PLAN.md §9.3 が要求する差分テストそのものであり、enum という限定的な
+部分集合について、"axiom-free の構成が既存の公理的構成と寸分違わぬ
+`DatatypeThms` を生成する" ことを実カーネルに対して証明している。
+
+**まだ残っているもの**:
+1. フィールド付きコンストラクタ（`prod` が必要）への一般化 --
+   `build_enum_thms` は `is_nullary_spec` で弾いており、フィールドがある
+   `spec` には使えない。
+2. 任意の非再帰 `DatatypeSpec` を `sum(prod(F1_1,...), sum(prod(F2_1,...),
+   ...))` へ機械的にエンコードする変換（コンストラクタ →
+   `inl`/`inr`/`pair` の合成）。enum の場合の `enum_inject`/`inject_left`
+   に相当するが、各スロットのペイロードが `unit` 固定ではなく実際の
+   フィールド型のタプルになる。
+3. `datatype.rhm`/`check_spec` 自体への実際の接続（`type` 宣言が
+   `datatype_axioms` の代わりに `build_enum_thms`/その一般化を呼ぶよう
+   切り替える）。`check_spec` の `nonrecursive_ctors` チェックが既に
+   この場合分けの入り口。
 `datatype.rhm` 自体はまだ一切変更していない。
 
 **フェーズ 2 (無限公理の新設)**: `trust.scrbl` に「4 本目の公理」として
@@ -558,7 +596,7 @@ solely on the statements in DatatypeThms, never on how they were obtained」
 | # | 項目 | 状況 |
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
-| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **部分的**。フェーズ1の土台 `unit`/`prod`/`sum` はすべて導出済み（`algebra.rhm`、§9.2.1）。`DatatypeSpec` を実際にエンコードして `datatype.rhm` を書き換える結線（差分テスト含む）は未着手 -- 複数セッション規模のまま。 |
+| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **部分的、進展あり**。`unit`/`prod`/`sum` を導出済み、かつ**全コンストラクタが0引数の enum** については `DatatypeSpec -> DatatypeThms` の配線を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_derived.rhm`、§9.2.1）。フィールド付きコンストラクタへの一般化と `check_spec`/`type` 本体への実接続は未着手 -- なお複数セッション規模。 |
 | 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **部分的**。`wellfounded.rhm` で `WF_INDUCTION` とその逆を導出（§9.1.1）。`WFREC` 本体（一番価値が高く、一番大きい部分）は未着手。`recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済みだが、hyp_insert 等の非公開化は未着手。 |

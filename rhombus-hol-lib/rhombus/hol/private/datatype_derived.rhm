@@ -1,0 +1,376 @@
+#lang rhombus/static
+
+// PLAN.md section 9.2.1's worked example: deriving `DatatypeThms` for the
+// simplest non-trivial sub-case of phase 1 -- a datatype every one of whose
+// constructors is nullary (a plain enum) -- via `unit`/`sum` (`algebra.rhm`)
+// composition, rather than `datatype.rhm`'s `new_axiom` schema.  This is not
+// wired into `type`/`check_spec`; it is a standalone proof of the technique,
+// meant to be compared against `datatype_axioms`'s output for the same
+// `DatatypeSpec` by a differential test (`tests/datatype_derived.rhm`).
+//
+// The encoding: for `n` nullary constructors `C0 .. C(n-1)`, represent the
+// type as a right-nested chain of binary sums over `unit`,
+//
+//   E(1)   := unit
+//   E(n)   := sum(unit, E(n-1))                (n > 1)
+//   inj(n, 0)     := INL(one) : E(n)
+//   inj(n, i > 0) := INR(inj(n-1, i-1)) : E(n)
+//
+// and carve the datatype's own type out of `E(n)` with the trivial predicate
+// `\e. true` -- since `E(n)` has exactly `n` inhabitants (`unit` has exactly
+// one, and `sum`'s `cases`/`distinct` make each `inj(n, i)` a distinct one of
+// them), the "subset" is all of `E(n)`, so `abs`/`rep` are a true bijection,
+// not just an embedding.  `Ci := abs(inj(n, i))`.
+//
+// Distinctness between two nested injections recurses on the shared prefix
+// of `INR`s: `sum`'s own `distinct` fires as soon as the two indices first
+// disagree on `INL` vs `INR`; `inr_inj`'s converse (a theorem `not P`,
+// `Q <=> P` entails `not Q`) carries a shorter distinctness fact outward
+// through each shared `INR` layer.  This is genuinely a small structural
+// induction on `n`, done here as an ordinary recursive Rhombus function
+// rather than as a HOL induction, because `n` is a *meta*-level constructor
+// count, not a term in the logic.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "algebra.rhm" open
+  "datatype.rhm" open
+
+export:
+  is_nullary_spec
+  build_enum_thms
+
+fun is_nullary_spec(spec :: DatatypeSpec) :: Boolean:
+  for all (c in spec.ctors): (c :~ Ctor).fields.length() == 0
+
+def unitty :: HType = TyApp(ty_unit, [])
+def one_term :: Term = mk_const(c_one, unitty)
+
+fun enum_repr_type(n :: Int) :: HType:
+  cond
+  | n == 1: unitty
+  | ~else: sum_ty(unitty, enum_repr_type(n - 1))
+
+fun enum_inject(n :: Int, i :: Int) :: Term:
+  cond
+  | n == 1: one_term
+  | i == 0: mk_inl_term(one_term, enum_repr_type(n - 1))
+  | ~else: mk_inr_term(unitty, enum_inject(n - 1, i - 1))
+
+// `|- Q <=> P`, `|- not P`  ==>  `|- not Q`.
+fun not_iff_left(thy :: Theory, iff_th :: Thm, not_p :: Thm) :: Thm:
+  let [qq, pp] = (match dest_eq(concl_of(iff_th)) | l: l)
+  let asm = ASSUME(thy, qq)
+  let p_th = EQ_MP(iff_th, asm)
+  let false_th = MP(thy, NOT_ELIM(thy, not_p), p_th)
+  NOT_INTRO(thy, DISCH(thy, qq, false_th))
+
+// `|- not (a = b)`  ==>  `|- not (b = a)`.
+fun not_eq_sym(thy :: Theory, th :: Thm) :: Thm:
+  let inner = (match dest_neg(concl_of(th)) | p: p)
+  let [a, b] = (match dest_eq(inner) | l: l)
+  let asm = ASSUME(thy, mk_eq(b, a))
+  let flipped = SYM(thy, asm)
+  let false_th = MP(thy, NOT_ELIM(thy, th), flipped)
+  NOT_INTRO(thy, DISCH(thy, mk_eq(b, a), false_th))
+
+// `|- not (inj(n,i) = inj(n,j))`, for `i != j`, both in `[0, n)`.
+fun enum_distinct_repr(thy :: Theory, sumthms :: SumThms, n :: Int, i :: Int, j :: Int) :: Thm:
+  cond
+  | i == 0 && j > 0:
+      let ty_rest = enum_repr_type(n - 1)
+      let inst = INST_TYPE(thy, {#'a: unitty, #'b: ty_rest}, sumthms.distinct)
+      SPECL(thy, [one_term, enum_inject(n - 1, j - 1)], inst)
+  | j == 0 && i > 0:
+      not_eq_sym(thy, enum_distinct_repr(thy, sumthms, n, j, i))
+  | ~else:
+      let inner = enum_distinct_repr(thy, sumthms, n - 1, i - 1, j - 1)
+      let ty_rest = enum_repr_type(n - 1)
+      let inst = INST_TYPE(thy, {#'a: unitty, #'b: ty_rest}, sumthms.inr_inj)
+      let iff_th = SPECL(thy, [enum_inject(n - 1, i - 1), enum_inject(n - 1, j - 1)], inst)
+      not_iff_left(thy, iff_th, inner)
+
+// Derive a full `DatatypeThms` for a nullary-only `spec`, via `unit`/`sum`
+// rather than `new_axiom`.  Errors if `spec` has any constructor with
+// fields -- this worked example does not attempt the general case (that
+// needs `prod` too, for the payload of each non-nullary constructor; see
+// PLAN.md section 9.2.1's residual-work list).
+fun build_enum_thms(thy :: Theory, spec :: DatatypeSpec) :: values(Theory, DatatypeThms):
+  check_spec(thy, spec)
+  unless is_nullary_spec(spec)
+  | error(~who: #'build_enum_thms,
+          "spec has a constructor with fields; this worked example only "
+            ++ "covers nullary-constructor enums")
+  let n = spec.ctors.length()
+  let self = TyApp(spec.name, [])
+
+  let (thy, unit_unique) = build_unit(thy)
+  let (thy, sumthms) = build_sum(thy)
+
+  // The datatype's own type: exactly `n` values, in bijection with all of
+  // `E(n)` (predicate `\e. true`), not merely a subset of it.
+  let ety = enum_repr_type(n)
+  let ev = mk_var(#'e, ety)
+  let pred = mk_abs(ev, tm_true)
+  let e0 = enum_inject(n, 0)
+  let beta_e0 = (match BETA_CONV(thy, mk_comb(pred, e0))
+                 | th :~ Thm: th
+                 | #false: error(~who: #'build_enum_thms, "beta failed"))
+  let witness = EQ_MP(SYM(thy, beta_e0), TRUTH(thy))
+  let abs_name = Symbol.from_string("abs_" ++ to_string(spec.name))
+  let rep_name = Symbol.from_string("rep_" ++ to_string(spec.name))
+  let (thy, th_abs_rep, th_pred) = new_basic_type_definition(thy, spec.name, abs_name, rep_name, witness)
+  let abs_c = mk_const(abs_name, mk_fun(ety, self))
+  let rep_c = mk_const(rep_name, mk_fun(self, ety))
+
+  // Every constructor: `Ci := abs(inj(n, i))`.
+  let thy = for values(t :~ Theory = thy) (c in spec.ctors, i in List.iota(n)):
+              let c :~ Ctor = c
+              let (t2, _) = new_basic_definition(t, mk_eq(mk_var(c.name, self), mk_comb(abs_c, enum_inject(n, i))))
+              t2
+  fun ctor_term(i :: Int) :: Term: mk_const((spec.ctors[i] :~ Ctor).name, self)
+  fun def_of(i :: Int) :: Thm:
+    (match definition_of(thy, (spec.ctors[i] :~ Ctor).name)
+     | th :~ Thm: th
+     | #false: error(~who: #'build_enum_thms, "constructor definition missing"))
+
+  // `|- rep(Ci) = inj(n,i)`: since `pred` is trivially true, `th_pred`
+  // gives the *full* bijection fact `rep(abs(e)) = e` for every `e`, not
+  // just those satisfying some nontrivial predicate.
+  fun rep_ctor_eq(i :: Int) :: Thm:
+    let unfold_ci = unfold_def(thy, def_of(i), [])
+    let rep_of_abs = AP_TERM(thy, rep_c, unfold_ci)
+    let th_pred_at = INST(thy, [[enum_inject(n, i), mk_var(v_rep, ety)]], th_pred)
+    let beta_pred_at = (match BETA_CONV(thy, mk_comb(pred, enum_inject(n, i)))
+                        | th :~ Thm: th
+                        | #false: error(~who: #'build_enum_thms, "beta failed"))
+    let true_pred_at = EQ_MP(SYM(thy, beta_pred_at), TRUTH(thy))
+    let rhs_eq = EQ_MP(th_pred_at, true_pred_at)
+    TRANS(rep_of_abs, rhs_eq)
+
+  // `|- not (Ci = Cj)`, `i != j`: from `rep_ctor_eq` at each side plus
+  // `enum_distinct_repr`, contrapositive through `rep`'s congruence.
+  fun ctor_distinct(i :: Int, j :: Int) :: Thm:
+    let asm = ASSUME(thy, mk_eq(ctor_term(i), ctor_term(j)))
+    let rep_eq = AP_TERM(thy, rep_c, asm)
+    let combined = TRANS(SYM(thy, rep_ctor_eq(i)), TRANS(rep_eq, rep_ctor_eq(j)))
+    let false_th = MP(thy, NOT_ELIM(thy, enum_distinct_repr(thy, sumthms, n, i, j)), combined)
+    NOT_INTRO(thy, DISCH(thy, concl_of(asm), false_th))
+
+  // -- distinctness: one per `i < j` pair, matching `build_distinctness`'s
+  // enumeration order exactly.
+  let pairs = for values(acc :~ List = []) (ci in spec.ctors, i in List.iota(n)):
+                for values(acc2 :~ List = acc) (cj in spec.ctors, j in List.iota(n)):
+                  (if i < j | acc2 ++ [[i, j]] | acc2)
+  let distinctness = for List ([i, j] in pairs): ctor_distinct(i, j)
+
+  // -- cases: `forall x. x=C0 or x=C1 or ... or x=C(n-1)`.  From `rep(x)`
+  // satisfying `pred` trivially and unfolding it through `sum`'s own
+  // `cases`/`unit`'s uniqueness, `x` must equal one specific `Ci`.
+  let xv = mk_var(#'x, self)
+  // `x=C0 or x=C1 or ... or x=Cupto`, left-associated -- matches
+  // `datatype.rhm`'s own `build_cases`, which folds its disjunction the
+  // same way (`for values(acc=a0)(a in rest): mk_disj(acc,a)`).
+  fun disj_chain(upto :: Int) :: Term:
+    (if upto == 0 | mk_eq(xv, ctor_term(0)) | mk_disj(disj_chain(upto - 1), mk_eq(xv, ctor_term(upto))))
+  // `|- e=inj(k,i) or e=inj(k,i+1) or ... or e=inj(k,k-1)`, the tail of
+  // `locate`'s target chain starting at index `i` (for `e :: E(k)`).
+  fun locate_chain(k :: Int, e :: Term, i :: Int) :: Term:
+    (if i == k - 1 | mk_eq(e, enum_inject(k, i)) | mk_disj(mk_eq(e, enum_inject(k, i)), locate_chain(k, e, i + 1)))
+  let cases:
+    // `rep(x) = inj(n, i)` for exactly one `i`, established by recursion on
+    // `n`: peel one `sum` layer off `rep(x)` at a time via `sumthms.cases`,
+    // landing on `unit`'s single value at the base case.  Each branch is
+    // wrapped (`DISJ1`/`DISJ2`) into the *same* target chain before
+    // `DISJ_CASES` combines them -- both sides of a `DISJ_CASES` must prove
+    // one common conclusion, not merely "some" disjunct.
+    fun locate(k :: Int, e :: Term) :: Thm:
+      // `e :: E(k)`; returns `|- locate_chain(k, e, 0)`
+      cond
+      | k == 1:
+          // `E(1) = unit`; `unit_unique` says every value equals `one`,
+          // which *is* `locate_chain(1, e, 0)` (a single, non-`or` equation).
+          SPEC(thy, e, unit_unique)
+      | ~else:
+          let tyRest = enum_repr_type(k - 1)
+          let sty = sum_ty(unitty, tyRest)
+          let inl_c = mk_const(c_inl, mk_fun(unitty, sty))
+          let inr_c = mk_const(c_inr, mk_fun(tyRest, sty))
+          let cases_inst = INST_TYPE(thy, {#'a: unitty, #'b: tyRest}, sumthms.cases)
+          let disj_e = SPEC(thy, e, cases_inst)
+          let [ldisj, rdisj] = (match dest_disj(concl_of(disj_e)) | l: l)
+          let left_case:
+            let l_asm = ASSUME(thy, ldisj)
+            let [oa, obody] = (match dest_exists(ldisj) | l: l)
+            let oa :~ FVar = oa
+            let ga = genvar(unitty)
+            let obody_ga = inst_fvar([[ga, oa]], obody)
+            let inner_asm = ASSUME(thy, obody_ga)
+            // `e = inl(ga) = inl(one)` since `ga:unit` and `unit_unique`
+            let ga_eq_one = SPEC(thy, ga, unit_unique)
+            let inl_eq = AP_TERM(thy, inl_c, ga_eq_one)
+            let e_eq_inj = TRANS(inner_asm, inl_eq)
+            let wrapped = DISJ1(thy, e_eq_inj, locate_chain(k, e, 1))
+            CHOOSE(thy, ga, l_asm, wrapped)
+          let right_case:
+            let r_asm = ASSUME(thy, rdisj)
+            let [ob, obody] = (match dest_exists(rdisj) | l: l)
+            let ob :~ FVar = ob
+            let gb = genvar(tyRest)
+            let obody_gb = inst_fvar([[gb, ob]], obody)
+            let inner_asm = ASSUME(thy, obody_gb)
+            // recurse: `gb` decomposes into one of `E(k-1)`'s `k-1` cases
+            let rest = locate(k - 1, gb)
+            // rewrite each disjunct `gb = inj(k-1,m)` of `rest` into
+            // `e = inr(gb) = inr(inj(k-1,m)) = inj(k, m+1)`, wrapped into
+            // `locate_chain(k, e, m+1)` at every step.
+            fun lift(m :: Int, restth :: Thm) :: Thm:
+              cond
+              | m == k - 2:
+                  TRANS(inner_asm, AP_TERM(thy, inr_c, restth))
+              | ~else:
+                  let [dl, dr] = (match dest_disj(concl_of(restth)) | l: l)
+                  let left:
+                    let a1 = ASSUME(thy, dl)
+                    let step = TRANS(inner_asm, AP_TERM(thy, inr_c, a1))
+                    DISJ1(thy, step, locate_chain(k, e, m + 2))
+                  let right:
+                    let a2 = ASSUME(thy, dr)
+                    DISJ2(thy, mk_eq(e, enum_inject(k, m + 1)), lift(m + 1, a2))
+                  DISJ_CASES(thy, restth, left, right)
+            let lifted = lift(0, rest)
+            CHOOSE(thy, gb, r_asm, lifted)
+          let right_wrapped = DISJ2(thy, mk_eq(e, enum_inject(k, 0)), right_case)
+          DISJ_CASES(thy, disj_e, left_case, right_wrapped)
+    let rep_x_locates = locate(n, mk_comb(rep_c, xv))
+    // `|- x = Ci`  ==>  `|- disj_chain(n-1)`: inject at position `i` (one
+    // `DISJ2` against the accumulated prefix, if `i > 0`), then extend
+    // outward through the remaining positions with `DISJ1`.  Because the
+    // target is *left*-associated, injecting a single known-true disjunct
+    // needs only its own position's term, never the sibling branches'
+    // proofs -- unlike reassociating an already-built disjunction.
+    fun inject_left(i :: Int, th_i :: Thm) :: Thm:
+      let start = (if i == 0 | th_i | DISJ2(thy, disj_chain(i - 1), th_i))
+      for values(acc :~ Thm = start) (j in List.iota(n - 1 - i)):
+        DISJ1(thy, acc, mk_eq(xv, ctor_term(i + 1 + j)))
+    fun to_ctor_eq(i :: Int, disjth :: Thm) :: Thm:
+      fun mk_one(a :: Thm) :: Thm:
+        TRANS(SYM(thy, INST(thy, [[xv, mk_var(v_alpha, self)]], th_abs_rep)),
+              TRANS(AP_TERM(thy, abs_c, a), SYM(thy, unfold_def(thy, def_of(i), []))))
+      cond
+      | i == n - 1: inject_left(i, mk_one(disjth))
+      | ~else:
+          let [dl, dr] = (match dest_disj(concl_of(disjth)) | l: l)
+          let left:
+            let a1 = ASSUME(thy, dl)
+            inject_left(i, mk_one(a1))
+          let right:
+            let a2 = ASSUME(thy, dr)
+            to_ctor_eq(i + 1, a2)
+          DISJ_CASES(thy, disjth, left, right)
+    let x_eq_some_ctor = to_ctor_eq(0, rep_x_locates)
+    GEN(thy, xv, x_eq_some_ctor)
+
+  // -- induction: no recursive fields, so `build_induction`'s antecedent
+  // has no inductive hypotheses per case -- it reduces to `cases` alone.
+  let induction:
+    let bigP = mk_var(#'P, mk_fun(self, bool))
+    let case_conj = (for values(acc :~ Term = mk_comb(bigP, ctor_term(0))) (i in List.iota(n - 1)):
+                       mk_conj(acc, mk_comb(bigP, ctor_term(i + 1))))
+    let hyp = ASSUME(thy, case_conj)
+    let per_ctor_th = (for List (i in List.iota(n)):
+                         (if n == 1 | hyp | CONJUNCTS(thy, hyp)[i]))
+    fun px_from_cases(stmt :: Term, th :: Thm) :: Thm:
+      cond
+      | !is_disj(stmt):
+          // base leaf: `stmt` is `x = C0` itself.
+          let [_, ci] = (match dest_eq(stmt) | l: l)
+          EQ_MP(AP_TERM(thy, bigP, SYM(thy, th)), per_ctor_th[index_of_ctor(spec, ci)])
+      | ~else:
+          // `stmt : dl or dr` (left-associated) -- `dl` is the accumulated
+          // prefix (recurse into it), `dr` is the one leaf added at this
+          // level (`x = C<i>` for whichever `i` this level added).
+          let [dl, dr] = (match dest_disj(stmt) | l: l)
+          let left:
+            let a1 = ASSUME(thy, dl)
+            px_from_cases(dl, a1)
+          let right:
+            let a2 = ASSUME(thy, dr)
+            let [_, ci] = (match dest_eq(dr) | l: l)
+            EQ_MP(AP_TERM(thy, bigP, SYM(thy, a2)), per_ctor_th[index_of_ctor(spec, ci)])
+          DISJ_CASES(thy, th, left, right)
+    let cases_x = SPEC(thy, xv, cases)
+    let px = px_from_cases(concl_of(cases_x), cases_x)
+    let disch_x = GEN(thy, xv, px)
+    let disch_hyp = DISCH(thy, case_conj, disch_x)
+    GEN(thy, bigP, disch_hyp)
+
+  // -- discriminators: `is_Ci(x) := (x = Ci)`, then `is_Ci(Cj) <=> (i==j)`.
+  let (thy, discriminators) = build_enum_discriminators(thy, spec, ctor_term, ctor_distinct)
+
+  // -- no fields anywhere: empty injectivity map, empty selectors, and the
+  // `elim_rules` reduce to `is_Ci(x) ==> Ci === x`, trivial from
+  // `discriminators` alone via the `x = Ci` unfolding baked into `is_Ci`.
+  let (thy, elim_rules) = build_enum_elim_rules(thy, spec, ctor_term, discriminators, xv)
+
+  values(thy, DatatypeThms(spec, {}, distinctness, induction, cases, discriminators, [], elim_rules))
+
+fun index_of_ctor(spec :: DatatypeSpec, ci :: Term) :: Int:
+  match ci
+  | Const(n, _):
+      recur loop (cs :~ List = spec.ctors, i = 0):
+        match cs
+        | List.cons(c, rest):
+            (if (c :~ Ctor).name == n | i | loop(rest, i + 1))
+
+fun build_enum_discriminators(thy :: Theory, spec :: DatatypeSpec,
+                              ctor_term, ctor_distinct)
+     :: values(Theory, List.of(Thm)):
+  let self = TyApp(spec.name, [])
+  let n = spec.ctors.length()
+  let xv = mk_var(#'x, self)
+  let thy = for values(t :~ Theory = thy) (ci in spec.ctors, i in List.iota(n)):
+              let ci :~ Ctor = ci
+              let (t2, _) = new_basic_definition(t, mk_eq(mk_var(discriminator_name(ci), mk_fun(self, bool)),
+                                                          mk_abs(xv, mk_eq(xv, ctor_term(i)))))
+              t2
+  fun disc_def(i :: Int) :: Thm:
+    (match definition_of(thy, discriminator_name(spec.ctors[i] :~ Ctor))
+     | th :~ Thm: th
+     | #false: error(~who: #'build_enum_discriminators, "discriminator definition missing"))
+  for values(t :~ Theory = thy, acc :~ List = []) (ci in spec.ctors, i in List.iota(n)):
+    let ci :~ Ctor = ci
+    for values(t2 :~ Theory = t, acc2 :~ List = acc) (cj in spec.ctors, j in List.iota(n)):
+      let cj :~ Ctor = cj
+      let applied = unfold_def(t2, disc_def(i), [ctor_term(j)])
+      let th:
+        cond
+        | i == j:
+            TRANS(applied, EQT_INTRO(t2, REFL(t2, ctor_term(j))))
+        | ~else:
+            TRANS(applied, EQF_INTRO(t2, ctor_distinct(j, i)))
+      values(t2, acc2 ++ [th])
+
+fun build_enum_elim_rules(thy :: Theory, spec :: DatatypeSpec, ctor_term,
+                          discriminators :: List.of(Thm), xv :: FVar)
+     :: values(Theory, List.of(Thm)):
+  let self = TyApp(spec.name, [])
+  let n = spec.ctors.length()
+  for values(t :~ Theory = thy, acc :~ List = []) (ci in spec.ctors, i in List.iota(n)):
+    let ci :~ Ctor = ci
+    let disc = mk_const(discriminator_name(ci), mk_fun(self, bool))
+    // `is_Ci(x) ==> Ci === x`: `is_Ci(x)` unfolds to `x=Ci`, `SYM` gives it.
+    let asm = ASSUME(t, mk_comb(disc, xv))
+    let unfolded = unfold_def(t, (match definition_of(t, discriminator_name(ci))
+                                  | th :~ Thm: th
+                                  | #false: error(~who: #'build_enum_elim_rules, "missing")), [xv])
+    let x_eq_ci = EQ_MP(unfolded, asm)
+    let ci_eq_x = SYM(t, x_eq_ci)
+    let th = GEN(t, xv, DISCH(t, mk_comb(disc, xv), ci_eq_x))
+    values(t, acc ++ [th])

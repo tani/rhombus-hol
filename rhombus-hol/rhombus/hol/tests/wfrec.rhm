@@ -1,0 +1,61 @@
+#lang rhombus/static
+
+// `WFREC`: the well-founded recursion existence theorem (PLAN.md section
+// 9.1, step 3) -- the last piece `recdef.rhm` needs before it can stop
+// asserting each clausal equation with `new_axiom` and instead derive them
+// from `WF` plus a congruence side-condition.
+//
+// Built via an impredicative "least relation" encoding (`wfrec_rel`) rather
+// than a general inductive-definitions package: closure, inversion (the
+// converse, proved via the relation's own least-ness), uniqueness and
+// existence (both by well-founded induction on `Rwf`), and finally the
+// concrete solution `\x. select(\y. wfrec_rel(Rwf,H,x,y))` satisfying its
+// own recursive equation.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/drule open
+  rhombus/hol/private/wellfounded open
+  rhombus/hol/private/wfrec open
+
+def thy0 = base_theory()
+def tyA :: HType = TyVar(#'a)
+def tyB :: HType = TyVar(#'b)
+def rwf = mk_var(#'Rwf, mk_fun(tyA, mk_fun(tyA, bool)))
+def h = mk_var(#'H, mk_fun(mk_fun(tyA, tyB), mk_fun(tyA, tyB)))
+
+// -- build_wfrec_rel: a plain definitional extension, no hypotheses --------
+
+def (thy1, wr_def) = build_wfrec_rel(thy0)
+check hyps_of(wr_def) ~is []
+check descends(thy0.stamp, thy1.stamp) ~is #true
+
+// -- WFREC itself: given WF(Rwf) and congruence, a concrete solution -------
+
+def wf_rwf = ASSUME(thy1, mk_wf(rwf))
+def f = mk_var(#'f, mk_fun(tyA, tyB))
+def g = mk_var(#'g, mk_fun(tyA, tyB))
+def z = mk_var(#'z, tyA)
+def x = mk_var(#'x, tyA)
+def congr_stmt = mk_forall(f, mk_forall(g, mk_forall(x, mk_imp(mk_forall(z, mk_imp(list_mk_comb(rwf, [z, x]), mk_eq(mk_comb(f, z), mk_comb(g, z)))), mk_eq(mk_comb(mk_comb(h, f), x), mk_comb(mk_comb(h, g), x))))))
+def congr = ASSUME(thy1, congr_stmt)
+
+def (soln, final) = WFREC(thy1, wr_def, rwf, h, wf_rwf, congr)
+
+// The solution is an honest closed term of the right type, and the
+// returned theorem is proved *in* (a descendant of) the theory `WFREC`
+// was handed, carrying exactly its two genuine hypotheses -- no
+// `new_axiom` anywhere in the derivation.
+check type_of(soln) ~is mk_fun(tyA, tyB)
+check descends(final.stamp, thy1.stamp) ~is #true
+check hyps_of(final) ~is [congr_stmt, mk_wf(rwf)]
+check:
+  show(concl_of(final))
+  ~is "forall (x :: 'a): "
+        ++ "(fun (y :: 'a): select(fun (z :: 'b): wfrec_rel(Rwf, H, y, z)))(x) === "
+        ++ "H(fun (y :: 'a): select(fun (z :: 'b): wfrec_rel(Rwf, H, y, z)), x)"

@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1106 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1112 tests passed。
 §10 に外部レビュー対応の状況をまとめてある。
 
 ---
@@ -72,7 +72,8 @@ rhombus-hol/
 │           ├── algebra.rhm         `unit`/`prod`/`sum` の導出（datatype 公理の代替、フェーズ1土台完成、§9.2.1）
 │           ├── datatype_derived.rhm  enum 限定の `DatatypeSpec -> DatatypeThms`（axiom-free、§9.2.1）
 │           ├── datatype_gen.rhm   enum を一般化: 任意の非再帰 `DatatypeSpec`（フィールド付き）の `DatatypeThms` 全 7 フィールド（axiom-free、§9.2.1）
-│           ├── order.rhm         ACL2 term-order（順序付き書き換え用、ruledb.rhm 専用）
+│           ├── wellfounded.rhm  `WF` <-> 整礎帰納法（recdef 導出化の第一段、§9.1.1）
+│           ├── wfrec.rhm        `WFREC` 存在定理（recdef 導出化の第二段、`recdef.rhm` へは未配線、§9.1.2）
 │           └── module_block.rhm  #%module_block 差し替え
 └── rhombus-hol/                  ドキュメント + テスト（deps: rhombus-hol-lib, rhombus-hol-kernel）
     ├── info.rkt
@@ -196,7 +197,7 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 | 論理定数 | `bool`（Church 流定数 + ETA/SELECT/BOOL_CASES）`conv` `drule` | `bool` `conv` `drule` |
 | データ型 | `datatype`：正値性チェッカ + 公理スキーマ | `datatype` `positivity` |
 | 非公理的型構成子 | `algebra`：`unit`/`prod`/`sum` を `new_basic_type_definition` から導出（フェーズ1土台完成、§9.2.1）。`datatype_derived`：enum（0引数コンストラクタのみ）を `DatatypeThms` まで配線。`datatype_gen`：任意の非再帰 `DatatypeSpec`（フィールド付き）を `DatatypeThms` まで配線 -- いずれも `datatype_axioms` と差分テストで完全一致 | `algebra` `datatype_derived` `datatype_gen` |
-| 停止性 | `terminate`（辞書式構造的降下 + 測度）`recdef`（節形式の再帰定義） | `recdef` |
+| 停止性 | `terminate`（辞書式構造的降下 + 測度）`recdef`（節形式の再帰定義、現状は `new_axiom`）。`wellfounded`：`WF` <-> 整礎帰納法の導出。`wfrec`：`WFREC` 存在定理の完全導出（`recdef.rhm` へは未配線、§9.1.2） | `recdef` `wellfounded` `wfrec` |
 | 書き換え | `tmatch` `ruledb` `simp`：一階マッチ、規則 DB（rewrite ルール + type-prescription 事実の二重分類）、順序付き書き換え | `ruledb` |
 | 証明探索 | `goal` `induct` `waterfall`（簡約・デストラクタ除去・フェルティライズ・一般化・irrelevance 除去・帰納法の固定パイプライン、ACL2 準拠） | `spec_4_1` |
 | 一般化・デストラクタ除去・フェルティライズ・irrelevance 除去 | `general`（type-prescription 事実を一般化に反映）`destruct` `fertilize` `irrelevance` | `spec_4_2` `destruct` `fertilize` `irrelevance` |
@@ -457,6 +458,69 @@ prove_wf_from_induction    : ind_scheme(R) の証明を受け取り |- WF(R) を
    積むだけでよい（`recdef.rhm`/`kernel.rhm` は不変のまま）。
 4. 上記が揃うまで `recdef.rhm`/`datatype.rhm` は変更していない
    （`new_axiom` は今もそのまま）。
+
+### 9.1.2 進捗（後続セッション）: `WFREC` 存在定理を完全導出 --- 上記項目 3 の結論を覆す
+
+項目 3 で「汎用 inductive-relations パッケージが前提条件」と結論したが、
+これは**覆った**。実際には汎用パッケージは不要で、`H` からその場で
+作る**単一の**最小不動点関係を、高階論理の全称量化を使って一つの
+閉じた `new_basic_definition` として直接書き下せる（`prove_inductive_relations_exist`
+を経由せず、その特殊化・単一インスタンス分だけを直接構成する）。
+`rhombus-hol-lib/rhombus/hol/private/wfrec.rhm` に実装し、`tests/wfrec.rhm`
+で実カーネルに対して確認済み（1106 → 1112 テスト）。
+
+```text
+wfrec_rel(Rwf, H) := \x y. !P. (!f x'. (!z. Rwf z x' ==> P z (f z))
+                                       ==> P x' (H f x'))
+                              ==> P x y
+```
+
+`wfrec_rel(Rwf,H)` は構成により、"`f` が `x'` の `Rwf`-下位すべてで
+関係と一致するなら、関係は `x'` と `H(f)(x')` についても成り立つ"
+というルールで閉じた**最小の**関係である。閉性・最小性はどちらも
+外側の `!P` を具体化するだけの 1 行の帰結（`wfrec_closure`/`wfrec_least`）。
+ここから次を導出した（すべて `new_axiom` なし、`drule.rhm` の規則だけ）:
+
+```text
+wfrec_closure    : |- !f x'. (!z. Rwf z x' ==> Rel z (f z)) ==> Rel x' (H f x')
+wfrec_inversion  : |- !x y. Rel(x,y) ==> ?f. (!z. Rwf z x ==> Rel z (f z)) /\ y = H f x
+wfrec_unique     : WF(Rwf), congr |- !x y1 y2. Rel(x,y1) /\ Rel(x,y2) ==> y1 = y2
+wfrec_exists     : WF(Rwf) |- !x. ?y. Rel(x,y)
+WFREC            : WF(Rwf), congr |- soln x = H soln x   (soln は具体的な閉じた項)
+```
+
+`wfrec_closure`（最小不動点の通常の「閉じている」半分）は `!P` を specialize
+するだけの直接証明。**`wfrec_inversion`（逆方向、"`(x,y)` が関係に入るなら
+ルールから来た" ）が鍵**で、これも汎用パッケージなしで `wfrec_least` から
+出る: 述語 `Q(x,y) := ?f. (!z. Rwf z x ==> Rel z (f z)) /\ y = H f x` 自身が
+ルールに閉じていることを示せば（＝ `Q` がルールの右辺に来る「証人」として
+自分自身を 1 段委譲するだけの純代数的な議論）、`Rel` は**最小**なので
+`Rel ⊆ Q`、すなわち `wfrec_inversion` が出る。ここが `prove_inductive_relations_exist`
+が一般に手当てする核心の性質（最小不動点は自身が生成する演算子の像に
+含まれる）だが、**この一関係だけ**なら特別な仕掛けは要らない。
+`wfrec_unique`/`wfrec_exists` は `wellfounded.rhm` の `prove_wf_induction`
+による整礎帰納法（`WF(Rwf)` が必要になるのはここだけ）。最終定理は
+`soln := \x. select(\y. Rel(x,y))`（`SELECT_INTRO` --- `SELECT_UNIQUE` の
+双対、"証人を選ぶだけ"版を新規実装）を `wfrec_inversion` で 1 回反転し、
+一致した `f` が `wfrec_unique` により `soln` 自身と一致することを示して
+`soln x = H soln x` を得る。
+
+実装上の罠: `BETA_RULE`（`TOP_DEPTH_CONV` によるフルベータ簡約）を
+不用意に使うと、`soln(x)` のように**それ自体が別のベータ基を含む項**を
+specialize した箇所まで簡約してしまい、後続で組み立てる「期待される形」の
+項と構造的に食い違って `CHOOSE`/`MP` が拒否する。`SPEC`/`SPECL` 自身の
+的を絞った簡約（`HEAD_BETA_CONV`、量化子の適用一段だけ）に留め、
+`BETA_RULE` は「もう埋め込みの再帰がない」箇所だけに使うこと。
+
+**残作業**: `WFREC` は具体的な `Rwf`/`H`/`WF(Rwf)`/congruence を受け取る
+一般定理として完成したが、`recdef.rhm` はまだこれを呼んでいない
+（`new_axiom` は今もそのまま）。配線には、節形式の `FunSpec` から
+単一の step 関数 `H`（パターンマッチを `match`/`cases` へコンパイル
+したもの）と、`check_termination` が既に持っている情報から測度関係
+`Rwf` の整礎性証明（`WF_FROM_INDUCTION` 経由、datatype の `subterm` 関係
+か辞書式複合）、および congruence side-condition（各節の再帰呼び出しが
+構文的に「小さくなる引数」だけを渡していることの確認）を構成する必要が
+あり、これ自体が独立したセッション規模の配線作業になる。
 
 ### 9.2 `datatype`: 段階的に閉じる
 
@@ -830,7 +894,7 @@ namespace・複数 theory import」を調査した。現状の制約
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
 | 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype（フェーズ 2・3、無限公理が必要）は未着手 -- なお複数セッション規模。 |
-| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **部分的**。`wellfounded.rhm` で `WF_INDUCTION` とその逆を導出（§9.1.1）。`WFREC` 本体は未着手 -- 本セッションで HOL Light `wf.ml` を直接読み、正確な依存関係を特定した: `WF_REC` は汎用の inductive-relations 定義パッケージ（`prove_inductive_relations_exist`、Knaster-Tarski 最小不動点）を前提にしており、それ自体が `datatype_gen.rhm` 級の独立したセッション規模の課題（§9.1.1 項目3 に詳細）。`recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
+| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **`WFREC` 存在定理は完全導出**（§9.1.2）。`wellfounded.rhm` の `WF_INDUCTION`/逆方向（§9.1.1）に加え、汎用 inductive-relations パッケージなしで単一の最小不動点関係 `wfrec_rel` を直接構成し、closure/inversion/uniqueness/existence を経て `soln x = H soln x`（`WF(Rwf)`・congruence を仮説に）を導出（`wfrec.rhm`、1106 → 1112 テスト）。**残るのは `recdef.rhm` への配線のみ**（節→ステップ関数、測度→整礎性、congruence 側条件の構成。§9.1.2 参照）-- `recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済み。`hyp_insert`/`hyp_union`/`hyp_remove`/`rehash_hyps` の非公開化は**調査済み、現状維持と判断**: `rhombus-hol-lib` のどこからも実際には呼ばれておらず（`Thm` は raw hyps リストではなく既に不可侵なので、これらは項リスト上の純粋なユーティリティであり公開してもソウンドネスに影響しない）、唯一の外部利用者は `rhombus-hol-kernel` に対応するテストパッケージが無いために `tests/kernel.rhm`/`tests/drule.rhm`（外側の `rhombus-hol` パッケージ）に置かれている kernel 自身の単体テスト。非公開化には kernel 専用のテストパッケージ新設が要り、得られる利益（API 美観）に見合わないと判断した。 |
 | 6 | 公開 kernel API を HOL Light `fusion.ml` に揃える | 大枠は既に一致（十規則、同じ命名）。未着手部分は上記の printer/tracing 分離のみ。 |

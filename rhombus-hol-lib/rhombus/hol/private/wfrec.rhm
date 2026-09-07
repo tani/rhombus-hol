@@ -1,0 +1,428 @@
+#lang rhombus/static
+
+// The well-founded recursion existence theorem: PLAN.md section 9.1, step 3,
+// the last piece `recdef.rhm` needs before `install_function` can stop
+// asserting each clausal equation with `new_axiom`.
+//
+//   |- !Rwf H. WF(Rwf)
+//              ==> (!f g x. (!z. Rwf z x ==> f z = g z) ==> H f x = H g x)
+//              ==> ?f. !x. f x = H f x
+//
+// Built via John Harrison's technique (hol-light/wf.ml's `WF_REC`), but
+// specialized to avoid needing a general inductive-relations-definition
+// package (`prove_inductive_relations_exist`) as a prerequisite: the
+// relation `WF_REC`'s proof introduces there is *this specific* rule's
+// least fixed point, and HOL's higher-order quantification lets that
+// least fixed point be written down directly, as one closed definition, by
+// quantifying over the very relations the rule could be closed under --
+// no general package, no extra axiom:
+//
+//   wfrec_rel(Rwf, H) := \x y. !P. (!f x'. (!z. Rwf z x' ==> P z (f z))
+//                                          ==> P x' (H f x'))
+//                                 ==> P x y
+//
+// `wfrec_rel(Rwf,H)` is, by construction, the *least* relation closed
+// under "if f agrees with the relation on everything Rwf-below x', then
+// the relation holds of x' and H(f)(x')" -- closure and least-ness are
+// each a one-line consequence of instantiating the outer `!P` (see
+// `wfrec_closure`/`wfrec_respects`).  From there, well-founded induction
+// (`wellfounded.rhm`, already derived) gives existence and, given the
+// congruence hypothesis, uniqueness of a value at every `x`; `select`
+// picks it out as an honest function.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "wellfounded.rhm" open
+
+export:
+  build_wfrec_rel
+  WFREC
+
+def tyA :: HType = TyVar(#'a)
+def tyB :: HType = TyVar(#'b)
+def rel_ty_ :: HType = mk_fun(tyA, mk_fun(tyA, bool))
+def fun_ty_ :: HType = mk_fun(tyA, tyB)
+def step_ty_ :: HType = mk_fun(fun_ty_, fun_ty_)
+def pred2_ty_ :: HType = mk_fun(tyA, mk_fun(tyB, bool))
+def c_wfrec_rel :: Symbol = #'wfrec_rel
+def wfrec_rel_ty_ :: HType = mk_fun(rel_ty_, mk_fun(step_ty_, mk_fun(tyA, mk_fun(tyB, bool))))
+
+// `wfrec_rel(Rwf, H) := \x y. !P. (!f x'. (!z. Rwf z x' ==> P z (f z))
+//                                        ==> P x' (H f x')) ==> P x y`
+fun build_wfrec_rel(thy :: Theory) :: values(Theory, Thm):
+  let rwf = mk_var(#'Rwf, rel_ty_)
+  let h = mk_var(#'H, step_ty_)
+  let p = mk_var(#'P, pred2_ty_)
+  let f = mk_var(#'f, fun_ty_)
+  let xp = mk_var(#'xp, tyA)
+  let z = mk_var(#'z, tyA)
+  let x = mk_var(#'x, tyA)
+  let y = mk_var(#'y, tyB)
+  let below = mk_forall(z, mk_imp(list_mk_comb(rwf :~ Term, [z, xp]), list_mk_comb(p :~ Term, [z, mk_comb(f, z)])))
+  let rule_p = mk_forall(f, mk_forall(xp, mk_imp(below, list_mk_comb(p :~ Term, [xp, mk_comb(mk_comb(h, f), xp)]))))
+  let body = mk_forall(p, mk_imp(rule_p, list_mk_comb(p :~ Term, [x, y])))
+  let def_body = mk_abs(rwf, mk_abs(h, mk_abs(x, mk_abs(y, body))))
+  new_basic_definition(thy, mk_eq(mk_var(c_wfrec_rel, wfrec_rel_ty_), def_body))
+
+// The instance type of `wfrec_rel` for a concrete `rwf :: A->A->bool`,
+// `h :: (A->B)->A->B` pair, read off `rwf`'s and `h`'s own types.
+fun wfrec_rel_const(rwf :: Term, h :: Term) :: Term:
+  let (a_ty, _) = dest_fun(type_of(rwf))
+  let (fty, _) = dest_fun(type_of(h))
+  let (_, b_ty) = dest_fun(fty)
+  let cty = mk_fun(mk_fun(a_ty, mk_fun(a_ty, bool)),
+                   mk_fun(mk_fun(fty, fty), mk_fun(a_ty, mk_fun(b_ty, bool))))
+  mk_const(c_wfrec_rel, cty)
+
+fun mk_wfrec_rel(rwf :: Term, h :: Term, x :: Term, y :: Term) :: Term:
+  list_mk_comb(wfrec_rel_const(rwf, h), [rwf, h, x, y])
+
+// `|- wfrec_rel(rwf,h)(x,y) = (!P. RULE(P) ==> P(x,y))`, `RULE(P) := !f x'.
+// (!z. rwf z x' ==> P z (f z)) ==> P x' (h f x')`, at the concrete instance
+// type `rwf`/`h` carry.
+fun unfold_wfrec_rel(thy :: Theory, wr_def :: Thm, rwf :: Term, h :: Term,
+                     x :: Term, y :: Term) :: Thm:
+  let (a_ty, _) = dest_fun(type_of(rwf))
+  let (fty, _) = dest_fun(type_of(h))
+  let (_, b_ty) = dest_fun(fty)
+  let inst = INST_TYPE(thy, {#'a: a_ty, #'b: b_ty}, wr_def)
+  unfold_def(thy, inst, [rwf, h, x, y])
+
+// `RULE(rwf,h,P) := !f x'. (!z. rwf z x' ==> P z (f z)) ==> P x' (h f x')`,
+// the antecedent inside `wfrec_rel`'s own definition -- built directly
+// (not extracted from an unfold) since locally nameless terms compare
+// structurally regardless of which symbols name the bound variables here.
+fun wfrec_rule(rwf :: Term, h :: Term, p :: Term) :: Term:
+  let (a_ty, _) = dest_fun(type_of(rwf))
+  let (fty, _) = dest_fun(type_of(h))
+  let f0 = mk_var(#'f0, fty)
+  let xp0 = mk_var(#'xp0, a_ty)
+  let z0 = mk_var(#'z0, a_ty)
+  let below0 = mk_forall(z0, mk_imp(list_mk_comb(rwf, [z0, xp0]), list_mk_comb(p, [z0, mk_comb(f0, z0)])))
+  mk_forall(f0, mk_forall(xp0, mk_imp(below0, list_mk_comb(p, [xp0, mk_comb(mk_comb(h, f0), xp0)]))))
+
+// `|- !f x'. (!z. rwf z x' ==> Rel z (f z)) ==> Rel x' (h f x')` -- `Rel`
+// (`wfrec_rel(rwf,h)`) satisfies its own defining rule: specialize any
+// rule-respecting `P` at `Rel`'s own witness and discharge.
+fun wfrec_closure(thy :: Theory, wr_def :: Thm, rwf :: Term, h :: Term) :: Thm:
+  let (a_ty, _) = dest_fun(type_of(rwf))
+  let (fty, _) = dest_fun(type_of(h))
+  let (_, b_ty) = dest_fun(fty)
+  let p_ty = mk_fun(a_ty, mk_fun(b_ty, bool))
+  let f = mk_var(#'f, fty)
+  let xp = mk_var(#'xp, a_ty)
+  let z = mk_var(#'z, a_ty)
+  let p = mk_var(#'P, p_ty)
+  let rwf_z_xp = list_mk_comb(rwf, [z :~ Term, xp])
+  let below = mk_forall(z, mk_imp(rwf_z_xp, mk_wfrec_rel(rwf, h, z, mk_comb(f, z))))
+  let below_asm = ASSUME(thy, below)
+  let rule_p = wfrec_rule(rwf, h, p)
+  let rule_asm = ASSUME(thy, rule_p)
+  let step:
+    let rwf_hyp = ASSUME(thy, rwf_z_xp)
+    let rel_z_fz = MP(thy, SPEC(thy, z, below_asm), rwf_hyp)
+    let inner_ufd = unfold_wfrec_rel(thy, wr_def, rwf, h, z, mk_comb(f, z))
+    let unfolded_z = EQ_MP(inner_ufd, rel_z_fz)
+    let at_p = SPEC(thy, p, unfolded_z)
+    MP(thy, at_p, rule_asm)
+  let gen_step = GEN(thy, z, DISCH(thy, rwf_z_xp, step))
+  let rule_at_f_xp = SPECL(thy, [f :~ Term, xp], rule_asm)
+  let p_xp_hfxp = MP(thy, rule_at_f_xp, gen_step)
+  let top_ufd = unfold_wfrec_rel(thy, wr_def, rwf, h, xp, mk_comb(mk_comb(h, f), xp))
+  let rel_xp_hfxp = EQ_MP(SYM(thy, top_ufd), GEN(thy, p, DISCH(thy, rule_p, p_xp_hfxp)))
+  GENL(thy, [f, xp], DISCH(thy, below, rel_xp_hfxp))
+
+// `|- !x y. Rel(x,y) ==> Q(x,y)` for any `Q` that itself satisfies the
+// defining rule -- `Rel` is the *intersection* of every rule-respecting
+// relation, so it sits inside each one, in particular the caller-supplied
+// `Q`.  `q_closure`'s concl must be exactly `wfrec_rule(rwf,h,q)` (built via
+// that helper, so `q`'s applications inside it are unreduced the same way
+// `SPEC` leaves them below).
+fun wfrec_least(thy :: Theory, wr_def :: Thm, rwf :: Term, h :: Term,
+                q :: Term, q_closure :: Thm) :: Thm:
+  let (a_ty, _) = dest_fun(type_of(rwf))
+  let (fty, _) = dest_fun(type_of(h))
+  let (_, b_ty) = dest_fun(fty)
+  let x = mk_var(#'x, a_ty)
+  let y = mk_var(#'y, b_ty)
+  let ufd = unfold_wfrec_rel(thy, wr_def, rwf, h, x, y)
+  let rel_asm = ASSUME(thy, mk_wfrec_rel(rwf, h, x, y))
+  let unfolded = EQ_MP(ufd, rel_asm)
+  let at_q = SPEC(thy, q, unfolded)
+  let step = MP(thy, at_q, q_closure)
+  GENL(thy, [x, y], DISCH(thy, mk_wfrec_rel(rwf, h, x, y), step))
+
+// Partial application `wfrec_rel(rwf,h,x)`, still waiting for its second
+// argument -- lets `AP_TERM` rewrite across an equality of *that* argument.
+fun wfrec_rel_partial(rwf :: Term, h :: Term, x :: Term) :: Term:
+  list_mk_comb(wfrec_rel_const(rwf, h), [rwf, h, x])
+
+// `Q(x,y) := ?f. (!z. Rwf z x ==> Rel z (f z)) /\ y = H f x`, as an
+// unapplied `\x y. ...` term -- the relation whose containment in `Rel`
+// (via `wfrec_least`) is the inversion lemma below.
+fun wfrec_inv_pred(rwf :: Term, h :: Term) :: Term:
+  let (a_ty, _) = dest_fun(type_of(rwf))
+  let (fty, _) = dest_fun(type_of(h))
+  let (_, b_ty) = dest_fun(fty)
+  let x = mk_var(#'x, a_ty)
+  let y = mk_var(#'y, b_ty)
+  let f1 = mk_var(#'f1, fty)
+  let z1 = mk_var(#'z1, a_ty)
+  let below = mk_forall(z1, mk_imp(list_mk_comb(rwf, [z1 :~ Term, x]), mk_wfrec_rel(rwf, h, z1, mk_comb(f1, z1))))
+  let eqn = mk_eq(y, mk_comb(mk_comb(h, f1), x))
+  mk_abs(x, mk_abs(y, mk_exists(f1, mk_conj(below, eqn))))
+
+// `|- wfrec_rule(rwf,h,Q)` -- `Q` (the inversion predicate above) respects
+// its own defining rule.  Given `!z. Rwf z x' ==> Q z (f z)`, each such `z`
+// supplies (via `CHOOSE`) a witness one recursion level down; reusing that
+// same witness at `x'` shows `Q x' (H f x')` too, discharging via the
+// witness's own equation and `wfrec_closure`.
+fun wfrec_inv_closure(thy :: Theory, wr_def :: Thm, closure_thm :: Thm,
+                      rwf :: Term, h :: Term) :: Thm:
+  let (a_ty, _) = dest_fun(type_of(rwf))
+  let (fty, _) = dest_fun(type_of(h))
+  let q = wfrec_inv_pred(rwf, h)
+  let f0 = mk_var(#'f0, fty)
+  let xp0 = mk_var(#'xp0, a_ty)
+  let z0 = mk_var(#'z0, a_ty)
+  let f2 = mk_var(#'f2, fty)
+  let z1 = mk_var(#'z1, a_ty)
+  let rwf_z0_xp0 = list_mk_comb(rwf, [z0 :~ Term, xp0])
+  let below_q = mk_forall(z0, mk_imp(rwf_z0_xp0, list_mk_comb(q, [z0 :~ Term, mk_comb(f0, z0)])))
+  let below_q_asm = ASSUME(thy, below_q)
+  let per_z0:
+    let rwf_hyp = ASSUME(thy, rwf_z0_xp0)
+    let q_at_z0 = BETA_RULE(thy, MP(thy, SPEC(thy, z0, below_q_asm), rwf_hyp))
+    let below_f2_eqn_term = mk_conj(
+      mk_forall(z1, mk_imp(list_mk_comb(rwf, [z1 :~ Term, z0]), mk_wfrec_rel(rwf, h, z1, mk_comb(f2, z1)))),
+      mk_eq(mk_comb(f0, z0), mk_comb(mk_comb(h, f2), z0)))
+    let inner:
+      let asm = ASSUME(thy, below_f2_eqn_term)
+      let below_f2 = CONJUNCT1(thy, asm)
+      let eqn = CONJUNCT2(thy, asm)
+      let closure_at = SPECL(thy, [f2 :~ Term, z0], closure_thm)
+      let rel_z0_hf2z0 = MP(thy, closure_at, below_f2)
+      let cong = AP_TERM(thy, wfrec_rel_partial(rwf, h, z0), SYM(thy, eqn))
+      EQ_MP(cong, rel_z0_hf2z0)
+    CHOOSE(thy, f2, q_at_z0, inner)
+  let gen_step2 = GEN(thy, z0, DISCH(thy, rwf_z0_xp0, per_z0))
+  let conj = CONJ(thy, gen_step2, REFL(thy, mk_comb(mk_comb(h, f0), xp0)))
+  let target = mk_exists(f2, mk_conj(
+    mk_forall(z1, mk_imp(list_mk_comb(rwf, [z1 :~ Term, xp0]), mk_wfrec_rel(rwf, h, z1, mk_comb(f2, z1)))),
+    mk_eq(mk_comb(mk_comb(h, f0), xp0), mk_comb(mk_comb(h, f2), xp0))))
+  let ex = EXISTS(thy, target, f0, conj)
+  let unreduced_target = list_mk_comb(q, [xp0 :~ Term, mk_comb(mk_comb(h, f0), xp0)])
+  let beta_eq = (match HEAD_BETA_CONV(thy, unreduced_target)
+                 | th :~ Thm: th
+                 | #false: error(~who: #'wfrec_inv_closure, "beta reduction failed"))
+  let result = EQ_MP(SYM(thy, beta_eq), ex)
+  GENL(thy, [f0, xp0], DISCH(thy, below_q, result))
+
+// `|- !x y. Rel(x,y) ==> ?f. (!z. Rwf z x ==> Rel z (f z)) /\ y = H f x` --
+// any `(x,y)` in the least rule-closed relation *came from* the rule.
+fun wfrec_inversion(thy :: Theory, wr_def :: Thm, closure_thm :: Thm,
+                    rwf :: Term, h :: Term) :: Thm:
+  let q = wfrec_inv_pred(rwf, h)
+  let q_closure = wfrec_inv_closure(thy, wr_def, closure_thm, rwf, h)
+  BETA_RULE(thy, wfrec_least(thy, wr_def, rwf, h, q, q_closure))
+
+// `|- !x y1 y2. Rel(x,y1) /\ Rel(x,y2) ==> y1 = y2` -- `Rel` (given `WF(Rwf)`
+// and the congruence hypothesis) is a partial function.  By well-founded
+// induction: assuming the property below every `Rwf`-predecessor of `x`,
+// invert both `Rel(x,y1)` and `Rel(x,y2)` to a pair of witness functions
+// agreeing with `Rel` below `x`; the induction hypothesis makes them agree
+// pointwise there, so the congruence hypothesis identifies `H` applied to
+// either, hence `y1 = y2`.
+fun wfrec_unique(thy :: Theory, wr_def :: Thm, inv_thm :: Thm,
+                 rwf :: Term, h :: Term, wf_rwf :: Thm, congr :: Thm) :: Thm:
+  let (a_ty, _) = dest_fun(type_of(rwf))
+  let (fty, _) = dest_fun(type_of(h))
+  let (_, b_ty) = dest_fun(fty)
+  let x = mk_var(#'x, a_ty)
+  let y1 = mk_var(#'y1, b_ty)
+  let y2 = mk_var(#'y2, b_ty)
+  let z = mk_var(#'z, a_ty)
+  let f1 = mk_var(#'f1, fty)
+  let f2v = mk_var(#'f2, fty)
+  let q_pred = mk_abs(x, mk_forall(y1, mk_forall(y2, mk_imp(mk_conj(mk_wfrec_rel(rwf, h, x, y1), mk_wfrec_rel(rwf, h, x, y2)), mk_eq(y1, y2)))))
+  let ind_applied = MP(thy, SPEC(thy, rwf, prove_wf_induction(thy)), wf_rwf)
+  let ind_at_q = SPEC(thy, q_pred, ind_applied)
+  let rwf_z_x = list_mk_comb(rwf, [z :~ Term, x])
+  let ih_term = mk_forall(z, mk_imp(rwf_z_x, list_mk_comb(q_pred, [z :~ Term])))
+  let ih_asm = ASSUME(thy, ih_term)
+  let rel_x_y1 = mk_wfrec_rel(rwf, h, x, y1)
+  let rel_x_y2 = mk_wfrec_rel(rwf, h, x, y2)
+  let y1y2_conj = mk_conj(rel_x_y1, rel_x_y2)
+  let step_x:
+    let conj_asm = ASSUME(thy, y1y2_conj)
+    let inv1 = BETA_RULE(thy, MP(thy, SPECL(thy, [x :~ Term, y1], inv_thm), CONJUNCT1(thy, conj_asm)))
+    let inv2 = BETA_RULE(thy, MP(thy, SPECL(thy, [x :~ Term, y2], inv_thm), CONJUNCT2(thy, conj_asm)))
+    let asm1_term = mk_conj(mk_forall(z, mk_imp(rwf_z_x, mk_wfrec_rel(rwf, h, z, mk_comb(f1, z)))), mk_eq(y1, mk_comb(mk_comb(h, f1), x)))
+    let asm2_term = mk_conj(mk_forall(z, mk_imp(rwf_z_x, mk_wfrec_rel(rwf, h, z, mk_comb(f2v, z)))), mk_eq(y2, mk_comb(mk_comb(h, f2v), x)))
+    let body:
+      let asm1 = ASSUME(thy, asm1_term)
+      let below1 = CONJUNCT1(thy, asm1)
+      let eq1 = CONJUNCT2(thy, asm1)
+      let inner2:
+        let asm2 = ASSUME(thy, asm2_term)
+        let below2 = CONJUNCT1(thy, asm2)
+        let eq2 = CONJUNCT2(thy, asm2)
+        let per_z:
+          let rwf_hyp = ASSUME(thy, rwf_z_x)
+          let r1 = MP(thy, SPEC(thy, z, below1), rwf_hyp)
+          let r2 = MP(thy, SPEC(thy, z, below2), rwf_hyp)
+          let ih_z = BETA_RULE(thy, MP(thy, SPEC(thy, z, ih_asm), rwf_hyp))
+          MP(thy, SPECL(thy, [mk_comb(f1, z), mk_comb(f2v, z)], ih_z), CONJ(thy, r1, r2))
+        let gen_per_z = GEN(thy, z, DISCH(thy, rwf_z_x, per_z))
+        let cong_at = MP(thy, SPECL(thy, [f1 :~ Term, f2v, x], congr), gen_per_z)
+        TRANS(eq1, TRANS(cong_at, SYM(thy, eq2)))
+      CHOOSE(thy, f2v, inv2, inner2)
+    CHOOSE(thy, f1, inv1, body)
+  let gen_y = GENL(thy, [y1, y2], DISCH(thy, y1y2_conj, step_x))
+  let q_at_x_unreduced = list_mk_comb(q_pred, [x :~ Term])
+  let beta_qx = (match HEAD_BETA_CONV(thy, q_at_x_unreduced)
+                 | th :~ Thm: th
+                 | #false: error(~who: #'wfrec_unique, "beta reduction failed"))
+  let gen_y_unreduced = EQ_MP(SYM(thy, beta_qx), gen_y)
+  let gen_x = GEN(thy, x, DISCH(thy, ih_term, gen_y_unreduced))
+  BETA_RULE(thy, MP(thy, ind_at_q, gen_x))
+
+// `|- ?v. body`  ==>  `|- body[select(\v.body)/v]` -- the "just get a
+// witness" half of choice, dual to `SELECT_UNIQUE`'s "identify the known
+// value" half: no `a` is supplied here, since `select(\v.body)` itself is
+// the value being produced.
+fun SELECT_INTRO(thy :: Theory, v :: FVar, body :: Term, ex :: Thm) :: Thm:
+  let pred = mk_abs(v, body)
+  let sel = mk_select(v, body)
+  let ax = INST_TYPE(thy, {#'a: v.ty}, base_axiom(#'SELECT_AX))
+  let ax_at_v = SPEC(thy, v, SPEC(thy, pred, ax))
+  let beta_v = (match BETA_CONV(thy, mk_comb(pred, v))
+                | th :~ Thm: th
+                | #false: error(~who: #'SELECT_INTRO, "beta failed"))
+  let pred_v_unreduced = EQ_MP(SYM(thy, beta_v), ASSUME(thy, body))
+  let pred_sel_unreduced = MP(thy, ax_at_v, pred_v_unreduced)
+  let beta_sel = (match BETA_CONV(thy, mk_comb(pred, sel))
+                  | th :~ Thm: th
+                  | #false: error(~who: #'SELECT_INTRO, "beta failed"))
+  CHOOSE(thy, v, ex, EQ_MP(beta_sel, pred_sel_unreduced))
+
+// The canonical solution `\x. select(\y. Rel(x,y))` -- the function
+// `WFREC` ultimately hands back, once `Rel` is known to be a total
+// function (`wfrec_exists`/`wfrec_unique`, given `WF(Rwf)` and congruence).
+fun wfrec_soln(rwf :: Term, h :: Term) :: Term:
+  let (a_ty, _) = dest_fun(type_of(rwf))
+  let (fty, _) = dest_fun(type_of(h))
+  let (_, b_ty) = dest_fun(fty)
+  let z = mk_var(#'z, a_ty)
+  let y = mk_var(#'y, b_ty)
+  mk_abs(z, mk_select(y, mk_wfrec_rel(rwf, h, z, y)))
+
+// `|- !x. ?y. Rel(x,y)`, given `WF(Rwf)` -- by well-founded induction:
+// below `x`, choose a witness pointwise (`SELECT_INTRO`) to build a
+// concrete `f` agreeing with `Rel` there, then `wfrec_closure` supplies
+// `Rel(x, H f x)`.
+fun wfrec_exists(thy :: Theory, wr_def :: Thm, closure_thm :: Thm,
+                 rwf :: Term, h :: Term, wf_rwf :: Thm) :: Thm:
+  let (a_ty, _) = dest_fun(type_of(rwf))
+  let (fty, _) = dest_fun(type_of(h))
+  let (_, b_ty) = dest_fun(fty)
+  let x = mk_var(#'x, a_ty)
+  let z = mk_var(#'z, a_ty)
+  let y = mk_var(#'y, b_ty)
+  let fsoln = wfrec_soln(rwf, h)
+  let q_pred = mk_abs(x, mk_exists(y, mk_wfrec_rel(rwf, h, x, y)))
+  let ind_applied = MP(thy, SPEC(thy, rwf, prove_wf_induction(thy)), wf_rwf)
+  let ind_at_q = SPEC(thy, q_pred, ind_applied)
+  let rwf_z_x = list_mk_comb(rwf, [z :~ Term, x])
+  let ih_term = mk_forall(z, mk_imp(rwf_z_x, list_mk_comb(q_pred, [z :~ Term])))
+  let ih_asm = ASSUME(thy, ih_term)
+  let step_x:
+    let per_z:
+      let rwf_hyp = ASSUME(thy, rwf_z_x)
+      let ex_z = BETA_RULE(thy, MP(thy, SPEC(thy, z, ih_asm), rwf_hyp))
+      let intro = SELECT_INTRO(thy, y, mk_wfrec_rel(rwf, h, z, y), ex_z)
+      let fsoln_z_beta = (match BETA_CONV(thy, mk_comb(fsoln, z))
+                          | th :~ Thm: th
+                          | #false: error(~who: #'wfrec_exists, "beta failed"))
+      let cong = AP_TERM(thy, wfrec_rel_partial(rwf, h, z), SYM(thy, fsoln_z_beta))
+      EQ_MP(cong, intro)
+    let below_fsoln = GEN(thy, z, DISCH(thy, rwf_z_x, per_z))
+    let rel_x_hfsolnx = MP(thy, SPECL(thy, [fsoln :~ Term, x], closure_thm), below_fsoln)
+    EXISTS(thy, mk_exists(y, mk_wfrec_rel(rwf, h, x, y)), mk_comb(mk_comb(h, fsoln), x), rel_x_hfsolnx)
+  let q_at_x_unreduced = list_mk_comb(q_pred, [x :~ Term])
+  let beta_qx = (match HEAD_BETA_CONV(thy, q_at_x_unreduced)
+                 | th :~ Thm: th
+                 | #false: error(~who: #'wfrec_exists, "beta reduction failed"))
+  let gen_x = GEN(thy, x, DISCH(thy, ih_term, EQ_MP(SYM(thy, beta_qx), step_x)))
+  BETA_RULE(thy, MP(thy, ind_at_q, gen_x))
+
+// `|- !x. Rel(x, soln(x))` -- given raw existence, pick the *specific*
+// witness `soln` names at every point, not just some `y`.
+fun wfrec_soln_sat(thy :: Theory, exists_thm :: Thm, rwf :: Term, h :: Term) :: Thm:
+  let (a_ty, _) = dest_fun(type_of(rwf))
+  let (fty, _) = dest_fun(type_of(h))
+  let (_, b_ty) = dest_fun(fty)
+  let x = mk_var(#'x, a_ty)
+  let y = mk_var(#'y, b_ty)
+  let fsoln = wfrec_soln(rwf, h)
+  let intro = SELECT_INTRO(thy, y, mk_wfrec_rel(rwf, h, x, y), SPEC(thy, x, exists_thm))
+  let fsoln_x_beta = (match BETA_CONV(thy, mk_comb(fsoln, x))
+                      | th :~ Thm: th
+                      | #false: error(~who: #'wfrec_soln_sat, "beta failed"))
+  let cong = AP_TERM(thy, wfrec_rel_partial(rwf, h, x), SYM(thy, fsoln_x_beta))
+  GEN(thy, x, EQ_MP(cong, intro))
+
+// `|- !x. soln(x) = H soln x` -- `soln` is a fixed point: `Rel(x,soln(x))`
+// inverts to some `f` agreeing with `Rel` (hence, by uniqueness, with
+// `soln` itself) below `x`, and congruence identifies `H f x` with
+// `H soln x`.
+fun wfrec_final(thy :: Theory, inv_thm :: Thm, unique_thm :: Thm,
+                soln_sat_thm :: Thm, rwf :: Term, h :: Term, congr :: Thm) :: Thm:
+  let (a_ty, _) = dest_fun(type_of(rwf))
+  let (fty, _) = dest_fun(type_of(h))
+  let x = mk_var(#'x, a_ty)
+  let z = mk_var(#'z, a_ty)
+  let fw = mk_var(#'fw, fty)
+  let fsoln = wfrec_soln(rwf, h)
+  let rwf_z_x = list_mk_comb(rwf, [z :~ Term, x])
+  let step_x:
+    let rel_x_fsolnx = SPEC(thy, x, soln_sat_thm)
+    let inv_x = MP(thy, SPECL(thy, [x :~ Term, mk_comb(fsoln, x)], inv_thm), rel_x_fsolnx)
+    let asm_term = mk_conj(mk_forall(z, mk_imp(rwf_z_x, mk_wfrec_rel(rwf, h, z, mk_comb(fw, z)))), mk_eq(mk_comb(fsoln, x), mk_comb(mk_comb(h, fw), x)))
+    let inner:
+      let asm = ASSUME(thy, asm_term)
+      let below_fw = CONJUNCT1(thy, asm)
+      let eqn = CONJUNCT2(thy, asm)
+      let per_z:
+        let rwf_hyp = ASSUME(thy, rwf_z_x)
+        let rel_z_fwz = MP(thy, SPEC(thy, z, below_fw), rwf_hyp)
+        let rel_z_fsolnz = SPEC(thy, z, soln_sat_thm)
+        let both = CONJ(thy, rel_z_fwz, rel_z_fsolnz)
+        MP(thy, SPECL(thy, [z :~ Term, mk_comb(fw, z), mk_comb(fsoln, z)], unique_thm), both)
+      let gen_per_z = GEN(thy, z, DISCH(thy, rwf_z_x, per_z))
+      let cong_at = MP(thy, SPECL(thy, [fw :~ Term, fsoln, x], congr), gen_per_z)
+      TRANS(eqn, cong_at)
+    CHOOSE(thy, fw, inv_x, inner)
+  GEN(thy, x, step_x)
+
+// The `WFREC` existence theorem itself: given `WF(Rwf)` and the
+// congruence hypothesis, produce a *concrete* function term and the
+// proof that it satisfies the recursive equation everywhere.
+//
+//   WFREC(thy, wr_def, rwf, h, wf_rwf, congr) = (soln, |- !x. soln x = h soln x)
+fun WFREC(thy :: Theory, wr_def :: Thm, rwf :: Term, h :: Term,
+          wf_rwf :: Thm, congr :: Thm) :: values(Term, Thm):
+  let closure_thm = wfrec_closure(thy, wr_def, rwf, h)
+  let inv_thm = wfrec_inversion(thy, wr_def, closure_thm, rwf, h)
+  let unique_thm = wfrec_unique(thy, wr_def, inv_thm, rwf, h, wf_rwf, congr)
+  let exists_thm = wfrec_exists(thy, wr_def, closure_thm, rwf, h, wf_rwf)
+  let soln_sat_thm = wfrec_soln_sat(thy, exists_thm, rwf, h)
+  let final_thm = wfrec_final(thy, inv_thm, unique_thm, soln_sat_thm, rwf, h, congr)
+  values(wfrec_soln(rwf, h), final_thm)

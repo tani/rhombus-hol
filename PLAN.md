@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1047 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1094 tests passed。
 §10 に外部レビュー対応の状況をまとめてある。
 
 ---
@@ -69,8 +69,9 @@ rhombus-hol/
 │           ├── conv.rhm          変換（equal.ml 相当）
 │           ├── drule.rhm         派生規則（bool.ml + drule.ml 相当）
 │           ├── datatype.rhm      データ型の公理（信頼境界②）
-│           ├── algebra.rhm       `unit`/`prod`/`sum` の導出（datatype 公理の代替、フェーズ1土台完成、§9.2.1）
+│           ├── algebra.rhm         `unit`/`prod`/`sum` の導出（datatype 公理の代替、フェーズ1土台完成、§9.2.1）
 │           ├── datatype_derived.rhm  enum 限定の `DatatypeSpec -> DatatypeThms`（axiom-free、§9.2.1）
+│           ├── datatype_gen.rhm   enum を一般化: 任意の非再帰 `DatatypeSpec`（フィールド付き）の `DatatypeThms` 全 7 フィールド（axiom-free、§9.2.1）
 │           ├── order.rhm         ACL2 term-order（順序付き書き換え用、ruledb.rhm 専用）
 │           └── module_block.rhm  #%module_block 差し替え
 └── rhombus-hol/                  ドキュメント + テスト（deps: rhombus-hol-lib, rhombus-hol-kernel）
@@ -194,7 +195,7 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 | カーネル | `Theory` `Stamp`（祖先集合）不可侵 `Thm`、基本 10 規則、理論拡張原理 | `kernel` |
 | 論理定数 | `bool`（Church 流定数 + ETA/SELECT/BOOL_CASES）`conv` `drule` | `bool` `conv` `drule` |
 | データ型 | `datatype`：正値性チェッカ + 公理スキーマ | `datatype` `positivity` |
-| 非公理的型構成子 | `algebra`：`unit`/`prod`/`sum` を `new_basic_type_definition` から導出（フェーズ1土台完成、§9.2.1）。`datatype_derived`：enum（0引数コンストラクタのみ）を `DatatypeThms` まで配線、`datatype_axioms` と差分テストで完全一致 | `algebra` `datatype_derived` |
+| 非公理的型構成子 | `algebra`：`unit`/`prod`/`sum` を `new_basic_type_definition` から導出（フェーズ1土台完成、§9.2.1）。`datatype_derived`：enum（0引数コンストラクタのみ）を `DatatypeThms` まで配線。`datatype_gen`：任意の非再帰 `DatatypeSpec`（フィールド付き）を `DatatypeThms` まで配線 -- いずれも `datatype_axioms` と差分テストで完全一致 | `algebra` `datatype_derived` `datatype_gen` |
 | 停止性 | `terminate`（辞書式構造的降下 + 測度）`recdef`（節形式の再帰定義） | `recdef` |
 | 書き換え | `tmatch` `ruledb` `simp`：一階マッチ、規則 DB（rewrite ルール + type-prescription 事実の二重分類）、順序付き書き換え | `ruledb` |
 | 証明探索 | `goal` `induct` `waterfall`（簡約・デストラクタ除去・フェルティライズ・一般化・irrelevance 除去・帰納法の固定パイプライン、ACL2 準拠） | `spec_4_1` |
@@ -533,19 +534,57 @@ PLAN.md §9.3 が要求する差分テストそのものであり、enum とい�
 部分集合について、"axiom-free の構成が既存の公理的構成と寸分違わぬ
 `DatatypeThms` を生成する" ことを実カーネルに対して証明している。
 
-**まだ残っているもの**:
-1. フィールド付きコンストラクタ（`prod` が必要）への一般化 --
-   `build_enum_thms` は `is_nullary_spec` で弾いており、フィールドがある
-   `spec` には使えない。
-2. 任意の非再帰 `DatatypeSpec` を `sum(prod(F1_1,...), sum(prod(F2_1,...),
-   ...))` へ機械的にエンコードする変換（コンストラクタ →
-   `inl`/`inr`/`pair` の合成）。enum の場合の `enum_inject`/`inject_left`
-   に相当するが、各スロットのペイロードが `unit` 固定ではなく実際の
-   フィールド型のタプルになる。
-3. `datatype.rhm`/`check_spec` 自体への実際の接続（`type` 宣言が
-   `datatype_axioms` の代わりに `build_enum_thms`/その一般化を呼ぶよう
-   切り替える）。`check_spec` の `nonrecursive_ctors` チェックが既に
-   この場合分けの入り口。
+**まだ残っているもの（更新: フィールド付きコンストラクタへの一般化が完了）**:
+
+`rhombus-hol-lib/rhombus/hol/private/datatype_gen.rhm`
+(`build_nonrecursive_datatype_thms`) が上記の項目 1・2 を実装し、
+`DatatypeThms` の 7 フィールドすべて（injectivity/distinctness/induction/
+cases/discriminators/selectors/elim_rules）を、フィールド付き・0 引数
+混在・複数型変数の任意の非再帰 `DatatypeSpec` について導出する。
+`tests/datatype_gen.rhm` が 6 通りの spec（1 引数、2 引数、多相 2 型変数
+3 引数、0/1 引数混在、0〜3 引数混在の 4 コンストラクタ、自己再帰の拒否）
+について `datatype_axioms`（公理的）と差分テストし、7 フィールド全部が
+`show` した文字列として完全一致し、導出側の全定理が仮説 0 個であることを
+実カーネルに対して確認済み（1047 → 1094 テスト）。エンコーディングは
+9.2.1 冒頭の `E(n)` を `sum(prod(F1_1,...,F1_k1), sum(prod(F2_1,...),...))`
+へ一般化しただけで、非再帰フィールドの構造は変わらない。
+
+判別子は `is_Ci(x) := exists a0...ak-1. x = Ci(a0,...,ak-1)`
+（`ctor_leaf_target` と同じ形の述語で、`i=j` なら `ys` 自身が証人、
+`i!=j` なら既存の `distinctness` から矛盾を導く）、選択子は
+`Ci_fj(x) := select(\v. exists z0...zk-1. x=Ci(zs) and zj=v)`
+（`select` による全域関数、一意性は `injectivity` から）として導出した。
+`select` の一意性補題 `SELECT_UNIQUE`（`|- pred(a)`, `|- forall v. body
+==> v=a` (簡約形) ==> `|- select(pred)=a`）を `drule.rhm` に新規追加した。
+
+この過程で `drule.rhm` の 2 つの既存バグを発見・修正した（`tests/` 全体は
+回帰なし、994→1047→1094 で単調増加のみ）:
+
+1. **`EXISTS` の変数捕獲**: 存在量化する変数と `exists` 自身の CPS 変換が
+   使う「答え変数」がたまたま同じ型（例: 束縛変数が `bool` 型で、
+   `exists` の答え変数も常に `bool`）を持つと、両方が独立な `fresh_for`
+   呼び出しで "x" と自動命名され、同一の `FVar` に潰れて証人のスコープに
+   答え変数を巻き込んでいた。`genvar`（`fresh_for` とは別の命名系統）で
+   衝突を回避。
+2. **`project`（`CONJUNCT1`/`CONJUNCT2`、ひいては `DISCH`/`MP` の内部）の
+   過剰簡約**: 選択関数の 2 引数適用をちょうど 2 段だけ簡約するために
+   `BINOP_CONV(HEAD_BETA_CONV)` を使っていたが、`HEAD_BETA_CONV` は
+   「止めるべき場所」を知らない open-ended な head-spine 簡約であり、
+   選び出した論理式自身がベータ基（適用されていない `Abs`）だった場合、
+   その論理式の**中身まで**簡約してしまっていた。選び出した論理式を
+   超えて簡約できない、ちょうど 3 段の明示的な簡約に置き換えた。
+   どちらのバグも、この一般化以前は誰も踏んでいなかった（`bool` 型の
+   存在量化や、簡約前の適用そのものを discharge/projection することは
+   これまでの呼び出し元のどれもしていなかった）ため、既存の証明には
+   影響がない。
+
+**まだ残っている（複数セッション規模）**:
+1. `datatype.rhm`/`check_spec`/`type` 宣言本体への実接続 --
+   `datatype_gen.rhm` は今も並行モジュールであり、実際の `type` 宣言は
+   相変わらず `datatype_axioms`（`new_axiom` ベース）を使っている。
+   接続には `DatatypeThms` の消費側（`destruct.rhm`/`waterfall.rhm` 等）
+   が導出側の出力をそのまま受け取れることの確認も要る。
+2. 自己再帰フィールドを持つ datatype（フェーズ 2・3、無限公理が必要）。
 `datatype.rhm` 自体はまだ一切変更していない。
 
 **フェーズ 2 (無限公理の新設)**: `trust.scrbl` に「4 本目の公理」として
@@ -596,7 +635,7 @@ solely on the statements in DatatypeThms, never on how they were obtained」
 | # | 項目 | 状況 |
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
-| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **部分的、進展あり**。`unit`/`prod`/`sum` を導出済み、かつ**全コンストラクタが0引数の enum** については `DatatypeSpec -> DatatypeThms` の配線を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_derived.rhm`、§9.2.1）。フィールド付きコンストラクタへの一般化と `check_spec`/`type` 本体への実接続は未着手 -- なお複数セッション規模。 |
+| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **部分的、大きく進展**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（injectivity/distinctness/induction/cases/discriminators/selectors/elim_rules の 7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。`check_spec`/`type` 本体への実接続（並行モジュールのまま）と自己再帰 datatype（フェーズ 2・3）は未着手 -- なお複数セッション規模。 |
 | 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **部分的**。`wellfounded.rhm` で `WF_INDUCTION` とその逆を導出（§9.1.1）。`WFREC` 本体（一番価値が高く、一番大きい部分）は未着手。`recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済みだが、hyp_insert 等の非公開化は未着手。 |

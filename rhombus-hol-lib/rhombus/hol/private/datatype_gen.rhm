@@ -1,0 +1,667 @@
+#lang rhombus/static
+
+// Generalization of `datatype_derived.rhm`'s enum worked example to
+// arbitrary non-recursive constructors (fields allowed), via `prod` for
+// each constructor's field tuple alongside `sum`/`unit` for the choice
+// among constructors.  See PLAN.md section 9.2.1's residual-work list,
+// item 1 -- this is that generalization, still not wired into
+// `check_spec`/`type` (see item 3 there).
+//
+// Encoding, per constructor `Ci` with fields `f0 :: T0, ..., f_{k-1} ::
+// T_{k-1}`:
+//
+//   payload(Ci) := unit                                    if k = 0
+//                  T0                                       if k = 1
+//                  prod(T0, prod(T1, ..., prod(T_{k-2}, T_{k-1})...))   if k >= 2
+//
+// and, for `n` constructors, the same right-nested `sum` chain as the enum
+// case, but now over `payload(C0), ..., payload(C(n-1))` instead of always
+// `unit`:
+//
+//   E(1) := payload(C0)
+//   E(n) := sum(payload(C0), E'(n-1))   where E'(n-1) is built from
+//           payload(C1)..payload(C(n-1))
+//
+// `E` is still carved out with the trivial predicate `\e. true`: `sum`'s
+// `cases`/`distinct` and `prod`'s `surjective` together say every value of
+// `E` is *exactly* one constructor's tag paired with *some* value of each
+// of its fields -- there is no junk element `E` has that no constructor
+// application maps to -- so `abs`/`rep` is again a true bijection, not
+// merely an embedding into a subset.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/names open
+  rhombus/hol/private/kernel open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "algebra.rhm" open
+  "datatype.rhm" open
+
+export:
+  is_nonrecursive_spec
+  build_nonrecursive_datatype_thms
+
+def unitty :: HType = TyApp(ty_unit, [])
+def one_term :: Term = mk_const(c_one, unitty)
+
+fun is_nonrecursive_spec(spec :: DatatypeSpec) :: Boolean:
+  for all (c in spec.ctors):
+    for all (f in (c :~ Ctor).fields): !is_recursive_field(spec, f :~ Field)
+
+// -- payload type/term construction -----------------------------------
+
+fun payload_type_of_fields(fields :: List.of(Field)) :: HType:
+  match fields
+  | []: unitty
+  | [f]: (f :~ Field).ty
+  | List.cons(f, rest): prod_ty((f :~ Field).ty, payload_type_of_fields(rest))
+
+fun pack_fields(vars :: List.of(Term)) :: Term:
+  match vars
+  | []: one_term
+  | [v]: v
+  | List.cons(v, rest): mk_pair_term(v, pack_fields(rest))
+
+// -- per-slot representation type / injection --------------------------
+
+fun payload_types(spec :: DatatypeSpec) :: List.of(HType):
+  spec.ctors.map(fun (c :: Ctor): payload_type_of_fields((c :~ Ctor).fields))
+
+fun repr_type_from(ptys :: List.of(HType)) :: HType:
+  match ptys
+  | [t]: t
+  | List.cons(t, rest): sum_ty(t, repr_type_from(rest))
+
+fun inject_from(ptys :: List.of(HType), i :: Int, payload :: Term) :: Term:
+  match ptys
+  | [t]: payload
+  | List.cons(t, rest):
+      (if i == 0
+       | mk_inl_term(payload, repr_type_from(rest))
+       | mk_inr_term(t, inject_from(rest, i - 1, payload)))
+
+// `|- a = b`  ==>  `|- inject_from(ptys,i,a) = inject_from(ptys,i,b)`.
+fun inject_congr(thy :: Theory, ptys :: List.of(HType), i :: Int, eq_th :: Thm) :: Thm:
+  match ptys
+  | [t]: eq_th
+  | List.cons(t, rest):
+      (if i == 0
+       | AP_TERM(thy, mk_const(c_inl, mk_fun(t, sum_ty(t, repr_type_from(rest)))), eq_th)
+       | AP_TERM(thy, mk_const(c_inr, mk_fun(repr_type_from(rest), sum_ty(t, repr_type_from(rest)))), inject_congr(thy, rest, i - 1, eq_th)))
+
+// `|- Q <=> P`, `|- not P`  ==>  `|- not Q`.
+fun not_iff_left(thy :: Theory, iff_th :: Thm, not_p :: Thm) :: Thm:
+  let [qq, pp] = (match dest_eq(concl_of(iff_th)) | l: l)
+  let asm = ASSUME(thy, qq)
+  let p_th = EQ_MP(iff_th, asm)
+  let false_th = MP(thy, NOT_ELIM(thy, not_p), p_th)
+  NOT_INTRO(thy, DISCH(thy, qq, false_th))
+
+// `|- not (a = b)`  ==>  `|- not (b = a)`.
+fun not_eq_sym(thy :: Theory, th :: Thm) :: Thm:
+  let inner = (match dest_neg(concl_of(th)) | p: p)
+  let [a, b] = (match dest_eq(inner) | l: l)
+  let asm = ASSUME(thy, mk_eq(b, a))
+  let flipped = SYM(thy, asm)
+  let false_th = MP(thy, NOT_ELIM(thy, th), flipped)
+  NOT_INTRO(thy, DISCH(thy, mk_eq(b, a), false_th))
+
+// `|- not (inject_from(ptys,i,pa) = inject_from(ptys,j,pb))`, `i != j`.
+// Generalizes `datatype_derived.rhm`'s `enum_distinct_repr` to arbitrary
+// payload terms (there, payloads were always `one_term`).
+fun distinct_repr(thy :: Theory, sumthms :: SumThms, ptys :: List.of(HType),
+                  i :: Int, j :: Int, pa :: Term, pb :: Term) :: Thm:
+  (match ptys
+   | List.cons(t0, rest):
+       let tyRest = repr_type_from(rest)
+       cond
+       | i == 0 && j > 0:
+           let inst = INST_TYPE(thy, {#'a: t0, #'b: tyRest}, sumthms.distinct)
+           SPECL(thy, [pa, inject_from(rest, j - 1, pb)], inst)
+       | j == 0 && i > 0:
+           not_eq_sym(thy, distinct_repr(thy, sumthms, ptys, j, i, pb, pa))
+       | ~else:
+           let inner = distinct_repr(thy, sumthms, rest, i - 1, j - 1, pa, pb)
+           let inst = INST_TYPE(thy, {#'a: t0, #'b: tyRest}, sumthms.inr_inj)
+           let iff_th = SPECL(thy, [inject_from(rest, i - 1, pa), inject_from(rest, j - 1, pb)], inst)
+           not_iff_left(thy, iff_th, inner))
+
+// Unpack `gcur :: payload_type_of_fields(fields)` into its `fields.length()`
+// components, existentially, via repeated `prod.surjective`.  `wrap_eq`/
+// `wrap_term` let a caller thread an *outer* rewriting through every level
+// of the recursion (e.g. "this payload is itself nested one level deeper
+// inside another `pair`") without duplicating the unpacking logic per
+// level; the top-level call (`unpack_payload_exists`) passes the identity.
+fun unpack_general(thy :: Theory, prodthms :: ProdThms, fields :: List.of(Field), gcur :: Term, wrap_eq, wrap_term) :: Thm:
+  match fields
+  | [f]:
+      let x0 = genvar((f :~ Field).ty)
+      EXISTS(thy, mk_exists(x0, wrap_term(x0)), gcur, wrap_eq(REFL(thy, gcur)))
+  | List.cons(f, rest):
+      let tyF = (f :~ Field).ty
+      let tyRest = payload_type_of_fields(rest)
+      let surj_inst = INST_TYPE(thy, {#'a: tyF, #'b: tyRest}, prodthms.surjective)
+      let surj_at_g = SPEC(thy, gcur, surj_inst)
+      let [oa, obody] = (match dest_exists(concl_of(surj_at_g)) | l: l)
+      let oa :~ FVar = oa
+      let ga = genvar(tyF)
+      let obody_ga = inst_fvar([[ga, oa]], obody)
+      let asm_outer = ASSUME(thy, obody_ga)
+      let [ob, ibody] = (match dest_exists(obody_ga) | l: l)
+      let ob :~ FVar = ob
+      let gb = genvar(tyRest)
+      let ibody_gb = inst_fvar([[gb, ob]], ibody)
+      let asm_inner = ASSUME(thy, ibody_gb)
+      fun wrap_eq2(inner_eq :: Thm) :: Thm:
+        wrap_eq(TRANS(asm_inner, AP_TERM(thy, mk_comb(mk_const(c_pair, mk_fun(tyF, mk_fun(tyRest, prod_ty(tyF, tyRest)))), ga), inner_eq)))
+      fun wrap_term2(v :: Term) :: Term: wrap_term(mk_pair_term(ga, v))
+      let unpacked_rest = unpack_general(thy, prodthms, rest, gb, wrap_eq2, wrap_term2)
+      let wrapped = EXISTS(thy, mk_exists(ga, concl_of(unpacked_rest)), ga, unpacked_rest)
+      let step1 = CHOOSE(thy, gb, asm_outer, wrapped)
+      CHOOSE(thy, ga, surj_at_g, step1)
+
+// `|- ?x0...?x_{k-1}. gp = pack_fields([x0,...,x_{k-1}])`.
+fun unpack_payload_exists(thy :: Theory, prodthms :: ProdThms, fields :: List.of(Field), gp :: Term) :: Thm:
+  unpack_general(thy, prodthms, fields, gp, fun (th :: Thm) :: Thm: th, fun (v :: Term) :: Term: mk_eq(gp, v))
+
+// `ex_th : |- ?x0. ?x1. ... ?x_{m-1}. P(vars)`.  Opens all `m` layers via
+// repeated `CHOOSE`, then calls `transform(vars, flat_th)` where `flat_th :
+// |- P(vars)` (with `vars` the chosen `FVar`s, outermost first) to produce
+// the caller's desired conclusion; `transform`'s own hypotheses (if any)
+// survive undischarged, `ex_th`'s existential layers do not.
+fun choose_through_and_rewrap(thy :: Theory, ex_th :: Thm, m :: Int, transform) :: Thm:
+  cond
+  | m == 0: transform([], ex_th)
+  | ~else:
+      let [ov, obody] = (match dest_exists(concl_of(ex_th)) | l: l)
+      let ov :~ FVar = ov
+      let gv = genvar(ov.ty)
+      let obody_gv = inst_fvar([[gv, ov]], obody)
+      let asm = ASSUME(thy, obody_gv)
+      let inner = choose_through_and_rewrap(thy, asm, m - 1, fun (rest_vars, flat_th): transform([gv] ++ rest_vars, flat_th))
+      CHOOSE(thy, gv, ex_th, inner)
+
+fun index_of_ctor(spec :: DatatypeSpec, ci :: Term) :: Int:
+  let (head, _) = strip_comb(ci)
+  match head
+  | Const(n, _):
+      recur loop (cs :~ List = spec.ctors, i = 0):
+        match cs
+        | List.cons(c, rest):
+            (if (c :~ Ctor).name == n | i | loop(rest, i + 1))
+
+fun mk_field_vars(fields :: List.of(Field), prefix :: String) :: List.of(FVar):
+  for List (f in fields, i in List.iota(fields.length())):
+    mk_var(Symbol.from_string(prefix ++ to_string(i)), (f :~ Field).ty)
+
+// `|- x0=y0 and x1=y1 and ...`  <--  `|- payload_eq(xs)=payload_eq(ys)`,
+// peeling one `prod.pair_eq` per field.
+fun collect_field_eqs(thy :: Theory, prodthms :: ProdThms, fields :: List.of(Field),
+                      xs :: List.of(Term), ys :: List.of(Term), payload_eq :: Thm) :: List.of(Thm):
+  match fields
+  | [f]: [payload_eq]
+  | List.cons(f, frest):
+      (match xs
+       | List.cons(x0, xrest):
+           (match ys
+            | List.cons(y0, yrest):
+                let tyF = (f :~ Field).ty
+                let tyRest = payload_type_of_fields(frest)
+                let inst_pair_eq = INST_TYPE(thy, {#'a: tyF, #'b: tyRest}, prodthms.pair_eq)
+                let specialized = SPECL(thy, [x0, pack_fields(xrest), y0, pack_fields(yrest)], inst_pair_eq)
+                let conj_th = EQ_MP(specialized, payload_eq)
+                let x0_eq_y0 = CONJUNCT1(thy, conj_th)
+                let rest_payload_eq = CONJUNCT2(thy, conj_th)
+                [x0_eq_y0] ++ collect_field_eqs(thy, prodthms, frest, xrest, yrest, rest_payload_eq)))
+
+fun left_fold_conj(thy :: Theory, eqs :: List.of(Thm)) :: Thm:
+  match eqs
+  | [e]: e
+  | List.cons(e0, rest): for values(acc :~ Thm = e0) (e in rest): CONJ(thy, acc, e)
+
+fun conj_all_term(xs :: List.of(Term), ys :: List.of(Term)) :: Term:
+  let eqs = for List (x in xs, y in ys): mk_eq(x, y)
+  (match eqs
+   | List.cons(t0, rest): for values(acc :~ Term = t0) (t in rest): mk_conj(acc, t))
+
+fun split_left_conj(thy :: Theory, th :: Thm, k :: Int) :: List.of(Thm):
+  cond
+  | k == 1: [th]
+  | ~else: split_left_conj(thy, CONJUNCT1(thy, th), k - 1) ++ [CONJUNCT2(thy, th)]
+
+fun congruence_chain(thy :: Theory, f :: Term, eqs :: List.of(Thm)) :: Thm:
+  (match eqs
+   | List.cons(e0, rest): for values(acc :~ Thm = AP_TERM(thy, f, e0)) (e in rest): MK_COMB(acc, e))
+
+// `|- a = b`  ==>  `|- pa = pb`, given `a = inject_from(ptys,i,pa)`,
+// `b = inject_from(ptys,i,pb)` (same index `i` both sides).
+fun payload_eq_from_inject_eq(thy :: Theory, sumthms :: SumThms, ptys :: List.of(HType),
+                              i :: Int, pa :: Term, pb :: Term, inject_eq :: Thm) :: Thm:
+  (match ptys
+   | [t]: inject_eq
+   | List.cons(t, rest):
+       let tyRest = repr_type_from(rest)
+       (if i == 0
+        | let inst = INST_TYPE(thy, {#'a: t, #'b: tyRest}, sumthms.inl_inj)
+          EQ_MP(SPECL(thy, [pa, pb], inst), inject_eq)
+        | let inst = INST_TYPE(thy, {#'a: t, #'b: tyRest}, sumthms.inr_inj)
+          let inner_eq = EQ_MP(SPECL(thy, [inject_from(rest, i - 1, pa), inject_from(rest, i - 1, pb)], inst), inject_eq)
+          payload_eq_from_inject_eq(thy, sumthms, rest, i - 1, pa, pb, inner_eq)))
+
+fun is_nonrecursive_spec_checked(thy :: Theory, spec :: DatatypeSpec) :: Void:
+  check_spec(thy, spec)
+  unless is_nonrecursive_spec(spec)
+  | error(~who: #'build_nonrecursive_datatype_thms,
+          "spec has a self-recursive field; this covers phase 1 "
+            ++ "(non-recursive datatypes) only")
+
+fun build_nonrecursive_datatype_thms(thy :: Theory, spec :: DatatypeSpec) :: values(Theory, DatatypeThms):
+  is_nonrecursive_spec_checked(thy, spec)
+  let n = spec.ctors.length()
+
+  let (thy, unit_unique) = build_unit(thy)
+  let (thy, prodthms) = build_prod(thy)
+  let (thy, sumthms) = build_sum(thy)
+
+  let ptys = payload_types(spec)
+  let ety = repr_type_from(ptys)
+  let ev = mk_var(#'e, ety)
+  let pred = mk_abs(ev, tm_true)
+  let e0 = mk_select(ev, tm_true)
+  let beta_e0 = (match BETA_CONV(thy, mk_comb(pred, e0))
+                 | th :~ Thm: th
+                 | #false: error(~who: #'build_nonrecursive_datatype_thms, "beta failed"))
+  let witness = EQ_MP(SYM(thy, beta_e0), TRUTH(thy))
+  let abs_name = Symbol.from_string("abs_" ++ to_string(spec.name))
+  let rep_name = Symbol.from_string("rep_" ++ to_string(spec.name))
+  let (thy, th_abs_rep, th_pred) = new_basic_type_definition(thy, spec.name, abs_name, rep_name, witness)
+  // `new_basic_type_definition` infers the new type's arity and type
+  // variables from whatever type variables actually occur in `ety`; for
+  // this to name the same type `ctor_type(spec, c)` (below) expects, every
+  // parameter `spec` declares must occur, left-to-right, in exactly that
+  // order, in some field.  Anything else is refused outright rather than
+  // silently building a type distinct from `self_type(spec)`.
+  let self = type_of(rhs_of(th_abs_rep))
+  let self_expected = TyApp(spec.name, spec.params.map(fun (p :: Symbol): TyVar(p)))
+  unless self == self_expected
+  | error(~who: #'build_nonrecursive_datatype_thms,
+          "declared type parameters are not exactly the parameters used, "
+            ++ "left-to-right, by the constructors' fields",
+          error.val(~label: "declared", type_to_string(self_expected)),
+          error.val(~label: "inferred", type_to_string(self)))
+  let abs_c = mk_const(abs_name, mk_fun(ety, self))
+  let rep_c = mk_const(rep_name, mk_fun(self, ety))
+
+  // Every constructor: `Ci(x0,...,x_{k-1}) := abs(inject_from(ptys,i,pack_fields([x0,...])))`.
+  let thy = for values(t :~ Theory = thy) (c in spec.ctors, i in List.iota(n)):
+              let c :~ Ctor = c
+              let xs = mk_field_vars(c.fields, "x")
+              let body = mk_comb(abs_c, inject_from(ptys, i, pack_fields(xs.map(fun (v :: FVar): v :~ Term))))
+              let rhs = for values(acc :~ Term = body) (v in xs.reverse()): mk_abs(v, acc)
+              let (t2, _) = new_basic_definition(t, mk_eq(mk_var(c.name, ctor_type(spec, c)), rhs))
+              t2
+  fun ctor_const(i :: Int) :: Term:
+    let c = spec.ctors[i] :~ Ctor
+    mk_const(c.name, ctor_type(spec, c))
+  fun ctor_applied(i :: Int, args :: List.of(Term)) :: Term: list_mk_comb(ctor_const(i), args)
+  fun def_of(i :: Int) :: Thm:
+    (match definition_of(thy, (spec.ctors[i] :~ Ctor).name)
+     | th :~ Thm: th
+     | #false: error(~who: #'build_nonrecursive_datatype_thms, "constructor definition missing"))
+
+  // `|- rep(Ci(args)) = inject_from(ptys,i,pack_fields(args))`: since `pred`
+  // is trivially true, `th_pred` gives the *full* bijection fact
+  // `rep(abs(e)) = e` for every `e`.
+  fun rep_ctor_eq(i :: Int, args :: List.of(Term)) :: Thm:
+    let unfold_ci = unfold_def(thy, def_of(i), args)
+    let rep_of_abs = AP_TERM(thy, rep_c, unfold_ci)
+    let payload = pack_fields(args)
+    let inj_payload = inject_from(ptys, i, payload)
+    let th_pred_at = INST(thy, [[inj_payload, mk_var(v_rep, ety)]], th_pred)
+    let beta_pred_at = (match BETA_CONV(thy, mk_comb(pred, inj_payload))
+                        | th :~ Thm: th
+                        | #false: error(~who: #'build_nonrecursive_datatype_thms, "beta failed"))
+    let true_pred_at = EQ_MP(SYM(thy, beta_pred_at), TRUTH(thy))
+    let rhs_eq = EQ_MP(th_pred_at, true_pred_at)
+    TRANS(rep_of_abs, rhs_eq)
+
+  // -- injectivity: one per ctor with fields ------------------------------
+  fun ctor_injectivity(i :: Int) :: maybe(Thm):
+    let c = spec.ctors[i] :~ Ctor
+    let k = c.fields.length()
+    cond
+    | k == 0: #false
+    | ~else:
+        let xs = mk_field_vars(c.fields, "x")
+        let ys = mk_field_vars(c.fields, "y")
+        let xs_t = xs.map(fun (v :: FVar): v :~ Term)
+        let ys_t = ys.map(fun (v :: FVar): v :~ Term)
+        let fwd_imp:
+          let asm = ASSUME(thy, mk_eq(ctor_applied(i, xs_t), ctor_applied(i, ys_t)))
+          let rep_eq = AP_TERM(thy, rep_c, asm)
+          let l = rep_ctor_eq(i, xs_t)
+          let r = rep_ctor_eq(i, ys_t)
+          let inject_eq = TRANS(SYM(thy, l), TRANS(rep_eq, r))
+          let payload_eq = payload_eq_from_inject_eq(thy, sumthms, ptys, i, pack_fields(xs_t), pack_fields(ys_t), inject_eq)
+          let field_eqs = collect_field_eqs(thy, prodthms, c.fields, xs_t, ys_t, payload_eq)
+          let conj_result = left_fold_conj(thy, field_eqs)
+          DISCH(thy, concl_of(asm), conj_result)
+        let bwd_imp:
+          let conj_stmt = conj_all_term(xs_t, ys_t)
+          let asm2 = ASSUME(thy, conj_stmt)
+          let eqs = split_left_conj(thy, asm2, k)
+          let ci_eq = congruence_chain(thy, ctor_const(i), eqs)
+          DISCH(thy, conj_stmt, ci_eq)
+        GENL(thy, xs ++ ys, IMP_ANTISYM_RULE(thy, fwd_imp, bwd_imp))
+  let injectivity = for values(acc :~ Map = {}) (c in spec.ctors, i in List.iota(n)):
+                       (match ctor_injectivity(i)
+                        | #false: acc
+                        | th :~ Thm: acc ++ {(c :~ Ctor).name: th})
+
+  // -- distinctness: one per `i < j` pair ----------------------------------
+  fun ctor_distinct_raw(i :: Int, j :: Int, xs :: List.of(Term), ys :: List.of(Term)) :: Thm:
+    let asm = ASSUME(thy, mk_eq(ctor_applied(i, xs), ctor_applied(j, ys)))
+    let rep_eq = AP_TERM(thy, rep_c, asm)
+    let l = rep_ctor_eq(i, xs)
+    let r = rep_ctor_eq(j, ys)
+    let combined = TRANS(SYM(thy, l), TRANS(rep_eq, r))
+    let false_th = MP(thy, NOT_ELIM(thy, distinct_repr(thy, sumthms, ptys, i, j, pack_fields(xs), pack_fields(ys))), combined)
+    NOT_INTRO(thy, DISCH(thy, concl_of(asm), false_th))
+  fun ctor_distinct(i :: Int, j :: Int) :: Thm:
+    let ci = spec.ctors[i] :~ Ctor
+    let cj = spec.ctors[j] :~ Ctor
+    let xs = mk_field_vars(ci.fields, "x")
+    let ys = mk_field_vars(cj.fields, "y")
+    let xs_t = xs.map(fun (v :: FVar): v :~ Term)
+    let ys_t = ys.map(fun (v :: FVar): v :~ Term)
+    GENL(thy, xs ++ ys, ctor_distinct_raw(i, j, xs_t, ys_t))
+  let pairs = for values(acc :~ List = []) (ci in spec.ctors, i in List.iota(n)):
+                for values(acc2 :~ List = acc) (cj in spec.ctors, j in List.iota(n)):
+                  (if i < j | acc2 ++ [[i, j]] | acc2)
+  let distinctness = for List ([i, j] in pairs): ctor_distinct(i, j)
+
+  // -- cases: `forall x. x=C0 or (?...x=C1(...)) or ...`, left-associated,
+  // matching `datatype.rhm`'s own fold direction.
+  let xv = mk_var(#'x, self)
+  fun ctor_leaf_target_at(i :: Int, x_term :: Term) :: Term:
+    let c = spec.ctors[i] :~ Ctor
+    let xs = mk_field_vars(c.fields, "a")
+    let body = mk_eq(x_term, ctor_applied(i, xs.map(fun (v :: FVar): v :~ Term)))
+    for values(acc :~ Term = body) (v in xs.reverse()): mk_exists(v, acc)
+  fun ctor_leaf_target(i :: Int) :: Term: ctor_leaf_target_at(i, xv)
+  // `|- exists z0...z_{m-1}. leaf`, given `target = exists z0. ... exists
+  // z_{m-1}. leaf` (the *exact* term, `zs` bound in that order) and a
+  // witness for each `z`, by substituting one variable at a time (via
+  // `dest_exists`, never by hand-rebuilding the partially-substituted
+  // term) and proving the fully-substituted leaf with `leaf_prover`.
+  fun exists_intro_chain(thy :: Theory, target :: Term, ws :: List.of(Term), leaf_prover) :: Thm:
+    match ws
+    | []: leaf_prover(target)
+    | List.cons(w, wrest):
+        let [zv, inner] = (match dest_exists(target) | l: l)
+        let zv :~ FVar = zv
+        let inner_at_w = inst_fvar([[w, zv]], inner)
+        EXISTS(thy, target, w, exists_intro_chain(thy, inner_at_w, wrest, leaf_prover))
+  fun disj_chain_gen(upto :: Int) :: Term:
+    (if upto == 0 | ctor_leaf_target(0) | mk_disj(disj_chain_gen(upto - 1), ctor_leaf_target(upto)))
+  fun inject_left_gen(i :: Int, th_i :: Thm) :: Thm:
+    let start = (if i == 0 | th_i | DISJ2(thy, disj_chain_gen(i - 1), th_i))
+    for values(acc :~ Thm = start) (j in List.iota(n - 1 - i)):
+      DISJ1(thy, acc, ctor_leaf_target(i + 1 + j))
+
+  // `wrap_eq(th : |- e = V) : |- xv = abs_c(V')`, `V'` being `V` lifted all
+  // the way back up to the top-level encoding via whatever `inr`/`inl`
+  // wrapping the enclosing recursion already threaded through -- so every
+  // leaf this reaches can finish with one `abs_c` congruence plus one
+  // `unfold_def` of the matching constructor, regardless of nesting depth.
+  fun cases_leaf(remaining_ptys :: List.of(HType), ctor_idx :: Int, e :: Term, wrap_eq) :: Thm:
+    match remaining_ptys
+    | [t]:
+        let c = spec.ctors[ctor_idx] :~ Ctor
+        let k = c.fields.length()
+        cond
+        | k == 0:
+            let e_eq_one = SPEC(thy, e, unit_unique)
+            let x_eq_abs_one = wrap_eq(e_eq_one)
+            let leaf_th = TRANS(x_eq_abs_one, SYM(thy, unfold_def(thy, def_of(ctor_idx), [])))
+            inject_left_gen(ctor_idx, leaf_th)
+        | ~else:
+            let unpacked = unpack_payload_exists(thy, prodthms, c.fields, e)
+            fun finish(vars :: List.of(FVar), flat_th :: Thm) :: Thm:
+              let x_eq_abs_pack = wrap_eq(flat_th)
+              let leaf_eq = TRANS(x_eq_abs_pack, SYM(thy, unfold_def(thy, def_of(ctor_idx), vars.map(fun (v :: FVar): v :~ Term))))
+              let wrapped_leaf = for values(acc :~ Thm = leaf_eq) (v in vars.reverse()): EXISTS(thy, mk_exists(v, concl_of(acc)), v, acc)
+              inject_left_gen(ctor_idx, wrapped_leaf)
+            choose_through_and_rewrap(thy, unpacked, k, finish)
+    | List.cons(t0, rest):
+        let tyRest = repr_type_from(rest)
+        let cases_inst = INST_TYPE(thy, {#'a: t0, #'b: tyRest}, sumthms.cases)
+        let disj_e = SPEC(thy, e, cases_inst)
+        let [ldisj, rdisj] = (match dest_disj(concl_of(disj_e)) | l: l)
+        let left_case:
+          let l_asm = ASSUME(thy, ldisj)
+          let [oa, obody] = (match dest_exists(ldisj) | l: l)
+          let oa :~ FVar = oa
+          let ga = genvar(t0)
+          let obody_ga = inst_fvar([[ga, oa]], obody)
+          let inner_asm = ASSUME(thy, obody_ga)
+          fun wrap_eq_left(th :: Thm) :: Thm:
+            wrap_eq(TRANS(inner_asm, AP_TERM(thy, mk_const(c_inl, mk_fun(t0, sum_ty(t0, tyRest))), th)))
+          let leaf = cases_leaf([t0], ctor_idx, ga, wrap_eq_left)
+          CHOOSE(thy, ga, l_asm, leaf)
+        let right_case:
+          let r_asm = ASSUME(thy, rdisj)
+          let [ob, obody] = (match dest_exists(rdisj) | l: l)
+          let ob :~ FVar = ob
+          let gb = genvar(tyRest)
+          let obody_gb = inst_fvar([[gb, ob]], obody)
+          let inner_asm = ASSUME(thy, obody_gb)
+          fun wrap_eq_right(th :: Thm) :: Thm:
+            wrap_eq(TRANS(inner_asm, AP_TERM(thy, mk_const(c_inr, mk_fun(tyRest, sum_ty(t0, tyRest))), th)))
+          let deeper = cases_leaf(rest, ctor_idx + 1, gb, wrap_eq_right)
+          CHOOSE(thy, gb, r_asm, deeper)
+        DISJ_CASES(thy, disj_e, left_case, right_case)
+
+  let cases:
+    fun wrap_eq_top(th :: Thm) :: Thm:
+      TRANS(SYM(thy, INST(thy, [[xv, mk_var(v_alpha, self)]], th_abs_rep)), AP_TERM(thy, abs_c, th))
+    GEN(thy, xv, cases_leaf(ptys, 0, mk_comb(rep_c, xv), wrap_eq_top))
+
+  // -- induction: no recursive fields, so `build_induction`'s antecedent
+  // has no inductive hypotheses per case -- it reduces to `cases` alone.
+  let induction:
+    let bigP = mk_var(#'P, mk_fun(self, bool))
+    fun case_term(i :: Int) :: Term:
+      let c = spec.ctors[i] :~ Ctor
+      let xs = mk_field_vars(c.fields, "x")
+      mk_forall_list(xs, mk_comb(bigP, ctor_applied(i, xs.map(fun (v :: FVar): v :~ Term))))
+    let case_conj = (for values(acc :~ Term = case_term(0)) (i in List.iota(n - 1)):
+                       mk_conj(acc, case_term(i + 1)))
+    let hyp = ASSUME(thy, case_conj)
+    let per_ctor_th = (for List (i in List.iota(n)):
+                         (if n == 1 | hyp | CONJUNCTS(thy, hyp)[i]))
+    fun leaf_to_px(stmt :: Term, th :: Thm, chosen :: List.of(Term)) :: Thm:
+      cond
+      | !is_exists(stmt):
+          let [_, ci] = (match dest_eq(stmt) | l: l)
+          let i = index_of_ctor(spec, ci)
+          let specialized = SPECL(thy, chosen, per_ctor_th[i])
+          EQ_MP(AP_TERM(thy, bigP, SYM(thy, th)), specialized)
+      | ~else:
+          let [ov, obody] = (match dest_exists(stmt) | l: l)
+          let ov :~ FVar = ov
+          let gv = genvar(ov.ty)
+          let obody_gv = inst_fvar([[gv, ov]], obody)
+          let asm = ASSUME(thy, obody_gv)
+          let inner = leaf_to_px(obody_gv, asm, chosen ++ [gv])
+          CHOOSE(thy, gv, th, inner)
+    fun px_from_cases(stmt :: Term, th :: Thm) :: Thm:
+      cond
+      | !is_disj(stmt): leaf_to_px(stmt, th, [])
+      | ~else:
+          let [dl, dr] = (match dest_disj(stmt) | l: l)
+          let left:
+            let a1 = ASSUME(thy, dl)
+            px_from_cases(dl, a1)
+          let right:
+            let a2 = ASSUME(thy, dr)
+            leaf_to_px(dr, a2, [])
+          DISJ_CASES(thy, th, left, right)
+    let cases_x = SPEC(thy, xv, cases)
+    let px = px_from_cases(concl_of(cases_x), cases_x)
+    let disch_x = GEN(thy, xv, px)
+    let disch_hyp = DISCH(thy, case_conj, disch_x)
+    GEN(thy, bigP, disch_hyp)
+
+  // -- discriminators: `is_Ci(x) := exists a0...ak-1. x = Ci(a0,...,ak-1)`,
+  // a total predicate identical in shape to `ctor_leaf_target`'s own
+  // disjunction leaves -- so `Ci(ys)` matching it (`i=j`) or refuting it
+  // (`i!=j`, via the already-proved `distinctness`) is all `is_Ci` ever
+  // needs to say.
+  let thy = for values(t :~ Theory = thy) (c in spec.ctors, i in List.iota(n)):
+              let c :~ Ctor = c
+              let dv = mk_var(#'d, self)
+              let (t2, _) = new_basic_definition(t, mk_eq(mk_var(discriminator_name(c), mk_fun(self, bool)), mk_abs(dv, ctor_leaf_target_at(i, dv))))
+              t2
+  fun disc_def(i :: Int) :: Thm:
+    (match definition_of(thy, discriminator_name(spec.ctors[i] :~ Ctor))
+     | th :~ Thm: th
+     | #false: error(~who: #'build_nonrecursive_datatype_thms, "discriminator definition missing"))
+  // `|- exists a0...ak-1. Ci(ys) = Ci(a0,...)`, witnessed by `ys` itself.
+  fun ctor_self_witness(i :: Int, ys :: List.of(Term)) :: Thm:
+    exists_intro_chain(thy, ctor_leaf_target_at(i, ctor_applied(i, ys)), ys, fun (leaf :: Term) :: Thm: REFL(thy, ctor_applied(i, ys)))
+  // `|- not (Cj(ys) = Ci(chosen))`, `i != j`, reusing the pairwise
+  // `distinctness` theorem, flipped/reordered to match.
+  fun ctor_distinct_stmt(i :: Int, j :: Int, ys :: List.of(Term), chosen :: List.of(Term)) :: Thm:
+    (if i < j
+     | not_eq_sym(thy, SPECL(thy, chosen ++ ys, ctor_distinct(i, j)))
+     | SPECL(thy, ys ++ chosen, ctor_distinct(j, i)))
+  // `{target} |- false`, peeling one existential layer at a time via
+  // `CHOOSE` until the leaf equation contradicts `distinctness`.
+  fun disc_disprove(i :: Int, j :: Int, ys :: List.of(Term), stmt :: Term, chosen :: List.of(Term)) :: Thm:
+    cond
+    | !is_exists(stmt):
+        MP(thy, NOT_ELIM(thy, ctor_distinct_stmt(i, j, ys, chosen)), ASSUME(thy, stmt))
+    | ~else:
+        let [zv, ibody] = (match dest_exists(stmt) | l: l)
+        let zv :~ FVar = zv
+        let gv = genvar(zv.ty)
+        let ibody_gv = inst_fvar([[gv, zv]], ibody)
+        CHOOSE(thy, gv, ASSUME(thy, stmt), disc_disprove(i, j, ys, ibody_gv, chosen ++ [gv]))
+  fun discriminator_pair(i :: Int, j :: Int) :: Thm:
+    let cj = spec.ctors[j] :~ Ctor
+    let ys_v = mk_field_vars(cj.fields, "y")
+    let ys_t = ys_v.map(fun (v :: FVar): v :~ Term)
+    let ufd = unfold_def(thy, disc_def(i), [ctor_applied(j, ys_t)])
+    let iff_th = (if i == j
+                  | TRANS(ufd, EQT_INTRO(thy, ctor_self_witness(i, ys_t)))
+                  | let target = rhs_of(ufd)
+                    TRANS(ufd, EQF_INTRO(thy, NOT_INTRO(thy, DISCH(thy, target, disc_disprove(i, j, ys_t, target, []))))))
+    GENL(thy, ys_v, iff_th)
+  let discriminators = for values(acc :~ List = []) (ci in spec.ctors, i in List.iota(n)):
+                          for values(acc2 :~ List = acc) (cj in spec.ctors, j in List.iota(n)):
+                            acc2 ++ [discriminator_pair(i, j)]
+
+  // -- selectors: `Ci_fj(x) := select(\v. exists z0...zk-1. x=Ci(zs) and
+  // zj=v)`, total via `select`; "z"-prefixed internal vars so the
+  // existential can never collide with a caller's own "x"-prefixed field
+  // vars once both appear together in an instantiated statement.
+  let thy = for values(t :~ Theory = thy) (c in spec.ctors, i in List.iota(n)):
+              let c :~ Ctor = c
+              for values(t2 :~ Theory = t) (f in c.fields, j in List.iota(c.fields.length())):
+                let f :~ Field = f
+                let sv = mk_var(#'s, self)
+                let zs = mk_field_vars(c.fields, "z")
+                let zs_t = zs.map(fun (v :: FVar): v :~ Term)
+                let vv = mk_var(#'v, f.ty)
+                let exists_body = mk_conj(mk_eq(sv, ctor_applied(i, zs_t)), mk_eq(zs_t[j], vv))
+                let pred_body = for values(acc :~ Term = exists_body) (z in zs.reverse()): mk_exists(z, acc)
+                let (t3, _) = new_basic_definition(t2, mk_eq(mk_var(selector_name(c, f), mk_fun(self, f.ty)), mk_abs(sv, mk_select(vv, pred_body))))
+                t3
+  fun sel_def(i :: Int, j :: Int) :: Thm:
+    let c = spec.ctors[i] :~ Ctor
+    let f = c.fields[j] :~ Field
+    (match definition_of(thy, selector_name(c, f))
+     | th :~ Thm: th
+     | #false: error(~who: #'build_nonrecursive_datatype_thms, "selector definition missing"))
+  // `|- forall x0...x_{k-1}. Ci_fj(Ci(x0,...,x_{k-1})) = xj`, via
+  // `SELECT_UNIQUE`: existence is witnessed by the field vars themselves,
+  // uniqueness comes from `injectivity`.
+  fun selector_theorem(i :: Int, j :: Int) :: Thm:
+    let c = spec.ctors[i] :~ Ctor
+    let f = c.fields[j] :~ Field
+    let xs_v = mk_field_vars(c.fields, "x")
+    let xs_t = xs_v.map(fun (v :: FVar): v :~ Term)
+    let target_j = xs_t[j]
+    let ufd = unfold_def(thy, sel_def(i, j), [ctor_applied(i, xs_t)])
+    let (_, pred_abs) = dest_comb(rhs_of(ufd))
+    let (vv2, body_at_xs) = dest_abs(pred_abs)
+    let vv2 :~ FVar = vv2
+    let pred = mk_abs(vv2, body_at_xs)
+    let body_at_xs_j = inst_fvar([[target_j, vv2]], body_at_xs)
+    let leaf_pf = CONJ(thy, REFL(thy, ctor_applied(i, xs_t)), REFL(thy, target_j))
+    let pa_reduced = exists_intro_chain(thy, body_at_xs_j, xs_t, fun (leaf :: Term) :: Thm: leaf_pf)
+    let beta_pa = (match BETA_CONV(thy, mk_comb(pred, target_j))
+                   | th :~ Thm: th
+                   | #false: error(~who: #'build_nonrecursive_datatype_thms, "beta failed"))
+    let pa = EQ_MP(SYM(thy, beta_pa), pa_reduced)
+    let vfresh = genvar(f.ty)
+    let body_at_v = inst_fvar([[vfresh, vv2]], body_at_xs)
+    fun uniq_peel(stmt :: Term, th :: Thm, chosen :: List.of(Term)) :: Thm:
+      cond
+      | is_exists(stmt):
+          let [zv, ibody] = (match dest_exists(stmt) | l: l)
+          let zv :~ FVar = zv
+          let gv = genvar(zv.ty)
+          let ibody_gv = inst_fvar([[gv, zv]], ibody)
+          let inner = uniq_peel(ibody_gv, ASSUME(thy, ibody_gv), chosen ++ [gv])
+          CHOOSE(thy, gv, th, inner)
+      | ~else:
+          // stmt : Ci(xs_t) = Ci(chosen) and chosen[j] = vfresh
+          let ctor_eq = CONJUNCT1(thy, th)
+          let field_eq_j = CONJUNCT2(thy, th)
+          let inj_th = (match injectivity[c.name] | th2 :~ Thm: th2 | #false: error(~who: #'build_nonrecursive_datatype_thms, "injectivity missing"))
+          let conj_all = EQ_MP(SPECL(thy, xs_t ++ chosen, inj_th), ctor_eq)
+          let xj_eq_chosenj = split_left_conj(thy, conj_all, xs_t.length())[j]
+          SYM(thy, TRANS(xj_eq_chosenj, field_eq_j))
+    let uniq_result = uniq_peel(body_at_v, ASSUME(thy, body_at_v), [])
+    let uniq = GEN(thy, vfresh, DISCH(thy, body_at_v, uniq_result))
+    GENL(thy, xs_v, TRANS(ufd, SELECT_UNIQUE(thy, vv2, body_at_xs, target_j, pa, uniq)))
+  let selectors = for values(acc :~ List = []) (c in spec.ctors, i in List.iota(n)):
+                     let c :~ Ctor = c
+                     for values(acc2 :~ List = acc) (f in c.fields, j in List.iota(c.fields.length())):
+                       acc2 ++ [selector_theorem(i, j)]
+
+  // -- elim rules: `forall x. is_Ci(x) ==> Ci(Ci_f0(x),...) === x`, from
+  // `is_Ci`'s own unfolding (an `x = Ci(chosen)` witness once every
+  // existential is peeled) rewritten through `selector_theorem`.
+  fun elim_rule(i :: Int) :: Thm:
+    let c = spec.ctors[i] :~ Ctor
+    let k = c.fields.length()
+    let disc_x = mk_comb(mk_const(discriminator_name(c), mk_fun(self, bool)), xv)
+    let exists_th = EQ_MP(unfold_def(thy, disc_def(i), [xv]), ASSUME(thy, disc_x))
+    fun peel(stmt :: Term, th :: Thm, chosen :: List.of(Term)) :: Thm:
+      cond
+      | is_exists(stmt):
+          let [zv, ibody] = (match dest_exists(stmt) | l: l)
+          let zv :~ FVar = zv
+          let gv = genvar(zv.ty)
+          let ibody_gv = inst_fvar([[gv, zv]], ibody)
+          let inner = peel(ibody_gv, ASSUME(thy, ibody_gv), chosen ++ [gv])
+          CHOOSE(thy, gv, th, inner)
+      | ~else:
+          // stmt (= concl_of(th)) : x = Ci(chosen)
+          let x_eq_ci = th
+          let sel_eqs = for List (f in c.fields, m in List.iota(k)):
+                          let f :~ Field = f
+                          let sel_const = mk_const(selector_name(c, f), mk_fun(self, f.ty))
+                          TRANS(AP_TERM(thy, sel_const, x_eq_ci), SPECL(thy, chosen, selector_theorem(i, m)))
+          (if k == 0
+           | SYM(thy, x_eq_ci)
+           | TRANS(congruence_chain(thy, ctor_const(i), sel_eqs), SYM(thy, x_eq_ci)))
+    GEN(thy, xv, DISCH(thy, disc_x, peel(concl_of(exists_th), exists_th, [])))
+  let elim_rules = for List (i in List.iota(n)): elim_rule(i)
+  values(thy, DatatypeThms(spec, injectivity, distinctness, induction, cases, discriminators, selectors, elim_rules))

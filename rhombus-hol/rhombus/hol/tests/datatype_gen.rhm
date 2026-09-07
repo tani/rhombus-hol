@@ -1,0 +1,83 @@
+#lang rhombus/static
+
+// PLAN.md section 9.2.1's differential test, generalized: `datatype_gen.rhm`
+// generalizes `datatype_derived.rhm`'s enum-only construction to arbitrary
+// non-recursive constructors (fields allowed), encoding each constructor's
+// field tuple via `prod` (`algebra.rhm`) alongside the same `unit`/`sum`
+// choice-among-constructors composition the enum case already used.
+// `datatype_axioms` (`datatype.rhm`) derives the same shape axiomatically.
+// Every field of `DatatypeThms` -- injectivity, distinctness, induction,
+// cases, discriminators, selectors, elim_rules -- must agree between the
+// two, *as printed statements*, and every theorem the derived side
+// produces must carry zero hypotheses.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/datatype open
+  rhombus/hol/private/datatype_gen open
+
+fun show_list(ths :: List.of(Thm)) :: String:
+  String.join(ths.map(fun (t :: Thm): show(concl_of(t))), " | ")
+
+fun all_zero_hyps(thms :: DatatypeThms) :: Boolean:
+  hyps_of(thms.induction).length() == 0
+    && hyps_of(thms.cases).length() == 0
+    && (for all (t in thms.distinctness): hyps_of(t).length() == 0)
+    && (for all (t in thms.discriminators): hyps_of(t).length() == 0)
+    && (for all (t in thms.selectors): hyps_of(t).length() == 0)
+    && (for all (t in thms.elim_rules): hyps_of(t).length() == 0)
+    && (for all (n in thms.injectivity.keys()): hyps_of(thms.injectivity[n]).length() == 0)
+
+fun check_dt(spec :: DatatypeSpec) :: Void:
+  let (_, ax) = datatype_axioms(base_theory(), spec)
+  let (_, dv) = build_nonrecursive_datatype_thms(base_theory(), spec)
+  check all_zero_hyps(dv) ~is #true
+  check show(concl_of(ax.induction)) ~is show(concl_of(dv.induction))
+  check show(concl_of(ax.cases)) ~is show(concl_of(dv.cases))
+  check show_list(ax.distinctness) ~is show_list(dv.distinctness)
+  check show_list(ax.discriminators) ~is show_list(dv.discriminators)
+  check show_list(ax.selectors) ~is show_list(dv.selectors)
+  check show_list(ax.elim_rules) ~is show_list(dv.elim_rules)
+  check ax.injectivity.length() ~is dv.injectivity.length()
+  check (for all (n in ax.injectivity.keys()): show(concl_of(ax.injectivity[n])) == show(concl_of(dv.injectivity[n]))) ~is #true
+
+
+
+// A single one-field constructor: the minimum needing `prod` at all is
+// two fields, so this exercises the `k = 1` (no `prod`, field type used
+// directly as the payload) path in isolation.
+check_dt(DatatypeSpec(#'Wrap, [], [Ctor(#'Wrap, [Field(#'v, bool)])]))
+
+// Two fields: the minimum that actually needs `prod`.
+check_dt(DatatypeSpec(#'Pair2, [], [Ctor(#'MkPair, [Field(#'fst, bool), Field(#'snd, bool)])]))
+
+// Three fields: nested `prod` two levels deep, and two independent type
+// variables (not just `bool`) to exercise `INST_TYPE`d field-typed helpers.
+check_dt(DatatypeSpec(#'Triple, [#'a, #'b], [Ctor(#'MkTriple, [Field(#'x, TyVar(#'a)), Field(#'y, TyVar(#'b)), Field(#'z, bool)])]))
+
+// Nullary mixed with a one-field constructor (an `Option`-shaped type):
+// exercises `is_Ci`/selectors coexisting with a fieldless constructor.
+check_dt(DatatypeSpec(#'OptionLike, [], [Ctor(#'NoneL, []), Ctor(#'SomeL, [Field(#'v, bool)])]))
+
+// Four constructors with 0/1/2/3 fields respectively: the general case,
+// covering every arity discriminators/selectors/elim_rules must handle
+// together, plus the full n^2 discriminator cross product.
+check_dt(DatatypeSpec(#'Mixed4, [], [Ctor(#'M0, []), Ctor(#'M1, [Field(#'a, bool)]), Ctor(#'M2, [Field(#'a, bool), Field(#'b, bool)]), Ctor(#'M3, [Field(#'a, bool), Field(#'b, bool), Field(#'c, bool)])]))
+
+// `is_nonrecursive_spec` rejects a self-recursive field, and
+// `build_nonrecursive_datatype_thms` refuses it outright rather than
+// silently producing something wrong (recursive datatypes are phase 2,
+// PLAN.md section 9.2).
+def recursive_spec = DatatypeSpec(#'Lst, [#'a], [Ctor(#'Nil, []), Ctor(#'Cons, [Field(#'hd, TyVar(#'a)), Field(#'tl, TyApp(#'Lst, [TyVar(#'a)]))])])
+check is_nonrecursive_spec(recursive_spec) ~is #false
+fun rejects_recursive_spec() :: Boolean:
+  try:
+    build_nonrecursive_datatype_thms(base_theory(), recursive_spec)
+    #false
+    ~catch _: #true
+
+check rejects_recursive_spec() ~is #true

@@ -1450,9 +1450,28 @@ congruence 証明の `cong_rewrite` は `f1(v)` を `f2(v)` へ**無条件に**
    その場で measure 証明を `SPEC` して `conds` を `ASSUME` で discharge し、
    `f1(v) = f2(v)` を作る。
 
-これで `down` のような guarded recursion も通る。工数は独立した 1
+これで `down` のような guarded recursion も通る…と考えて `COND_CONG` を
+実際に書き、単体テストまで通した（`BOOL_CASES_AX` で場合分けし、
+`conditionals` を**分岐の型に `INST_TYPE` してから** `SPECL` する -- これを
+忘れると `SPEC: instantiation has the wrong type` で落ちる。テストが先に
+捕まえた）。しかしその先で**二つ目の障害**に当たったため、未使用の機構を
+信頼層に残さないよう `COND_CONG` ごと撤回した:
+
+3. **義務側の条件と、簡約後の `H` 本体に残る条件は同じ形とは限らない**。
+   義務は節の変数で書かれた `conds`（例: `nul(n)`）を持ち、葉では
+   `n := succ(k)` を代入して `nul(succ(k))` になる。一方 congruence 証明が
+   歩くのは `reduce_h` が `simp_conv` で正規化した後の本体で、そこに残って
+   いる条件は簡約済みの形である。条件が定数まで簡約できた場合は `cond`
+   ごと消えて再帰呼び出しも消えるので問題ないが、部分的に簡約された場合、
+   `ASSUME` した条件と義務の条件が構文的に一致せず `MP` できない。
+   解決には「義務の条件を同じ `db` で簡約して突き合わせる」か、
+   「`H` を作る段階で条件を義務と同じ形に固定する」かの設計判断が要る。
+
+したがってこの項目は**設計 3 点セット（COND_CONG・条件付き bridge・
+条件形の突き合わせ）が揃って初めて着手可能**であり、工数は独立した 1
 セッション規模（新しい派生規則 + congruence bridge の作り直し + carrier +
-driver 配線 + テスト）と見積もり、今回は着手しなかった。
+driver 配線 + テスト）と見積もる。今回は 1 と 2 の設計を確定し、3 を
+発見した段階で止めた。
 
 ---
 
@@ -1466,18 +1485,18 @@ driver 配線 + テスト）と見積もり、今回は着手しなかった。
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
 | 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype（フェーズ 2・3、無限公理が必要）は未着手 -- なお複数セッション規模。 |
-| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **完了**（§9.1.2）。`WFREC` 存在定理は完全導出（`wfrec.rhm`）。`wellfounded.rhm` の `WF_INDUCTION`/逆方向（§9.1.1）に加え、汎用 inductive-relations パッケージなしで単一の最小不動点関係 `wfrec_rel` を直接構成し、closure/inversion/uniqueness/existence を経て `soln x = H soln x`（`WF(Rwf)`・congruence を仮説に）を導出。配線の前提のうち 4 点解消: `terminate.rhm` の discharge 証明保持（§9.1.3）、`WF` の pullback 補題（§9.1.4）、多引数タプル化（§9.1.5、`algebra.rhm` に `mk_tuple`/`tuple_proj`/`prove_tuple_proj` を追加）、datatype 帰納法→汎用WFの橋渡し（§9.1.6、`subterm.rhm` の `prove_wf_t_lt` が任意の再帰的 datatype について `WF(T_lt)` を導出）。**単一引数・構造的降下の `function` について `H` 決定木コンパイラ（`stepfn.rhm`）を実装し、`driver.rhm` の `add_function` から実接続済み**（§9.1.2 続報）: 単一引数で既知の datatype へ構造的に降下する定義は `new_axiom` を一切使わず `WFREC` から導出、それ以外（多引数・`~measure`・未知の型）は従来通り `install_function` の公理スキーマへフォールバックする。フルテストスイート 1129 件全通過（回帰なし）。**残るのは多引数（タプリング配線）と `~measure` 付き定義への一般化のみ**、いずれも独立したセッション規模。 |
+| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **ほぼ完了**（§9.1.2、§9.7〜9.10）。`WFREC` 存在定理は完全導出（`wfrec.rhm`）。`driver.rhm` の `add_function` から実接続済みで、**`~measure` と真の辞書式降下以外はすべて `new_axiom` なしで導出される**: 単一引数・構造的降下（§9.1.2）、**任意深さの入れ子パターン**（§9.7、決定木の各位置で `cases` 場合分けを繰り返す）、**多引数**（§9.8、引数のタプル上で `T_lt` を降下列への射影に沿って引き戻す）、**非再帰関数**（§9.8 続報、`method == #'none`）。計測: `tests/fixtures/funs_ok.rhm`（関数 6 本）の公理 30 個は 2 つの再帰 datatype のスキーマとその `T_lt` 自身の方程式だけで、`app`/`plus`/`rev`/`length` の寄与は 0。残るフォールバックは `~measure`（§9.10 に設計と障害 3 点を記録）・辞書式降下・非再帰 datatype 上の関数（`T_lt` が無い）・再帰 datatype のスキーマ本体。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
 | 4 | 内部は locally nameless、外部 API は標準 HOL にする | **`mk_abs`/`dest_abs` により実質的に達成済みと判断**。詳細下記。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済み。`hyp_insert`/`hyp_union`/`hyp_remove`/`rehash_hyps` の非公開化は**調査済み、現状維持と判断**: `rhombus-hol-lib` のどこからも実際には呼ばれておらず（`Thm` は raw hyps リストではなく既に不可侵なので、これらは項リスト上の純粋なユーティリティであり公開してもソウンドネスに影響しない）、唯一の外部利用者は `rhombus-hol-kernel` に対応するテストパッケージが無いために `tests/kernel.rhm`/`tests/drule.rhm`（外側の `rhombus-hol` パッケージ）に置かれている kernel 自身の単体テスト。非公開化には kernel 専用のテストパッケージ新設が要り、得られる利益（API 美観）に見合わないと判断した。 |
 | 6 | 公開 kernel API を HOL Light `fusion.ml` に揃える | 大枠は既に一致（十規則、同じ命名）。**`BETA` の trivial-redex 化は検討し、見送りと判断**（詳細下記）。残る未着手部分は printer/tracing 分離のみ（§5 で対応済みと説明）。 |
 | 6b | base logic は HOL Light型かHOL4型かを明示する | **既に明示済み**。`bool.rhm` 冒頭のコメントが "ETA, SELECT and BOOL_CASES -- following HOL4 rather than HOL Light" と明記し、`kernel.rhm`/PLAN.md §1 が原始規則は HOL Light 型（十規則）であることを明記している。レビューが望む「どちらの型を実装しているか」の明示は既存のドキュメントで満たされている。 |
 | 7 | `Surface → CoreExpr → HOL + Rhombus` の共通 IR | **調査済み、現行範囲では不要と判断**。`module_block.rhm`の実行側emitは`body`を一切解釈しない逐語コピーで、独自の第二の意味論を持たない。裸の識別子・ハードコード演算子表のみの現行反映範囲では名前ベース(elab.rhm)と束縛ベース(Rhombus)の解決が食い違い得ない。共通IRが要る具体的な引き金（インポート別名越しの参照・ユーザー定義演算子）を§9.5に記録した。 |
-| 8 | `match`/`cond`/局所 `def`/入れ子パターンの追加 | **完了**。`cond`/局所 `let` に加え、入れ子パターン（コンストラクタパターンの中にさらにコンストラクタパターン、または本体中の別の `match` によるさらなる精緻化）を実装した。`recdef.rhm` の `check_coverage` を列インデックス固定表から本物の決定木コンパイラへ、`terminate.rhm` の `descends_at` を「直近1フィールド」から「再帰フィールドのチェーンを辿る」へ、`elab.rhm` の `match` パーサを列インデックスベースから名前ベース（`matched_var`/`refine_pats`）へ一般化した。詳細と踏んだ罠（`stepfn.rhm` の zip 長不一致）は §9.4.1 にまとめた。`_` ワイルドカード・節順序依存は今回も未着手（意図的、§9.4.1 末尾）。 |
+| 8 | `match`/`cond`/局所 `def`/入れ子パターンの追加 | **完了**。`cond`/局所 `let` に加え、入れ子パターンを実装した（§9.4.1）。さらに本セッションで決定木を独立した IR（`dtree.rhm`）に切り出し、`recdef.rhm` の網羅性検査と `stepfn.rhm` の `H` 生成が**同じ木を共有**するようにした（§9.7）-- これにより入れ子パターンの関数も `new_axiom` なしで導出される。`_` ワイルドカード・節順序依存は今回も未着手（意図的、§9.4.1 末尾）。 |
 | 9 | `function` はロジック性マーカーのみとし、grammar は Rhombus `fun` を再利用 | **設計判断として達成、コード内に既存の理由コメントあり**。`elab.rhm` 冒頭が「`fun` を intercept せず別キーワードにする」理由を明記済み。宣言レベルの多節 `\|` 構文（Rhombus 本来の `fun` の書き方）への接近は、項目8で完了した決定木コンパイラを流用できるため、以前考えていたより着手しやすくなったが、`function`自体の宣言文法を変えるかどうかは別の設計判断であり今回は着手しなかった。 |
 | 10 | user-defined operator に logical interpretation を登録可能にする | **調査済み、v0.1 の範囲では不要と判断（既存コメントあり）**。`elab.rhm` の手書き precedence parser 自体が "What `space.enforest` would buy is user extensibility, which v0.1 does not need" と明記しており、固定・小さい命題文法である現状ではレビューが望む拡張性の需要が実際に発生していない。§9.5 の Core IR 同様、需要が生じた時点（ユーザー定義演算子が実際に使われる時点）で再検討する。 |
 | 11 | fertilization / irrelevance 除去 / induction pool | fertilization と irrelevance 除去は**完了**（本セッション以前）。induction pool は**試みて撤回**。下記参照。 |
-| 13 | rule classes | **完了**。`ruledb.rhm` の `RuleDB` が type-prescription 事実を rewrite ルールと独立に分類・保持（`type_facts_of`）、`general.rhm` の `generalize_goal` が一般化時にそれを消費する。 |
+| 13 | rule classes | **完了**。`ruledb.rhm` の `RuleDB` が type-prescription 事実を rewrite ルールと独立に分類・保持（`type_facts_of`）、`general.rhm` の `generalize_goal` が一般化時にそれを消費する。本セッションで `disable`/`~in_theory:` が型事実にも届くようにした（ACL2 の rune の扱いに合わせた、§9.9）。 |
 | 14 | conditional rewriting | **完了**。`RewriteRule` が `conds :: List.of(Term)` を持ち、`apply_rule` が（自分自身を除外した db で）各条件を `simp_conv` により再帰的に discharge する。 |
 | 15 | hints の拡充（`~cases`/`~expand`/`~in_theory`） | **`~in_theory:` と `~cases:` は完了**。`~expand:` は見送り（下記）。`~do_not:` は本セッション以前に追加済み。 |
 | (最終まとめ表 P2) | binding-aware logical names・namespace・複数 theory import | **調査済み、未着手**。`driver.rhm` の `adopt` が兄弟理論（互いに拡張関係にない2理論）を合流できないのは、`Const` の identity が裸の `Symbol` のみで名前空間の概念がないため。安全な合流にはカーネルの項表現そのもの（`Symbol` を定数識別子に使っている全箇所）の変更が要り、独立したセッション規模の課題。詳細は §9.6。 |

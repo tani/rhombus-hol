@@ -41,10 +41,14 @@ could not be lexed here.
   | Cons(head :: ~a, tail :: List(~a))
 )
 
-Logically this postulates the usual characterisation of the type: constructors
-are injective, distinct constructors build distinct values, every value is
-built by some constructor, and the induction principle holds. Field selectors
-and constructor discriminators are declared too, so @rhombus(List) above brings
+Logically this @emph{derives} the usual characterisation of the type ---
+constructors are injective, distinct constructors build distinct values, every
+value is built by some constructor, and the induction principle holds --- as
+theorems with no hypotheses. A non-recursive type is built as a sum of
+products over its field types; a recursive one is carved out of the labelled
+trees over @tt{num} with the kernel's type-definition principle. Neither adds
+an axiom. Field selectors and constructor discriminators are declared too, so
+@rhombus(List) above brings
 @rhombus(Cons_head), @rhombus(Cons_tail), @rhombus(is_Nil) and
 @rhombus(is_Cons) into the theory. All of their equations enter the rewriter,
 which is what makes @rhombus(match)-defined functions compute during a proof.
@@ -58,9 +62,9 @@ they compare structurally with @rhombus(==) and print readably.
 
 A declaration is rejected unless every recursive occurrence of the type is
 @deftech{strictly positive} --- informally, the type being declared may not
-appear to the left of an arrow in a field. Without that check the axioms would
-be inconsistent, so this is the load-bearing soundness condition of the whole
-datatype mechanism.
+appear to the left of an arrow in a field. An ill-founded declaration has no
+set of labelled trees to be carved out of, so it now fails to be constructed
+rather than being assumed into existence.
 
 @section{@rhombus(function, ~datum)}
 

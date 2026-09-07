@@ -120,12 +120,14 @@ Tree_lt(x, Node(l, v, r))
 }
 
 Two things make this the right order to measure into. It is @emph{derived, not
-postulated}: it is an ordinary clausal definition installed through the same
-seam as any user function, structurally terminating and exhaustive, so it adds
-no axiom beyond the definitional ones every function adds. And it is
+postulated}, and in a stronger sense than "installed through a definitional
+seam": the relation is @tt{TC(Nat_child)}, the transitive closure of a
+direct-child predicate written with the datatype's own discriminators and
+selectors. Neither the closure nor the child predicate recurses, so neither
+needs a recursion theorem, and the equations above are @emph{proved} from the
+closure's induction principle rather than asserted. And it is
 @emph{well-founded by the datatype's own induction principle}: a descending
-chain would be an infinitely deep term, and the induction axiom says there are
-none.
+chain would be an infinitely deep term, and induction says there are none.
 
 That is why a measure must land in a declared datatype. A measure into
 @rhombus(Boolean), or into any type with no subterm relation, is rejected.

@@ -1815,6 +1815,67 @@ type: a derived declaration introduced 1 new axiom(s): Nat_lt
 （再帰 datatype 2 つ + subterm relation、decision tree から定義した関数、
 辞書式再帰、`~measure`）がいずれも基礎の 4 公理しか持たないことを固定する。
 
+### 9.33 進捗（本セッション）: 通常の `function` は公理を足さない、という言語の不変条件
+
+第四次レビュー項目 1・2・3・4。
+
+**1. `trust.scrbl` の矛盾を解消。** 文書前半が「公理は 3 つ」「無限公理は
+ない」「再帰 datatype は postulate」と書いたままだった。実装は base axioms
+= 4（ETA/SELECT/BOOL_CASES/INFINITY）で、再帰 datatype も `T_lt` も導出
+済み。あわせて `declarations.scrbl`（datatype は derived）、
+`termination.scrbl`（`T_lt` は `TC(T_child)`）、「rewriting に fuel も
+timeout も無い」の記述（→ shared budget と cycle detection）も直した。
+
+**2. `axiomatic_function` を分離した（P0）。** 通常の `function` は、
+導出できない再帰を**拒否する**:
+
+```text
+function: the termination analysis succeeded, but this version has no
+proof-producing definition compiler for this recursion scheme: the measure
+lands in Colour, which is not a recursive datatype declared here; write
+`axiomatic_function` to postulate the equations instead
+```
+
+理由は推測ではなく切り分けて述べる（measure の着地型 / 入れ子呼び出し /
+どの引数型も宣言された再帰 datatype でない / 辞書式順序も無い）。
+`require_no_new_axioms` は `function` に対して**無条件**になった。
+公理を足してよい枝が `axiomatic_function` だけであることを、コードの形が
+言っている。
+
+**3. concrete datatype instance を扱えるようにした。** `schematic_datatype`
+は `List('a)` を通し `List(Nat)` を拒否していた -- 再帰の性質ではなく
+引数型の形で宣言を拒否していたことになる。`DatatypeView` と
+`instantiate_datatype`（型代入で特殊化）を入れ、判定を
+`datatype_instance` に置き換えた。`wf(T_lt)` は宣言時の型で一度証明して
+`INST_TYPE` する -- 同じ定理の型代入であって再証明ではない。
+
+**4. 入れ子再帰呼び出しを扱えるようにした。** 原因は辞書式順序ではなく、
+降下事実を**節に書かれたまま**の項について述べていたこと。
+`ack(m, ack(succ m, k))` の外側 carrier は `ack` を含むが、`ack` は
+（定義が最後に入るので）まだ理論に無い。`H` が見る body では内側呼び出しは
+既にステップ変数なので、同じ carrier は `pair(m, f1(...))` -- 普通の項で
+ある。降下事実を walked body から作るように変えた。あわせて
+`bridge_calls` が引数の中の呼び出しへ降りるようにし、方程式の畳み戻しを
+不動点まで回した（Ackermann はちょうど 2 パス要る）。
+
+結果、**`ack` も `merge` も公理 0 で導出**される:
+
+```text
+ack(succ(x), succ(y)) === ack(x, ack(succ(x), y))
+merge(Cons(x, y), Cons(z, u)) === Cons(x, Cons(z, merge(y, u)))
+```
+
+**11. docs build も green にした。** 32 件のエラーは全部「わざと通らない
+fixture」で、`raco setup` がそれを package build error として数えていた。
+fixtures の `info.rkt` に `compile-omit-paths 'all` を足して解決
+（`test-omit-paths` は `raco test` にしか効かない）。三点すべて green:
+
+```text
+raco make rhombus-hol-lib/rhombus/hol.rkt   OK
+raco test rhombus-hol/rhombus/hol/tests     1386/1386
+raco setup --pkgs rhombus-hol               0 errors
+```
+
 ## 10. 外部レビュー（2026-09-07）への対応状況
 
 レビューは `rhombus-hol-kernel` を標準 HOL Light 型カーネルへ寄せ、

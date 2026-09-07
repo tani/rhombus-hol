@@ -47,6 +47,7 @@ export:
   declared_names
   add_type
   add_function
+  add_axiomatic_function
   add_theorem
   set_rules
   adopt
@@ -197,7 +198,23 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
 
 // -- function ----------------------------------------------------------------
 
+// `function` never adds an axiom.  A definition it cannot derive is refused,
+// naming what about the recursion the deriver could not handle, so that
+// "this module compiled" and "this module assumed nothing new" are the same
+// statement for the ordinary declaration form.
 fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
+  install_declared_function(st, form, at, ~postulate: #false)
+
+// `axiomatic_function` is the escape hatch, and it is a different word on
+// purpose: a reader scanning a module can see which declarations extended
+// the theory by assumption without knowing which recursion schemes this
+// version happens to derive.
+fun add_axiomatic_function(st :: HolState, form :: Syntax,
+                           at :: Syntax) :: HolState:
+  install_declared_function(st, form, at, ~postulate: #true)
+
+fun install_declared_function(st :: HolState, form :: Syntax, at :: Syntax,
+                              ~postulate: postulate :: Boolean) :: HolState:
   let spec :~ FunSpec = try:
                           elab.parse_function_decl(st.thy, form)
                           ~catch e :: Exn.Fail: hol_reraise(e, at)
@@ -206,14 +223,14 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   try:
     check_function_spec(st.thy, spec, dt_specs)
     ~catch e :: Exn.Fail: hol_reraise(e, at)
-  // An un-measured definition that recurses structurally, with one argument
-  // column descending at every recursive call into a *known* (`st.dts`)
-  // datatype, gets a genuine `WFREC` derivation (`stepfn.rhm`) instead of
-  // `new_axiom`; several arguments are derived over their tuple.  Anything
-  // else -- an explicit `~measure`, lexicographic descent where no single
-  // column always shrinks, or an argument type this module never declared
-  // -- falls back to `install_function`'s postulating seam.  `add_type` has
-  // no such seam any more: both kinds of datatype are derived.
+  // A definition that does not recurse is *defined* from its decision tree
+  // (`funcases.rhm`).  One that does gets a genuine `WFREC` derivation
+  // (`stepfn.rhm`) whenever an order can be built: structural descent in one
+  // column, several arguments over their tuple, a lexicographic product of
+  // several columns, or an explicit `~measure`.  What is left over --- a
+  // recursion scheme with no such order --- is refused here, and reaches
+  // `install_function`'s postulating seam only through
+  // `axiomatic_function`.
   let arity = spec.arg_types.length()
   let derivable:
     cond
@@ -273,6 +290,17 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
                 let tyname = (match (order_tys :~ List)[0] | TyApp(n, _): n)
                 [st.dts[tyname] :~ DatatypeThms, all_subterm_equations(st),
                  recinfo, tree]
+  // Refused here rather than inside the `try` below: this is not a failure
+  // of the logical layer to be re-raised, it is this declaration form saying
+  // no.
+  unless postulate || derivable || nonrecursive_function(st, spec)
+  | hol_error(#'function,
+              "the termination analysis succeeded, but this version has no "
+                ++ "proof-producing definition compiler for this recursion "
+                ++ "scheme: " ++ undecidable_reason(st, spec)
+                ++ "; write `axiomatic_function` to postulate the equations "
+                ++ "instead",
+              at)
   let (thy2, info0) = try:
                         match derivable
                         | [thms, t_lt_equations, recinfo, tree]:
@@ -300,19 +328,49 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
                                                                    tree, st.dts)
                                 values(t, info)
                             | ~else:
+                                // Only reachable under `postulate`: the
+                                // refusal above has already run.
                                 install_function(st.thy, spec, dt_specs,
                                                  ~discharge: discharger(st))
                         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let info :~ FunInfo = info0
-  // Both derived paths claim to add no axiom; only `install_function`'s
-  // seam is allowed to, and it is the one branch not checked here.
-  when derivable || nonrecursive_function(st, spec)
+  // `function` claims to add no axiom, so it is checked -- unconditionally,
+  // because every branch it can take is a derivation now.  Only
+  // `axiomatic_function` is exempt, and that is the whole difference between
+  // the two forms.
+  unless postulate
   | require_no_new_axioms(#'function, st.thy, thy2, spec.name, at)
   // The defining equations become rewrite rules straight away: that is what
   // makes a `match`-defined function compute during simplification.
   let db2 = add_thms(thy2, st.db, spec.name, info.equations)
   HolState(thy2, db2, st.dts, st.funs ++ {spec.name: info}, st.thms,
            st.names ++ [spec.name], st.wfrec_def)
+
+// Why the deriver could not take this definition, as a phrase to finish
+// "no proof-producing definition compiler for this recursion scheme: ...".
+// Guessing is not good enough here: the difference between "give it a
+// `~measure`" and "this type is not one I can recurse in" is the difference
+// between a fixable declaration and one that has to wait for the compiler.
+fun undecidable_reason(st :: HolState, spec :: FunSpec) :: String:
+  let fn_ph = mk_const(spec.name, fun_type(spec))
+  let undeclared = for values(acc :~ List = []) (ty in spec.arg_types):
+                     if has_subterm_relation(st, ty :~ HType)
+                     | acc
+                     | acc ++ [type_to_string(ty :~ HType)]
+  cond
+  | spec.measure:
+      "the measure lands in "
+        ++ type_to_string(measure_result_type(spec))
+        ++ ", which is not a recursive datatype declared here"
+  | !no_nested_calls(spec, fn_ph):
+      "a recursive call appears inside another recursive call's arguments"
+  | undeclared.length() == spec.arg_types.length():
+      "no argument type is a recursive datatype declared here (saw "
+        ++ String.join(undeclared, ", ") ++ ")"
+  | ~else:
+      "no argument column descends at every call, and no lexicographic "
+        ++ "order over the columns whose types are recursive datatypes "
+        ++ "declared here settles them either"
 
 // A type this module declared as a datatype, at its own schematic self type.
 fun declared_datatype(st :: HolState, ty :: HType) :: Boolean:

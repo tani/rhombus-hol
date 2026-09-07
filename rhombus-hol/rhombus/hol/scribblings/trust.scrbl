@@ -72,23 +72,33 @@ written.
 
 @section{The axioms}
 
-Three, following HOL4:
+Four:
 
 @itemlist(
  @item{@bold{ETA} --- @tt{(fun x: f(x)) === f}}
  @item{@bold{SELECT} --- the choice operator returns a witness when one exists}
  @item{@bold{BOOL_CASES} --- @tt{(t <=> true) or (t <=> false)}}
+ @item{@deftech{axiom of infinity} --- there is an injection from the type
+  @tt{ind} into itself that is not onto}
 )
 
-There is deliberately no axiom of infinity. Non-recursive datatypes are
-derived from @tt{unit} and the kernel's own type definition principle, which
-needs no infinite type; recursive ones are postulated, which is the reason
-nothing here ever has to bootstrap one. Deriving recursive datatypes too is
-what would require it.
+The first three follow HOL4. BOOL_CASES is derivable from choice and eta, but
+taking it directly saves a long stretch of derived-rule scripting and costs
+nothing in confidence --- it is a standard consistent basis.
 
-BOOL_CASES is derivable from choice and eta, but taking it directly saves a
-long stretch of derived-rule scripting and costs nothing in confidence --- it
-is a standard consistent basis.
+Infinity is there because @emph{recursive} datatypes are derived rather than
+postulated, and the construction needs an infinite type to index the trees it
+carves them out of. It is stated once, in the base theory, and shared: a
+module declaring ten recursive datatypes assumes it exactly as often as a
+module declaring none. Non-recursive datatypes do not touch it --- they are
+built from @tt{unit}, @tt{prod} and @tt{sum} over their field types --- but
+they are in the same theory, so it is present either way.
+
+That trade is the point. The alternative, and what this system did before,
+was to assume no infinity and instead postulate every recursive datatype's
+characterisation: injectivity, distinctness, exhaustiveness and induction,
+per declaration. One shared axiom replaced an unbounded number of
+per-declaration ones.
 
 Every logical connective is @emph{defined} on top of the kernel's equality, not
 postulated. So are the conditional rules @tt{if true | a | b === a} and its
@@ -267,13 +277,13 @@ Beyond the termination restrictions in @secref("termination"):
  @item{The function body grammar has @rhombus(if), @rhombus(cond), local
   @rhombus(let), no arithmetic, and no literals other than the Booleans.}
 
- @item{There is no fuel or timeout on rewriting, deliberately --- see
-  @secref("prover"). A rewrite rule that is not permutative and does not
-  terminate is not rejected: @rhombus(mk_rule)'s admission conditions catch a
-  variable left-hand side, an unconstrained variable or type variable on the
-  right, and a trivial equation, but nothing checks that the rule actually
-  makes progress. Such a rule sends simplification into an infinite loop, and
-  since simplification happens while a module compiles, that hangs
-  @tt{raco make} rather than failing it.}
+ @item{Proof search is bounded, but a rule that does not make progress is
+  still admitted. @rhombus(mk_rule)'s conditions catch a variable left-hand
+  side, an unconstrained variable or type variable on the right, and a
+  trivial equation; nothing checks that a rule shrinks anything. Such a rule
+  no longer hangs @tt{raco make}, because rewriting runs against a shared
+  step budget and detects a position that rewrites back to a term it has
+  already been --- but it fails the compile with a resource error rather than
+  telling you which rule was at fault. See @secref("prover").}
 
 )

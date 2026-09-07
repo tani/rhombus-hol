@@ -62,6 +62,7 @@ import:
 export:
   can_derive_structurally
   lex_descent_columns
+  no_nested_calls
   descent_column
   measure_result_type
   install_structural_function
@@ -135,23 +136,17 @@ fun can_derive_structurally(spec :: FunSpec, recinfo :: RecursionInfo,
       // type's subterm relation, pulled back along it.  That type has to be
       // a declared datatype at its schematic self type, for the same reason
       // a switched position does.
-      schematic_datatype(dts, measure_result_type(spec))
+      datatype_instance(dts, measure_result_type(spec))
   | recinfo.method != #'structural && recinfo.method != #'none: #false
   | ~else:
       let fn_ph = mk_const(spec.name, fun_type(spec))
       cond
       | descent_column(spec, fn_ph,
                        ~usable: fun (ty :: HType):
-                                  schematic_datatype(dts, ty)) != #false: #true
+                                  datatype_instance(dts, ty)) != #false: #true
       // No single column descends everywhere, but the tuple of the
       // lexicographic order's columns does (PLAN.md 9.31).
       //
-      // A call nested inside another call's *arguments* is refused here.
-      // The descent fact for the outer call is stated about the tuple its
-      // arguments build, and that tuple would mention the function being
-      // defined -- which does not exist yet in the theory the derivation
-      // runs in.  Ackermann's third clause is the example.
-      | !no_nested_calls(spec, fn_ph): #false
       | ~else: lex_descent_columns(spec, fn_ph, dts) != #false
 
 // What `~measure(e)` lands in: `e`'s type with the parameters peeled off.
@@ -167,13 +162,19 @@ fun measure_result_type(spec :: FunSpec) :: HType:
         loop(r, k - 1)
     | ~else: ty
 
-fun schematic_datatype(dts :: Map.of(Symbol, DatatypeThms),
-                       ty :: HType) :: Boolean:
+// `ty` is *an instance of* a datatype declared here.  It used to have to be
+// the declaration's own type: `List('a)` was accepted and `List(Nat)` was
+// not, which refused a definition for the shape of its argument types rather
+// than for anything about its recursion.  The facts at an instance are the
+// declaration's facts under a type substitution (`instantiate_datatype`).
+fun datatype_instance(dts :: Map.of(Symbol, DatatypeThms),
+                      ty :: HType) :: Boolean:
   match ty
-  | TyApp(n, _):
+  | TyApp(n, args):
       match dts.get(n, #false)
       | #false: #false
-      | thms: self_type((thms :~ DatatypeThms).spec) == ty
+      | thms:
+          (args :~ List).length() == (thms :~ DatatypeThms).spec.params.length()
   | ~else: #false
 
 fun switch_types_ok(t :: DecisionTree,
@@ -182,12 +183,21 @@ fun switch_types_ok(t :: DecisionTree,
   | DTLeaf(_, _): #true
   | DTSwitch(_, self_ty, branches):
       cond
-      | !schematic_datatype(dts, self_ty): #false
+      | !datatype_instance(dts, self_ty): #false
       | ~else: for all (b in branches): switch_types_ok((b :~ DTBranch).tree, dts)
 
-// The `DatatypeThms` at a switched position's type.  Total in practice:
-// `can_derive_structurally` has already established every lookup succeeds.
-fun thms_at(dts :: Map.of(Symbol, DatatypeThms), ty :: HType) :: DatatypeThms:
+// The type substitution taking a declaration's own type to `ty`.
+fun type_substitution(spec :: DatatypeSpec,
+                      ty :: HType) :: Map.of(Symbol, HType):
+  match ty
+  | TyApp(_, args):
+      for values(m :~ Map = {}) (p in spec.params, a in (args :~ List)):
+        m ++ {p: a :~ HType}
+  | ~else: {}
+
+// The declaration a type names, without specialising anything: `path_term`
+// reads field *positions*, and those do not move under a type substitution.
+fun spec_at(dts :: Map.of(Symbol, DatatypeThms), ty :: HType) :: DatatypeSpec:
   match ty
   | TyApp(n, _):
       match dts.get(n, #false)
@@ -195,7 +205,31 @@ fun thms_at(dts :: Map.of(Symbol, DatatypeThms), ty :: HType) :: DatatypeThms:
           error(~who: #'install_structural_function,
                 "no datatype for a switched position",
                 error.val(~label: "type", n))
-      | thms: thms :~ DatatypeThms
+      | thms: (thms :~ DatatypeThms).spec
+  | ~else:
+      error(~who: #'install_structural_function,
+            "a switched position is not a datatype",
+            error.val(~label: "type", type_to_string(ty)))
+
+// The datatype's facts at a switched position's type, specialised to that
+// type.  Total in practice: `can_derive_structurally` has already
+// established every lookup succeeds.
+fun thms_at(thy :: Theory, dts :: Map.of(Symbol, DatatypeThms),
+            ty :: HType) :: DatatypeView:
+  match ty
+  | TyApp(n, _):
+      match dts.get(n, #false)
+      | #false:
+          error(~who: #'install_structural_function,
+                "no datatype for a switched position",
+                error.val(~label: "type", n))
+      | thms:
+          match instantiate_datatype(thy, thms :~ DatatypeThms, ty)
+          | #false:
+              error(~who: #'install_structural_function,
+                    "a switched position is not an instance of its datatype",
+                    error.val(~label: "type", type_to_string(ty)))
+          | v: v :~ DatatypeView
   | ~else:
       error(~who: #'install_structural_function,
             "cannot switch on a position of variable type")
@@ -446,7 +480,7 @@ fun lex_descent_columns(spec :: FunSpec, fn_ph :: Term,
       let needed = settling_prefix(all_sites, order)
       cond
       | needed.length() < 2: #false
-      | (for all (k in needed): schematic_datatype(dts, spec.arg_types[k])):
+      | (for all (k in needed): datatype_instance(dts, spec.arg_types[k])):
           needed
       | ~else: #false
 
@@ -581,7 +615,7 @@ fun build_step_body(spec :: FunSpec, tree :: DecisionTree,
                     fn_ph :: Term, f_var :: FVar, x_var :: FVar) :: Term:
   let arity = spec.arg_types.length()
   let args :~ List = carrier.arg_terms(x_var :~ Term)
-  fun dt_of(ty :: HType) :: DatatypeSpec: thms_at(dts, ty).spec
+  fun dt_of(ty :: HType) :: DatatypeSpec: spec_at(dts, ty)
   fun go(t :: DecisionTree) :: Term:
     match t
     | DTLeaf(ci, bindings):
@@ -773,7 +807,27 @@ fun bridge_calls(thy :: Theory, t :: Term, conds :: List.of(Term),
               let (v, body) = dest_abs(t)
               ABS(thy, v, bridge_calls(thy, body, conds, fact))
           | ~else: REFL(thy, t)
-  | th :: Thm: th
+  | th :: Thm:
+      // A call's *arguments* can contain calls of their own, and those have
+      // to be converted too -- `H f2` has `f2` at every one of them, so
+      // stopping at the outermost would leave the two sides differing
+      // underneath.  The fact is about the argument as it stands, which is
+      // what the descent proof was about; the conversion of the argument is
+      // applied after it.
+      match t
+      | Comb(_, x):
+          let inner = bridge_calls(thy, x, conds, fact)
+          cond
+          | rhs_of(inner) == x: th
+          | ~else:
+              let (head, _) = dest_comb(rhs_of_term(concl_of(th)))
+              TRANS(th, AP_TERM(thy, head, inner))
+      | ~else: th
+
+fun rhs_of_term(eq :: Term) :: Term:
+  match dest_eq(eq)
+  | [_, r]: r
+  | ~else: error(~who: #'bridge_calls, "not an equation")
 
 // The distinct carrier terms the recursive calls in `t` are made at, in
 // order of first occurrence.
@@ -889,17 +943,22 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec,
       MP(thy, SPEC(thy, v, hyp), below_xv)
 
     // Structural descent holds unconditionally -- `T_lt` relates a field to
-    // its constructor whatever branch you are in -- so the facts are all
-    // built up front and the branch conditions `bridge_calls` offers go
-    // unread.
-    let structural_facts:
-      cond
-      | spec.measure: []
-      | ~else:
-          for List (v in call_carriers(fn_ph, arity, carrier.build, rhs_here)):
-            let v :~ Term = v
-            at_call(v, EQT_ELIM(thy, reduce(thy, db,
-                                            list_mk_comb(rel, [v, concrete]))))
+    // its constructor whatever branch you are in -- so the branch conditions
+    // `bridge_calls` offers go unread.
+    //
+    // The carrier comes from the walked body rather than from the clause as
+    // written, and that is what lets a call sit inside another call's
+    // arguments.  In the clause, `ack(m, ack(succ m, k))`'s outer carrier
+    // mentions `ack` -- a constant the theory does not have until the
+    // definition is installed, which is last.  In the body `H` was built
+    // from, the inner call is already the step variable, so the same carrier
+    // is `pair(m, f1(...))`: an ordinary well-formed term.
+    fun structural_fact(t :: Term, _conds :: List.of(Term)) :: maybe(Thm):
+      match t
+      | Comb(g, v) when g == (f1 :~ Term):
+          at_call(v, EQT_ELIM(thy, reduce(thy, db,
+                                          list_mk_comb(rel, [v, concrete]))))
+      | ~else: #false
 
     // A measure decreases only down the branch its guard admits, so the
     // fact is built where the call is, out of the obligation
@@ -933,9 +992,7 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec,
               at_call(v, EQ_MP(SYM(thy, want_red), EQ_MP(have_red, discharged)))
       | ~else: #false
 
-    let fact = (if spec.measure
-                | measure_fact
-                | fun (t :: Term, _conds): find_fact(structural_facts, t))
+    let fact = (if spec.measure | measure_fact | structural_fact)
     let l1 = reduce_h(thy, db, def_h, f1, concrete)
     let l2 = reduce_h(thy, db, def_h, f2, concrete)
     let bridge = bridge_calls(thy, rhs_of(l1), [], fact)
@@ -952,7 +1009,7 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec,
         // Always a variable: a position is split at most once, and the
         // path's own steps are the splits already taken above it.
         let v :~ FVar = path_subterm(carrier.split(concrete), path)
-        let dtt :~ DatatypeThms = thms_at(dts, self_ty)
+        let dtt :~ DatatypeView = thms_at(thy, dts, self_ty)
         fun peel(sub :: DecisionTree, target :: Term) :: Thm:
           match dest_exists(target)
           | [w, body]:
@@ -1027,23 +1084,39 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
   let arity = spec.arg_types.length()
   let fty = fun_type(spec)
   let fn_ph = mk_const(spec.name, fty)
-  let self = self_type(dt.spec)
-  // `dt` is the datatype the recursion's order comes from: the descending
-  // argument's for structural descent, the *measure's result type* for a
-  // `~measure`.  Either way its `T_lt` is what gets pulled back.  For
-  // lexicographic descent there is more than one, and they are recovered
-  // from `t_lt_equations` by which relation each equation is about.
-  let t_lt = mk_const(subterm_name(dt.spec), mk_fun(self, mk_fun(self, bool)))
+  // The type the order compares in: the measure's result type for a
+  // `~measure`, the descending column's for structural descent.  It is the
+  // type as the definition actually uses it -- `List(Nat)`, not
+  // `List('a)` -- so the relation and its well-foundedness are taken there.
+  fun order_type() :: HType:
+    cond
+    | spec.measure: measure_result_type(spec)
+    | ~else:
+        match descent_column(spec, fn_ph,
+                             ~usable: fun (ty :: HType):
+                                        datatype_instance(dts, ty))
+        | k :: Int: spec.arg_types[k]
+        | ~else: self_type(dt.spec)
+  let self = order_type()
+  let t_lt = subterm_rel(self)
+  // `T_lt`'s well-foundedness is proved once at the declaration's own type
+  // and instantiated, rather than re-proved per instance: it is the same
+  // theorem under a type substitution.  For lexicographic descent there is
+  // one of these per ordered column.
   fun wf_of(ty :: HType) :: Thm:
     let n = (match ty | TyApp(n, _): n)
     let d :~ DatatypeThms = dts[n]
-    prove_wf_t_lt(thy, d.spec, equations_about(subterm_relation_name(n),
-                                               t_lt_equations),
-                  d.induction)
-  let wf_t_lt = prove_wf_t_lt(thy, dt.spec,
-                              equations_about(subterm_name(dt.spec),
-                                              t_lt_equations),
-                              dt.induction)
+    let schematic = prove_wf_t_lt(thy, d.spec,
+                                  equations_about(subterm_relation_name(n),
+                                                  t_lt_equations),
+                                  d.induction)
+    match instantiate_datatype(thy, d, ty)
+    | #false:
+        error(~who: #'install_structural_function,
+              "the order's type is not an instance of its datatype",
+              error.val(~label: "type", type_to_string(ty)))
+    | _: INST_TYPE(thy, type_substitution(d.spec, ty), schematic)
+  let wf_t_lt = wf_of(self)
   let (thy0, carrier :~ Carrier, proj_rules :~ List):
     cond
     | spec.measure:
@@ -1052,7 +1125,7 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
     | ~else:
         match descent_column(spec, fn_ph,
                              ~usable: fun (ty :: HType):
-                                        schematic_datatype(dts, ty))
+                                        datatype_instance(dts, ty))
         | k :: Int:
             cond
             | arity == 1: values(thy, direct_carrier(self, t_lt, wf_t_lt), [])
@@ -1126,8 +1199,21 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
               // `f1`/`f2`.
               let soln_facts = for List (call in recursive_calls(fn_ph, arity, rhs_here)):
                                  SYM(thy2, apply_fn_def(thy2, def_fn, arity, call :~ List))
-              let folded = cong_rewrite(thy2, soln_facts, rhs_of(reduced))
-              let final_reduced = TRANS(reduced, folded)
+              // To a fixed point, not once: `cong_rewrite` stops at a
+              // subterm it recognises, and a call sitting inside another
+              // call's arguments only becomes recognisable after the inner
+              // one has been folded.  Ackermann's third clause needs exactly
+              // two passes.  Bounded by the number of calls, since each pass
+              // folds at least one.
+              let final_reduced:
+                recur loop (th :~ Thm = reduced, fuel = soln_facts.length()):
+                  cond
+                  | fuel == 0: th
+                  | ~else:
+                      let step = cong_rewrite(thy2, soln_facts, rhs_of(th))
+                      cond
+                      | rhs_of(step) == rhs_of(th): th
+                      | ~else: loop(TRANS(th, step), fuel - 1)
               GENL(thy2, row_vars(pats),
                    TRANS(fn_eq_soln, TRANS(spec_at_c, final_reduced)))
   values(thy2, FunInfo(spec, mk_const(spec.name, fty), eqs, recinfo))

@@ -34,6 +34,8 @@ export:
   Ctor
   DatatypeSpec
   DatatypeThms
+  DatatypeView
+  instantiate_datatype
   check_spec
   datatype_axioms
   is_recursive_field
@@ -65,8 +67,54 @@ class DatatypeThms(spec :: DatatypeSpec,
                    // `is_Ci(x) ==> Ci(Ci_f1(x), ...) === x`, for destructor elimination
                    elim_rules :: List.of(Thm))
 
+// A datatype's facts at one *instance* of it.
+//
+// `DatatypeThms` states everything at the declaration's own type --
+// `List('a)` -- because that is where it is proved.  A definition recursing
+// over `List(Nat)` needs the same facts at `List(Nat)`, and instantiating
+// them is a type substitution, not a re-derivation: the theorems are
+// polymorphic and `INST_TYPE` is exactly the rule for this.
+//
+// Keeping the specialised facts in a value of their own, rather than
+// instantiating at each use, means a consumer cannot accidentally mix a
+// theorem at `List('a)` with a term at `List(Nat)` -- the mismatch would
+// surface as a confusing `SPEC` failure deep inside a derivation.
+class DatatypeView(spec :: DatatypeSpec,
+                   self_ty :: HType,
+                   injectivity :: Map.of(Symbol, Thm),
+                   distinctness :: List.of(Thm),
+                   induction :: Thm,
+                   cases :: Thm,
+                   discriminators :: List.of(Thm),
+                   selectors :: List.of(Thm),
+                   elim_rules :: List.of(Thm))
+
 fun self_type(spec :: DatatypeSpec) :: HType:
   mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol): mk_tyvar(p)))
+
+// `#false` unless `ty` is an instance of `dt` -- the same type constructor,
+// applied to as many arguments as the declaration has parameters.  The
+// schematic type is the instance that substitutes each parameter for
+// itself, so this subsumes the case where nothing needs instantiating.
+fun instantiate_datatype(thy :: Theory, dt :: DatatypeThms,
+                         ty :: HType) :: maybe(DatatypeView):
+  match ty
+  | TyApp(n, args) when n == dt.spec.name
+                          && (args :~ List).length() == dt.spec.params.length():
+      let theta = for values(m :~ Map = {}) (p in dt.spec.params,
+                                             a in (args :~ List)):
+                    m ++ {p: a :~ HType}
+      fun at(th :: Thm) :: Thm: INST_TYPE(thy, theta, th)
+      DatatypeView(dt.spec, ty,
+                   for values(m :~ Map = {}) ((k, th) in dt.injectivity):
+                     m ++ {k: at(th :~ Thm)},
+                   dt.distinctness.map(fun (th :: Thm): at(th)),
+                   at(dt.induction),
+                   at(dt.cases),
+                   dt.discriminators.map(fun (th :: Thm): at(th)),
+                   dt.selectors.map(fun (th :: Thm): at(th)),
+                   dt.elim_rules.map(fun (th :: Thm): at(th)))
+  | ~else: #false
 
 fun is_recursive_field(spec :: DatatypeSpec, f :: Field) :: Boolean:
   f.ty == self_type(spec)

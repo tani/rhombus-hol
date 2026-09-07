@@ -1528,7 +1528,7 @@ measure 適用判定テストを追加。フルスイート 1193 -> 1206。
 | # | 項目 | 状況 |
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
-| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype については本セッションで**フェーズ 2（無限公理と `num` の導出）を完了**した（§9.14、`infinity.rhm`）: 標準形の無限公理 1 本だけを立てて `num` を `new_basic_type_definition` で切り出し、Peano の 3 定理を仮説 0 個の定理として導出（公理数 3 -> 4、他は全部定義原理経由）。**配線はしていない** -- `build_ind` は渡された theory を拡張するだけで `base_theory()` に触れないので、既定の TCB は不変（`tests/infinity.rhm` が回帰で固定）。残るフェーズ 3（`num` 上に labelled tree 型と recursion theorem を作り、再帰 datatype を一般に切り出す）は未着手で、HOL システム中で単体最大の部品のため複数セッション規模。 |
+| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype については本セッションで**フェーズ 2（無限公理と `num` の導出）を完了**した（§9.14、`infinity.rhm`）: 標準形の無限公理 1 本だけを立てて `num` を `new_basic_type_definition` で切り出し、Peano の 3 定理を仮説 0 個の定理として導出（公理数 3 -> 4、他は全部定義原理経由）。**配線はしていない** -- `build_ind` は渡された theory を拡張するだけで `base_theory()` に触れないので、既定の TCB は不変（`tests/infinity.rhm` が回帰で固定）。さらに `num` の後続関係 `num_pred` を定義して `|- WF(num_pred)` を導出したので、**`num` 上の再帰は原理的に利用可能**になっている（§9.16。この検証中に `drule.rhm` の `EXISTS` の潜在的な捕獲バグも見つけて直した）。残るフェーズ 3（`num` 上に labelled tree 型と recursion theorem を作り、再帰 datatype を一般に切り出す）は未着手で、HOL システム中で単体最大の部品のため複数セッション規模。 |
 | 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **完了**（§9.1.2、§9.7〜9.10）。`WFREC` 存在定理は完全導出（`wfrec.rhm`）。`driver.rhm` の `add_function` から実接続済みで、**通常の `function` 宣言はもう `new_axiom` を使わない**: 単一引数・構造的降下（§9.1.2）、任意深さの入れ子パターン（§9.7）、多引数（§9.8、タプル上で射影に沿った引き戻し）、非再帰関数（§9.8 続報）、そして **`~measure`（§9.10、measure に沿った引き戻し＋条件付き congruence bridge、ガード付き再帰も含む）**。残るフォールバックは真の辞書式降下（Ackermann、整礎関係の辞書式積が要る）と、関係する型が宣言済み datatype でない場合の 2 つだけ。なお datatype の `T_lt` 自身の方程式は `add_subterm_relation` が従来通り公理として入れる（`WF(T_lt)` は導出、`trust.scrbl` にその区別を明記した）。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**（`unsafe` 名前空間、§10.x）、**`HType` 側は意図的に見送り**。下記参照。 |
 | 3(facade) | `rhombus/hol/kernel` を教育用 public facade にする | **完了**（§9.13）。`hyps`/`trace` を名前空間へ移し、`htype`/`term` を再 export。一 import で学生向け API が揃い、`hyp_union`/`trace_start`/`raw_comb` は裸では unbound。 |
@@ -1762,6 +1762,48 @@ Peano の 3 定理（`suc` の単射性、`suc n /= zero`、帰納法）を**す
 フェーズ 3（再帰 datatype の一般導出）で、それは未着手。
 
 フルスイート 1219/1219（+13）。
+
+### 9.16 進捗（本セッション）: `num` の整礎性を導出し、`EXISTS` の潜在的な捕獲バグを見つけた
+
+§9.14 の続き。フェーズ 3 に進むには「`num` 上の再帰が使える」ことが要る。
+そこで後続関係
+
+    num_pred m n := (n = suc_num m)
+
+を定数として定義し（`WFREC` とルールデータベースは関係を先頭定数で索引
+するのでラムダでは駄目 -- `stepfn.rhm` 参照）、`|- WF(num_pred)` を
+**導出**した。道筋は datatype の subterm 関係と同じで、整礎帰納法の
+スキーマを Peano の 3 定理から作って `prove_wf_from_induction` に渡す:
+
+* `zero` の下には何も無い（`suc_not_zero` から前提が矛盾）
+* `suc k` の下にはちょうど `k` だけ（`suc_injective` から）
+
+仮説 0 個、公理は §9.14 の 1 本のまま（3 -> 4）。
+
+**副産物: `drule.rhm` の `EXISTS` に潜在的な捕獲バグがあった。**
+`WF(num_pred)` が本当に既存の機械に食わせられるか確かめるため
+`prove_wf_pullback`（`~measure` が使う当のもの）に通したところ、measure の
+**定義域が `bool` のときだけ** カーネルが
+`ABS: abstracted variable is free in the hypotheses` を出した。
+
+原因は `EXISTS`。`exists` の CPS 符号化の answer 変数は、何を量化して
+いようと**常に `bool` 型**である。その fresh 名を選ぶ `fresh_for` は
+target しか見ないので、量化型が `bool` のときに限り
+
+* 量化変数 `v` 自身（既に対処済みだった）
+* **定理が抱えている仮説の自由変数**（未対処）
+
+と衝突し得る。後者に当たると最後の `GEN` が不正になり、カーネルが正当に
+拒否する。定理自体は証明可能なので、これは偽の失敗である。
+`hyps_of(th)` の自由変数も避けるよう修正した。
+
+回帰は「実際に落ちた経路」で固定してある
+（`tests/wellfounded.rhm`、定義域 `bool` の measure に沿った pullback --
+修正前は落ち、修正後は通ることを両方向で確認した）。最初に書いた
+`EXISTS` 直叩きの手製ケースは修正前でも通ってしまい**何も守らない**ので
+削除した。
+
+フルスイート 1228/1228。
 
 ### 9.15 進捗（本セッション）: 「論理側の名前と実行側の束縛は食い違わない」を回帰で固定した
 

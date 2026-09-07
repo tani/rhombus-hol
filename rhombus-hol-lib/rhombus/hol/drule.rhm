@@ -439,14 +439,26 @@ fun EXISTS(thy :: Theory, target :: Term, witness :: Term, th :: Thm) :: Thm:
       let unfolded = rhs_of(ufd)
       let [qv0, _] = (match dest_forall(unfolded) | l: l)
       let qv0 :~ FVar = qv0
-      // `qv0`'s name comes from `fresh_for`, independently of `v`'s own --
-      // when both happen to share a type (e.g. `v :: bool`, matching
-      // `exists`'s own CPS-encoding answer variable, which is *always*
-      // `bool` regardless of what is being quantified), they can collide,
-      // silently capturing `qv0` inside `v`'s own scope in `inner` below.
+      // `qv0`'s name comes from `fresh_for`, which looks at the target and
+      // nothing else.  Two things it therefore cannot see can collide with
+      // it, and both only bite when the quantified type is `bool` -- the
+      // type of `exists`'s own CPS-encoding answer variable, which it uses
+      // whatever is being quantified:
+      //
+      //   `v` itself, which would silently capture `qv0` inside `v`'s scope
+      //   in `inner` below;
+      //
+      //   a free variable of `th`'s *hypotheses*, which would make the
+      //   closing `GEN` illegal -- the kernel refuses to abstract a variable
+      //   the hypotheses still mention, so this surfaced as a spurious
+      //   "abstracted variable is free in the hypotheses" from deep inside a
+      //   derived rule (found by pulling a well-founded relation back along
+      //   a measure whose domain is `bool`).
+      //
       // `genvar` draws from a namespace disjoint from `fresh_for`'s, so it
-      // can never coincide with `v`.
-      let qv = (if v == qv0 | genvar(qv0.ty) | qv0)
+      // can coincide with neither.
+      let clashes = v == qv0 || (for any (h in hyps_of(th)): vfree_in(qv0, h))
+      let qv = (if clashes | genvar(qv0.ty) | qv0)
       let inner = mk_forall(v, mk_imp(mk_comb(pred, v), qv))
       let a = ASSUME(thy, inner)
       let spec = SPEC(thy, witness, a)

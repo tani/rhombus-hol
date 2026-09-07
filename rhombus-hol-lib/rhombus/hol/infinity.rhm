@@ -38,6 +38,7 @@ import:
   rhombus/hol/term open
   rhombus/hol/names open
   rhombus/hol/kernel open
+  "wellfounded.rhm" open
   rhombus/hol/printer open
   "bool.rhm" open
   "conv.rhm" open
@@ -48,6 +49,7 @@ export:
   ty_num
   c_zero
   c_suc
+  c_num_pred
   num_ty
   IndThms
   build_ind
@@ -61,6 +63,7 @@ def c_mk_num :: Symbol = #'mk_num
 def c_dest_num :: Symbol = #'dest_num
 def c_zero :: Symbol = #'zero_num
 def c_suc :: Symbol = #'suc_num
+def c_num_pred :: Symbol = #'num_pred
 
 fun ind_ty() :: HType: TyApp(ty_ind, [])
 fun num_ty() :: HType: TyApp(ty_num, [])
@@ -73,7 +76,10 @@ fun num_ty() :: HType: TyApp(ty_num, [])
 //   `suc_injective`  |- !m n. suc m = suc n <=> m = n
 //   `suc_not_zero`   |- !n. not (suc n = zero)
 //   `induction`      |- !P. P zero and (!n. P n ==> P (suc n)) ==> !n. P n
-class IndThms(suc_injective :: Thm, suc_not_zero :: Thm, induction :: Thm)
+class PeanoThms(suc_injective :: Thm, suc_not_zero :: Thm, induction :: Thm)
+
+class IndThms(suc_injective :: Thm, suc_not_zero :: Thm, induction :: Thm,
+              wf :: Thm)
 
 // `|- P(@x. P x)` from `|- ?x. P x`.  The same derivation `wfrec.rhm` uses;
 // it is not exported from there, and duplicating six lines beats widening
@@ -194,11 +200,25 @@ fun build_ind(thy0 :: Theory) :: values(Theory, IndThms):
                                                           mk_comb(dest_num, nv))))))
   let suc = mk_const(c_suc, sucty)
 
-  let thms = derive_peano(thy8, abs_rep, rep_pred, def_rep,
-                          def_zero, def_suc_num,
-                          ind_suc, ind_0, num_rep, mk_num, dest_num,
-                          zero, suc, ind_suc_inj, ind_suc_ne_0)
-  values(thy8, thms)
+  // -- num is well-founded --------------------------------------------------
+  //
+  // `num_pred m n` reads "n is m's successor", so it is the relation
+  // recursion on `num` descends along.  Giving it a name of its own is not
+  // cosmetic: `WFREC` and the rule database index relations by head constant
+  // and cannot see through a lambda (see `stepfn.rhm`).
+  let predty = mk_fun(nty, mk_fun(nty, bool))
+  let pred_rhs = mk_abs(mv, mk_abs(nv, mk_eq(nv :~ Term, mk_comb(suc, mv))))
+  let (thy9, def_pred):
+    new_basic_definition(thy8, mk_eq(mk_var(c_num_pred, predty), pred_rhs))
+  let num_pred = mk_const(c_num_pred, predty)
+
+  let thms0:
+    derive_peano(thy9, abs_rep, rep_pred, def_rep, def_zero, def_suc_num,
+                 ind_suc, ind_0, num_rep, mk_num, dest_num,
+                 zero, suc, ind_suc_inj, ind_suc_ne_0)
+  let wf = derive_num_wf(thy9, def_pred, num_pred, zero, suc, nty, thms0)
+  values(thy9, IndThms(thms0.suc_injective, thms0.suc_not_zero,
+                       thms0.induction, wf))
 
 // `|- t = t'` where `t'` is `t` with `rhs` replaced by the constant `def`
 // introduces for it.  `def : |- c = rhs`, so rewriting is `cong_rewrite`
@@ -233,7 +253,7 @@ fun derive_peano(thy :: Theory, abs_rep :: Thm, rep_pred :: Thm,
                  def_rep :: Thm, def_zero :: Thm, def_suc_num :: Thm,
                  ind_suc :: Term, ind_0 :: Term, num_rep :: Term,
                  mk_num :: Term, dest_num :: Term, zero :: Term, suc :: Term,
-                 ind_suc_inj :: Thm, ind_suc_ne_0 :: Thm) :: IndThms:
+                 ind_suc_inj :: Thm, ind_suc_ne_0 :: Thm) :: PeanoThms:
   let ity = ind_ty()
   let nty = num_ty()
   let av = mk_var(v_alpha, nty)
@@ -375,4 +395,61 @@ fun derive_peano(thy :: Theory, abs_rep :: Thm, rep_pred :: Thm,
     let q_n = EQ_MP(AP_TERM(thy, qp, INST(thy, [[nv :~ Term, av]], abs_rep)), q_mk_dn)
     GEN(thy, qp, DISCH(thy, hyp, GEN(thy, nv, q_n)))
 
-  IndThms(suc_injective, suc_not_zero, induction)
+  PeanoThms(suc_injective, suc_not_zero, induction)
+
+// `|- WF(num_pred)`.
+//
+// `WF` is reached the way `subterm.rhm` reaches it for a datatype: prove the
+// well-founded induction scheme for the relation, then hand it to
+// `prove_wf_from_induction`.  For `num_pred` the scheme is Peano induction
+// with the two constructor cases read off the two Peano theorems -- nothing
+// below `zero`, and exactly one thing below `suc k`.
+fun derive_num_wf(thy :: Theory, def_pred :: Thm, num_pred :: Term,
+                  zero :: Term, suc :: Term,
+                  nty :: HType, thms :: PeanoThms) :: Thm:
+  let bigP = mk_var(#'P, mk_fun(nty, bool))
+  let x = mk_var(#'x, nty)
+  let y = mk_var(#'y, nty)
+  let k = mk_var(#'k, nty)
+
+  // `!y. num_pred y x ==> P y`, the step's premise, at a given `x`.
+  fun below(t :: Term) :: Term:
+    mk_forall(y, mk_imp(list_mk_comb(num_pred, [y :~ Term, t]),
+                        mk_comb(bigP, y)))
+  let step_stmt = mk_forall(x, mk_imp(below(x :~ Term), mk_comb(bigP, x)))
+  let step = ASSUME(thy, step_stmt)
+
+  // `num_pred y t` unfolded to `t = suc y`.
+  fun pred_at(t :: Term) :: Thm:
+    unfold_def(thy, def_pred, [y :~ Term, t])
+
+  // base: nothing is below `zero`, because `zero` is no successor.
+  let at_zero:
+    let asm = ASSUME(thy, list_mk_comb(num_pred, [y :~ Term, zero]))
+    let as_eq = EQ_MP(pred_at(zero), asm)
+    let absurd = MP(thy, NOT_ELIM(thy, SPEC(thy, y, thms.suc_not_zero)),
+                    SYM(thy, as_eq))
+    let vacuous = GEN(thy, y, DISCH(thy, list_mk_comb(num_pred, [y :~ Term, zero]),
+                                    CCONTR(thy, mk_comb(bigP, y), absurd)))
+    MP(thy, SPEC(thy, zero, step), vacuous)
+
+  // step: the only thing below `suc k` is `k`, because `suc` is injective.
+  fun at_suc(pk :: Thm) :: Thm:
+    let sk = mk_comb(suc, k)
+    let asm = ASSUME(thy, list_mk_comb(num_pred, [y :~ Term, sk]))
+    let as_eq = EQ_MP(pred_at(sk), asm)                 // |- suc k = suc y
+    let k_is_y = EQ_MP(SPEC(thy, y, SPEC(thy, k, thms.suc_injective)), as_eq)
+    let py = EQ_MP(AP_TERM(thy, bigP, k_is_y), pk)
+    let vacuous = GEN(thy, y, DISCH(thy, list_mk_comb(num_pred, [y :~ Term, sk]),
+                                    py))
+    MP(thy, SPEC(thy, sk, step), vacuous)
+
+  let base_case = mk_comb(bigP, zero)
+  let step_case = mk_forall(k, mk_imp(mk_comb(bigP, k),
+                                      mk_comb(bigP, mk_comb(suc, k))))
+  let ind_prem = CONJ(thy, at_zero,
+                      GEN(thy, k, DISCH(thy, mk_comb(bigP, k),
+                                        at_suc(ASSUME(thy, mk_comb(bigP, k))))))
+  let all_p = MP(thy, SPEC(thy, bigP :~ Term, thms.induction), ind_prem)
+  let scheme = GEN(thy, bigP, DISCH(thy, step_stmt, all_p))
+  prove_wf_from_induction(thy, num_pred, scheme)

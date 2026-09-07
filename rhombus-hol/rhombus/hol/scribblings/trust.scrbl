@@ -127,8 +127,11 @@ the axiom of infinity and carves @tt{num} out of it, deriving successor's
 injectivity, that no successor is zero, and induction --- three theorems, no
 hypotheses, for one axiom. Nothing imports it yet, so no theory reached
 through @tt{rhombus/hol} carries that axiom; a module's own
-@tt{axioms_of} count is what says whether it paid for one. Carving recursive
-datatypes out of @tt{num} is the step that would use it, and is not written.
+@tt{axioms_of} count is what says whether it paid for one. It also derives
+@tt{WF(num_pred)} for @tt{num}'s successor relation, so recursion over
+@tt{num} is available on the same footing as recursion over a declared
+datatype. Carving recursive datatypes out of @tt{num} is the step that
+would use all of this, and is not written.
 
 @bold{Function definitions.} A @rhombus(function, ~datum) is @emph{derived}
 whenever the recursion it performs has a well-founded relation this version

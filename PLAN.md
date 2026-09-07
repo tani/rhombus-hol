@@ -1528,7 +1528,7 @@ measure 適用判定テストを追加。フルスイート 1193 -> 1206。
 | # | 項目 | 状況 |
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
-| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype については本セッションで**フェーズ 2（無限公理と `num` の導出）を完了**した（§9.14、`infinity.rhm`）: 標準形の無限公理 1 本だけを立てて `num` を `new_basic_type_definition` で切り出し、Peano の 3 定理を仮説 0 個の定理として導出（公理数 3 -> 4、他は全部定義原理経由）。**配線はしていない** -- `build_ind` は渡された theory を拡張するだけで `base_theory()` に触れないので、既定の TCB は不変（`tests/infinity.rhm` が回帰で固定）。さらに `num_pred`／`|- WF(num_pred)`（§9.16）、cases（§9.18）、**原始再帰定理と `num_rec`**（§9.19）まで導出した。つまり `num` は、自己再帰 `type` 宣言が公理として置くもの（単射性・相異性・網羅性・帰納法）を**全部定理として**持ち、その上の再帰も公理なしで使える（回帰: `double` の 2 本の節方程式を仮説 0・追加公理 0 で導出）。代価は宣言 13 公理に対し導出 1 公理、しかも型ごとではない。**フェーズ 3 の前提部品はこれで全部揃った**。残るのは `num` 上の labelled tree 型（`NUMPAIR` 相当の符号化に算術が要る）と、そこから任意の再帰 datatype を切り出す一般構成＋`driver.rhm` 配線で、HOL システム中で単体最大の部品のため複数セッション規模。なおこの過程で `drule.rhm` の `EXISTS` の潜在的な捕獲バグ（§9.16）と、`WFREC` にラムダを渡したときの不可解な失敗（§9.19、明示的な拒否を追加）も見つけて直した。 |
+| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype については本セッションで**フェーズ 2（無限公理と `num` の導出）を完了**した（§9.14、`infinity.rhm`）: 標準形の無限公理 1 本だけを立てて `num` を `new_basic_type_definition` で切り出し、Peano の 3 定理を仮説 0 個の定理として導出（公理数 3 -> 4、他は全部定義原理経由）。**配線はしていない** -- `build_ind` は渡された theory を拡張するだけで `base_theory()` に触れないので、既定の TCB は不変（`tests/infinity.rhm` が回帰で固定）。さらに `num_pred`／`|- WF(num_pred)`（§9.16）、cases（§9.18）、**原始再帰定理と `num_rec`**（§9.19）まで導出した。つまり `num` は、自己再帰 `type` 宣言が公理として置くもの（単射性・相異性・網羅性・帰納法）を**全部定理として**持ち、その上の再帰も公理なしで使える（回帰: `double` の 2 本の節方程式を仮説 0・追加公理 0 で導出）。代価は宣言 13 公理に対し導出 1 公理、しかも型ごとではない。**そして本セッションでフェーズ 3 も完了した**（§9.21〜9.25）: 経路添字の labelled tree（算術も対関数も不要）、任意 `DatatypeSpec` の切り出し、4 定理＋観測子の生成（公理版と 1 本ずつ差分一致）、`driver.rhm` への配線。**自己再帰 `type` 宣言はもう特徴づけを公理にしない** -- 再帰 datatype 2 つのモジュールで公理は 8 本（base 3＋無限公理 1＋`T_lt` 方程式 4）。残るのは `T_lt` の方程式で、導出には任意 datatype 上の原始再帰定理が要る。なおこの過程で `drule.rhm` の `EXISTS` の潜在的な捕獲バグ（§9.16）と、`WFREC` にラムダを渡したときの不可解な失敗（§9.19、明示的な拒否を追加）も見つけて直した。 |
 | 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **完了**（§9.1.2、§9.7〜9.10）。`WFREC` 存在定理は完全導出（`wfrec.rhm`）。`driver.rhm` の `add_function` から実接続済みで、**通常の `function` 宣言はもう `new_axiom` を使わない**: 単一引数・構造的降下（§9.1.2）、任意深さの入れ子パターン（§9.7）、多引数（§9.8、タプル上で射影に沿った引き戻し）、非再帰関数（§9.8 続報）、そして **`~measure`（§9.10、measure に沿った引き戻し＋条件付き congruence bridge、ガード付き再帰も含む）**。残るフォールバックは真の辞書式降下（Ackermann、整礎関係の辞書式積が要る）と、関係する型が宣言済み datatype でない場合の 2 つだけ。なお datatype の `T_lt` 自身の方程式は `add_subterm_relation` が従来通り公理として入れる（`WF(T_lt)` は導出、`trust.scrbl` にその区別を明記した）。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **完了**。`Term` 側は `unsafe` 名前空間つきで以前から、`HType` 側は本セッションで `constructor ~none` + `mk_tyvar`/`mk_tyapp`（型には検査すべき不変条件が無いので裏口は作っていない）。下記参照。 |
 | 3(facade) | `rhombus/hol/kernel` を教育用 public facade にする | **完了**（§9.13）。`hyps`/`trace` を名前空間へ移し、`htype`/`term` を再 export。一 import で学生向け API が揃い、`hyp_union`/`trace_start`/`raw_comb` は裸では unbound。 |
@@ -2085,6 +2085,35 @@ induction の述べ直しだけは書き換えではない。表現側は payloa
 するには任意 datatype 上の原始再帰定理が要り、それはまだ無い。
 
 フルスイート 1319/1319。
+
+### 9.25 進捗（本セッション）: 配線した -- 自己再帰 `type` 宣言はもう特徴づけを公理にしない
+
+`driver.rhm` の `add_type` に分岐を足し、`is_selfrecursive_spec` なら
+`build_recursive_datatype_thms` を通すようにした。あわせて
+`infinity_base_theory()`（`wfrec_base_theory()` の上に `build_ind`、
+`algebra_base`/`wfrec_base` と同じくメモ化）を `initial_state` の出発点に
+した -- メモ化しないとモジュールごとに `Stamp` が変わり `adopt` が壊れる。
+
+**実測（`tests/rec_wired.rhm`）**: 自己再帰 datatype を 2 つ宣言した
+モジュールの理論が持つ公理は **8 本**:
+
+* base の 3 本（`BOOL_CASES`／`SELECT`／`ETA`）
+* **無限公理 1 本** -- base に 1 度だけ。datatype をいくつ宣言しても増えない
+* 各型の部分項関係 `T_lt` の方程式 2 本ずつ（計 4 本）
+
+**コンストラクタの性質は 1 本も入っていない。** injectivity・distinctness・
+induction・cases・判別子・選択子・elim はすべて定理で、仮説 0。
+配線前の同じモジュールは 30 本前後だった。
+
+残る `T_lt` の方程式は `add_subterm_relation` が今も公理として置く。
+これを導出にするには**任意の datatype 上の原始再帰定理**が要る（`num` に
+ついては §9.19 で作ったが、一般版は無い）。`trust.scrbl` にそう明記した。
+
+なお strict positivity 検査は宣言の門番として残るが、**もはや「誰も証明
+していない公理の無矛盾性」を守ってはいない** -- 基礎付けの無い宣言は
+公理として仮定されるのではなく、切り出しに失敗する。
+
+フルスイート 1328/1328。
 
 ### 9.20 進捗（本セッション）: `num` を `DatatypeThms` に梱包し、公理版と差分一致を取った
 

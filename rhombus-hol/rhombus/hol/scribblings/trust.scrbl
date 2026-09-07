@@ -111,61 +111,30 @@ that covers part of its range and a postulating fallback for the rest, and
 which one you get is decided by a check, not by a flag. Counting the axioms a
 module's theory ends up with is the way to tell (@tt{axioms_of}).
 
-@bold{Datatypes.} A non-recursive @rhombus(type, ~datum) --- any number of
-constructors, any number of fields, any number of type parameters --- is
-@emph{derived}: it is built as a sum of products of @tt{unit} over its field
-types via @tt{new_basic_type_definition}, and its injectivity, distinctness,
-exhaustiveness, induction, discriminators and selectors come out as theorems
-with no hypotheses. A @emph{self-recursive} @rhombus(type, ~datum) is still
-postulated: injectivity, distinctness, exhaustiveness and induction are
-axioms, consistent exactly when the declaration is @tech{strictly positive},
-and the positivity checker is what enforces it. That check is the single most
-load-bearing one in the system --- but it now guards recursive declarations
-only. Deriving those too needs an infinite type to bootstrap from.
-@tt{rhombus/hol/infinity} builds one: @tt{build_ind} extends a theory with
-the axiom of infinity and carves @tt{num} out of it, deriving successor's
-injectivity, that no successor is zero, and induction --- three theorems, no
-hypotheses, for one axiom. Nothing imports it yet, so no theory reached
-through @tt{rhombus/hol} carries that axiom; a module's own
-@tt{axioms_of} count is what says whether it paid for one.
+@bold{Datatypes.} A @rhombus(type, ~datum) is @emph{derived}, recursive or
+not. A non-recursive one --- any number of constructors, fields and type
+parameters --- is built as a sum of products of @tt{unit} over its field
+types. A @emph{self-recursive} one is carved out of the labelled trees over
+@tt{num} (@tt{rhombus/hol/treerep}, @tt{rhombus/hol/datatype_rec}): its
+representation is the least set of trees closed under its constructors, cut
+out by @tt{new_basic_type_definition}, and its injectivity, distinctness,
+exhaustiveness, induction, discriminators, selectors and destructor
+elimination all come out as theorems with no hypotheses. Run the axiom
+schema on the same declaration and every statement agrees --- the same
+theory, reached by proof.
 
-What it derives for @tt{num} is every theorem a self-recursive
-@rhombus(type, ~datum) declaration postulates --- constructors injective,
-constructors distinct, every value built by one of them, and induction ---
-together with @tt{WF(num_pred)} for its successor relation, so recursion
-over @tt{num} stands on the same footing as recursion over a declared
-datatype. So the comparison is one axiom against thirteen: declaring the
-same type postulates its characterisation and its subterm relation's
-equations, and does so again for the next type, while the one axiom here is
-paid once and is not per-type.
+What a self-recursive declaration still costs is two things. One is the
+@tech{axiom of infinity}, which the base theory carries once however many
+datatypes a module declares, because the trees are indexed by paths over
+@tt{num}. The other is the two equations of that type's subterm relation,
+which @tt{add_subterm_relation} still posits: deriving those needs a
+recursion theorem for an arbitrary datatype, and this version does not have
+one. So a module declaring two recursive datatypes assumes eight things: the
+base logic's three, infinity, and two subterm equations apiece.
 
-It also derives the primitive recursion theorem for @tt{num}, and with it a
-named combinator @tt{num_rec} whose two equations let a function be defined
-by recursion on the naturals and its clauses @emph{proved}. That is
-@tt{WFREC} --- itself derived --- applied to @tt{num_pred}, so it adds no
-axiom either.
-
-All of it is packaged as the @tt{DatatypeThms} a @rhombus(type, ~datum)
-declaration would install --- including the subterm relation, defined by
-recursion and proved well-founded by @tt{subterm.rhm}'s own derivation,
-unmodified. Run the axiom schema on the same specification and every one of
-the eleven statements agrees: the same theory, reached by proof instead of
-assumption, for eleven fewer axioms.
-
-That makes @tt{num} the first self-recursive type in this system whose
-characterisation is proved rather than assumed, and the first over which
-recursion is available without postulating anything. It is not yet the
-general construction, but it is no longer only a plan:
-@tt{rhombus/hol/treerep} builds the labelled trees over @tt{num} that a
-recursive datatype is carved from --- indexed by paths, so the encoding
-needs no arithmetic and no pairing function --- proves the node constructor
-injective, and cuts a genuinely self-recursive type (a list) out of the
-least set of trees closed under its constructors, with
-@tt{new_basic_type_definition} and no axiom. What is missing is the rest:
-deriving that type's own injectivity, distinctness, induction and cases
-from those pieces, generating all of it from a @tt{DatatypeSpec}, and
-wiring it into the declaration. Until then a self-recursive
-@rhombus(type, ~datum) in a module still postulates.
+The @tech{strict positivity} check still guards the declaration, but it no
+longer guards a consistency claim about axioms nobody proved --- an
+ill-founded declaration now fails to be carved rather than being assumed.
 
 @bold{Function definitions.} A @rhombus(function, ~datum) is @emph{derived}
 whenever the recursion it performs has a well-founded relation this version

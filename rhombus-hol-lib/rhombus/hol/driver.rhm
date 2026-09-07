@@ -23,6 +23,8 @@ import:
   "bool.rhm" open
   "datatype.rhm" open
   "datatype_gen.rhm" open
+  "datatype_rec.rhm" open
+  "infinity.rhm" open
   "algebra.rhm" open
   "recdef.rhm" open
   "dtree.rhm" open
@@ -101,7 +103,7 @@ fun initial_state() :: HolState:
   // a fresh `Stamp` on every call, so calling `build_wfrec_rel` fresh here
   // would give every module's `HolState.thy` an incomparable stamp,
   // breaking `adopt`'s check the moment one module imports another's state.
-  let thy = wfrec_base_theory()
+  let thy = infinity_base_theory()
   // Propositional cleanup is in the database from the start: without it a
   // finished proof can look stuck at `true and true`.
   let db = for values(d :~ RuleDB = empty_db) (th in tautologies(thy)):
@@ -126,15 +128,20 @@ fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   // Non-recursive specs (no self-recursive fields) get a genuinely derived
   // `DatatypeThms` -- proved from `unit`/`prod`/`sum` via
   // `new_basic_type_definition`, with zero `new_axiom` calls -- rather than
-  // the axiom schema below; see PLAN.md section 9.2.1.  Self-recursive
-  // datatypes still use the axioms: `infinity.rhm` now supplies the infinite
-  // type and a well-founded `num` they need to bootstrap from (PLAN.md 9.2
-  // phase 2, 9.14), but the construction that carves a recursive datatype out
-  // of it -- phase 3 -- is not written, so nothing here can call it yet.
+  // the axiom schema below; see PLAN.md section 9.2.1.  A *self-recursive*
+  // one is derived too, by carving it out of the labelled trees over `num`
+  // (`datatype_rec.rhm`, PLAN.md 9.2 phase 3): its characterisation and its
+  // observers are proved, and the one axiom they rest on -- infinity -- is in
+  // the base theory once, not once per datatype.  The axiom schema is what is
+  // left for a spec neither construction admits.
   let (thy2, thms) = try:
-                       (if is_nonrecursive_spec(spec)
-                        | build_nonrecursive_datatype_thms(st.thy, spec)
-                        | datatype_axioms(st.thy, spec))
+                       (cond
+                        | is_nonrecursive_spec(spec):
+                            build_nonrecursive_datatype_thms(st.thy, spec)
+                        | is_selfrecursive_spec(spec):
+                            build_recursive_datatype_thms(st.thy, spec,
+                                                          infinity_base_ind())
+                        | ~else: datatype_axioms(st.thy, spec))
                        ~catch e :: Exn.Fail: hol_reraise(e, at)
   // Every equation the datatype brings -- injectivity, distinctness,
   // discriminators, selectors -- goes straight into the rule database, which

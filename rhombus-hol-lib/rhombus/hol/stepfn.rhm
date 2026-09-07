@@ -40,6 +40,7 @@ import:
   "wellfounded.rhm" open
   "wfrec.rhm" open
   "recdef.rhm" open
+  "dtree.rhm" open
   "terminate.rhm" open
 
 export:
@@ -49,33 +50,71 @@ export:
 fun self_type(spec :: DatatypeSpec) :: HType:
   TyApp(spec.name, spec.params.map(fun (p :: Symbol): TyVar(p) :~ HType))
 
-// Whether this module's derivation applies: single argument, termination
-// settled by plain structural descent (no measure), and every clause's
-// pattern exactly one constructor level deep.
+// Whether this module's derivation applies: a single argument, termination
+// settled by plain structural descent (no measure), and every position the
+// pattern matrix splits on carrying a datatype whose *schematic* self type
+// is exactly the type at that position.
 //
-// `recdef.rhm`'s coverage checker and `terminate.rhm`'s `descends_at` both
-// admit nested patterns (`Cons(x, Cons(y, zs))`), but `build_step_body`
-// below zips a clause's pattern variables against its own constructor's
-// *top-level* fields one-for-one (`leaf_for`, below) -- a nested pattern
-// has more leaf variables than the top-level constructor has fields, which
-// `for List` would silently zip short rather than raise, quietly dropping
-// a substitution rather than building the wrong `H`.  Rejecting depth
-// beyond one level here keeps that mismatch from ever being reached;
-// `install_function` (`recdef.rhm`)'s `new_axiom` postulation handles
-// nested patterns at any depth just fine, so a nested-pattern definition
-// still installs, just without this module's `new_axiom`-free derivation.
-fun can_derive_structurally(spec :: FunSpec, recinfo :: RecursionInfo) :: Boolean:
+// Pattern depth is no longer a condition.  `H` is now built from the
+// decision tree (`dtree.rhm`) rather than by zipping a clause's variables
+// against its constructor's own fields, and the tree records a selector
+// *path* to every variable -- so a nested pattern is just a `Switch` whose
+// branch holds another `Switch`, and the congruence proof case-splits at
+// the nested position exactly as it does at the top one.
+//
+// The type condition is what makes that case-split possible: it needs the
+// position's datatype `cases` theorem, which is stated at the schematic
+// self type, to apply at the position's type directly.  A field declared
+// at a concrete instance of another datatype would need `cases`
+// instantiated first, which this version does not do, so such a definition
+// falls back to `install_function`'s postulating seam.
+fun can_derive_structurally(spec :: FunSpec, recinfo :: RecursionInfo,
+                            tree :: DecisionTree,
+                            dts :: Map.of(Symbol, DatatypeThms)) :: Boolean:
   spec.arg_types.length() == 1 && recinfo.method == #'structural
-    && (for all (cl in spec.clauses): is_shallow_pattern((cl :~ DefClause).pats[0]))
+    && switch_types_ok(tree, dts)
 
-fun is_shallow_pattern(p :: Term) :: Boolean:
-  match p
-  | FVar(_, _): #true
+fun switch_types_ok(t :: DecisionTree,
+                    dts :: Map.of(Symbol, DatatypeThms)) :: Boolean:
+  match t
+  | DTLeaf(_, _): #true
+  | DTSwitch(_, self_ty, branches):
+      let ok:
+        match self_ty
+        | TyApp(n, _):
+            match dts.get(n, #false)
+            | #false: #false
+            | thms: self_type((thms :~ DatatypeThms).spec) == self_ty
+        | ~else: #false
+      cond
+      | ! ok: #false
+      | ~else: for all (b in branches): switch_types_ok((b :~ DTBranch).tree, dts)
+
+// The `DatatypeThms` at a switched position's type.  Total in practice:
+// `can_derive_structurally` has already established every lookup succeeds.
+fun thms_at(dts :: Map.of(Symbol, DatatypeThms), ty :: HType) :: DatatypeThms:
+  match ty
+  | TyApp(n, _):
+      match dts.get(n, #false)
+      | #false:
+          error(~who: #'install_structural_function,
+                "no datatype for a switched position",
+                error.val(~label: "type", n))
+      | thms: thms :~ DatatypeThms
   | ~else:
-      let (head, args) = strip_comb(p)
-      match head
-      | Const(_, _): for all (a in args): a is_a FVar
-      | ~else: #false
+      error(~who: #'install_structural_function,
+            "cannot switch on a position of variable type")
+
+// The concrete subterm a path points at, once the scrutinee has been split
+// far enough that every step on the path is a literal constructor
+// application -- which the tree guarantees, a path's steps being exactly
+// the splits its own ancestors performed.  This is the proof-side twin of
+// `path_term`: the same position, reached by taking a constructor apart
+// rather than by wrapping a selector around it.
+fun path_subterm(t :: Term, p :: DTPath) :: Term:
+  for values(cur :~ Term = t) (s in p.steps):
+    let (_, args) = strip_comb(cur)
+    args[(s :~ DTStep).field]
 
 // -- building `H` ------------------------------------------------------
 
@@ -96,41 +135,42 @@ fun rewrite_recursive_head(fn_ph :: Term, f_var :: Term, t :: Term) :: Term:
       mk_abs(v, rewrite_recursive_head(fn_ph, f_var, body))
   | ~else: t
 
-// The clause whose pattern matches constructor `name` -- always found:
-// `check_coverage` already verified every constructor has exactly one.
-fun clause_for_ctor(spec :: FunSpec, name :: Symbol) :: DefClause:
-  recur loop (cls :~ List = spec.clauses):
-    match cls
-    | List.cons(cl, rest):
-        (if pattern_ctor((cl :~ DefClause).pats[0]) == name
-         | cl :~ DefClause
-         | loop(rest))
-    | []:
-        error(~who: #'install_structural_function,
-              "no clause matches constructor",
-              error.val(~label: "constructor", name))
-
-// `H := \f x. cond(is_C1(x), leaf_1, cond(is_C2(x), leaf_2, ... leaf_n))`,
-// where `leaf_i` is clause `i`'s own body with every pattern variable
-// replaced by the selector that reads it back out of `x`, and every
-// recursive self-call replaced by an application of `f`.
-fun build_step_body(spec :: FunSpec, dt :: DatatypeThms, fn_ph :: Term,
+// `H := \f x. <the decision tree, as nested `cond`s>`.
+//
+// A `Switch` becomes a `cond` chain over the position's discriminators --
+// the last constructor is the final `else`, since the tree is exhaustive
+// and its branches are mutually exclusive.  A `Leaf` is its clause's own
+// body with every pattern variable replaced by the chain of selectors that
+// reads it back out of `x` (`path_term`), and every recursive self-call
+// replaced by an application of `f`.
+//
+// Nesting needs nothing special here: a nested pattern is a `Switch`
+// inside a `Switch`, and the path already says how deep to read.
+fun build_step_body(spec :: FunSpec, tree :: DecisionTree,
+                    dts :: Map.of(Symbol, DatatypeThms), fn_ph :: Term,
                     f_var :: FVar, x_var :: FVar) :: Term:
-  let self = self_type(dt.spec)
-  fun leaf_for(c :: Ctor) :: Term:
-    let cl = clause_for_ctor(spec, c.name)
-    let field_vars = pattern_vars(#'function, cl.pats[0])
-    let subst = for List (v in field_vars, f in c.fields):
-                  let f :~ Field = f
-                  let sel = mk_const(selector_name(c, f), mk_fun(self, f.ty))
-                  [mk_comb(sel, x_var :~ Term), v :~ FVar]
-    inst_fvar(subst, rewrite_recursive_head(fn_ph, f_var, cl.rhs))
-  fun test_for(c :: Ctor) :: Term:
-    mk_comb(mk_const(discriminator_name(c), mk_fun(self, bool)), x_var)
-  recur build (cs :~ List = dt.spec.ctors):
-    match cs
-    | [c]: leaf_for(c :~ Ctor)
-    | List.cons(c, rest): mk_cond(test_for(c :~ Ctor), leaf_for(c :~ Ctor), build(rest))
+  fun dt_of(ty :: HType) :: DatatypeSpec: thms_at(dts, ty).spec
+  fun go(t :: DecisionTree) :: Term:
+    match t
+    | DTLeaf(ci, bindings):
+        let cl :~ DefClause = spec.clauses[ci]
+        let subst = for List (b in bindings):
+                      let b :~ DTBinding = b
+                      [path_term(dt_of, [x_var :~ Term], b.path), b.var]
+        inst_fvar(subst, rewrite_recursive_head(fn_ph, f_var, cl.rhs))
+    | DTSwitch(path, self_ty, branches):
+        let scrut = path_term(dt_of, [x_var :~ Term], path)
+        recur build (bs :~ List = branches):
+          match bs
+          | [b]: go((b :~ DTBranch).tree)
+          | List.cons(b, rest):
+              let b :~ DTBranch = b
+              mk_cond(mk_comb(mk_const(discriminator_name(b.ctor),
+                                       mk_fun(self_ty, bool)),
+                              scrut),
+                      go(b.tree),
+                      build(rest))
+  go(tree)
 
 // -- the reduction database ----------------------------------------------
 
@@ -217,16 +257,26 @@ fun cong_rewrite(thy :: Theory, facts :: List.of(Thm), t :: Term) :: Thm:
 
 // `|- !f1 f2 x. (!z. T_lt(z,x) ==> f1(z)=f2(z)) ==> H(f1)(x) = H(f2)(x)`.
 //
-// By cases on `x`'s own shape (`dt.cases`): fixing `x := Ci(vars)`,
-// `H_const(f1)` and `H_const(f2)` applied to it both reduce (`reduce_h`,
-// above) to clause `i`'s own body with `f1`/`f2` respectively standing in
-// for the recursive call.  The two only differ where a recursive call
-// reads a field `v` of `Ci`, and `T_lt(v, Ci(vars))` always holds (`v` is
-// literally one of `Ci`'s own arguments, one of `T_lt`'s own defining
-// disjuncts) -- so the hypothesis gives `f1(v) = f2(v)` there, and
-// `cong_rewrite` carries that fact through whatever the clause's body
-// builds around the call.
+// The proof walks the same decision tree `H` was built from, refining `x`
+// as it descends: at a `Switch` it splits the position's own variable with
+// that datatype's `cases` theorem, and carries the refinement into the
+// running `x_eq : |- x = <concrete>` by rewriting with the split equation.
+// Splitting at a *nested* position is the same move as splitting at the
+// top one, which is what lets nested patterns through: `H` cannot reduce
+// past a test whose scrutinee is still a variable, so the proof keeps
+// splitting until every test resolves -- which is exactly when the tree
+// reaches a leaf.
+//
+// At a leaf, `H_const(f1)` and `H_const(f2)` applied to the refined `x`
+// both reduce (`reduce_h`) to that clause's body with `f1`/`f2` standing
+// in for the recursive call.  The two differ only where a recursive call
+// reads a field, and `T_lt(field, <concrete>)` always holds -- `T_lt` is
+// the proper-subterm relation, so it covers a field of a field just as it
+// covers an immediate one -- so the hypothesis gives `f1(v) = f2(v)`
+// there, and `cong_rewrite` carries that through whatever the body builds
+// around the call.
 fun prove_congruence(thy :: Theory, spec :: FunSpec, dt :: DatatypeThms,
+                     dts :: Map.of(Symbol, DatatypeThms), tree :: DecisionTree,
                      fn_ph :: Term, h_const :: Term, def_h :: Thm, rel :: Term,
                      db :: RuleDB) :: Thm:
   let self = self_type(dt.spec)
@@ -240,16 +290,17 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec, dt :: DatatypeThms,
                                       mk_eq(mk_comb(f1, zv), mk_comb(f2, zv))))
   let hyp = ASSUME(thy, hyp_term)
 
-  fun per_ctor(c :: Ctor, x_eq_c :: Thm) :: Thm:
-    let cl = clause_for_ctor(spec, c.name)
-    let orig_vars = pattern_vars(#'function, cl.pats[0])
-    // `x_eq_c : |- xv = C(actual_vars...)`, `actual_vars` being whichever
-    // fresh variables `peel`'s own `CHOOSE`s happened to introduce -- not
-    // necessarily `cl`'s own pattern variables by name, so every use of
-    // the clause body below has to be re-expressed in terms of them.
-    let c_vars = rhs_of(x_eq_c)
-    let (_, actual_vars) = strip_comb(c_vars)
-    let rename = for List (av in actual_vars, ov in orig_vars): [av :~ Term, ov :~ FVar]
+  // `x_eq : |- xv = concrete`, `concrete` being `xv` refined by every
+  // split taken to reach this leaf.  The clause's own variable names mean
+  // nothing here -- the concrete term is built from whichever fresh
+  // variables the `CHOOSE`s introduced -- so the body is re-expressed in
+  // terms of them, position by position, using the leaf's own bindings.
+  fun at_leaf(ci :: Int, bindings :: List.of(DTBinding), x_eq :: Thm) :: Thm:
+    let concrete = rhs_of(x_eq)
+    let cl :~ DefClause = spec.clauses[ci]
+    let rename = for List (b in bindings):
+                   let b :~ DTBinding = b
+                   [path_subterm(concrete, b.path), b.var]
     let rhs_here = inst_fvar(rename, cl.rhs)
     let calls = recursive_calls(fn_ph, 1, rhs_here)
     let distinct_args = for values(acc :~ List = []) (call in calls):
@@ -258,63 +309,121 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec, dt :: DatatypeThms,
     // `f1(v) = f2(v)` for each distinct recursive-call argument `v`.
     let call_facts = for List (v in distinct_args):
                        let v :~ Term = v
-                       let tlt_at_cvars = EQT_ELIM(thy, reduce(thy, db, list_mk_comb(rel, [v, c_vars])))
-                       let tlt_at_xv = EQ_MP(SYM(thy, AP_TERM(thy, mk_comb(rel, v), x_eq_c)), tlt_at_cvars)
+                       let tlt_at_c = EQT_ELIM(thy, reduce(thy, db, list_mk_comb(rel, [v, concrete])))
+                       let tlt_at_xv = EQ_MP(SYM(thy, AP_TERM(thy, mk_comb(rel, v), x_eq)), tlt_at_c)
                        MP(thy, SPEC(thy, v, hyp), tlt_at_xv)
-    let l1 = reduce_h(thy, db, def_h, f1, c_vars)
-    let l2 = reduce_h(thy, db, def_h, f2, c_vars)
+    let l1 = reduce_h(thy, db, def_h, f1, concrete)
+    let l2 = reduce_h(thy, db, def_h, f2, concrete)
     let bridge = cong_rewrite(thy, call_facts, rhs_of(l1))
-    let step_c_vars = TRANS(l1, TRANS(bridge, SYM(thy, l2)))
-    let lift1 = AP_TERM(thy, mk_comb(h_const, f1), x_eq_c)
-    let lift2 = AP_TERM(thy, mk_comb(h_const, f2), x_eq_c)
-    TRANS(lift1, TRANS(step_c_vars, SYM(thy, lift2)))
+    let step_at_c = TRANS(l1, TRANS(bridge, SYM(thy, l2)))
+    let lift1 = AP_TERM(thy, mk_comb(h_const, f1), x_eq)
+    let lift2 = AP_TERM(thy, mk_comb(h_const, f2), x_eq)
+    TRANS(lift1, TRANS(step_at_c, SYM(thy, lift2)))
 
-  fun peel(c :: Ctor, target :: Term) :: Thm:
-    match dest_exists(target)
-    | [v, body]:
-        let v :~ FVar = v
-        let gv = genvar(v.ty)
-        let body_gv = inst_fvar([[gv, v]], body)
-        CHOOSE(thy, gv, ASSUME(thy, target), peel(c, body_gv))
-    | #false: per_ctor(c, ASSUME(thy, target))
+  fun walk(t :: DecisionTree, x_eq :: Thm) :: Thm:
+    match t
+    | DTLeaf(ci, bindings): at_leaf(ci, bindings, x_eq)
+    | DTSwitch(path, self_ty, branches):
+        let concrete = rhs_of(x_eq)
+        // Always a variable: a position is split at most once, and the
+        // path's own steps are the splits already taken above it.
+        let v :~ FVar = path_subterm(concrete, path)
+        let dtt :~ DatatypeThms = thms_at(dts, self_ty)
+        fun peel(sub :: DecisionTree, target :: Term) :: Thm:
+          match dest_exists(target)
+          | [w, body]:
+              let w :~ FVar = w
+              let gv = genvar(w.ty)
+              CHOOSE(thy, gv, ASSUME(thy, target),
+                     peel(sub, inst_fvar([[gv, w]], body)))
+          | #false:
+              // `target : v = C(ws)`; rewriting `concrete` with it pushes
+              // the refinement into the running equation for `xv`.
+              let v_eq = ASSUME(thy, target)
+              walk(sub, TRANS(x_eq, cong_rewrite(thy, [v_eq], concrete)))
+        // A `cases` disjunction is left-associated (`datatype.rhm`'s
+        // `build_cases`): `((a0 or a1) or a2) or ... or an`.  Peeling from
+        // the outside in, the left branch is the prefix disjunction
+        // (recurse) and the right branch is one constructor's own case,
+        // walking the branches back to front as `upto` shrinks.  The
+        // tree's branch order is the datatype's own constructor order,
+        // which is the order `cases` disjoins them in.
+        fun combine(upto :: Int, stmt :: Term, th :: Thm) :: Thm:
+          cond
+          | upto == 0: peel((branches[0] :~ DTBranch).tree, stmt)
+          | ~else:
+              let [dl, dr] = (match dest_disj(stmt) | l: l)
+              let left = combine(upto - 1, dl, ASSUME(thy, dl))
+              let right = peel((branches[upto] :~ DTBranch).tree, dr)
+              DISJ_CASES(thy, th, left, right)
+        let disj_at_v = SPEC(thy, v, dtt.cases)
+        combine(branches.length() - 1, concl_of(disj_at_v), disj_at_v)
 
-  // `dt.cases`'s disjunction is left-associated (`datatype.rhm`'s
-  // `build_cases`): `((a0 or a1) or a2) or ... or an`.  Peeling from the
-  // outside in, the left branch is the prefix disjunction (recurse) and
-  // the right branch is exactly one constructor's own case, walking
-  // `dt.spec.ctors` back to front as `upto` shrinks.
-  fun combine_ctors(upto :: Int, stmt :: Term, th :: Thm) :: Thm:
-    cond
-    | upto == 0: peel(dt.spec.ctors[0] :~ Ctor, stmt)
-    | ~else:
-        let [dl, dr] = (match dest_disj(stmt) | l: l)
-        let left = combine_ctors(upto - 1, dl, ASSUME(thy, dl))
-        let right = peel(dt.spec.ctors[upto] :~ Ctor, dr)
-        DISJ_CASES(thy, th, left, right)
-
-  let disj_at_xv = SPEC(thy, xv, dt.cases)
-  let per_x = combine_ctors(dt.spec.ctors.length() - 1, concl_of(disj_at_xv), disj_at_xv)
+  let per_x = walk(tree, REFL(thy, xv))
   GENL(thy, [f1, f2], GEN(thy, xv, DISCH(thy, hyp_term, per_x)))
 
 // -- installation ----------------------------------------------------------
+
+// A leaf's fully refined argument, and which clause it belongs to.
+class LeafShape(clause :: Int, pattern :: Term, bindings :: List.of(DTBinding))
+
+// One shape per leaf of the tree.  For clauses that are one constructor
+// deep this is just each clause's own pattern back again, so the equations
+// come out exactly as they did before the tree existed.  Where a sibling
+// clause forced a split *below* a clause's own variable, that clause
+// contributes one shape per branch of the split -- and that is what its
+// equations have to be: `H` cannot reduce past a test whose scrutinee is
+// still a variable, so `f(Cons(x, ys))` has no closed form while a
+// sibling is asking whether `ys` is `Nil`.
+fun leaf_shapes(dts :: Map.of(Symbol, DatatypeThms), tree :: DecisionTree,
+                root :: Term) :: List.of(LeafShape):
+  fun go(t :: DecisionTree, concrete :: Term) :: List.of(LeafShape):
+    match t
+    | DTLeaf(ci, bindings):
+        // Hand the clause's own names back wherever the clause named the
+        // position; the fresh variables that survive stand for positions
+        // the clause left to a sibling's split and never refers to.
+        let rename = for values(acc :~ List = []) (b in bindings):
+                       let b :~ DTBinding = b
+                       let w = path_subterm(concrete, b.path)
+                       cond
+                       | w is_a FVar: acc ++ [[b.var :~ Term, w :~ FVar]]
+                       | ~else: acc
+        [LeafShape(ci, inst_fvar(rename, concrete), bindings)]
+    | DTSwitch(path, self_ty, branches):
+        let v :~ FVar = path_subterm(concrete, path)
+        let dspec :~ DatatypeSpec = thms_at(dts, self_ty).spec
+        for values(acc :~ List = []) (b in branches):
+          let b :~ DTBranch = b
+          let c :~ Ctor = b.ctor
+          let ws = for List (ty in ctor_field_types(dspec, self_ty, c)):
+                     genvar(ty :~ HType) :~ Term
+          let cterm = list_mk_comb(mk_const(c.name, ctor_type(dspec, c)), ws)
+          acc ++ go(b.tree, inst_fvar([[cterm, v]], concrete))
+  go(tree, root)
 
 // `wr_def` is `build_wfrec_rel(thy)`'s result: `wfrec_rel`'s definition,
 // installed exactly once per theory (a `new_basic_definition`, not
 // reinstallable) and threaded in by the caller so every structurally
 // derived function in a session shares the one copy.
+//
+// `dts` is every declared datatype's theorems, not just the matched type's:
+// a nested pattern splits at a position whose type need not be the argument
+// type, and the congruence proof needs that type's own `cases`.
 fun install_structural_function(thy :: Theory, wr_def :: Thm,
                                 spec :: FunSpec, dt :: DatatypeThms,
+                                dts :: Map.of(Symbol, DatatypeThms),
+                                tree :: DecisionTree,
                                 t_lt_equations :: List.of(Thm),
                                 recinfo :: RecursionInfo)
      :: values(Theory, FunInfo):
-  let who = #'function
   let fty = fun_type(spec)
   let self = self_type(dt.spec)
   let rel = mk_const(subterm_name(dt.spec), mk_fun(self, mk_fun(self, bool)))
   let fn_ph = mk_const(spec.name, fty)
   let f_var = mk_var(#'_stepf, fty)
   let x_var = mk_var(#'_stepx, self)
-  let h_body = build_step_body(spec, dt, fn_ph, f_var, x_var)
+  let h_body = build_step_body(spec, tree, dts, fn_ph, f_var, x_var)
   let h_term = mk_abs(f_var, mk_abs(x_var, h_body))
   // `H` stays behind an opaque constant everywhere `WFREC`'s own machinery
   // touches it -- see `reduce_h`'s comment for why a literal lambda there
@@ -325,15 +434,18 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
   let h_const = mk_const(h_name, hfty)
   let db = base_reduction_db(thy1, dt, t_lt_equations)
   let wf_rel = prove_wf_t_lt(thy1, dt.spec, t_lt_equations, dt.induction)
-  let congr = prove_congruence(thy1, spec, dt, fn_ph, h_const, def_h, rel, db)
+  let congr = prove_congruence(thy1, spec, dt, dts, tree, fn_ph, h_const,
+                               def_h, rel, db)
   let (soln, final_thm) = WFREC(thy1, wr_def, rel, h_const, wf_rel, congr)
   let (thy2, def_fn) = new_basic_definition(thy1, mk_eq(mk_var(spec.name, fty), soln))
-  let eqs = for List (c in dt.spec.ctors):
-              let c :~ Ctor = c
-              let cl = clause_for_ctor(spec, c.name)
-              let field_vars = pattern_vars(who, cl.pats[0])
-              let c_vars = list_mk_comb(mk_const(c.name, ctor_type(dt.spec, c)),
-                                        field_vars.map(fun (v :: FVar): v :~ Term))
+  let eqs = for List (ls in leaf_shapes(dts, tree, mk_var(#'_eqx, self))):
+              let ls :~ LeafShape = ls
+              let c_vars = ls.pattern
+              let cl :~ DefClause = spec.clauses[ls.clause]
+              let rename = for List (b in ls.bindings):
+                             let b :~ DTBinding = b
+                             [path_subterm(c_vars, b.path), b.var]
+              let rhs_here = inst_fvar(rename, cl.rhs)
               let fn_eq_soln_at_c = AP_THM(thy2, def_fn, c_vars)
               let spec_at_c = SPEC(thy2, c_vars, final_thm)
               let reduced = reduce_h(thy2, db, def_h, soln, c_vars)
@@ -342,7 +454,7 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
               // it) at every recursive-call site; fold each one back into
               // `fn` the same structural way `prove_congruence` bridges
               // `f1`/`f2`.
-              let calls = recursive_calls(fn_ph, 1, cl.rhs)
+              let calls = recursive_calls(fn_ph, 1, rhs_here)
               let distinct_args = for values(acc :~ List = []) (call in calls):
                                     let v = (call :~ List)[0]
                                     (if acc.contains(v :~ Term) | acc | acc ++ [v])
@@ -351,5 +463,6 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
                                  AP_THM(thy2, SYM(thy2, def_fn), v)
               let folded = cong_rewrite(thy2, soln_facts, rhs_of(reduced))
               let final_reduced = TRANS(reduced, folded)
-              GENL(thy2, field_vars, TRANS(fn_eq_soln_at_c, TRANS(spec_at_c, final_reduced)))
+              GENL(thy2, free_vars(c_vars),
+                   TRANS(fn_eq_soln_at_c, TRANS(spec_at_c, final_reduced)))
   values(thy2, FunInfo(spec, mk_const(spec.name, fty), eqs, recinfo))

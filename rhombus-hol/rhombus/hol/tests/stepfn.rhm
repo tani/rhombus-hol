@@ -22,6 +22,7 @@ import:
   rhombus/hol/terminate open
   rhombus/hol/wfrec open
   rhombus/hol/stepfn open
+  rhombus/hol/dtree open
 
 def tya = TyVar(#'a)
 def nat_ty = TyApp(#'Nat, [])
@@ -50,7 +51,7 @@ fun setup(base :: Theory, spec :: DatatypeSpec) :: values(Theory, DatatypeThms, 
 // `length`'s result type is `Nat`, so its theory needs both datatypes --
 // `Nat` declared first (plain, no subterm relation needed by `length`
 // itself), then `List` (with its own subterm relation and `wfrec_rel`).
-def (nat_base, _) = datatype_axioms(base_theory(), nat_spec)
+def (nat_base, nat_base_thms) = datatype_axioms(base_theory(), nat_spec)
 
 // -- length(xs :: List(~a)) :: Nat -------------------------------------------
 
@@ -62,6 +63,15 @@ def nil_ctor = mk_const(#'Nil, list_ty)
 def cons_ctor = mk_const(#'Cons, mk_fun(tya, mk_fun(list_ty, list_ty)))
 def zero_ctor = mk_const(#'zero, nat_ty)
 def succ_ctor = mk_const(#'succ, mk_fun(nat_ty, nat_ty))
+
+// What `driver.rhm` threads in: every declared datatype's theorems, and
+// the same map keyed by spec for the pattern compiler.
+def all_thms = {#'Nat: nat_base_thms, #'List: list_thms}
+def all_specs = {#'Nat: nat_spec, #'List: list_spec}
+
+fun tree_of(spec :: FunSpec) :: DecisionTree:
+  function_decision_tree(#'function, spec, all_specs)
+
 def length_spec:
   FunSpec(#'length, [list_ty], nat_ty,
           [DefClause([nil_ctor], zero_ctor),
@@ -73,11 +83,13 @@ def length_recinfo:
                     length_ph)
 
 check length_recinfo.method ~is #'structural
-check can_derive_structurally(length_spec, length_recinfo) ~is #true
+check can_derive_structurally(length_spec, length_recinfo,
+                              tree_of(length_spec), all_thms) ~is #true
 
 def axioms_before_length = axioms_of(thy_l).length()
 def (thy_length, length_info):
   install_structural_function(thy_l, list_wr_def, length_spec, list_thms,
+                              all_thms, tree_of(length_spec),
                               list_tlt_eqs, length_recinfo)
 
 // No `new_axiom` anywhere in the derivation: same axiom count as the
@@ -93,11 +105,58 @@ check:
   (length_info :~ FunInfo).equations.map(fun (t :: Thm): hyps_of(t))
   ~is [[], []]
 
+// -- count_pairs: the recursive call two constructors deep -------------------
+//
+// The case the old shallow-pattern guard sent to `install_function`'s
+// `new_axiom` fallback.  The decision tree splits the tail as well as the
+// argument, so the congruence proof splits twice and the derivation goes
+// through with zero axioms -- and `Cons(x, ys)`'s clause contributes one
+// equation per branch of the split its sibling forced, because `H` cannot
+// reduce past a test whose scrutinee is still a variable.
+
+def y_var = mk_var(#'y, tya)
+def cp_ph = mk_const(#'count_pairs, mk_fun(list_ty, nat_ty))
+def cp_spec:
+  FunSpec(#'count_pairs, [list_ty], nat_ty,
+          [DefClause([nil_ctor], zero_ctor),
+           DefClause([list_mk_comb(cons_ctor, [x_var, nil_ctor])], zero_ctor),
+           DefClause([list_mk_comb(cons_ctor,
+                                   [x_var,
+                                    list_mk_comb(cons_ctor, [y_var, rest_var])])],
+                     mk_comb(succ_ctor, mk_comb(cp_ph, rest_var)))])
+def cp_recinfo:
+  check_termination(#'function, #'count_pairs, 1,
+                    cp_spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
+                    cp_ph)
+
+check cp_recinfo.method ~is #'structural
+check:
+  can_derive_structurally(cp_spec, cp_recinfo, tree_of(cp_spec), all_thms)
+  ~is #true
+
+def axioms_before_cp = axioms_of(thy_l).length()
+def (thy_cp, cp_info):
+  install_structural_function(thy_l, list_wr_def, cp_spec, list_thms,
+                              all_thms, tree_of(cp_spec),
+                              list_tlt_eqs, cp_recinfo)
+
+check axioms_of(thy_cp).length() ~is axioms_before_cp
+check:
+  (cp_info :~ FunInfo).equations.map(fun (t :: Thm): hyps_of(t))
+  ~is [[], [], []]
+check:
+  (cp_info :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
+  ~is ["count_pairs(Nil) === zero",
+       "forall (x :: 'a): count_pairs(Cons(x, Nil)) === zero",
+       "forall (x :: 'a, y :: 'a, z :: List('a)): "
+         ++ "count_pairs(Cons(x, Cons(y, z))) === succ(count_pairs(z))"]
+
 // -- double(n :: Nat) :: Nat --------------------------------------------------
 
 def (thy_n, nat_thms, nat_tlt_eqs, nat_wr_def) = setup(base_theory(), nat_spec)
 def k_var = mk_var(#'k, nat_ty)
 def double_ph = mk_const(#'double, mk_fun(nat_ty, nat_ty))
+def nat_only_thms = {#'Nat: nat_thms}
 def double_spec:
   FunSpec(#'double, [nat_ty], nat_ty,
           [DefClause([zero_ctor], zero_ctor),
@@ -107,13 +166,17 @@ def double_recinfo:
   check_termination(#'function, #'double, 1,
                     double_spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
                     double_ph)
+def double_tree:
+  function_decision_tree(#'function, double_spec, {#'Nat: nat_spec})
 
 check double_recinfo.method ~is #'structural
-check can_derive_structurally(double_spec, double_recinfo) ~is #true
+check can_derive_structurally(double_spec, double_recinfo, double_tree,
+                              nat_only_thms) ~is #true
 
 def axioms_before_double = axioms_of(thy_n).length()
 def (thy_double, double_info):
   install_structural_function(thy_n, nat_wr_def, double_spec, nat_thms,
+                              nat_only_thms, double_tree,
                               nat_tlt_eqs, double_recinfo)
 
 check axioms_of(thy_double).length() ~is axioms_before_double
@@ -127,5 +190,6 @@ check:
 
 check:
   can_derive_structurally(FunSpec(#'plus, [nat_ty, nat_ty], nat_ty, []),
-                          RecursionInfo([0], #'structural, [], []))
+                          RecursionInfo([0], #'structural, [], []),
+                          DTLeaf(0, []), nat_only_thms)
   ~is #false

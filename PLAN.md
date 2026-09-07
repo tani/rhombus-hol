@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1094 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1098 tests passed。
 §10 に外部レビュー対応の状況をまとめてある。
 
 ---
@@ -578,14 +578,27 @@ cases/discriminators/selectors/elim_rules）を、フィールド付き・0 引�
    これまでの呼び出し元のどれもしていなかった）ため、既存の証明には
    影響がない。
 
+**実接続、完了**: `driver.rhm` の `add_type` を、`is_nonrecursive_spec(spec)`
+が真なら `build_nonrecursive_datatype_thms`、そうでなければ（自己再帰
+フィールドを持つ場合）従来通り `datatype_axioms` を呼ぶよう切り替えた。
+`datatype_gen.rhm` はもう並行モジュールではなく、非再帰 `type` 宣言の
+実際の実装になった。既存テストへの影響はゼロ（テストスイート中で唯一の
+非再帰 `type`、`tests/fixtures/theory_after_decl.rhm` の 2 引数なし
+enum `Colour` が対象になるだけで、その他はすべて `Nat`/`List`/`Tree` 等の
+自己再帰型なので従来通り公理的パスを通る）。1094 テストは変わらず全通過。さらに`tests/datatype_gen_wired.rhm`/`fixtures/nonrecursive_field_type_ok.rhm`として専用の回帰テストに昇格（1094 → 1098）
+（速度に有意な変化なし）。加えてフィールド付き非再帰型を**実際の
+`#lang rhombus/hol` ソース**から宣言するスモークテストで、`type` → 導出
+された `injectivity`/`selectors` がルールベースに入り `match` で定義した
+`function` の等式が証明できること、さらにその `function` についての
+`theorem`（`swap`を2回で元に戻る、および導出 injectivity を書き換え
+規則として使う iff）が `auto()` だけで証明できることを確認した
+（`match(p) | MkPair(a,b): MkPair(b,a)` を持つ2値フィールドの `Pair` 型）。
+
 **まだ残っている（複数セッション規模）**:
-1. `datatype.rhm`/`check_spec`/`type` 宣言本体への実接続 --
-   `datatype_gen.rhm` は今も並行モジュールであり、実際の `type` 宣言は
-   相変わらず `datatype_axioms`（`new_axiom` ベース）を使っている。
-   接続には `DatatypeThms` の消費側（`destruct.rhm`/`waterfall.rhm` 等）
-   が導出側の出力をそのまま受け取れることの確認も要る。
-2. 自己再帰フィールドを持つ datatype（フェーズ 2・3、無限公理が必要）。
-`datatype.rhm` 自体はまだ一切変更していない。
+1. 自己再帰フィールドを持つ datatype（フェーズ 2・3、無限公理が必要）。
+`datatype.rhm` 自体（`datatype_axioms` の実装本体）はまだ一切変更していない
+-- 自己再帰型は今も axiom スキーマのままで、これは意図通り（フェーズ 2・3
+待ち）。
 
 **フェーズ 2 (無限公理の新設)**: `trust.scrbl` に「4 本目の公理」として
 明記した上で、`exists f :: ind -> ind. injective(f) and not (surjective(f))`
@@ -635,7 +648,7 @@ solely on the statements in DatatypeThms, never on how they were obtained」
 | # | 項目 | 状況 |
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
-| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **部分的、大きく進展**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（injectivity/distinctness/induction/cases/discriminators/selectors/elim_rules の 7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。`check_spec`/`type` 本体への実接続（並行モジュールのまま）と自己再帰 datatype（フェーズ 2・3）は未着手 -- なお複数セッション規模。 |
+| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype（フェーズ 2・3、無限公理が必要）は未着手 -- なお複数セッション規模。 |
 | 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **部分的**。`wellfounded.rhm` で `WF_INDUCTION` とその逆を導出（§9.1.1）。`WFREC` 本体（一番価値が高く、一番大きい部分）は未着手。`recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済みだが、hyp_insert 等の非公開化は未着手。 |

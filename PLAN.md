@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1098 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1106 tests passed。
 §10 に外部レビュー対応の状況をまとめてある。
 
 ---
@@ -637,6 +637,89 @@ cases は**構成による全射性**から、それぞれ定理として出る�
 solely on the statements in DatatypeThms, never on how they were obtained」
 の通り）ので、この一致確認が正しさの実用的な担保になる。
 
+### 9.4 進捗（本セッション）: 反映される部分集合に `cond` と局所 `let` を追加
+
+レビュー項目 8 の「第一段階」（`if`/`cond`/局所 `def`/`let`/入れ子適用/
+Boolean 演算子）のうち、`cond` と局所 `let` を `elab.rhm` に実装した。
+`function` の本体は「emit verbatim」（実行時コードは字句通りそのまま出力
+する）ので、実行側は元々の Rhombus がすでに `cond`/`let` を持っており
+**無変更**で済む。変更が要るのは論理側（`elab.rhm`）だけ。
+
+```rhombus
+function classify(b1 :: Boolean, b2 :: Boolean, m :: Nat, n :: Nat, k :: Nat) :: Nat:
+  let mid = n            // 局所 `let`: 束縛を評価環境に追加するだけ
+  cond                    // `cond`: 入れ子の `if` へ脱糖
+  | b1: m
+  | b2: mid
+  | ~else: k
+```
+
+`cond`は`mk_cond`への入れ子`if`へ脱糖するだけで、`~else`節を必須にした
+（`match`と違い、任意のBoolean条件についての網羅性解析はできないため）。
+局所`let`は新しいHOL構成子を一切必要としない、純粋にelaborator側の環境
+拡張（`env ++ {name: elaborated_term}`）で、`function`本体を複数の
+`;`区切りグループとして受け取り、先頭が`let name = expr`でなければ
+（既存の）`not_admitted`エラーに落ちる。`match`節の内部でも同様に働く
+（`parse_clause`が同じ`parse_body`を再帰的に呼ぶため）。
+
+**踏んだ罠**: shrubbery の quoted pattern で複数グループ（`;` 区切り）を
+捉える構文は、`$name; ...`という**組**（メタ変数に直接 `;` を後置した
+もの）としてしか書けない。素朴に `$rhs ... $rest ...`（改行のみ）や
+`$rhs ...; $rest ...`（`...`の後に生の`;`）を試すと**サイレントに
+マッチ失敗**し、実行時まで気づけない（`raco make`は通り、`raco test`で
+初めて「本体全体が`not_admitted`に落ちた」という形で表面化する）。正しい
+書き方は:
+```rhombus
+| 'let $(n :: Identifier) = $rhs ...
+   $more; ...':
+    ...
+    parse_body(..., '$more; ...', at)   -- 使う側もテンプレートとして `; ...` を保つ
+```
+`$rhs ...`（`;`なし）は「**このグループ内**の残り全部」を表し、グループ
+境界で自動的に止まる（ドキュメント通り）。`$more; ...`（`;`あり）は
+「**残りのグループ全部**」を表す、別のイディオムであり、両者は混同
+できない。
+
+**回帰テスト**: `tests/decl_cond.rhm`/`fixtures/cond_ok.rhm`（`cond`の
+正常系・`~else`欠落の異常系）、`tests/decl_let.rhm`/`fixtures/let_ok.rhm`
+（局所`let`の正常系、`match`節内部での使用、`let`なしの複数文本体の
+異常系）。1098 → 1106 テスト、既存テストへの回帰なし。
+
+**入れ子パターン（未着手）に進む前に必ず読むこと -- ソウンドネス隣接の罠**:
+
+当初、`match n | succ(m): match m | succ(k): ...`のような**パターン束縛
+変数への再`match`**（真の入れ子）を、単に`parse_body`の列追跡を
+「元の引数だけ」から「現在生きているどの束縛変数でも」へ一般化すれば
+実現できると考え、設計まで進めた。しかし詳細検討で、これは
+**`recdef.rhm`の`cover()`（網羅性検査）が見逃す穴を作る**ことが判明した:
+
+`cover()`は各列について`pattern_ctor(pats[col])`で**その列の最上位の
+コンストラクタ**だけを見て「この列は割れているか」を判定する。もし
+ユーザーが`match a | Cons(h,t): match h | Cons(hh,tt): ... | Nil(): ...`
+と書いたとき、`h`への再`match`は**同じ列**（列aの中身が`Cons(h,t)`から
+`Cons(Cons(hh,tt),t)`へと入れ子で深まる）を更新するだけなので、`cover()`
+視点では列aは相変わらず「全部`Cons`」（トップだけ見ている）にしか
+見えず、**`h`自身の`Cons`/`Nil`分岐が本当に網羅されているかは一度も
+検査されない**。ユーザーが`h=Nil()`のケースを書き忘れても`check_coverage`
+は気づかず、`install_function`は「網羅済み」として通してしまう。
+
+これは`new_axiom`を経由するので直接カーネルの不健全性にはならないが
+（未網羅な入力については単に`f`の値が公理に拘束されないだけ）、
+「論理側と実行側が食い違う」というレビュー自身が懸念していた種類の
+バグそのものである（実行側の`match`は網羅性を要求する通常のRhombusの
+ままなので、未網羅なら**実行時にマッチ失敗で落ちる**が、論理側は
+`install_function`が黙って通す）。
+
+したがって、入れ子パターンに着手する場合は、**まずパース面ではなく
+`cover()`/`check_coverage`自体を、列の最上位だけでなく再帰的に
+（各コンストラクタの各フィールド位置についても、そこがさらに
+コンストラクタパターンで割れているなら再帰的に網羅性を検査するよう）
+一般化することが前提条件**である。これは事実上、決定木コンパイラを
+`recdef.rhm`の中に正しく実装することを意味し、パーサ側の変更だけでは
+安全に実現できない。`terminate.rhm`の`descends_at`も同じ「列は最大1回
+だけ、コンストラクタ1段だけ」という前提に依存しているため、あわせて
+一般化が必要になる可能性が高い。
+
 ---
 
 ## 10. 外部レビュー（2026-09-07）への対応状況
@@ -654,7 +737,7 @@ solely on the statements in DatatypeThms, never on how they were obtained」
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済みだが、hyp_insert 等の非公開化は未着手。 |
 | 6 | 公開 kernel API を HOL Light `fusion.ml` に揃える | 大枠は既に一致（十規則、同じ命名）。未着手部分は上記の printer/tracing 分離のみ。 |
 | 7 | `Surface → CoreExpr → HOL + Rhombus` の共通 IR | **未着手**。`elab.rhm`（HOL 側）と `module_block.rhm`（Rhombus 側）は今も同じソースを別々に読む二経路のまま。 |
-| 8 | `match`/`cond`/局所 `def`/入れ子パターンの追加 | **未着手**。現状は `elab.rhm` の `parse_body`/`parse_clause` が「1 引数につき 1 段」の制約を持ち、`terminate.rhm` の `descends_at` も同じ制約に依存しているため、単なる文法追加ではなく決定木コンパイラ相当の設計変更になる。 |
+| 8 | `match`/`cond`/局所 `def`/入れ子パターンの追加 | **`cond`/局所 `let` は完了、入れ子パターンは未着手**。詳細と、入れ子パターンを安全に進めるための必須の前提条件（下記参照）は §9.4 にまとめた。 |
 | 11 | fertilization / irrelevance 除去 / induction pool | fertilization と irrelevance 除去は**完了**（本セッション以前）。induction pool は**試みて撤回**。下記参照。 |
 | 13 | rule classes | **完了**。`ruledb.rhm` の `RuleDB` が type-prescription 事実を rewrite ルールと独立に分類・保持（`type_facts_of`）、`general.rhm` の `generalize_goal` が一般化時にそれを消費する。 |
 | 14 | conditional rewriting | **完了**。`RewriteRule` が `conds :: List.of(Term)` を持ち、`apply_rule` が（自分自身を除外した db で）各条件を `simp_conv` により再帰的に discharge する。 |

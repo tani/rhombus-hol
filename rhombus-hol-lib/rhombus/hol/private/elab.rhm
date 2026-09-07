@@ -350,6 +350,14 @@ fun parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
       let cs = [c, ...]
       for values(acc :~ List = []) (c in cs):
         acc ++ parse_clause(thy, self_name, self, pvars, pats, col, env, c, at)
+  | 'let $(n :: Identifier) = $rhs ...
+     $more; ...':
+      // A multi-statement body's first statement must be `let name = expr`;
+      // anything else there falls through to the generic `not_admitted`
+      // error below, the same as any other unrecognised body shape.
+      let v = elab_expr(thy, self_name, self, env, '$rhs ...')
+      let env2 = env ++ {Syntax.unwrap(n): v}
+      parse_body(thy, self_name, self, pvars, pats, env2, '$more; ...', at)
   | ~else:
       [DefClause(pats, elab_expr(thy, self_name, self, env, body))]
 
@@ -509,6 +517,7 @@ fun parse_prefix(env :: PEnv, ts :: List.of(Syntax))
               let (inner, rest2) = parse_at(env, rest, prec_not + 1)
               values(mk_neg(inner), rest2)
           | #'if: parse_conditional(env, ts)
+          | #'cond: parse_cond(env, ts)
           | #'forall when env.mode == #'prop: parse_quantifier(env, #'forall, ts)
           | #'exists when env.mode == #'prop: parse_quantifier(env, #'exists, ts)
           | ~else: parse_application(env, t, rest)
@@ -540,6 +549,44 @@ fun parse_conditional(env :: PEnv, ts :: List.of(Syntax))
       values(mk_cond(ct, at, bt), [])
   | ~else:
       syntax_error(env.who, "an `if` needs a condition and two branches", whole)
+
+// `cond | c1: e1 | c2: e2 | ... | ~else: en`.  Desugars to nested `if`;
+// requires an explicit `~else` clause -- this reflected subset does not do
+// exhaustiveness analysis over arbitrary Boolean guards the way `match`
+// does over constructors, so unlike `match` there is no way to check a
+// `cond` without a catch-all is total.
+fun parse_cond(env :: PEnv, ts :: List.of(Syntax))
+     :: values(Term, List.of(Syntax)):
+  let [t, ...] = ts
+  let whole = '$t ...'
+  match whole
+  | 'cond | $clause | ...':
+      values(build_cond(env, [clause, ...], whole), [])
+  | ~else:
+      syntax_error(env.who, "a `cond` needs at least one clause", whole)
+
+fun build_cond(env :: PEnv, cs :: List.of(Syntax), at :: Syntax) :: Term:
+  match cs
+  | []:
+      syntax_error(env.who, "a `cond` needs a final `~else` clause", at)
+  | List.cons(c, rest):
+      match c
+      | '~else: $b; ...':
+          unless rest.length() == 0
+          | syntax_error(env.who, "`~else` must be the last `cond` clause", c)
+          parse_group(env, '$b; ...')
+      | '$g ...: $b; ...':
+          let ct = parse_group(env, '$g ...')
+          unless type_of(ct) == bool
+          | syntax_error(env.who, "a `cond` condition must be a Boolean",
+                         '$g ...')
+          let at_t = parse_group(env, '$b; ...')
+          let bt = build_cond(env, rest, at)
+          unless type_of(at_t) == type_of(bt)
+          | syntax_error(env.who,
+                         "the branches of a `cond` have different types", c)
+          mk_cond(ct, at_t, bt)
+      | ~else: syntax_error(env.who, "malformed `cond` clause", c)
 
 // `forall (x :: T, ...): body`.  The body extends as far right as it can, so a
 // quantifier always swallows the rest of the sequence -- which is why this
@@ -595,8 +642,9 @@ fun not_admitted(env :: PEnv) :: String:
       "a proposition admits variables, named applications, `not`, `and`, "
         ++ "`or`, `===`, `<=>`, `==>`, `forall`, `exists` and `if`"
   | ~else:
-      "this version admits only variables, named applications, `if`, and the "
-        ++ "Boolean operators `!`, `&&`, `||` and `==` in a function body"
+      "this version admits only variables, named applications, `if`, "
+        ++ "`cond`, and the Boolean operators `!`, `&&`, `||` and `==` in "
+        ++ "a function body"
 
 fun is_parens(t :: Syntax) :: Boolean:
   match t

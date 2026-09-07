@@ -182,13 +182,19 @@ Beyond the termination restrictions in @secref("termination"):
   @rhombus(block), not inside a macro expansion. @rhombus(check_property, ~datum)
   is the one exception; see @secref("declarations").}
 
- @item{Patterns may nest to any depth (a constructor pattern's own
-  arguments may themselves be further constructor patterns, and a
-  @rhombus(match) may refine a variable an enclosing pattern already bound),
-  but clauses are unordered and there are no wildcards: a variable pattern
-  may sit beside constructor patterns at the same position, but more than
-  one clause reaching the same fully-refined case is an overlap error, not a
-  fallback.}
+ @item{Patterns may nest to any depth, clauses are ordered (earliest match
+  wins, as in the @rhombus(match) they compile to), and @tt{_} names a
+  position a clause does not use --- inside a pattern or as a whole clause
+  head. A clause that no argument shape can reach is still refused, and so
+  is a matrix that leaves a constructor uncovered: ordering is a way to
+  write a fallback, not a way to skip totality.
+
+  A definition's equations are stated at the shapes each clause wins at,
+  which is what makes an overlapping matrix consistent at all --- postulating
+  a catch-all as written, beside the specific clause that precedes it, would
+  equate their two right-hand sides. Both installers agree on this, so a
+  definition means the same thing whether its equations were derived or
+  postulated.}
 
  @item{An import of a theory must precede the module's own declarations, and
   several must be given in dependency order. Two theories neither of which

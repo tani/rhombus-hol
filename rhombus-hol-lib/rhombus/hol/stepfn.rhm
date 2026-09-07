@@ -165,17 +165,6 @@ fun thms_at(dts :: Map.of(Symbol, DatatypeThms), ty :: HType) :: DatatypeThms:
       error(~who: #'install_structural_function,
             "cannot switch on a position of variable type")
 
-// The concrete subterm a path points at, given the concrete argument terms
-// -- once the scrutinee has been split far enough that every step on the
-// path is a literal constructor application, which the tree guarantees: a
-// path's steps are exactly the splits its own ancestors performed.  This is
-// the proof-side twin of `path_term`: the same position, reached by taking
-// a constructor apart rather than by wrapping a selector around it.
-fun path_subterm(args :: List.of(Term), p :: DTPath) :: Term:
-  for values(cur :~ Term = args[p.arg]) (s in p.steps):
-    let (_, sub) = strip_comb(cur)
-    sub[(s :~ DTStep).field]
-
 // -- the carrier -----------------------------------------------------------
 
 // What `WFREC` recurses over, and how the definition's several arguments
@@ -585,48 +574,6 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec,
 
 // -- installation ----------------------------------------------------------
 
-// A leaf's fully refined argument row, and which clause it belongs to.
-class LeafShape(clause :: Int, patterns :: List.of(Term),
-                bindings :: List.of(DTBinding))
-
-// One shape per leaf of the tree.  For clauses that are one constructor
-// deep this is just each clause's own pattern row back again, so the
-// equations come out exactly as they did before the tree existed.  Where a
-// sibling clause forced a split *below* a clause's own variable, that
-// clause contributes one shape per branch of the split -- and that is what
-// its equations have to be: `H` cannot reduce past a test whose scrutinee
-// is still a variable, so `f(Cons(x, ys))` has no closed form while a
-// sibling is asking whether `ys` is `Nil`.
-fun leaf_shapes(dts :: Map.of(Symbol, DatatypeThms), tree :: DecisionTree,
-                roots :: List.of(Term)) :: List.of(LeafShape):
-  fun go(t :: DecisionTree, concretes :: List.of(Term)) :: List.of(LeafShape):
-    match t
-    | DTLeaf(ci, bindings):
-        // Hand the clause's own names back wherever the clause named the
-        // position; the fresh variables that survive stand for positions
-        // the clause left to a sibling's split and never refers to.
-        let rename = for values(acc :~ List = []) (b in bindings):
-                       let b :~ DTBinding = b
-                       let w = path_subterm(concretes, b.path)
-                       cond
-                       | w is_a FVar: acc ++ [[b.var :~ Term, w :~ FVar]]
-                       | ~else: acc
-        [LeafShape(ci, concretes.map(fun (c :: Term): inst_fvar(rename, c)),
-                   bindings)]
-    | DTSwitch(path, self_ty, branches):
-        let v :~ FVar = path_subterm(concretes, path)
-        let dspec :~ DatatypeSpec = thms_at(dts, self_ty).spec
-        for values(acc :~ List = []) (b in branches):
-          let b :~ DTBranch = b
-          let c :~ Ctor = b.ctor
-          let ws = for List (ty in ctor_field_types(dspec, self_ty, c)):
-                     genvar(ty :~ HType) :~ Term
-          let cterm = list_mk_comb(mk_const(c.name, ctor_type(dspec, c)), ws)
-          let refined = for List (t2 in concretes):
-                          inst_fvar([[cterm, v]], t2 :~ Term)
-          acc ++ go(b.tree, refined)
-  go(tree, roots)
-
 // `|- f a0 ... an-1 = soln(<carrier>)`, peeling the *definition's own*
 // binders and no further.
 //
@@ -644,12 +591,6 @@ fun apply_fn_def(thy :: Theory, def_fn :: Thm, arity :: Int,
   cond
   | arity == 1: AP_THM(thy, def_fn, args[0])
   | ~else: unfold_def(thy, def_fn, args)
-
-// The free variables of a whole pattern row, left to right, no duplicates.
-fun row_vars(pats :: List.of(Term)) :: List.of(FVar):
-  for values(acc :~ List = []) (p in pats):
-    for values(a :~ List = acc) (v in free_vars(p)):
-      (if a.contains(v :~ FVar) | a | a ++ [v])
 
 // `wr_def` is `build_wfrec_rel(thy)`'s result: `wfrec_rel`'s definition,
 // installed exactly once per theory (a `new_basic_definition`, not
@@ -718,7 +659,9 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
   let (thy2, def_fn) = new_basic_definition(thy1, mk_eq(mk_var(spec.name, fty), fn_rhs))
   let roots = for List (ty in spec.arg_types, i in List.iota(arity)):
                 mk_var(Symbol.from_string("_eqx" ++ to_string(i)), ty :~ HType) :~ Term
-  let eqs = for List (ls in leaf_shapes(dts, tree, roots)):
+  let dt_specs = for values(m :~ Map = {}) ((n, th) in dts):
+                   m ++ {n: (th :~ DatatypeThms).spec}
+  let eqs = for List (ls in leaf_shapes(dt_specs, tree, roots)):
               let ls :~ LeafShape = ls
               let pats :~ List = ls.patterns
               let carrier_at = carrier.build(pats)

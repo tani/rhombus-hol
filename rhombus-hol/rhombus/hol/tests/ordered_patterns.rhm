@@ -1,0 +1,92 @@
+#lang rhombus/static
+
+// Wildcards and ordered clauses (PLAN.md section 9.11).
+//
+// Clauses are ordered -- where several match, the earliest wins, exactly as
+// in the `match` the same source compiles to -- and `_` names a position the
+// clause does not use.  Both are checked here at the surface, plus the two
+// things that are still errors: a clause no argument shape can reach, and a
+// matrix that is not exhaustive.
+
+import:
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  rhombus/hol/recdef open
+  rhombus/hol/driver open
+  "fixtures/ordered_patterns_ok.rhm" as f
+  "fixtures/ordered_patterns_ok.rhm"!hol_theory as m
+  "fixtures/ordered_patterns_types.rhm"!hol_theory as types_only
+
+def st :~ HolState = m.theory
+
+// -- the executable half agrees with the logical one -------------------------
+
+check f.is_singleton(f.Nil()) ~is f.zero()
+check f.is_singleton(f.Cons(f.zero(), f.Nil())) ~is f.succ(f.zero())
+check f.is_singleton(f.Cons(f.zero(), f.Cons(f.zero(), f.Nil()))) ~is f.zero()
+check f.nul(f.zero()) ~is f.succ(f.zero())
+check f.nul(f.succ(f.zero())) ~is f.zero()
+check f.first_two(f.Nil()) ~is f.zero()
+check f.first_two(f.Cons(f.zero(), f.Nil())) ~is f.zero()
+check:
+  f.first_two(f.Cons(f.zero(), f.Cons(f.zero(), f.Nil())))
+  ~is f.succ(f.succ(f.zero()))
+
+// -- the logical half ---------------------------------------------------------
+
+fun eqs_of(n :: Symbol) :~ List:
+  (st.funs[n] :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
+
+// `_` binds nothing: the tail of the two-or-more case never appears on the
+// right, and the equation quantifies over it like any other position.
+check:
+  eqs_of(#'is_singleton)
+  ~is ["is_singleton(Nil) === zero",
+       "forall (x :: 'a): is_singleton(Cons(x, Nil)) === succ(zero)",
+       "forall (x :: 'a, y :: 'a, z :: List('a)): "
+         ++ "is_singleton(Cons(x, Cons(y, z))) === zero"]
+
+// The catch-all is *not* postulated as written -- `forall n. nul(n) === zero`
+// beside `nul(zero) === succ(zero)` would prove `zero === succ(zero)`.  It
+// holds exactly where it wins, which is `succ`.
+check:
+  eqs_of(#'nul)
+  ~is ["nul(zero) === succ(zero)",
+       "forall (x :: Nat): nul(succ(x)) === zero"]
+
+// A catch-all left holding two shapes gets one equation for each.
+//
+// `first_two` is declared at `List(Nat)`, a *concrete* instance of a
+// polymorphic datatype, so it falls to `install_function`'s postulating
+// seam rather than the `WFREC` derivation (which builds at the datatype's
+// schematic self type).  That is the point of testing it here: the
+// postulating path resolves ordered clauses the same way, per leaf, or the
+// catch-all's axiom would contradict the specific clause before it.
+check:
+  eqs_of(#'first_two)
+  ~is ["first_two(Nil) === zero",
+       "forall (x :: Nat): first_two(Cons(x, Nil)) === zero",
+       "forall (x :: Nat, y :: Nat, z :: List(Nat)): "
+         ++ "first_two(Cons(x, Cons(y, z))) === succ(succ(zero))"]
+
+// `is_singleton` and `nul` cost no axiom at all -- they derive through
+// `WFREC` -- so the module's theory is the two datatypes' axioms plus
+// exactly `first_two`'s three postulated leaves, and nothing else.
+check:
+  axioms_of(st.thy).length()
+  ~is axioms_of((types_only.theory :~ HolState).thy).length() + 3
+
+// -- what is still refused ----------------------------------------------------
+
+fun load(mp :: ModulePath):
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }: Evaluator.instantiate(mp)
+
+// A clause after a catch-all can never fire.
+check:
+  load(ModulePath'lib("rhombus/hol/tests/fixtures/ordered_unreachable.rhm")')
+  ~throws "this clause can never match"
+// Ordering does not excuse a gap: nothing covers `Cons`.
+check:
+  load(ModulePath'lib("rhombus/hol/tests/fixtures/ordered_partial.rhm")')
+  ~throws "not exhaustive"

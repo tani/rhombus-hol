@@ -294,12 +294,31 @@ fun ctor_pattern(thy :: Theory, cname :: Symbol, vids :: List.of(Syntax),
   values(list_mk_comb(mk_const(cname, type_subst(tyin, gty)), subpats),
          bound)
 
-// One constructor-argument position: a bare identifier (a fresh variable),
-// or `SubC(sv, ...)` -- a further nested pattern, recursing into
-// `ctor_pattern` at `SubC`'s own matched type.
+// One constructor-argument position: `_` (a position the clause does not
+// name), a bare identifier (a fresh variable), or `SubC(sv, ...)` -- a
+// further nested pattern, recursing into `ctor_pattern` at `SubC`'s own
+// matched type.
+//
+// `_` is a fresh variable under a name nothing can write, so every layer
+// below -- coverage, termination, the step-function compiler -- goes on
+// seeing exactly the variable pattern it already understands.  Two `_`s in
+// one row must be distinct variables (patterns bind distinct names), which
+// `genvar` gives for free.
+def wildcard_counter :: Box = Box(0)
+
+// A pattern variable under a name no source text can write, so nothing can
+// refer to what `_` matched.
+fun fresh_wildcard(ty :: HType) :: FVar:
+  let n = wildcard_counter.value
+  wildcard_counter.value := n + 1
+  mk_var(Symbol.from_string("_ %" ++ to_string(n)), ty)
+
 fun parse_sub_pattern(thy :: Theory, v :: Syntax,
                       ty :: HType) :: List:
   match v
+  | '_':
+      let fv = fresh_wildcard(ty)
+      [fv :~ Term, [fv]]
   | '$(n :: Identifier)($sv, ...)':
       let (pat, bound) = ctor_pattern(thy, Syntax.unwrap(n), [sv, ...], ty, v)
       [pat, bound]
@@ -439,16 +458,25 @@ fun refine_pats(pats :: List.of(Term), v :: FVar,
         | ~else: t
   pats.map(walk)
 
+// One `match` clause.  `_: body` is the catch-all: it refines nothing, so
+// the row keeps `v` as it stood and the decision tree treats it exactly as
+// the variable pattern it is -- earlier clauses win wherever they match,
+// and this one covers whatever is left.  That is the same reading the
+// emitted Rhombus `match` gives the same text.
 fun parse_clause(thy :: Theory, self_name :: Symbol, self :: Term,
                  pats :: List.of(Term), v :: FVar,
                  env0 :: Map.of(Symbol, Term), c :: Syntax,
                  at :: Syntax) :: List.of(DefClause):
-  let (cname, vids, body) = clause_parts(c)
-  let (pat, bound) = ctor_pattern(thy, cname, vids, v.ty, c)
-  let env = for values(m :~ Map = env0) (bv in bound):
-              m ++ {(bv :~ FVar).name: bv :~ Term}
-  let pats2 = refine_pats(pats, v, pat)
-  parse_body(thy, self_name, self, pats2, env, body, at)
+  match c
+  | '_: $body; ...':
+      parse_body(thy, self_name, self, pats, env0, '$body; ...', at)
+  | ~else:
+      let (cname, vids, body) = clause_parts(c)
+      let (pat, bound) = ctor_pattern(thy, cname, vids, v.ty, c)
+      let env = for values(m :~ Map = env0) (bv in bound):
+                  m ++ {(bv :~ FVar).name: bv :~ Term}
+      let pats2 = refine_pats(pats, v, pat)
+      parse_body(thy, self_name, self, pats2, env, body, at)
 
 fun clause_parts(c :: Syntax) :: values(Symbol, List.of(Syntax), Syntax):
   match c

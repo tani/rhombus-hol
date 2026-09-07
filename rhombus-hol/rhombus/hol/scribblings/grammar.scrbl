@@ -74,10 +74,20 @@ more than one argument.
         | succ(q): ack(p, ack(succ(p), q))
 )
 
-The matrix must cover the product of the matched columns and must not overlap.
-There are no wildcard clauses and no clause ordering: every clause in a matched
-column names a constructor, and each constructor of that type appears exactly
-once.
+The matrix must cover the product of the matched columns. It may overlap:
+clauses are @emph{ordered}, and where several match the earliest wins ---
+the same reading the @rhombus(match) this compiles to gives the same text.
+What is refused is a clause no argument shape can reach, since that is a
+mistake however the clauses are arranged.
+
+@tt{_} stands for a position the clause does not name. It may appear inside
+a pattern (@tt{Cons(x, _)}) or as a whole clause head (@tt{| _: ...}), which
+is how a catch-all after a specific case is written.
+
+A definition's equations are stated at the shapes each clause actually
+@emph{wins} at, not at its pattern as written --- @tt{| zero(): a | _: b}
+gives @tt{f(zero) === a} and @tt{f(succ(k)) === b}, never the inconsistent
+pair @tt{f(zero) === a} and @tt{forall n: f(n) === b}.
 
 A pattern may nest to any depth: @tt{Cons(x, Cons(y, rest))} is a pattern,
 written directly in a clause head, or built the same way one level at a time

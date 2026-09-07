@@ -31,6 +31,7 @@ import:
   rhombus/hol/term open
   rhombus/hol/kernel open
   rhombus/hol/printer open
+  "conv.rhm" open
   "datatype.rhm" open
 
 export:
@@ -46,6 +47,11 @@ export:
   tree_leaves
   ctor_field_types
   pattern_head
+  ctor_type_at
+  path_subterm
+  LeafShape
+  leaf_shapes
+  row_vars
 
 // -- paths ----------------------------------------------------------------
 
@@ -120,6 +126,14 @@ fun ctor_field_types(dt :: DatatypeSpec, self_ty :: HType,
                 m ++ {p :~ Symbol: a :~ HType}
   c.fields.map(fun (f :: Field): type_subst(theta, f.ty))
 
+// `c`'s own type at the concrete type arguments `self_ty` carries, rather
+// than at the datatype's schematic parameters: a definition may match on a
+// *instance* of a polymorphic datatype (`List(Nat)`), and a constructor
+// term built at the schematic type would not typecheck against it.
+fun ctor_type_at(dt :: DatatypeSpec, self_ty :: HType, c :: Ctor) :: HType:
+  for values(t :~ HType = self_ty) (f in ctor_field_types(dt, self_ty, c).reverse()):
+    mk_fun(f :~ HType, t)
+
 // The constructor a pattern matches, or `#false` for a variable pattern.
 fun pattern_head(p :: Term) :: maybe(Symbol):
   match p
@@ -131,10 +145,18 @@ fun pattern_head(p :: Term) :: maybe(Symbol):
       | ~else: #false
 
 // Compile a pattern matrix into a decision tree, raising on a matrix that
-// is not exhaustive, that overlaps, or that matches on something which is
-// not a declared datatype.  `clause_pats[i]` is clause `i`'s pattern row,
-// one pattern per argument.  `show_clause(i)` renders clause `i` for the
-// overlap message; the caller owns clause syntax, this module does not.
+// is not exhaustive, that has a clause no argument shape can ever reach, or
+// that matches on something which is not a declared datatype.
+// `clause_pats[i]` is clause `i`'s pattern row, one pattern per argument.
+// `show_clause(i)` renders clause `i` for the unreachable-clause message;
+// the caller owns clause syntax, this module does not.
+//
+// Clauses are *ordered*: where several match, the earliest wins, the same
+// way the executable `match` the same source compiles to resolves them.
+// Overlap is therefore not an error -- it is how a catch-all after a
+// specific case is written.  What is still an error is a clause that wins
+// nowhere, since that is a mistake in every case and silently dropping it
+// would leave a definition whose text says more than its equations do.
 fun compile_patterns(who :: Symbol, name :: Symbol,
                      clause_pats :: List.of(List.of(Term)),
                      dts :: Map.of(Symbol, DatatypeSpec),
@@ -145,7 +167,18 @@ fun compile_patterns(who :: Symbol, name :: Symbol,
                    for List (k in List.iota((pats :~ List).length())): DTPath(k, []),
                    [],
                    i)
-  compile_rows(who, name, dts, rows, clause_pats, show_clause)
+  let tree = compile_rows(who, name, dts, rows, clause_pats, show_clause)
+  let winners = for values(acc :~ Set = Set()) (l in tree_leaves(tree)):
+                  acc ++ {(l :~ DTLeaf).clause}
+  for (i in List.iota(clause_pats.length())):
+    unless i in winners
+    | error(~who: who, "this clause can never match",
+            error.val(~label: "name", name),
+            error.val(~label: "clause", show_clause(i)),
+            error.val(~label: "hint",
+                      "an earlier clause already covers every argument "
+                        ++ "shape this one does"))
+  tree
 
 fun compile_rows(who :: Symbol, name :: Symbol,
                  dts :: Map.of(Symbol, DatatypeSpec),
@@ -155,13 +188,14 @@ fun compile_rows(who :: Symbol, name :: Symbol,
   match find_splittable(rows)
   | #false:
       // Nothing left to split on: every row is a variable at every
-      // position.  More than one such row is an unconditional overlap --
-      // nothing left distinguishes them, including a row that started out
-      // a bare catch-all variable beside a more specific one.
-      unless rows.length() == 1
-      | error(~who: who, "two clauses match the same arguments",
-              error.val(~label: "name", name),
-              error.val(~label: "clause", show_clause((rows[0] :~ Row).clause)))
+      // position, so every row here matches.  The first one wins.
+      //
+      // Rows are built in clause order and every filter below preserves
+      // it, so `rows[0]` is the earliest clause that reaches this leaf --
+      // which is exactly what the executable `match` does with the same
+      // clauses.  A clause that wins at no leaf at all is reported by
+      // `compile_patterns`, not here: unreachable is a mistake, but being
+      // shadowed at *some* argument shape is the point of ordering.
       let r :~ Row = rows[0]
       DTLeaf(r.clause, r.bound ++ leaf_bindings(who, r, clause_pats))
   | idx:
@@ -290,3 +324,72 @@ fun tree_leaves(t :: DecisionTree) :: List.of(DTLeaf):
   | DTSwitch(_, _, branches):
       for values(acc :~ List = []) (b in branches):
         acc ++ tree_leaves((b :~ DTBranch).tree)
+
+// -- the shapes the equations are stated at ---------------------------------
+
+// The concrete subterm a path points at, given the concrete argument terms
+// -- once each has been refined far enough that every step on the path is a
+// literal constructor application, which the tree guarantees: a path's
+// steps are exactly the splits its own ancestors performed.  The
+// counterpart of `path_term`: the same position, reached by taking a
+// constructor apart rather than by wrapping a selector around it.
+fun path_subterm(args :: List.of(Term), p :: DTPath) :: Term:
+  for values(cur :~ Term = args[p.arg]) (s in p.steps):
+    let (_, sub) = strip_comb(cur)
+    sub[(s :~ DTStep).field]
+
+// A leaf's fully refined argument row, and which clause it belongs to.
+class LeafShape(clause :: Int, patterns :: List.of(Term),
+                bindings :: List.of(DTBinding))
+
+// One shape per leaf.  These, not the clauses as written, are what a
+// definition's equations are stated at -- and both installers agree on
+// that, so a definition means the same thing whichever way it was
+// installed.
+//
+// Where each clause reaches exactly one leaf this is the clause rows back
+// again, which is the common case.  It differs in two ways, both forced:
+//
+//   * a sibling clause splitting *below* a clause's own variable gives that
+//     clause one shape per branch of the split -- there is no closed form
+//     for `f(Cons(x, ys))` while a sibling is asking whether `ys` is `Nil`;
+//   * a clause shadowed by an earlier one at some shapes keeps only the
+//     shapes where it actually wins, which is what makes ordered clauses
+//     consistent at all: postulating `f(x) = e` beside an earlier
+//     `f(Nil) = e'` would say `e = e'`.
+fun leaf_shapes(dts :: Map.of(Symbol, DatatypeSpec), tree :: DecisionTree,
+                roots :: List.of(Term)) :: List.of(LeafShape):
+  fun go(t :: DecisionTree, concretes :: List.of(Term)) :: List.of(LeafShape):
+    match t
+    | DTLeaf(ci, bindings):
+        // Hand the clause's own names back wherever the clause named the
+        // position; the fresh variables that survive stand for positions
+        // the clause left to a sibling's split and never refers to.
+        let rename = for values(acc :~ List = []) (b in bindings):
+                       let b :~ DTBinding = b
+                       let w = path_subterm(concretes, b.path)
+                       cond
+                       | w is_a FVar: acc ++ [[b.var :~ Term, w :~ FVar]]
+                       | ~else: acc
+        [LeafShape(ci, concretes.map(fun (c :: Term): inst_fvar(rename, c)),
+                   bindings)]
+    | DTSwitch(path, self_ty, branches):
+        let v :~ FVar = path_subterm(concretes, path)
+        let dspec :~ DatatypeSpec = datatype_at_type(#'function, #'function,
+                                                     dts, self_ty)
+        for values(acc :~ List = []) (b in branches):
+          let b :~ DTBranch = b
+          let c :~ Ctor = b.ctor
+          let ws = for List (ty in ctor_field_types(dspec, self_ty, c)):
+                     genvar(ty :~ HType) :~ Term
+          let cterm = list_mk_comb(mk_const(c.name, ctor_type_at(dspec, self_ty, c)), ws)
+          let refined = for List (t2 in concretes):
+                          inst_fvar([[cterm, v]], t2 :~ Term)
+          acc ++ go(b.tree, refined)
+  go(tree, roots)
+
+// The free variables of a whole pattern row, left to right, no duplicates.
+fun row_vars(pats :: List.of(Term)) :: List.of(FVar):
+  for values(acc :~ List = []) (p in pats):
+    for values(a :~ List = acc) (v in free_vars(p)):
+      (if a.contains(v :~ FVar) | a | a ++ [v])

@@ -514,13 +514,49 @@ specialize した箇所まで簡約してしまい、後続で組み立てる「
 
 **残作業**: `WFREC` は具体的な `Rwf`/`H`/`WF(Rwf)`/congruence を受け取る
 一般定理として完成したが、`recdef.rhm` はまだこれを呼んでいない
-（`new_axiom` は今もそのまま）。配線には、節形式の `FunSpec` から
-単一の step 関数 `H`（パターンマッチを `match`/`cases` へコンパイル
-したもの）と、`check_termination` が既に持っている情報から測度関係
-`Rwf` の整礎性証明（`WF_FROM_INDUCTION` 経由、datatype の `subterm` 関係
-か辞書式複合）、および congruence side-condition（各節の再帰呼び出しが
-構文的に「小さくなる引数」だけを渡していることの確認）を構成する必要が
-あり、これ自体が独立したセッション規模の配線作業になる。
+（`new_axiom` は今もそのまま）。配線を検討し、以下の 5 点が独立した
+作業項目になることを確認した（`install_function`/`terminate.rhm` を
+読んで具体的に特定 --- 前回セッションの見立てより詳細化）:
+
+1. **`terminate.rhm` が実際の discharge 証明を捨てている。**
+   `check_measure` は `measure.discharge(obligation)` の戻り値を
+   「`#false` = 成功／それ以外 = 失敗メッセージ」という**真偽値的な
+   プロトコル**としてしか使っておらず、成功時に得られたはずの
+   `T_lt(measure(args), measure(pats))` の実際の `Thm` を握り潰している。
+   `WFREC` の congruence 証明にはこの `Thm` 自体（各再帰呼び出し位置で
+   引数が `Rwf`-下位であることの本物の証拠）が要るので、まず
+   `check_termination`/`check_measure`/`Measure.discharge` のシグネチャを
+   「成功／失敗メッセージ」から「`Thm` を返す／エラー」へ変更する
+   API 変更が前提になる。これは prover 側（waterfall 経由の discharge
+   コールバック）にも影響する。
+2. **datatype 帰納法 → 汎用 WF スキームの橋渡し補題がまだ無い**（§9.1.1
+   項目 1）。構造的降下の場合、`Rwf` は datatype の `T_lt`（`subterm.rhm`、
+   これ自体まだ `install_function`/`new_axiom` 経由で導出されている）だが、
+   `WF(T_lt)` を`DatatypeThms.induction`（コンストラクタ場合分け形）から
+   一般形の帰納法スキームへ変換してから `prove_wf_from_induction` に渡す
+   変換がまだ無い。
+3. **測度ベースの場合は追加の一般補題が要る。** `Rwf(x,y) := T_lt(measure(x),
+   measure(y))` という「測度を通した引き戻し」が整礎であることは、
+   `WF(T_lt) ==> WF(\x y. T_lt(m(x),m(y)))` という一般的な pullback 補題
+   （one-time、`wellfounded.rhm` に足す）が要る。
+4. **多引数関数のタプル化。** `WFREC` は単一の型 `A` 上の `Rwf :: A->A->bool`
+   を取るので、`FunSpec.arg_types` が複数ある場合は `algebra.rhm` の
+   `prod` で引数列を 1 つの型へエンコードする必要がある（構造的降下の
+   辞書式順序 `RecursionInfo.positions` も、この符号化上の関係として
+   再構成する必要がある）。
+5. **`H`（step 関数）をクロージャ節から実際に組み立てる。** 現在の
+   `DefClause` リストはパターンマッチの節でしかなく、`WFREC` が要求する
+   「`f :: A->B` を引数に取り `H(f, x) :: B` を返す」という単一の項は
+   まだどこにも構築されていない。`cover()` が持つ決定木を、各再帰呼び出し
+   位置で元の `fn` の代わりに引数 `f` を挿入する形でコンパイルし直す
+   必要がある（`check_coverage` 自体は §9.4 の入れ子パターン課題と同じ
+   決定木コンパイラ基盤を必要とする可能性が高い）。
+
+以上 5 点はいずれも独立に大きく、特に項目 1（API 変更）と項目 5（決定木
+コンパイラ）は §9.4 で入れ子パターンについて記録したのと同種の
+ソウンドネス隣接の設計判断を伴う。したがって配線自体は本セッションでは
+着手せず、`WFREC` という**汎用定理の完成**をこのセッションの成果として
+確定し、配線は独立したセッション規模の作業として次に持ち越す。
 
 ### 9.2 `datatype`: 段階的に閉じる
 

@@ -26,6 +26,7 @@ import:
   rhombus/hol/names open
   rhombus/hol/kernel open
   rhombus/hol/printer open
+  "search_limits.rhm" open
 
 export:
   lhs_of
@@ -61,6 +62,7 @@ export:
   DEPTH_CONV
   REDEPTH_CONV
   TOP_DEPTH_CONV
+  BOUNDED_TOP_DEPTH_CONV
   TOP_SWEEP_CONV
   // applying a conversion to a theorem
   CONV_RULE
@@ -276,6 +278,65 @@ fun TOP_DEPTH_CONV(c):
     THENC(REPEATC(c),
           TRY_CONV(THENC(CHANGED_CONV(SUB_CONV(TOP_DEPTH_CONV(c))),
                          TRY_CONV(THENC(c, TOP_DEPTH_CONV(c))))))(thy, t)
+
+// `TOP_DEPTH_CONV` with a step budget and cycle detection.
+//
+// The unbounded version loops forever on a rule that neither terminates nor
+// fails, and simplification runs while a module compiles, so the loop hangs
+// the build instead of failing it.
+//
+// Cycle detection is *per position*, not global.  A term can legitimately be
+// rewritten twice in one traversal -- `pair(f(x), f(x))` rewrites `f(x)` on
+// each side -- so "seen this term before" is only evidence of a loop when it
+// recurs on the chain of rewrites at one position.
+//
+// Both limits raise.  Returning `#false` would be indistinguishable from "no
+// rule applies", which is an ordinary answer, and the proof would carry on
+// past a search that had actually been abandoned.
+// `TOP_DEPTH_CONV` with a shared step budget and cycle detection.
+//
+// The unbounded version loops forever on a rule that neither terminates nor
+// fails, and simplification runs while a module compiles, so the loop hangs
+// the build instead of failing it.
+//
+// This is `TOP_DEPTH_CONV`'s own structure with `REPEATC` replaced, rather
+// than a second traversal written from scratch: the congruence idiom needs a
+// `REFL` for every unchanged subterm, and duplicating that is how the two
+// copies drift apart.
+//
+// Cycle detection sits exactly at the repetition point, which is the only
+// place a position rewrites to something it has already been.  It is per
+// position, not global: `pair(f(x), f(x))` legitimately rewrites `f(x)` twice
+// in one traversal, and a global "seen this term" check would reject it.
+fun REPEATC_BOUNDED(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    recur loop (acc :: maybe(Thm) = #false, t = t, seen :~ List = []):
+      spend_search_step(#'simplify)
+      when seen.contains(t)
+      | error(~who: #'simplify, "rewrite cycle detected",
+              error.val(~label: "term", show(t)))
+      match c(thy, t)
+      | #false: (if acc | acc | REFL(thy, t))
+      | th :~ Thm:
+          let next = rhs_of(th)
+          let acc2 = (if acc | TRANS(acc :~ Thm, th) | th)
+          (if next == t | acc2 | loop(acc2, next, List.cons(t, seen)))
+
+// Entering the scope here, on every application rather than once per proof,
+// is deliberate: no caller can then reach rewriting without a bound, and
+// there is no scope-opening obligation to document or forget.  It is not a
+// fresh allowance -- `with_search_limits` joins the budget already running,
+// so a search nested inside a proof still spends the proof's steps.  Measured
+// against opening it only in `prove`: 65.7s vs 63.5s on the full suite.
+fun BOUNDED_TOP_DEPTH_CONV(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    with_search_limits(fun (): bounded_top_depth(c)(thy, t))
+
+fun bounded_top_depth(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    THENC(REPEATC_BOUNDED(c),
+          TRY_CONV(THENC(CHANGED_CONV(SUB_CONV(bounded_top_depth(c))),
+                         TRY_CONV(THENC(c, bounded_top_depth(c))))))(thy, t)
 
 fun TOP_SWEEP_CONV(c):
   fun (thy :: Theory, t :: Term) :: maybe(Thm):

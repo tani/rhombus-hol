@@ -1,0 +1,66 @@
+#lang rhombus/static
+
+// Resource accounting for proof search (PLAN.md section 9.28).
+//
+// Rewriting had no bound at all: a rule that neither terminates nor fails --
+// one that is not permutative and whose right-hand side is not smaller --
+// sent `simp_conv` into a loop, and since simplification runs while a module
+// compiles, that hung `raco make` rather than failing it.
+//
+// Two properties matter and are easy to get wrong separately.
+//
+// The budget is *shared*.  A nested search -- discharging a rewrite rule's
+// side condition, which itself rewrites -- draws on the caller's remaining
+// steps rather than starting a fresh allowance, or conditional rewriting
+// would be an unbounded loop with a bound written next to it.
+//
+// Exhaustion is an *error*, never `#false`.  A conversion returning `#false`
+// means "this rule does not apply here", which is an ordinary and expected
+// answer; if running out of resources said the same thing, a proof would
+// silently continue down a path whose search had been abandoned, and the
+// failure would surface somewhere else entirely.
+//
+// The `Box` here is not state that any theorem depends on.  It counts steps
+// within one call and is discarded; theorems remain what the kernel's rules
+// made them.
+
+export:
+  SearchLimits
+  with_search_limits
+  spend_search_step
+
+// One number, not two.  A depth limit would be redundant: every level of a
+// bounded traversal spends a step before it recurs, so the step count bounds
+// depth as well as total work, and a second knob would only be a second thing
+// to tune wrongly.
+class SearchLimits(steps :: NonnegInt = 200000)
+
+class SearchBudget(limits :: SearchLimits, remaining :: Box)
+
+Parameter.def current_search_budget :: maybe(SearchBudget) = #false
+
+// Establish a budget, or join the one already running.  Joining is the whole
+// point: the outermost search owns the allowance and everything under it
+// spends from the same pot.
+fun with_search_limits(thunk :: Function.of_arity(0),
+                       ~limits: limits :: SearchLimits = SearchLimits()):
+  match current_search_budget()
+  | #false:
+      parameterize { current_search_budget: SearchBudget(limits,
+                                                         Box(limits.steps)) }:
+        thunk()
+  | _: thunk()
+
+fun spend_search_step(who :: Symbol) :: Void:
+  match current_search_budget()
+  | #false:
+      // Not a resource failure: a caller reached search without opening a
+      // scope, which is a wiring mistake and should read as one.
+      error(~who: who, "internal error: proof search ran outside a resource scope")
+  | budget :: SearchBudget:
+      let left :: NonnegInt = budget.remaining.value
+      when left == 0
+      | error(~who: who, "proof-search step limit exceeded",
+              error.val(~label: "limit", budget.limits.steps))
+      budget.remaining.value := left - 1
+

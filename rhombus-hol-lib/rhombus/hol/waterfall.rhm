@@ -28,6 +28,7 @@ import:
   rhombus/hol/printer open
   "bool.rhm" open
   "conv.rhm" open
+  "search_limits.rhm" open
   "drule.rhm" open
   "datatype.rhm" open
   "recdef.rhm" open
@@ -46,6 +47,7 @@ export:
   mk_context
   prove_goal
   prove
+  SearchLimits
   residue_message
   strip_forall_all
 
@@ -146,9 +148,20 @@ fun stage(do_not :: Set.of(Symbol), name :: Symbol,
 
 // `hint` forces the first induction variable; deeper inductions always choose
 // for themselves.
+// The other public way into the waterfall, so it opens a resource scope too
+// -- and joins one already open, so calling it from inside `prove` still
+// spends from the same budget rather than starting over.
 fun prove_goal(ctx :: Context, g :: Goal,
                ~induct: hint :: maybe(FVar) = #false,
-               ~do_not: do_not :: Set.of(Symbol) = Set()) :: ProofNode:
+               ~do_not: do_not :: Set.of(Symbol) = Set(),
+               ~limits: limits :: SearchLimits = SearchLimits()) :: ProofNode:
+  with_search_limits(fun ():
+                       prove_goal_impl(ctx, g, ~induct: hint, ~do_not: do_not),
+                     ~limits: limits)
+
+fun prove_goal_impl(ctx :: Context, g :: Goal,
+                    ~induct: hint :: maybe(FVar) = #false,
+                    ~do_not: do_not :: Set.of(Symbol) = Set()) :: ProofNode:
   check_do_not(do_not)
   // `inducted` is the goals already inducted on along this branch, oldest
   // first: its length is the branch limit above, and membership is the
@@ -156,6 +169,10 @@ fun prove_goal(ctx :: Context, g :: Goal,
   // to the same subgoals and get stuck the same way, so trying again only
   // costs time.
   fun go(g :: Goal, inducted :: List, hint :: maybe(FVar)) :: ProofNode:
+    // One step per waterfall visit, on the same budget the simplifier spends
+    // from.  Each individual simplification can terminate while the stages
+    // cycle between themselves; the shared total is what stops that.
+    spend_search_step(#'waterfall)
     fun descend(st :: Step, next :: List) :: ProofNode:
       Derived(st, st.subgoals.map(fun (s :: Goal): go(s, next, #false)))
     // `#false` first in every one of these: `:~` is an assertion, not a
@@ -198,11 +215,28 @@ fun prove_goal(ctx :: Context, g :: Goal,
 // variable names a residue message shows the user -- therefore has to be told
 // what the source called them.  Without `names` the prover invents its own,
 // which is fine for a machine-generated goal and unhelpful for a human one.
+// The public entry point opens the resource scope; `prove_impl` is the body.
+// Everything the proof does -- simplification, discharging a rewrite rule's
+// side conditions, the waterfall's own stages -- spends from this one budget,
+// so no nested search can escape the limit by starting a fresh one.
 fun prove(ctx :: Context, statement :: Term,
           ~names: names :: List.of(Symbol) = [],
           ~induct: hint :: maybe(Symbol) = #false,
           ~do_not: do_not :: Set.of(Symbol) = Set(),
-          ~cases: cases :: List.of(Term) = [])
+          ~cases: cases :: List.of(Term) = [],
+          ~limits: limits :: SearchLimits = SearchLimits())
+     :: values(maybe(Thm), ProofNode):
+  with_search_limits(fun ():
+                       prove_impl(ctx, statement, ~names: names,
+                                  ~induct: hint, ~do_not: do_not,
+                                  ~cases: cases),
+                     ~limits: limits)
+
+fun prove_impl(ctx :: Context, statement :: Term,
+               ~names: names :: List.of(Symbol) = [],
+               ~induct: hint :: maybe(Symbol) = #false,
+               ~do_not: do_not :: Set.of(Symbol) = Set(),
+               ~cases: cases :: List.of(Term) = [])
      :: values(maybe(Thm), ProofNode):
   let thy = ctx.thy
   let (vars, matrix) = strip_forall_all(statement, names)

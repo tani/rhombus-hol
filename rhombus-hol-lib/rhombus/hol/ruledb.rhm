@@ -353,11 +353,22 @@ fun discharge_all(thy :: Theory, db :: RuleDB, conds :: List.of(Term))
       | ~else: #false
 
 // Try every enabled rule whose head matches, newest first.
+// Each *candidate* costs a step, not just each successful rewrite: a large
+// database tried repeatedly is work whether or not anything fires, and
+// discharging a rule's side conditions recurses back through here.
 fun db_conv(db :: RuleDB):
   fun (thy :: Theory, t :: Term) :: maybe(Thm):
     match head_symbol(t)
     | #false: #false
     | h:
+        // Nothing is charged here.  This loop is finite -- one pass over the
+        // rules stored under `h` -- so it is not what needs bounding, and
+        // charging for it would make a bare `db_conv` call, which never
+        // rewrites more than once, demand a resource scope.  The unbounded
+        // thing is repetition, and that is charged where it happens, in
+        // `REPEATC_BOUNDED`.  A side condition discharged from `apply_rule`
+        // rewrites through `simp_conv`, so it joins and spends this proof's
+        // budget rather than opening a fresh one.
         recur loop (rs :~ List = rules_of(db, h)):
           match rs
           | []: #false
@@ -377,5 +388,8 @@ fun refl_conv(thy :: Theory, t :: Term) :: maybe(Thm):
 // The simplifier's conversion: rewrite top-down, revisiting after each change,
 // so that a rule which collapses a whole subterm saves the work of
 // normalising it first.
+// Bounded, and cycle-detecting per rewrite position.  The budget is shared
+// with any search already running, so a side condition discharged from inside
+// a rewrite cannot buy itself a fresh allowance.
 fun simp_conv(db :: RuleDB):
-  TOP_DEPTH_CONV(ORELSEC(db_conv(db), refl_conv))
+  BOUNDED_TOP_DEPTH_CONV(ORELSEC(db_conv(db), refl_conv))

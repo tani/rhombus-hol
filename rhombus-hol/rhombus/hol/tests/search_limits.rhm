@@ -1,0 +1,87 @@
+#lang rhombus/static
+
+// Proof search is bounded, and running out is an error (PLAN.md 9.28).
+//
+// Rewriting had no limit at all.  A rule that neither terminates nor fails --
+// not permutative, right-hand side not smaller -- looped, and since
+// simplification runs while a module compiles, the loop hung `raco make`
+// rather than failing it.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  rhombus/hol/bool open
+  rhombus/hol/conv open
+  rhombus/hol/ruledb open
+  rhombus/hol/search_limits open
+
+
+def nt = mk_tyapp(#'n, [])
+def thy:
+  let t0 = new_type(base_theory(), #'n, 0)
+  let t1 = new_constant(t0, #'a, nt)
+  let t2 = new_constant(t1, #'b, nt)
+  new_constant(t2, #'h, mk_fun(nt, nt))
+def a = mk_const(#'a, nt)
+def b = mk_const(#'b, nt)
+def h = mk_const(#'h, mk_fun(nt, nt))
+
+fun outcome(db :: RuleDB, t :: Term) :: String:
+  try:
+    block:
+      match simp_conv(db)(thy, t)
+      | #false: "no rewrite"
+      | th :: Thm: "ok: " ++ show(concl_of(th))
+    ~catch e :: Exn.Fail: "raised: " ++ e.message.split("\n")[0]
+
+// -- a cycle is reported as a cycle, at the position it occurs ---------------
+//
+// Detection is per rewrite position, not global: the same term may legitimately
+// be rewritten at two places in one traversal.
+check:
+  let db = add_thm(thy, add_thm(thy, empty_db, #'ab, ASSUME(thy, mk_eq(a, b))),
+                   #'ba, ASSUME(thy, mk_eq(b, a)))
+  outcome(db, a)
+  ~is "raised: simplify: rewrite cycle detected"
+
+// -- a rule that grows its argument forever stops too ------------------------
+check:
+  let db = add_thm(thy, empty_db, #'grow,
+                   ASSUME(thy, mk_eq(a, mk_comb(h, a))))
+  outcome(db, a).substring(0, 6)
+  ~is "raised"
+
+// -- and an ordinary rewrite is unaffected -----------------------------------
+check:
+  let db = add_thm(thy, empty_db, #'ab, ASSUME(thy, mk_eq(a, b)))
+  outcome(db, mk_comb(h, a))
+  ~is "ok: h(a) === h(b)"
+
+// -- the budget is shared with nested searches -------------------------------
+//
+// This is the property that makes the bound mean anything: discharging a
+// rewrite rule's side condition rewrites in turn, and if that inner search
+// opened a fresh allowance the limit would bound nothing.
+def counted = Box(0)
+
+fun drain():
+  // spend one here, then a nested scope spends until exhaustion; the nested
+  // scope must inherit what is left rather than start over
+  spend_search_step(#'test)
+  try:
+    block:
+      with_search_limits(fun ():
+                           recur loop (n = 0):
+                             spend_search_step(#'test)
+                             counted.value := n + 1
+                             loop(n + 1))
+      "no error"
+    ~catch e :: Exn.Fail: "raised"
+
+check:
+  with_search_limits(drain, ~limits: SearchLimits(10))
+  ~is "raised"
+// nine left after the outer one, so the inner loop got nine and no more
+check counted.value ~is 9

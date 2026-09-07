@@ -92,8 +92,17 @@ is a standard consistent basis.
 
 Every logical connective is @emph{defined} on top of the kernel's equality, not
 postulated. So are the conditional rules @tt{if true | a | b === a} and its
-dual, the thirteen propositional simplification rules, and the subterm relation
-of every datatype.
+dual, and the thirteen propositional simplification rules.
+
+A datatype's subterm relation @tt{T_lt} is a mixed case worth stating
+exactly, because so much rests on it. That @tt{T_lt} is @emph{well founded}
+is derived, from the datatype's own induction principle
+(@tt{prove_wf_t_lt}); it is what every derived recursive function recurses
+in. But @tt{T_lt}'s own defining equations are installed the ordinary way,
+through the same seam any other function goes through, and that seam
+postulates. So "the recursion is derived" is true and "@tt{T_lt} is derived"
+is not: the relation is described by axioms, and only its well-foundedness
+is proved.
 
 @section{What is postulated beyond that}
 
@@ -115,15 +124,26 @@ load-bearing one in the system --- but it now guards recursive declarations
 only. Deriving those too needs an infinite type to bootstrap from, which is
 the axiom of infinity this version deliberately does not have.
 
-@bold{Function definitions.} A single-argument @rhombus(function, ~datum) with
-no @rhombus(~measure) whose termination check finds structural descent into a
-declared datatype is @emph{derived}: its clausal equations are proved from a
-well-founded recursion theorem (itself derived, not postulated) applied to a
-step function compiled from the clauses' decision tree. Patterns may nest to
-any depth. Everything else --- several arguments, an explicit
-@rhombus(~measure), an argument type no datatype declared --- still postulates
-one equation per clause, a conservative extension exactly when the definition
-is exhaustive, non-overlapping and terminating, which is what
+@bold{Function definitions.} A @rhombus(function, ~datum) is @emph{derived}
+whenever the recursion it performs has a well-founded relation this version
+can build: its clausal equations are proved from a well-founded recursion
+theorem (itself derived, not postulated) applied to a step function compiled
+from the clauses' decision tree. That covers structural descent in any one
+argument column, several arguments (derived over their tuple, with the
+relation pulled back along the projection onto the descending column), no
+recursion at all, patterns nested to any depth, and an explicit
+@rhombus(~measure) --- whose order is the measure's own result type's
+subterm relation pulled back along the measure, and whose descent facts are
+the obligations the termination check discharged, used under the branch
+conditions they were discharged under.
+
+What still postulates one equation per shape: a definition whose descent is
+genuinely lexicographic, where no single column shrinks at every call
+(Ackermann's function), since that needs a lexicographic product rather than
+a pullback along one projection; and one whose relevant type --- the
+descending argument's, or the measure's result --- is not a datatype this
+module declared. Those are a conservative extension exactly when the
+definition is exhaustive and terminating, which is what
 @secref("termination") is about.
 
 Both fallbacks sit behind a narrow seam, and the derivations that have

@@ -1,0 +1,62 @@
+#lang rhombus/static
+
+// `~measure` recursion is derived through `WFREC`, not postulated (PLAN.md
+// section 9.10, review worklist item 4).
+//
+// A measure has no descending argument column -- that is why it needs a
+// measure -- so the order is the measure's own result type's subterm
+// relation, pulled back along the measure.  The descent facts are the
+// obligations `check_termination` discharged, and they hold only under the
+// branch conditions that reach each call, which is what the congruence
+// bridge carries.
+
+import:
+  rhombus/hol/kernel open
+  rhombus/hol/recdef open
+  rhombus/hol/printer open
+  rhombus/hol/driver open
+  "fixtures/measure_ok.rhm" as f
+  "fixtures/measure_ok.rhm"!hol_theory as m
+  "fixtures/measure_types_only.rhm"!hol_theory as types_only
+
+def st :~ HolState = m.theory
+
+fun info_of(n :: Symbol) :~ FunInfo: st.funs[n]
+fun eqs_of(n :: Symbol) :~ List:
+  info_of(n).equations.map(fun (t :: Thm): show(concl_of(t)))
+
+// Both measured definitions really did take the measure route.
+check info_of(#'count).recinfo.method ~is #'measure
+check info_of(#'down).recinfo.method ~is #'measure
+
+// `count`: the recursive argument is a *computed* term, `pred_of(succ(k))`,
+// which is not a constructor subterm of `succ(k)`.  Unguarded, so the
+// obligation has no antecedents.
+check:
+  eqs_of(#'count)
+  ~is ["count(zero) === zero",
+       "forall (x :: Nat): count(succ(x)) === succ(count(pred_of(succ(x))))"]
+
+// `down`: guarded.  The measure decreases only down the branch `nul(n)`
+// rejects, so the obligation is stated under `not nul(n)` and the
+// congruence proof has to be standing under that condition when it uses it.
+check:
+  eqs_of(#'down)
+  ~is ["forall (x :: Nat): down(x) === if nul(x) | zero | succ(down(pred_of(x)))"]
+
+// Every equation is a closed theorem, derived rather than assumed.
+check info_of(#'count).equations.map(fun (t :: Thm): hyps_of(t)) ~is [[], []]
+check info_of(#'down).equations.map(fun (t :: Thm): hyps_of(t)) ~is [[]]
+
+// And none of the four functions in the fixture costs an axiom: the
+// module's theory has exactly what declaring `Nat` alone brings, which is
+// the datatype's own schema plus `Nat_lt`'s equations (`add_subterm_relation`
+// still postulates those -- see trust.scrbl).
+check:
+  axioms_of(st.thy).length()
+  ~is axioms_of((types_only.theory :~ HolState).thy).length()
+
+// The executable half computes, as always.
+check f.count(f.two) ~is f.two
+check f.down(f.two) ~is f.two
+check f.down(f.zero()) ~is f.zero()

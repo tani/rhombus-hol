@@ -194,13 +194,18 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   let arity = spec.arg_types.length()
   let derivable:
     cond
-    | arity == 0 || spec.measure: #false
+    | arity == 0: #false
     | ~else:
         let fn_ph = mk_const(spec.name, fun_type(spec))
+        let measure:
+          match spec.measure
+          | #false: #false
+          | m: Measure(m :~ Term, discharger(st))
         let recinfo = try:
                         check_termination(#'function, spec.name, arity,
                                           spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
-                                          fn_ph)
+                                          fn_ph,
+                                          ~measure: measure)
                         ~catch e :: Exn.Fail: hol_reraise(e, at)
         // The same tree `check_function_spec` just checked, kept this time:
         // `stepfn.rhm` builds `H` and its congruence proof from it, so the
@@ -216,13 +221,20 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
             // type; what is left is that the type's subterm relation was
             // actually installed, which it is for every datatype `add_type`
             // declared.
-            let k = (match descent_column(spec, fn_ph,
-                                          ~usable: fun (ty :: HType):
-                                                     match ty
-                                                     | TyApp(n, _): st.dts.get(n, #false) != #false
-                                                     | ~else: #false)
-                     | c: c :~ Int)
-            let tyname = (match spec.arg_types[k] | TyApp(n, _): n)
+            // The order's own type: the measure's result type for a
+            // `~measure`, the descending column's otherwise.
+            let order_ty:
+              cond
+              | spec.measure: measure_result_type(spec)
+              | ~else:
+                  let k = (match descent_column(spec, fn_ph,
+                                                ~usable: fun (ty :: HType):
+                                                           match ty
+                                                           | TyApp(n, _): st.dts.get(n, #false) != #false
+                                                           | ~else: #false)
+                           | c: c :~ Int)
+                  spec.arg_types[k]
+            let tyname = (match order_ty | TyApp(n, _): n)
             match st.dts.get(tyname, #false)
             | #false: #false
             | thms:

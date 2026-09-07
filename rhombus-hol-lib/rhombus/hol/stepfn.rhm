@@ -61,6 +61,7 @@ import:
 export:
   can_derive_structurally
   descent_column
+  measure_result_type
   install_structural_function
 
 fun self_type(spec :: DatatypeSpec) :: HType:
@@ -125,12 +126,32 @@ fun can_derive_structurally(spec :: FunSpec, recinfo :: RecursionInfo,
                             tree :: DecisionTree,
                             dts :: Map.of(Symbol, DatatypeThms)) :: Boolean:
   cond
-  | recinfo.method != #'structural && recinfo.method != #'none: #false
   | spec.arg_types.length() == 0: #false
-  | descent_column(spec, mk_const(spec.name, fun_type(spec)),
-                   ~usable: fun (ty :: HType): schematic_datatype(dts, ty))
-      == #false: #false
-  | ~else: switch_types_ok(tree, dts)
+  | !switch_types_ok(tree, dts): #false
+  | recinfo.method == #'measure:
+      // A measure needs no descending column: the order is its own result
+      // type's subterm relation, pulled back along it.  That type has to be
+      // a declared datatype at its schematic self type, for the same reason
+      // a switched position does.
+      schematic_datatype(dts, measure_result_type(spec))
+  | recinfo.method != #'structural && recinfo.method != #'none: #false
+  | ~else:
+      descent_column(spec, mk_const(spec.name, fun_type(spec)),
+                     ~usable: fun (ty :: HType): schematic_datatype(dts, ty))
+        != #false
+
+// What `~measure(e)` lands in: `e`'s type with the parameters peeled off.
+// `check_termination` has already refused a measure that does not take every
+// parameter, so the peel is total by the time this runs.
+fun measure_result_type(spec :: FunSpec) :: HType:
+  recur loop (ty :~ HType = type_of(spec.measure :~ Term),
+              k = spec.arg_types.length()):
+    cond
+    | k == 0: ty
+    | is_fun(ty):
+        let (_, r) = dest_fun(ty)
+        loop(r, k - 1)
+    | ~else: ty
 
 fun schematic_datatype(dts :: Map.of(Symbol, DatatypeThms),
                        ty :: HType) :: Boolean:
@@ -277,6 +298,72 @@ fun tuple_carrier(thy :: Theory, name :: Symbol, prod_thms :: ProdThms,
     name_relation(thy1, name, dom, prove_wf_pullback(thy1, wf_t_lt, proj))
   values(thy2, Carrier(dom, rel, wf, arg_terms, build, split, open_c),
          [rel_eq, proj_eq, prod_thms.fst_pair, prod_thms.snd_pair])
+
+// A `~measure`: the order is the measure type's own subterm relation
+// pulled back along the measure, so `R(p, q)` holds exactly when `p`
+// measures below `q`.  Structurally the same move as the tupled case --
+// the same pullback, along a different function -- which is what the
+// shape/order split is for.
+//
+// `spec.measure` abstracts over the *parameters*; the pullback needs a
+// function of the domain, so it is applied to the arguments the shape
+// reads out of a domain value and beta-reduced back to a body.
+fun measure_carrier(thy :: Theory, name :: Symbol, prod_thms :: ProdThms,
+                    tys :: List.of(HType), measure :: Term,
+                    wf_m_lt :: Thm) :: values(Theory, Carrier, List.of(Thm)):
+  let (dom, arg_terms, build, split, open_c) = shape_of(prod_thms, tys)
+  let pv = mk_var(#'_msp, dom)
+  let m_body = measure_at(measure, arg_terms(pv :~ Term))
+  let (thy1, mfn, m_eq):
+    name_function(thy, Symbol.from_string(to_string(name) ++ "_measure"), dom,
+                  m_body, pv)
+  let (thy2, rel, wf, rel_eq):
+    name_relation(thy1, name, dom, prove_wf_pullback(thy1, wf_m_lt, mfn))
+  let projs :~ List = (if tys.length() == 1
+                       | []
+                       | [prod_thms.fst_pair, prod_thms.snd_pair])
+  values(thy2, Carrier(dom, rel, wf, arg_terms, build, split, open_c),
+         [rel_eq, m_eq] ++ projs)
+
+// One discharged measure obligation, tied back to the call it came from.
+//
+// `check_termination` builds its sites clause by clause and, within a
+// clause, in `call_sites_in` order, then discharges one obligation per site
+// in that same order -- so zipping the same walk against
+// `RecursionInfo.proofs` recovers the pairing.  `recdef.rhm`'s
+// `recursive_calls` walks identically (a `cond` as condition, then, else;
+// anything else operator then operand), which is why the two agree.
+//
+// `binders` is the obligation's own universal prefix, recomputed rather
+// than read off the theorem: it is `free_vars(guarded)` by construction,
+// and stripping the quantifiers instead would lose the clause's variable
+// names, which are exactly what the instantiation needs to key on.
+class MSite(clause :: Int, conds :: List.of(Term), args :: List.of(Term),
+            binders :: List.of(FVar), proof :: Thm)
+
+fun measure_sites(spec :: FunSpec, fn_ph :: Term, m_rel :: Term,
+                  recinfo :: RecursionInfo) :: List.of(MSite):
+  let arity = spec.arg_types.length()
+  let m :~ Term = spec.measure :~ Term
+  let n_clauses = spec.clauses.length()
+  let raw:
+    for values(acc :~ List = []) (cl in spec.clauses, i in List.iota(n_clauses)):
+      let cl :~ DefClause = cl
+      let sites = call_sites_in(#'function, spec.name, fn_ph, arity, cl.rhs)
+      acc ++ sites.map(fun (site :: List): [i, site[0], site[1]])
+  for List (r in raw, p in recinfo.decrease_proofs):
+    let [i, conds, args] = r :~ List
+    let cl :~ DefClause = spec.clauses[i :~ Int]
+    let core = list_mk_comb(m_rel, [measure_at(m, args :~ List),
+                                    measure_at(m, cl.pats)])
+    let guarded = for values(acc :~ Term = core) (c in (conds :~ List).reverse()):
+                    mk_imp(c :~ Term, acc)
+    let binders = free_vars(guarded)
+    unless concl_of(p :~ Thm) == mk_forall_list(binders, guarded)
+    | error(~who: #'install_structural_function,
+            "cannot line a measure obligation up with its call site",
+            error.val(~label: "name", spec.name))
+    MSite(i :~ Int, conds :~ List, args :~ List, binders, p :~ Thm)
 
 // The components of a literal tuple, as they stand.
 fun split_tuple(tys :: List.of(HType), c :: Term) :: List.of(Term):
@@ -559,6 +646,47 @@ fun call_carriers(fn_ph :: Term, arity :: Int, build,
     let v :~ Term = build(call :~ List)
     (if acc.contains(v) | acc | acc ++ [v])
 
+// The obligation for the call this clause makes at carrier `v`, if there is
+// one: the site must belong to this clause and its arguments, instantiated
+// at the leaf's concrete terms, must build exactly `v`.
+fun find_msite(msites :: List.of(MSite), ci :: Int, rename :: List,
+               build, v :: Term) :: maybe(MSite):
+  recur loop (ss :~ List = msites):
+    match ss
+    | []: #false
+    | List.cons(s0, rest):
+        let s :~ MSite = s0
+        cond
+        | s.clause != ci: loop(rest)
+        | ~else:
+            let inst = s.args.map(fun (a :: Term): inst_fvar(rename, a))
+            (if (build(inst) :~ Term) == v | s | loop(rest))
+
+// `|- c`, where `c` is a branch condition the obligation was discharged
+// under and `in_scope` are the conditions `bridge_calls` is standing under.
+//
+// The two need not be the same term: the obligation states its conditions
+// over the clause's own variables *before* anything is simplified, while
+// the conditions in scope come out of the reduced body.  Reducing the
+// obligation's with the same database is what lines them up; a definition
+// whose guard normalises to something the body no longer mentions is
+// refused rather than guessed at.
+fun condition_in_scope(thy :: Theory, db :: RuleDB, c :: Term,
+                       in_scope :: List.of(Term)) :: Thm:
+  cond
+  | in_scope.contains(c): ASSUME(thy, c)
+  | ~else:
+      let red = reduce(thy, db, c)
+      cond
+      | in_scope.contains(rhs_of(red)):
+          EQ_MP(SYM(thy, red), ASSUME(thy, rhs_of(red)))
+      | ~else:
+          error(~who: #'install_structural_function,
+                "a measure obligation's guard is not available where the "
+                  ++ "recursive call is",
+                error.val(~label: "guard", show(c)),
+                error.val(~label: "reduced", show(rhs_of(red))))
+
 // -- the congruence hypothesis --------------------------------------------
 
 // `|- !f1 f2 x. (!z. R(z,x) ==> f1(z)=f2(z)) ==> H(f1)(x) = H(f2)(x)`.
@@ -590,7 +718,8 @@ fun call_carriers(fn_ph :: Term, arity :: Int, build,
 fun prove_congruence(thy :: Theory, spec :: FunSpec,
                      dts :: Map.of(Symbol, DatatypeThms), tree :: DecisionTree,
                      carrier :: Carrier, fn_ph :: Term, h_const :: Term,
-                     def_h :: Thm, db :: RuleDB) :: Thm:
+                     def_h :: Thm, db :: RuleDB,
+                     msites :: List.of(MSite)) :: Thm:
   let arity = spec.arg_types.length()
   let dom = carrier.dom
   let rel = carrier.rel
@@ -616,24 +745,63 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec,
                    let b :~ DTBinding = b
                    [path_subterm(cargs, b.path), b.var]
     let rhs_here = inst_fvar(rename, cl.rhs)
-    // Structural descent holds unconditionally, so the facts can all be
-    // built up front and the branch conditions `bridge_calls` offers are
-    // not consulted.  Descending into `cond` still goes through
-    // `COND_CONG` rather than plain congruence, which costs a case split
-    // per conditional and is what a `~measure` definition would need to
-    // reach its obligation (PLAN.md section 9.10).
-    let call_facts = for List (v in call_carriers(fn_ph, arity, carrier.build,
-                                                  rhs_here)):
-                       let v :~ Term = v
-                       let below = EQT_ELIM(thy, reduce(thy, db,
-                                                        list_mk_comb(rel, [v, concrete])))
-                       let below_xv = EQ_MP(SYM(thy, AP_TERM(thy, mk_comb(rel, v), x_eq)),
-                                            below)
-                       MP(thy, SPEC(thy, v, hyp), below_xv)
+    // `|- f1(v) = f2(v)` for a recursive call at carrier `v`, from the
+    // congruence hypothesis and a proof that `v` is below the scrutinee.
+    fun at_call(v :: Term, below :: Thm) :: Thm:
+      let below_xv = EQ_MP(SYM(thy, AP_TERM(thy, mk_comb(rel, v), x_eq)), below)
+      MP(thy, SPEC(thy, v, hyp), below_xv)
+
+    // Structural descent holds unconditionally -- `T_lt` relates a field to
+    // its constructor whatever branch you are in -- so the facts are all
+    // built up front and the branch conditions `bridge_calls` offers go
+    // unread.
+    let structural_facts:
+      cond
+      | spec.measure: []
+      | ~else:
+          for List (v in call_carriers(fn_ph, arity, carrier.build, rhs_here)):
+            let v :~ Term = v
+            at_call(v, EQT_ELIM(thy, reduce(thy, db,
+                                            list_mk_comb(rel, [v, concrete]))))
+
+    // A measure decreases only down the branch its guard admits, so the
+    // fact is built where the call is, out of the obligation
+    // `check_termination` already discharged, with the conditions in scope
+    // supplying its antecedents.
+    fun measure_fact(t :: Term, in_scope :: List.of(Term)) :: maybe(Thm):
+      match t
+      | Comb(g, v) when g == (f1 :~ Term):
+          match find_msite(msites, ci, rename, carrier.build, v)
+          | #false: #false
+          | s0:
+              let s :~ MSite = s0
+              let terms = s.binders.map(fun (b :: FVar): inst_fvar(rename, b :~ Term))
+              let discharged:
+                for values(acc :~ Thm = SPECL(thy, terms, s.proof)) (c in s.conds):
+                  MP(thy, acc, condition_in_scope(thy, db, inst_fvar(rename, c :~ Term),
+                                                  in_scope))
+              // Both sides normalised by the same database: the obligation
+              // is stated before simplification, the reduced body carries
+              // its conditions and subterms after it.
+              let want = list_mk_comb(rel, [v, concrete])
+              let want_red = reduce(thy, db, want)
+              let have_red = reduce(thy, db, concl_of(discharged))
+              unless rhs_of(want_red) == rhs_of(have_red)
+              | error(~who: #'install_structural_function,
+                      "a measure obligation does not reduce to the recursion's "
+                        ++ "own relation",
+                      error.val(~label: "name", spec.name),
+                      error.val(~label: "wanted", show(rhs_of(want_red))),
+                      error.val(~label: "obligation", show(rhs_of(have_red))))
+              at_call(v, EQ_MP(SYM(thy, want_red), EQ_MP(have_red, discharged)))
+      | ~else: #false
+
+    let fact = (if spec.measure
+                | measure_fact
+                | fun (t :: Term, _conds): find_fact(structural_facts, t))
     let l1 = reduce_h(thy, db, def_h, f1, concrete)
     let l2 = reduce_h(thy, db, def_h, f2, concrete)
-    let bridge = bridge_calls(thy, rhs_of(l1), [],
-                              fun (t :: Term, _conds): find_fact(call_facts, t))
+    let bridge = bridge_calls(thy, rhs_of(l1), [], fact)
     let step_at_c = TRANS(l1, TRANS(bridge, SYM(thy, l2)))
     let lift1 = AP_TERM(thy, mk_comb(h_const, f1), x_eq)
     let lift2 = AP_TERM(thy, mk_comb(h_const, f2), x_eq)
@@ -723,20 +891,31 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
   let fty = fun_type(spec)
   let fn_ph = mk_const(spec.name, fty)
   let self = self_type(dt.spec)
-  let k = (match descent_column(spec, fn_ph,
-                                ~usable: fun (ty :: HType): schematic_datatype(dts, ty))
-           | #false:
-               error(~who: #'install_structural_function,
-                     "no argument column descends at every recursive call",
-                     error.val(~label: "name", spec.name))
-           | c: c :~ Int)
+  // `dt` is the datatype the recursion's order comes from: the descending
+  // argument's for structural descent, the *measure's result type* for a
+  // `~measure`.  Either way its `T_lt` is what gets pulled back.
   let t_lt = mk_const(subterm_name(dt.spec), mk_fun(self, mk_fun(self, bool)))
   let wf_t_lt = prove_wf_t_lt(thy, dt.spec, t_lt_equations, dt.induction)
-  let (thy0, carrier, proj_rules):
+  let (thy0, carrier :~ Carrier, proj_rules :~ List):
     cond
-    | arity == 1: values(thy, direct_carrier(self, t_lt, wf_t_lt), [])
+    | spec.measure:
+        measure_carrier(thy, spec.name, alg.prod, spec.arg_types,
+                        spec.measure :~ Term, wf_t_lt)
     | ~else:
-        tuple_carrier(thy, spec.name, alg.prod, spec.arg_types, k, wf_t_lt)
+        let k = (match descent_column(spec, fn_ph,
+                                      ~usable: fun (ty :: HType): schematic_datatype(dts, ty))
+                 | #false:
+                     error(~who: #'install_structural_function,
+                           "no argument column descends at every recursive call",
+                           error.val(~label: "name", spec.name))
+                 | c: c :~ Int)
+        cond
+        | arity == 1: values(thy, direct_carrier(self, t_lt, wf_t_lt), [])
+        | ~else:
+            tuple_carrier(thy, spec.name, alg.prod, spec.arg_types, k, wf_t_lt)
+  let msites = (if spec.measure
+                | measure_sites(spec, fn_ph, t_lt, recinfo)
+                | [])
 
   let hdom = mk_fun(carrier.dom, spec.ret_type)
   let f_var = mk_var(#'_stepf, hdom)
@@ -752,7 +931,7 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
   let h_const = mk_const(h_name, hfty)
   let db = base_reduction_db(thy1, dts, t_lt_equations, proj_rules)
   let congr = prove_congruence(thy1, spec, dts, tree, carrier, fn_ph, h_const,
-                               def_h, db)
+                               def_h, db, msites)
   let (soln, final_thm) = WFREC(thy1, wr_def, carrier.rel, h_const, carrier.wf, congr)
   // One argument: the function *is* the solution.  Several: it is the
   // solution composed with tupling, so that `f a b` and `soln(PAIR(a,b))`

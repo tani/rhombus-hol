@@ -1422,80 +1422,56 @@ datatype 上の関数（`T_lt` が無いので整礎関係が無い）である�
 （`tests/ruledb.rhm`）は `disable` 後に `Q(g)` が一般化に付かなくなり、
 `enable` で戻ることを確認する。
 
-### 9.10 `~measure` の `WFREC` 化 -- 前提部品は実装済み、残り 3 点
+### 9.10 進捗（本セッション）: `~measure` も `WFREC` 導出へ載せた
 
-carrier 抽象ができたので、関係は「`M_lt` を measure に沿って引き戻したもの」
-= `prove_wf_pullback(thy, wf_M_lt, measure_const)` でよく、§9.8 のタプル
-射影とまったく同じ機構である（measure も定数にする必要があるのも同じ）。
-**残る本質的な障害は 1 つだけ**: 降下事実の出どころが違う。
+carrier の「形」と「順序」の分離（§9.8 続き）が効いて、measure の場合は
+順序だけを差し替えればよい: `prove_wf_pullback(thy, WF(M_lt),
+<f>_measure)`。射影に沿った引き戻し（§9.8）とまったく同じ機構で、
+引き戻す関数が違うだけである。`<f>_measure` も定数にする必要があるのは
+同じ理由（`prove_wf_pullback` は `f(x)` の形の項を組み立てて照合する）。
 
-構造的降下では `reduce(rel(call, concrete))` が `T_lt` の方程式で `true`
-まで計算できる。measure では `RecursionInfo.proofs` が呼び出し地点ごとに
-`|- !vars. conds ==> M_lt(measure(args), measure(pats))` を持っており、
-`conds` は本体中の `if` が付ける**分岐条件**である
-（`measure_ok.rhm` の `down` がまさにこれ、`count` は `conds` が空）。
+**降下事実の出どころが構造的降下と違う**のが本質的な差だった。構造的降下
+では `reduce(rel(call, concrete))` が `T_lt` の方程式で `true` まで計算
+できるが、measure では `RecursionInfo.decrease_proofs` が呼び出し地点
+ごとに `|- !vars. conds ==> M_lt(measure(args), measure(pats))` を持って
+いて、`conds` は本体の `if` が付ける分岐条件である。解決した 3 点:
 
-congruence 証明の `cong_rewrite` は `f1(v)` を `f2(v)` へ**無条件に**
-置き換えるので、条件付きの降下事実を使えない。必要なのは:
+1. **条件付きで書き換えられる congruence bridge**。`COND_CONG`
+   （`BOOL_CASES_AX` で場合分けし `conditionals` で枝を潰す）と
+   `bridge_calls`（`cond` の then 側に `c`・else 側に `not c` を足して
+   降りる）。構造的降下も同じ bridge を通る（条件を読まないだけ）。
+2. **呼び出し地点と義務の対応付け**。`check_termination` は `all_sites` を
+   節順・節内は `call_sites_in` 順で作り `decrease_proofs` をそれに 1:1 で
+   並べるので、同じ walk を回せば対応が取れる（`call_sites_in` と
+   `measure_at` を `terminate.rhm` から公開した）。全称束縛子の順序は
+   `mk_forall_list(free_vars(guarded), guarded)` なので `guarded` を組み
+   直して求める -- 定理から剥がすと節の変数名が失われて使えない。
+   組み直した文が実際の義務と一致することを `MSite` 構築時に確認する。
+3. **条件の形合わせ**。義務は簡約前の節の変数で書かれ、bridge が立って
+   いるのは `reduce_h` が簡約した後の本体である。`condition_in_scope` が
+   義務側の条件を同じ `db` で `reduce` し、その右辺がスコープ内の条件と
+   一致すれば `EQ_MP` で橋渡しする。最終形も同様に、
+   `reduce(rel(v, concrete))` と義務を具体化・discharge した定理の
+   `reduce` を突き合わせる。合わなければ明示的にエラーにする（黙って
+   間違った定理を作らない）。
 
-1. `COND_CONG`: `c \|- a = a'`、`not c \|- b = b'`、`\|- c = c'` から
-   `\|- cond(c,a,b) = cond(c',a',b')`。`BOOL_CASES_AX` で `c` について
-   場合分けし、`taut.rhm` の `conditionals` で分岐を潰す。
-   `CCONTR`（`drule.rhm`）がまさに同じ骨格なので、それを写せばよい。
-   条件の置換は `cong_rewrite` ではなく `AP_TERM`/`AP_THM` で
-   `cond` の頭だけを狙う（`c` が枝の中にも現れる場合に壊れないため）。
-2. `cong_rewrite` を「いま仮定している分岐条件のリスト」を持って歩く版に
-   置き換え、`cond` に出会ったら then 側に `c`・else 側に `not c` を足して
-   再帰し、`COND_CONG` で組み直す。再帰呼び出し地点に着いた時点で、
-   その場で measure 証明を `SPEC` して `conds` を `ASSUME` で discharge し、
-   `f1(v) = f2(v)` を作る。
+`can_derive_structurally` は measure の場合、降下列を要求せず
+「**measure の結果型**がスキーマ self 型の宣言済み datatype であること」を
+見る。`driver.rhm` は順序の型（measure なら結果型、それ以外なら降下列の型）
+の `DatatypeThms`/`T_lt` 方程式を渡す。
 
-これで `down` のような guarded recursion も通る。**1 と 2 は実装して
-`stepfn.rhm` に入っている**（`COND_CONG`・`bridge_calls`）。構造的降下の
-場合は条件を参照しないだけで同じ bridge を通っており、フルスイート
-1193 全通過・所要 40 秒（変化なし）で回帰は無い。
+**残るフォールバック**は、真の辞書式降下（Ackermann -- 射影一本の
+引き戻しでは足りず、整礎関係の辞書式積が要る）と、関係する型が宣言済み
+datatype でない場合だけになった。
 
-`COND_CONG` を書くときに踏んだ罠: `taut.rhm` の `conditionals` は分岐型が
-スキーマなので、`SPECL` の前に `INST_TYPE` で実際の分岐型に当てる必要が
-ある（忘れると `SPEC: instantiation has the wrong type`）。また条件自体の
-書き換えは `cong_rewrite` ではなく `cond` の頭への `AP_TERM`/`AP_THM` で
-狙う -- 構造的書き換えだと枝の中の `c` まで置換してしまい、
-`cond(true,a,b)` を潰す規則が当たらなくなる。
-
-**三つ目の障害も解ける見込みが立った**。義務側の条件と簡約後の本体に
-残る条件が食い違う件は、`ASSUME` している側が**すでに簡約後の形**である
-ことを使えばよい: 義務の条件を同じ `db` で `reduce` して、その右辺が
-`ASSUME` した条件と一致すれば `EQ_MP` で橋渡しできる。一致しなければ
-導出をあきらめて `install_function` に落とす（安全側）。
-
-**carrier の分解も済んでいる**。`Carrier` は「形」（`shape_of`:
-dom/arg_terms/build/split/open）と「順序」（`name_relation` が名前を付けた
-rel/wf）に分かれ、`direct_carrier`/`tuple_carrier` はどちらもその組み立て
-になった。measure carrier は `prove_wf_pullback(thy, wf_M_lt,
-<f>_measure)` を `name_relation` に通すだけで、形は既存のものをそのまま
-使える（`name_function` が measure を定数にする -- §9.8 と同じ理由）。
-一度書いて動かしたが、下の fact クロージャが無いと呼び出し元が無く、
-信頼層に未使用の機構を残さないため撤回した。
-
-**残っているのは実質 1 つ、`at_leaf` の fact クロージャの measure 版**:
-
-* 呼び出し地点と `RecursionInfo.proofs` の対応付け。`check_termination` は
-  `all_sites` を節順・節内は `calls_in` 順で作り `proofs` をそれに 1:1 で
-  並べる。`recdef.rhm` の `recursive_calls` は `calls_in` と**同じ順序**で
-  歩く（`cond` は c→then→else、それ以外は f→x）ので位置で対応付けられる。
-  ただし `conds` は `recursive_calls` が返さないので、`terminate.rhm` の
-  `calls_in` を公開する必要がある。
-* 義務の全称束縛子の順序は `mk_forall_list(free_vars(guarded), guarded)` で
-  決まるので、`guarded` を節の変数で組み直せば `SPECL` に渡す順序が確定する
-  （`spec_all_vars` では束縛子名が失われるので使えない）。
-* `conds` の discharge と最終形合わせは、**両辺を同じ `db` で `reduce` して
-  比べる**: `reduce(rel(v, concrete))` の右辺と、義務を具体化・discharge
-  して得た定理を `reduce` した右辺が一致すれば `EQ_MP` 二回で
-  `|- rel(v, concrete)` になる。一致しなければ導出を諦めて
-  `install_function` に落ちる（安全側）。
-* `driver.rhm` の配線 -- `dt`/`t_lt_equations` を降下列の型ではなく
-  **measure の結果型**のものに切り替え、`can_derive_structurally` が
-  `#'measure` も通すようにする。
+**検証**: `tests/measure_derived.rhm`（新規、10 テスト）が
+`fixtures/measure_ok.rhm` の `count`（無ガード）と `down`（**ガード付き**、
+`not nul(n)` の下でだけ measure が減る）の両方について、
+`recinfo.method == #'measure` で導出されたこと・方程式が仮説 0 の閉じた
+定理であること・モジュールの公理数が `Nat` を宣言しただけの理論と等しい
+ことを固定する。実測: 同じフィクスチャの公理数は 19 -> 16（`count` の
+2 本と `down` の 1 本がちょうど消えた）。`tests/stepfn.rhm` にも直接 API の
+measure 適用判定テストを追加。フルスイート 1193 -> 1206。
 
 ### 9.11 進捗（本セッション）: `_` ワイルドカードと節順序依存（first-match-wins）
 
@@ -1553,7 +1529,7 @@ rel/wf）に分かれ、`direct_carrier`/`tuple_carrier` はどちらもその�
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
 | 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype（フェーズ 2・3、無限公理が必要）は未着手 -- なお複数セッション規模。 |
-| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **ほぼ完了**（§9.1.2、§9.7〜9.10）。`WFREC` 存在定理は完全導出（`wfrec.rhm`）。`driver.rhm` の `add_function` から実接続済みで、**`~measure` と真の辞書式降下以外はすべて `new_axiom` なしで導出される**: 単一引数・構造的降下（§9.1.2）、**任意深さの入れ子パターン**（§9.7、決定木の各位置で `cases` 場合分けを繰り返す）、**多引数**（§9.8、引数のタプル上で `T_lt` を降下列への射影に沿って引き戻す）、**非再帰関数**（§9.8 続報、`method == #'none`）。計測: `tests/fixtures/funs_ok.rhm`（関数 6 本）の公理 30 個は 2 つの再帰 datatype のスキーマとその `T_lt` 自身の方程式だけで、`app`/`plus`/`rev`/`length` の寄与は 0。残るフォールバックは `~measure`（§9.10 に設計と障害 3 点を記録）・辞書式降下・非再帰 datatype 上の関数（`T_lt` が無い）・再帰 datatype のスキーマ本体。 |
+| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **完了**（§9.1.2、§9.7〜9.10）。`WFREC` 存在定理は完全導出（`wfrec.rhm`）。`driver.rhm` の `add_function` から実接続済みで、**通常の `function` 宣言はもう `new_axiom` を使わない**: 単一引数・構造的降下（§9.1.2）、任意深さの入れ子パターン（§9.7）、多引数（§9.8、タプル上で射影に沿った引き戻し）、非再帰関数（§9.8 続報）、そして **`~measure`（§9.10、measure に沿った引き戻し＋条件付き congruence bridge、ガード付き再帰も含む）**。残るフォールバックは真の辞書式降下（Ackermann、整礎関係の辞書式積が要る）と、関係する型が宣言済み datatype でない場合の 2 つだけ。なお datatype の `T_lt` 自身の方程式は `add_subterm_relation` が従来通り公理として入れる（`WF(T_lt)` は導出、`trust.scrbl` にその区別を明記した）。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
 | 4 | 内部は locally nameless、外部 API は標準 HOL にする | **`mk_abs`/`dest_abs` により実質的に達成済みと判断**。詳細下記。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済み。`hyp_insert`/`hyp_union`/`hyp_remove`/`rehash_hyps` の非公開化は**調査済み、現状維持と判断**: `rhombus-hol-lib` のどこからも実際には呼ばれておらず（`Thm` は raw hyps リストではなく既に不可侵なので、これらは項リスト上の純粋なユーティリティであり公開してもソウンドネスに影響しない）、唯一の外部利用者は `rhombus-hol-kernel` に対応するテストパッケージが無いために `tests/kernel.rhm`/`tests/drule.rhm`（外側の `rhombus-hol` パッケージ）に置かれている kernel 自身の単体テスト。非公開化には kernel 専用のテストパッケージ新設が要り、得られる利益（API 美観）に見合わないと判断した。 |

@@ -155,9 +155,16 @@ assumption, for eleven fewer axioms.
 That makes @tt{num} the first self-recursive type in this system whose
 characterisation is proved rather than assumed, and the first over which
 recursion is available without postulating anything. It is not yet the
-general construction: carving an @emph{arbitrary} recursive datatype out of
-@tt{num} needs a type of labelled trees over it, whose encoding needs
-arithmetic, and that is not written --- so a self-recursive
+general construction, but it is no longer only a plan:
+@tt{rhombus/hol/treerep} builds the labelled trees over @tt{num} that a
+recursive datatype is carved from --- indexed by paths, so the encoding
+needs no arithmetic and no pairing function --- proves the node constructor
+injective, and cuts a genuinely self-recursive type (a list) out of the
+least set of trees closed under its constructors, with
+@tt{new_basic_type_definition} and no axiom. What is missing is the rest:
+deriving that type's own injectivity, distinctness, induction and cases
+from those pieces, generating all of it from a @tt{DatatypeSpec}, and
+wiring it into the declaration. Until then a self-recursive
 @rhombus(type, ~datum) in a module still postulates.
 
 @bold{Function definitions.} A @rhombus(function, ~datum) is @emph{derived}

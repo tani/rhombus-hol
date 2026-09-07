@@ -48,6 +48,10 @@ export:
   prove_lit_distinct
   mk_kids
   prove_kids_injective
+  CtorRep
+  mk_ctor_term
+  mk_rep_pred
+  prove_rep_closed
 
 fun path_ty() :: HType: mk_fun(num_ty(), num_ty())
 
@@ -291,3 +295,127 @@ fun prove_kids_injective(thy :: Theory, ind :: IndThms, junk :: Term,
   DISCH(thy, eq_term,
         TRANS(SYM(thy, prove_kids_at(thy, ind, junk, ts, m)),
               TRANS(at, prove_kids_at(thy, ind, junk, us, m))))
+
+// -- the carved set ----------------------------------------------------------
+//
+// A datatype's representation is the *least* set of trees closed under its
+// constructors.  Written the way `NUM_REP` is written in `infinity.rhm`:
+//
+//   REP t  :=  !P. closed(P) ==> P t
+//
+//   closed(P)  :=  for each constructor i,
+//                    !a t1..tn. P t1 and ... and P tn
+//                               ==> P (node (label_i a) (kids [t1..tn]))
+//
+// Least, not merely closed, is what gives induction: a predicate that
+// survives every constructor holds of everything in the set, because the set
+// was defined as the intersection of all such predicates.  Nothing about
+// finiteness has to be said -- infinite trees are simply not reachable by the
+// closure, so they are not in the intersection.
+//
+// `label` is the map from a constructor's non-recursive fields to the label
+// type: `A_i -> Label`, so a nullary-field constructor passes a constant
+// function's worth of `unit`.
+class CtorRep(label :: Term, arity :: Int)
+
+// `node (label_i a) (kids [t1..tn])`, the tree constructor `i` builds.
+fun mk_ctor_term(inl :: Term, junk :: Term, c :: CtorRep,
+                 a :: Term, ts :: List.of(Term)) :: Term:
+  unless ts.length() == c.arity
+  | error(~who: #'mk_ctor_term, "wrong number of children",
+          error.val(~label: "arity", c.arity))
+  mk_node(inl, mk_comb(c.label, a), mk_kids(junk, ts))
+
+// The closure conjunct for one constructor, at a predicate `p`.
+fun ctor_closure(inl :: Term, junk :: Term, rty :: HType, p :: Term,
+                 c :: CtorRep, i :: Int) :: Term:
+  let (aty, _) = dest_fun(type_of(c.label))
+  let a = mk_var(Symbol.from_string("a" ++ to_string(i)), aty)
+  let ts = for List (k in List.iota(c.arity)):
+             mk_var(Symbol.from_string("t" ++ to_string(i) ++ "_" ++ to_string(k)), rty)
+  let concl = mk_comb(p, mk_ctor_term(inl, junk, c, a :~ Term,
+                                      ts.map(fun (v :: FVar): v :~ Term)))
+  let body:
+    cond
+    | c.arity == 0: concl
+    | ~else:
+        let prem:
+          recur loop (k = ts.length() - 1,
+                      acc :~ Term = mk_comb(p, (ts[ts.length() - 1] :~ FVar) :~ Term)):
+            cond
+            | k <= 0: acc
+            | ~else: loop(k - 1, mk_conj(mk_comb(p, (ts[k - 1] :~ FVar) :~ Term), acc))
+        mk_imp(prem, concl)
+  mk_forall_list([a] ++ ts, body)
+
+// `closed(p)`, the conjunction over every constructor.
+fun closure_term(inl :: Term, junk :: Term, rty :: HType, p :: Term,
+                 ctors :: List.of(CtorRep)) :: Term:
+  let parts = for List (c in ctors, i in List.iota(ctors.length())):
+                ctor_closure(inl, junk, rty, p, c :~ CtorRep, i)
+  recur loop (k = parts.length() - 1, acc :~ Term = parts[parts.length() - 1]):
+    cond
+    | k <= 0: acc
+    | ~else: loop(k - 1, mk_conj(parts[k - 1], acc))
+
+// `\t. !P. closed(P) ==> P t`
+fun mk_rep_pred(inl :: Term, junk :: Term,
+                ctors :: List.of(CtorRep)) :: Term:
+  let rty = type_of(junk)
+  let t = mk_var(#'t, rty)
+  let p = mk_var(#'P, mk_fun(rty, bool))
+  mk_abs(t, mk_forall(p, mk_imp(closure_term(inl, junk, rty, p :~ Term, ctors),
+                                mk_comb(p, t))))
+
+// `|- REP t1 and ... and REP tn ==> REP (ctor_i a t1..tn)` -- one per
+// constructor, the fact that says the carved set really is closed under what
+// it was defined to be closed under.
+//
+// `rep_at` is the caller's `|- REP t <=> !P. closed(P) ==> P t`, so this works
+// against the *named* constant rather than the raw lambda.
+fun prove_rep_closed(thy :: Theory, inl :: Term, junk :: Term,
+                     ctors :: List.of(CtorRep), rep :: Term,
+                     rep_at :: Function.of_arity(1), i :: Int) :: Thm:
+  let rty = type_of(junk)
+  let c :~ CtorRep = ctors[i]
+  let (aty, _) = dest_fun(type_of(c.label))
+  let a = mk_var(#'a, aty)
+  let ts = for List (k in List.iota(c.arity)):
+             mk_var(Symbol.from_string("t" ++ to_string(k)), rty)
+  let p = mk_var(#'P, mk_fun(rty, bool))
+  let closed = closure_term(inl, junk, rty, p :~ Term, ctors)
+  let closed_asm = ASSUME(thy, closed)
+  // the conjunct for this constructor, specialised at `a` and the children
+  let mine:
+    recur loop (k = 0, acc :~ Thm = closed_asm):
+      cond
+      | k == ctors.length() - 1: acc
+      | k == i: CONJUNCT1(thy, acc)
+      | ~else: loop(k + 1, CONJUNCT2(thy, acc))
+  let mine_at = SPECL(thy, [a :~ Term] ++ ts.map(fun (v :: FVar): v :~ Term),
+                      mine)
+  // `P t_k` for each child, from `REP t_k` and the same `closed`
+  let child_ps = for List (v in ts):
+                   MP(thy, SPEC(thy, p, EQ_MP(rep_at((v :~ FVar) :~ Term),
+                                              ASSUME(thy, mk_comb(rep, (v :~ FVar) :~ Term)))),
+                      closed_asm)
+  let concl:
+    cond
+    | c.arity == 0: mine_at
+    | ~else:
+        let prem:
+          recur loop (k = child_ps.length() - 1,
+                      acc :~ Thm = child_ps[child_ps.length() - 1]):
+            cond
+            | k <= 0: acc
+            | ~else: loop(k - 1, CONJ(thy, child_ps[k - 1] :~ Thm, acc))
+        MP(thy, mine_at, prem)
+  let built = mk_ctor_term(inl, junk, c, a :~ Term,
+                           ts.map(fun (v :: FVar): v :~ Term))
+  let rep_built = EQ_MP(SYM(thy, rep_at(built)),
+                        GEN(thy, p, DISCH(thy, closed, concl)))
+  // discharge the children's `REP` assumptions, innermost first
+  let discharged:
+    for values(acc :~ Thm = rep_built) (v in ts.reverse()):
+      DISCH(thy, mk_comb(rep, (v :~ FVar) :~ Term), acc)
+  GENL(thy, [a] ++ ts, discharged)

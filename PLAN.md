@@ -1875,6 +1875,43 @@ Peano の 3 定理（`suc` の単射性、`suc n /= zero`、帰納法）を**す
 
 フルスイート 1275/1275。
 
+### 9.23 進捗（本セッション）: 自己再帰型を初めて `new_basic_type_definition` で切り出した
+
+`treerep.rhm` に `CtorRep`／`mk_rep_pred`／`prove_rep_closed` を追加し、
+**本当に自己再帰的な datatype を公理 0 本で切り出した**。
+
+`REP` は `NUM_REP`（§9.14）と同じ書き方で、コンストラクタで閉じた**最小**
+集合である:
+
+    REP t := !P. closed(P) ==> P t
+    closed(P) := 各コンストラクタ i について
+                 !a t1..tn. P t1 and ... and P tn
+                            ==> P (node (label_i a) (kids [t1..tn]))
+
+「閉じている」ではなく「最小」であることが induction を与える。有限性を
+別途言う必要はない -- 無限木は閉包で到達できないので、そもそも共通部分に
+入らない。
+
+回帰（`tests/treerep.rhm`）で本当に再帰的な最小形、リスト
+（`Nil` = フィールド 0・子 0、`Cons` = フィールド 1・子 1）を通した:
+
+* 両コンストラクタについて閉包定理が仮説 0 で出る。`Cons` 側は
+  「尾が集合に入っていれば、そこから作った節も入る」という含意で、
+  これが「自己再帰」の実体である。
+* `Nil` の閉包定理を witness に `new_basic_type_definition` で型 `Lst`
+  （型引数 1）を切り出せる。`abs_Lst(rep_Lst(a)) = a` と
+  `LREP(r) <=> rep_Lst(abs_Lst(r)) = r` が仮説 0 で得られる。
+* **追加公理は 0**。理論にある公理は §9.14 の無限公理 1 本だけである。
+
+**まだ言語には配線していない。** 残るのは抽象側のコンストラクタを定義し、
+`node`／`kids` の単射性（§9.22）から injectivity を、ラベルの直和の相異性
+から distinctness を、`REP` の最小性から induction を、そこから cases を
+出して `DatatypeThms` に組む部分と、それを `DatatypeSpec` から自動生成
+して `driver.rhm` に繋ぐ部分。モジュール内の自己再帰 `type` 宣言は今も
+公理を置く。
+
+フルスイート 1285/1285。
+
 ### 9.20 進捗（本セッション）: `num` を `DatatypeThms` に梱包し、公理版と差分一致を取った
 
 フェーズ 3 が最終的に「任意の再帰 datatype について」作らねばならないもの

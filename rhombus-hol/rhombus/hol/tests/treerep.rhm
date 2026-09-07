@@ -19,6 +19,7 @@ import:
   rhombus/hol/algebra open
   rhombus/hol/infinity open
   rhombus/hol/conv open
+  rhombus/hol/drule open
   rhombus/hol/treerep open
 
 def base = algebra_base_theory()
@@ -81,3 +82,69 @@ check:
     let concl = (match dest_imp(concl_of(th)) | [_, c]: c | ~else: concl_of(th))
     [hyps_of(th).length(), show(concl)]
   ~is [[0, "t0 === u0"], [0, "t1 === u1"], [0, "t2 === u2"]]
+
+// -- carving a genuinely self-recursive datatype -----------------------------
+//
+// The whole point, on the smallest shape that is actually recursive: a list,
+// `Nil` with no fields and no children and `Cons` with one field and one
+// child.  Its representation is the least set of trees closed under those
+// two, and `new_basic_type_definition` cuts the type out of that set.
+//
+// Recursive datatypes in a module still postulate -- the general construction
+// on top of this is not written -- but the type below is carved, not
+// assumed, and it costs no axiom.
+def a_ty :: HType = mk_tyvar(#'a)
+def lab_ty = sum_ty(uty, a_ty)               // which constructor, and its fields
+def opt_ty = sum_ty(lab_ty, uty)             // a node, or nothing here
+def tree_ty = rep_ty(opt_ty)
+def node_inl = mk_const(#'inl, mk_fun(lab_ty, opt_ty))
+def ctors = [CtorRep(mk_const(#'inl, mk_fun(uty, lab_ty)), 0),
+             CtorRep(mk_const(#'inr, mk_fun(a_ty, lab_ty)), 1)]
+
+// the junk that fills unused child slots: the empty tree, which is a real
+// term but never a value of the datatype
+def (bthy, def_bot):
+  new_basic_definition(thy,
+                       mk_eq(mk_var(#'BOT, tree_ty),
+                             mk_abs(mk_var(#'p, path_ty()),
+                                    mk_comb(mk_const(#'inr, mk_fun(uty, opt_ty)),
+                                            mk_const(#'one, uty)))))
+def bot = mk_const(#'BOT, tree_ty)
+
+def (rthy, def_rep):
+  new_basic_definition(bthy,
+                       mk_eq(mk_var(#'LREP, mk_fun(tree_ty, bool)),
+                             mk_rep_pred(node_inl :~ Term, bot, ctors)))
+def lrep = mk_const(#'LREP, mk_fun(tree_ty, bool))
+fun lrep_at(t :: Term) :: Thm: unfold_def(rthy, def_rep, [t])
+
+fun closed(i :: Int) :: Thm:
+  prove_rep_closed(rthy, node_inl :~ Term, bot, ctors, lrep, lrep_at, i)
+
+// closed under both constructors, unconditionally
+check hyps_of(closed(0)) ~is []
+check hyps_of(closed(1)) ~is []
+
+// `Nil`'s clause has no premise; `Cons`'s says: if the tail is in the set,
+// so is the node built from it.  That second one is what "self-recursive"
+// means here.
+check is_forall(concl_of(closed(0))) ~is #true
+check:
+  match dest_forall(concl_of(closed(1)))
+  | [_, b]: (match dest_forall(b) | [_, b2]: is_imp(b2) | ~else: #false)
+  | ~else: #false
+  ~is #true
+
+// -- and the type comes out of it --------------------------------------------
+def witness = SPEC(rthy, mk_const(#'one, uty), closed(0))
+def (lthy, abs_rep, rep_pred):
+  new_basic_type_definition(rthy, #'Lst, #'abs_Lst, #'rep_Lst, witness)
+
+check type_arity(lthy, #'Lst) ~is 1
+check show(concl_of(abs_rep)) ~is "abs_Lst(rep_Lst(a)) === a"
+check show(concl_of(rep_pred)) ~is "LREP(r) <=> rep_Lst(abs_Lst(r)) === r"
+check hyps_of(abs_rep) ~is []
+check hyps_of(rep_pred) ~is []
+
+// zero axioms for the datatype: the only one in the theory is infinity's
+check axioms_of(lthy).length() - axioms_of(base).length() ~is 1

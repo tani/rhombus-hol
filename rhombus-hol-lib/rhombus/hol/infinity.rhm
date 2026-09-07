@@ -60,6 +60,10 @@ export:
   IndThms
   NumRec
   NumDatatype
+  NumArith
+  c_add
+  c_mul
+  build_num_arith
   build_ind
   build_num_recursion
   num_spec
@@ -78,6 +82,8 @@ def c_num_pred :: Symbol = #'num_pred
 def c_pre :: Symbol = #'pre_num
 def c_rec_step :: Symbol = #'num_rec_step
 def c_num_rec :: Symbol = #'num_rec
+def c_add :: Symbol = #'num_add
+def c_mul :: Symbol = #'num_mul
 
 fun ind_ty() :: HType: mk_tyapp(ty_ind, [])
 fun num_ty() :: HType: mk_tyapp(ty_num, [])
@@ -854,3 +860,72 @@ fun build_num_datatype(thy0 :: Theory, ind :: IndThms,
                                   [sel_eq],
                                   [elim_zero, elim_suc]),
                      lt_eqs, wf_lt))
+
+// -- arithmetic --------------------------------------------------------------
+//
+// Addition and multiplication, defined by `num_rec` with their clausal
+// equations derived.  These are on phase 3's critical path, not decoration:
+// a recursive datatype gets carved out of `num` by indexing the nodes of a
+// tree, and with a bound `k` on branching -- which every datatype here has,
+// since a constructor's fields are a fixed finite list -- the node at index
+// `n` has its children at `k*n+1 .. k*n+k`.  That indexing needs `+` and `*`
+// and nothing else; in particular it needs no `NUMPAIR`, and so none of the
+// factorisation theory HOL Light's `ind-types.ml` builds to get one.
+class NumArith(add_zero :: Thm, add_suc :: Thm,
+               mul_zero :: Thm, mul_suc :: Thm)
+
+fun build_num_arith(thy0 :: Theory, rec :: NumRec) :: values(Theory, NumArith):
+  let nty = num_ty()
+  let zero = mk_const(c_zero, nty)
+  let suc = mk_const(c_suc, mk_fun(nty, nty))
+  let m = mk_var(#'m, nty)
+  let n = mk_var(#'n, nty)
+  let r = mk_var(#'r, nty)
+  let y = mk_var(#'y, nty)
+  let binty = mk_fun(nty, mk_fun(nty, nty))
+  let rec_ty = mk_fun(nty, mk_fun(binty, mk_fun(nty, nty)))
+  let num_rec = mk_const(c_num_rec, rec_ty)
+  let rec_n = INST_TYPE(thy0, {#'b: nty}, rec.at_zero)
+  let rec_s = INST_TYPE(thy0, {#'b: nty}, rec.at_suc)
+
+  // `f(m, n) = num_rec base(n) step(n) m`, with both equations read off
+  // `num_rec`'s own two.  The recursion is on the first argument, so `n` is
+  // carried along untouched and shows up in `base`/`step` as a parameter.
+  fun by_recursion(thy :: Theory, name :: Symbol, base :: Term,
+                   step :: Term) :: values(Theory, Thm, Thm):
+    let core = list_mk_comb(num_rec, [base, step])
+    let (thy2, defn):
+      new_basic_definition(thy, mk_eq(mk_var(name, binty),
+                                      mk_abs(m, mk_abs(n, mk_comb(core, m)))))
+    let c = mk_const(name, binty)
+    let at_zero:
+      GEN(thy2, n,
+          TRANS(unfold_def(thy2, defn, [zero, n :~ Term]),
+                SPECL(thy2, [base, step], rec_n)))
+    let at_suc:
+      // `f(suc m, n) = step (num_rec base step m) m`, beta-reduced, and then
+      // the inner `num_rec ...` folded back into `f(m, n)` -- which is what
+      // makes the result a *clausal equation* about `f` rather than one that
+      // still mentions the combinator it was built from.
+      let unf_m = unfold_def(thy2, defn, [m :~ Term, n :~ Term])
+      let chain:
+        TRANS(unfold_def(thy2, defn, [mk_comb(suc, m), n :~ Term]),
+              SPEC(thy2, m, SPECL(thy2, [base, step], rec_s)))
+      let reduced = BETA_RULE(thy2, chain)
+      let fold:
+        cong_replace(thy2, mk_comb(core, m :~ Term),
+                     list_mk_comb(c, [m :~ Term, n :~ Term]),
+                     SYM(thy2, unf_m), rhs_of(reduced))
+      GENL(thy2, [m, n], TRANS(reduced, fold))
+    values(thy2, at_zero, at_suc)
+
+  // `add m n`: recursion on `m`, base `n`, step `\r y. suc r`.
+  let (thy1, add_zero0, add_suc0):
+    by_recursion(thy0, c_add, n :~ Term, mk_abs(r, mk_abs(y, mk_comb(suc, r))))
+  // `mul m n`: base `zero`, step `\r y. add r n` -- so `mul` is defined in
+  // terms of the `add` just introduced, exactly as it would be written.
+  let add_c = mk_const(c_add, binty)
+  let (thy2, mul_zero0, mul_suc0):
+    by_recursion(thy1, c_mul, zero,
+                 mk_abs(r, mk_abs(y, list_mk_comb(add_c, [r :~ Term, n :~ Term]))))
+  values(thy2, NumArith(add_zero0, add_suc0, mul_zero0, mul_suc0))

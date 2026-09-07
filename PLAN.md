@@ -431,11 +431,30 @@ prove_wf_from_induction    : ind_scheme(R) の証明を受け取り |- WF(R) を
 2. `T_lt`（`subterm.rhm`）は「直近の子」ではなく**その推移閉包**（等しいか、
    子孫か）。`WF(直近の子) ==> WF(推移閉包)` という汎用補題が別途要る
    （one-time, `wellfounded.rhm` に足す）。
-3. **`WFREC` の存在定理**（9.1 の段 3）はまったく手つかず。これが一番大きく、
-   最も価値がある残作業: `RESTRICT(f, R, x)` の定義、近似の一意性論法、
-   `SELECT` を使った構成 --- 本格的な HOL4 `relationTheory.WF_RECURSION` 相当の
-   証明で、他の何よりも分量がある。`recdef.rhm` の `install_function` が
-   `new_axiom` をやめられるのはこれが揃ってから。
+3. **`WFREC` の存在定理**（9.1 の段 3）はまったく手つかず。本セッションで
+   HOL Light 本家の `wf.ml` を直接読み、正確な依存関係を確認した:
+   `WF_REC`（求める存在定理そのもの）は `WF_REC_INVARIANT` から出るが、
+   `WF_REC_INVARIANT` 自身の証明は `prove_inductive_relations_exist`
+   （**汎用の inductive relation 定義パッケージ**、Knaster-Tarski の
+   最小不動点を関係の束上で取る、`ind_defs.ml` 相当）を土台にしている
+   （「近似」を場当たり的にではなく、`H`から生成される最小の関係`R`として
+   一発で存在・一意性を得るため）。すなわち実際の依存順序は:
+   ```text
+   汎用 inductive-relations パッケージ（未着手、それ自体が独立した課題）
+       ↓
+   WF_REC_INVARIANT / WF_REC（今回目標の WFREC 存在定理）
+       ↓
+   recdef.rhm の install_function 書き換え
+   ```
+   「近似の一意性論法を直接書く」という当初の見立ては、複数の局所的な
+   近似関数を「一つの無矛盾な大域関数」へ貼り合わせる操作が結局
+   同じ最小不動点構成を必要とすることが分かり、有望な近道ではなかった
+   （HOL Light 自身がこの経路を選んでいるのが根拠）。したがって本項目は
+   9.1 単独ではなく、**まず汎用 inductive-relations パッケージを
+   `rhombus-hol-lib` に追加することが前提条件**であり、これ自体が
+   `datatype_gen.rhm` 級の独立したセッション規模の作業になる。
+   `install_function` は kernel.rhm にも `recdef.rhm` にも触れず、この上に
+   積むだけでよい（`recdef.rhm`/`kernel.rhm` は不変のまま）。
 4. 上記が揃うまで `recdef.rhm`/`datatype.rhm` は変更していない
    （`new_axiom` は今もそのまま）。
 
@@ -777,6 +796,28 @@ on the same syntax」の通り）。したがって:
 identity（`Syntax.bind_id`相当）をキーにした共通の中間表現へ切り替える
 ことを検討する。それまでは、現状維持がむしろ正しい判断である。
 
+### 9.6 進捗（本セッション）: namespace・複数 theory import は未着手・調査のみ
+
+レビューの最終まとめ表にある P2 最終項目「binding-aware logical names・
+namespace・複数 theory import」を調査した。現状の制約
+（PLAN.md §4 に既出）は `driver.rhm` の `adopt` に起因する: `import` で
+取り込んだ理論を**丸ごと置き換える**（`HolState(imported.thy, ...)`）
+実装で、直前の `descends`/スタンプ等価チェックにより、取り込む理論が
+現在の理論の祖先か同一でなければ拒否される。これは`combine_stamps`が
+片方が他方の祖先でない2理論の定理を混在させられないことの反映であり、
+**互いに拡張関係にない「兄弟理論」は合流できない**。
+
+`Const(name :: Symbol, ty :: HType)`（`term.rhm`）を確認したところ、
+定数の identity は**裸の `Symbol` のみ**で、名前空間・モジュール修飾の
+概念が一切ない。したがって「兄弟理論を安全に合流する」ためには、まず
+定数名にモジュール由来の修飾（またはそれに相当する一意化）を持たせる
+**カーネルの項表現そのものの変更**が要る -- `term.rhm`/`kernel.rhm`
+（`Theory.consts`/`Theory.defs` の `Symbol` キー）は言うに及ばず、
+`printer.rhm`・`elab.rhm`・全 datatype/recdef 導出コードなど、`Symbol`
+を定数識別子として扱っている箇所全てに影響する。§9.5 の Core IR や
+入れ子パターンと同様、**パーサ面の変更ではなくカーネルの表現面の変更が
+前提**であり、独立したセッション規模の課題と判断し、着手しなかった。
+
 ---
 
 ## 10. 外部レビュー（2026-09-07）への対応状況
@@ -789,9 +830,9 @@ identity（`Syntax.bind_id`相当）をキーにした共通の中間表現へ�
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
 | 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype（フェーズ 2・3、無限公理が必要）は未着手 -- なお複数セッション規模。 |
-| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **部分的**。`wellfounded.rhm` で `WF_INDUCTION` とその逆を導出（§9.1.1）。`WFREC` 本体（一番価値が高く、一番大きい部分）は未着手。`recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
+| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **部分的**。`wellfounded.rhm` で `WF_INDUCTION` とその逆を導出（§9.1.1）。`WFREC` 本体は未着手 -- 本セッションで HOL Light `wf.ml` を直接読み、正確な依存関係を特定した: `WF_REC` は汎用の inductive-relations 定義パッケージ（`prove_inductive_relations_exist`、Knaster-Tarski 最小不動点）を前提にしており、それ自体が `datatype_gen.rhm` 級の独立したセッション規模の課題（§9.1.1 項目3 に詳細）。`recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
-| 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済みだが、hyp_insert 等の非公開化は未着手。 |
+| 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済み。`hyp_insert`/`hyp_union`/`hyp_remove`/`rehash_hyps` の非公開化は**調査済み、現状維持と判断**: `rhombus-hol-lib` のどこからも実際には呼ばれておらず（`Thm` は raw hyps リストではなく既に不可侵なので、これらは項リスト上の純粋なユーティリティであり公開してもソウンドネスに影響しない）、唯一の外部利用者は `rhombus-hol-kernel` に対応するテストパッケージが無いために `tests/kernel.rhm`/`tests/drule.rhm`（外側の `rhombus-hol` パッケージ）に置かれている kernel 自身の単体テスト。非公開化には kernel 専用のテストパッケージ新設が要り、得られる利益（API 美観）に見合わないと判断した。 |
 | 6 | 公開 kernel API を HOL Light `fusion.ml` に揃える | 大枠は既に一致（十規則、同じ命名）。未着手部分は上記の printer/tracing 分離のみ。 |
 | 7 | `Surface → CoreExpr → HOL + Rhombus` の共通 IR | **調査済み、現行範囲では不要と判断**。`module_block.rhm`の実行側emitは`body`を一切解釈しない逐語コピーで、独自の第二の意味論を持たない。裸の識別子・ハードコード演算子表のみの現行反映範囲では名前ベース(elab.rhm)と束縛ベース(Rhombus)の解決が食い違い得ない。共通IRが要る具体的な引き金（インポート別名越しの参照・ユーザー定義演算子）を§9.5に記録した。 |
 | 8 | `match`/`cond`/局所 `def`/入れ子パターンの追加 | **`cond`/局所 `let` は完了、入れ子パターンは未着手**。詳細と、入れ子パターンを安全に進めるための必須の前提条件（下記参照）は §9.4 にまとめた。 |
@@ -799,6 +840,7 @@ identity（`Syntax.bind_id`相当）をキーにした共通の中間表現へ�
 | 13 | rule classes | **完了**。`ruledb.rhm` の `RuleDB` が type-prescription 事実を rewrite ルールと独立に分類・保持（`type_facts_of`）、`general.rhm` の `generalize_goal` が一般化時にそれを消費する。 |
 | 14 | conditional rewriting | **完了**。`RewriteRule` が `conds :: List.of(Term)` を持ち、`apply_rule` が（自分自身を除外した db で）各条件を `simp_conv` により再帰的に discharge する。 |
 | 15 | hints の拡充（`~cases`/`~expand`/`~in_theory`） | **`~in_theory:` と `~cases:` は完了**。`~expand:` は見送り（下記）。`~do_not:` は本セッション以前に追加済み。 |
+| (最終まとめ表 P2) | binding-aware logical names・namespace・複数 theory import | **調査済み、未着手**。`driver.rhm` の `adopt` が兄弟理論（互いに拡張関係にない2理論）を合流できないのは、`Const` の identity が裸の `Symbol` のみで名前空間の概念がないため。安全な合流にはカーネルの項表現そのもの（`Symbol` を定数識別子に使っている全箇所）の変更が要り、独立したセッション規模の課題。詳細は §9.6。 |
 
 ### `HType`（`TyVar`/`TyApp`）の raw construction は意図的に隠していない
 

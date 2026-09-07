@@ -1,0 +1,142 @@
+#lang rhombus/static
+
+// A `function` that does not recurse, defined rather than postulated
+// (PLAN.md section 9.30).
+//
+// `recdef.rhm`'s seam turns a clausal declaration into one axiom per leaf of
+// its decision tree.  For a function that does not call itself there is
+// nothing to justify and no reason to assume anything: the decision tree is
+// already a closed term once its tests are written with the datatype's
+// discriminators and its variables read out with the datatype's selectors.
+//
+//   f = \a1 ... an. if is_C1 (path) | <branch> | if is_C2 (path) | ... 
+//
+// `new_basic_definition` takes that, and the clausal equations come back out
+// by unfolding and reducing with the discriminator, selector and conditional
+// rules -- the same reduction `datatype_gen.rhm` uses to state a destructor
+// elimination.  So the equations a caller sees are unchanged; only their
+// provenance is.
+//
+// The last constructor's branch is the `else` rather than a test of its own.
+// Exhaustiveness is a property of the tree, so at that point the value can
+// only be that constructor -- and the equation for it is still *proved*,
+// because reducing its left-hand side needs every earlier discriminator to
+// come out `false`, which is what distinctness says.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "ruledb.rhm" open
+  "taut.rhm" open
+  "search_limits.rhm" open
+  "datatype.rhm" open
+  "dtree.rhm" open
+  "terminate.rhm" open
+  "recdef.rhm" open
+
+export:
+  define_by_cases
+
+// The rules that reduce the scaffolding this module introduces, and nothing
+// else: a caller's own definitions stay out, so a clause's right-hand side
+// comes back exactly as written rather than partly evaluated.
+fun scaffold_rules(thy :: Theory,
+                   dts :: Map.of(Symbol, DatatypeThms)) :: RuleDB:
+  let db0 = for values(d :~ RuleDB = empty_db) (th in tautologies(thy)):
+              add_thm(thy, d, #'propositional, th :~ Thm)
+  let db1 = for values(d :~ RuleDB = db0) (th in conditionals(thy)):
+              add_thm(thy, d, #'conditional, th :~ Thm)
+  for values(d :~ RuleDB = db1) ((_, thms) in dts):
+    let thms :~ DatatypeThms = thms
+    for values(e :~ RuleDB = d) (th in thms.discriminators ++ thms.selectors):
+      add_thm(thy, e, #'observer, th :~ Thm)
+
+// The tree as a term, over terms standing for the arguments.
+fun tree_term(spec :: FunSpec, dt_of :: Function.of_arity(1),
+              args :: List.of(Term), tree :: DecisionTree) :: Term:
+  match tree
+  | DTLeaf(clause, bindings):
+      let cl :~ DefClause = spec.clauses[clause]
+      let theta = for List (b in bindings):
+                    let b :~ DTBinding = b
+                    [path_term(dt_of, args, b.path), b.var]
+      inst_fvar(theta, cl.rhs)
+  | DTSwitch(path, self_ty, branches):
+      let scrut = path_term(dt_of, args, path)
+      recur loop (bs :~ List = branches):
+        match bs
+        | [last]:
+            tree_term(spec, dt_of, args, (last :~ DTBranch).tree)
+        | List.cons(b, rest):
+            let b :~ DTBranch = b
+            let disc = mk_const(discriminator_name(b.ctor),
+                                mk_fun(self_ty, bool))
+            mk_cond(mk_comb(disc, scrut),
+                    tree_term(spec, dt_of, args, b.tree),
+                    loop(rest))
+  | ~else: error(~who: #'define_by_cases, "unknown decision tree node")
+
+// Define `spec` outright and prove its clausal equations -- the same
+// statements, in the same order, that `install_function` would have
+// postulated.
+fun define_by_cases(thy0 :: Theory, spec :: FunSpec, tree :: DecisionTree,
+                    dts :: Map.of(Symbol, DatatypeThms))
+     :: values(Theory, FunInfo, List.of(Thm)):
+  let fty = fun_type(spec)
+  let arity = spec.arg_types.length()
+  let dt_specs = for values(m :~ Map = {}) ((n, thms) in dts):
+                   m ++ {n: (thms :~ DatatypeThms).spec}
+  fun dt_of(ty :: HType) :: DatatypeSpec:
+    match ty
+    | TyApp(n, _): dt_specs[n]
+    | ~else: error(~who: #'define_by_cases, "not a datatype",
+                   error.val(~label: "type", type_to_string(ty)))
+  let params = for List (ty in spec.arg_types, i in List.iota(arity)):
+                 mk_var(Symbol.from_string("_arg" ++ to_string(i)),
+                        ty :~ HType)
+  let arg_terms = params.map(fun (v :: FVar): v :~ Term)
+  let leaf_body = tree_term(spec, dt_of, arg_terms, tree)
+  let body = for values(b :~ Term = leaf_body) (v in params.reverse()):
+               mk_abs(v :~ FVar, b)
+  let (thy, def_th) = new_basic_definition(thy0,
+                                           mk_eq(mk_var(spec.name, fty),
+                                                 body))
+  let fn = mk_const(spec.name, fty)
+  let db = scaffold_rules(thy, dts)
+  let roots = for List (ty in spec.arg_types, i in List.iota(arity)):
+                mk_var(Symbol.from_string("_eqx" ++ to_string(i)),
+                       ty :~ HType) :~ Term
+  let eqs = for List (ls in leaf_shapes(dt_specs, tree, roots)):
+              leaf_equation(thy, spec, fn, def_th, db, ls :~ LeafShape)
+  values(thy, FunInfo(spec, fn, eqs, RecursionInfo([], #'none, [], [])), eqs)
+
+fun leaf_equation(thy :: Theory, spec :: FunSpec, fn :: Term, def_th :: Thm,
+                  db :: RuleDB, ls :: LeafShape) :: Thm:
+  let pats :~ List = ls.patterns
+  let cl :~ DefClause = spec.clauses[ls.clause]
+  let rename = for List (b in ls.bindings):
+                 let b :~ DTBinding = b
+                 [path_subterm(pats, b.path), b.var]
+  let lhs = list_mk_comb(fn, pats)
+  let rhs = inst_fvar(rename, cl.rhs)
+  let unf = unfold_def(thy, def_th, pats)
+  let reduced:
+    with_search_limits(fun ():
+                         match simp_conv(db)(thy, rhs_of(unf))
+                         | #false: unf
+                         | s :~ Thm: TRANS(unf, s))
+  // The reduction is supposed to land on the clause as written.  If it did
+  // not, installing whatever it did land on would quietly give the caller a
+  // different function than the one they declared, so this is an error and
+  // not a fallback.
+  unless concl_of(reduced) == mk_eq(lhs, rhs)
+  | error(~who: #'define_by_cases,
+          "the clause did not reduce to what was declared",
+          error.val(~label: "declared", show(mk_eq(lhs, rhs))),
+          error.val(~label: "reduced to", show(concl_of(reduced))))
+  GENL(thy, row_vars(pats), reduced)

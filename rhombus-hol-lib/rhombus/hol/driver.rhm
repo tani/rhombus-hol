@@ -27,6 +27,7 @@ import:
   "infinity.rhm" open
   "algebra.rhm" open
   "recdef.rhm" open
+  "funcases.rhm" open
   "dtree.rhm" open
   "subterm.rhm" open
   "ruledb.rhm" open
@@ -274,8 +275,24 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
                                                         recinfo :~ RecursionInfo,
                                                         algebra_base_thms())
                         | #false:
-                            install_function(st.thy, spec, dt_specs,
-                                             ~discharge: discharger(st))
+                            // A function that does not call itself has
+                            // nothing to justify: its decision tree is
+                            // already a closed term, so it is *defined* and
+                            // its clausal equations are proved
+                            // (`funcases.rhm`).  Only recursion the deriver
+                            // cannot handle still reaches the postulating
+                            // seam.
+                            cond
+                            | nonrecursive_function(st, spec):
+                                let tree = function_decision_tree(#'function,
+                                                                  spec,
+                                                                  dt_specs)
+                                let (t, info, _) = define_by_cases(st.thy, spec,
+                                                                   tree, st.dts)
+                                values(t, info)
+                            | ~else:
+                                install_function(st.thy, spec, dt_specs,
+                                                 ~discharge: discharger(st))
                         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let info :~ FunInfo = info0
   // The defining equations become rewrite rules straight away: that is what
@@ -283,6 +300,14 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   let db2 = add_thms(thy2, st.db, spec.name, info.equations)
   HolState(thy2, db2, st.dts, st.funs ++ {spec.name: info}, st.thms,
            st.names ++ [spec.name], st.wfrec_def)
+
+// No clause's right-hand side mentions the function being declared, so there
+// is no recursion to justify -- whatever the patterns look like.
+fun nonrecursive_function(st :: HolState, spec :: FunSpec) :: Boolean:
+  let fn = mk_const(spec.name, fun_type(spec))
+  let recurses = for any (cl in spec.clauses):
+                   mentions(fn, (cl :~ DefClause).rhs)
+  !recurses && !spec.measure
 
 // Discharge a termination obligation against the state as it stands -- which
 // is to say, without the function being defined.  That is not a limitation to

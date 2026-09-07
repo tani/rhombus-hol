@@ -1688,6 +1688,47 @@ TC R x y <=> !P. (!u v. R u v ==> P u v)
    使うのが正しい。1 つ目は「異なる結論」、2 つ目は `CHOOSE` の変数捕獲
    チェックで露見した -- どちらもカーネルが捕まえた。
 
+### 9.30 進捗（本セッション）: 非再帰 `function` は公理を立てない
+
+第三次レビュー項目 7 の前半。`recdef.rhm` の seam は節形式の宣言を
+「decision tree の葉ごとに 1 公理」へ変える。**自分を呼ばない関数には
+正当化すべきものが何も無い**ので、これは丸ごと不要だった。
+
+判別子でテストを書き、選択子で変数を読み出せば、decision tree は
+そのまま閉じた項である:
+
+```text
+f = \a1..an. if is_C1(path) | <branch> | if is_C2(path) | ...
+```
+
+`new_basic_definition` はこれを受け取る。節ごとの方程式は unfold して
+判別子・選択子・条件規則で簡約すれば出てくる（`funcases.rhm`）。
+最後のコンストラクタは `else` に畳む -- 網羅性は tree の性質なので
+そこに来たら他ではあり得ない -- が、その葉の方程式も**証明する**。
+左辺を簡約するには先行する判別子が全部 `false` になる必要があり、
+それは distinctness が言っていることだから。
+
+簡約結果が宣言どおりの節と一致しなければ**エラー**にする。fallback に
+しない: 一致しない物を入れたら、宣言した関数と違う物を利用者に渡す
+ことになる。
+
+実測（スイート全体で `new_axiom` を踏む宣言を数えた）:
+
+```text
+before: merge, first_two, ack, turn, swap, boxed_colour
+after:  merge, ack
+```
+
+`first_two`（入れ子パターン + catch-all）・`turn`・`swap`・
+`boxed_colour` が公理経路から消えた。残る 2 つは辞書式再帰で、これは
+項目 7 の後半（`Lex` の導出）に属する。`~measure` は既に WFREC 経由で
+導出されており、postulate していない。
+
+台帳: `tests/ordered_patterns.rhm` の「`first_two` の 3 公理」が 0 に。
+新規 `tests/nonrec_defined.rhm` は、変数だけの節・コンストラクタ節・
+catch-all 付き入れ子節の 3 形状について、方程式が宣言どおりでかつ
+モジュールの公理が基礎の 4 本だけであることを固定する。
+
 ## 10. 外部レビュー（2026-09-07）への対応状況
 
 レビューは `rhombus-hol-kernel` を標準 HOL Light 型カーネルへ寄せ、

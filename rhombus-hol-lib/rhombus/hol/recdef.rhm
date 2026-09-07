@@ -22,6 +22,7 @@ import:
   rhombus/hol/printer open
   "bool.rhm" open
   "datatype.rhm" open
+  "drule.rhm" open
   "terminate.rhm" open
   "dtree.rhm" open
 
@@ -193,35 +194,77 @@ fun install_function(thy :: Theory,
     fn_placeholder,
     ~measure: measure)
 
-  // -- only now is anything added to the theory
-  let thy2 = new_constant(thy, spec.name, fty)
-  let fn = mk_const(spec.name, fty)
-  // One axiom per *leaf* of the decision tree, not per clause as written.
+  // -- a definition that is only a definition
   //
-  // Clauses are ordered, so a clause that an earlier one shadows at some
-  // argument shapes does not hold at those shapes, and postulating it as
-  // written would be inconsistent: `f(Nil) = a` beside `!x. f(x) = b` says
-  // `a = b`.  The leaves are exactly the shapes where each clause actually
-  // wins.  This is also what `install_structural_function` derives, so a
-  // definition means the same thing whichever seam installed it.
-  let dt_of = for values(m :~ Map = {}) ((n, d) in dts): m ++ {n: d}
-  let roots = for List (ty in spec.arg_types, i in List.iota(arity)):
-                mk_var(Symbol.from_string("_eqx" ++ to_string(i)),
-                       ty :~ HType) :~ Term
-  let (thy3, eqs):
-    for values(t :~ Theory = thy2, acc :~ List = []) (ls in leaf_shapes(dt_of, tree, roots)):
-      let ls :~ LeafShape = ls
-      let pats :~ List = ls.patterns
-      let cl :~ DefClause = spec.clauses[ls.clause]
-      let rename = for List (b in ls.bindings):
-                     let b :~ DTBinding = b
-                     [path_subterm(pats, b.path), b.var]
-      let lhs = list_mk_comb(fn, pats)
-      let stmt = mk_forall_list(row_vars(pats),
-                                mk_eq(lhs, inst_fvar(rename, cl.rhs)))
-      let (t2, th) = new_axiom(t, stmt)
-      values(t2, acc ++ [th])
-  values(thy3, FunInfo(spec, fn, eqs, recinfo))
+  // One clause, distinct variables for patterns, no reference to itself:
+  // there is nothing to compile and nothing to justify, and `f = \xs. rhs`
+  // is exactly what `new_basic_definition` takes.  Going through the seam
+  // below instead would postulate an equation the kernel would have handed
+  // over for free.
+  cond
+  | can_define_directly(spec):
+      let cl :~ DefClause = spec.clauses[0]
+      let vars = for List (p in cl.pats): (p :~ FVar)
+      let body = for values(b :~ Term = cl.rhs) (v in vars.reverse()):
+                   mk_abs(v :~ FVar, b)
+      let (thy2, def_th) = new_basic_definition(thy, mk_eq(mk_var(spec.name,
+                                                                  fty),
+                                                           body))
+      let eqn = GENL(thy2, vars,
+                     unfold_def(thy2, def_th,
+                                vars.map(fun (v :: FVar): v :~ Term)))
+      values(thy2, FunInfo(spec, mk_const(spec.name, fty), [eqn], recinfo))
+  | ~else:
+      // -- only now is anything added to the theory
+      let thy2 = new_constant(thy, spec.name, fty)
+      let fn = mk_const(spec.name, fty)
+      // One axiom per *leaf* of the decision tree, not per clause as written.
+      //
+      // Clauses are ordered, so a clause that an earlier one shadows at some
+      // argument shapes does not hold at those shapes, and postulating it as
+      // written would be inconsistent: `f(Nil) = a` beside `!x. f(x) = b` says
+      // `a = b`.  The leaves are exactly the shapes where each clause actually
+      // wins.  This is also what `install_structural_function` derives, so a
+      // definition means the same thing whichever seam installed it.
+      let dt_of = for values(m :~ Map = {}) ((n, d) in dts): m ++ {n: d}
+      let roots = for List (ty in spec.arg_types, i in List.iota(arity)):
+                    mk_var(Symbol.from_string("_eqx" ++ to_string(i)),
+                           ty :~ HType) :~ Term
+      let (thy3, eqs):
+        for values(t :~ Theory = thy2, acc :~ List = []) (ls in leaf_shapes(dt_of, tree, roots)):
+          let ls :~ LeafShape = ls
+          let pats :~ List = ls.patterns
+          let cl :~ DefClause = spec.clauses[ls.clause]
+          let rename = for List (b in ls.bindings):
+                         let b :~ DTBinding = b
+                         [path_subterm(pats, b.path), b.var]
+          let lhs = list_mk_comb(fn, pats)
+          let stmt = mk_forall_list(row_vars(pats),
+                                    mk_eq(lhs, inst_fvar(rename, cl.rhs)))
+          let (t2, th) = new_axiom(t, stmt)
+          values(t2, acc ++ [th])
+      values(thy3, FunInfo(spec, fn, eqs, recinfo))
+
+// One clause, every pattern a distinct variable, no self-reference: a plain
+// definition, not a recursion to justify or a match to compile.  A measure
+// disqualifies it only because a measure implies the author expected
+// recursion; there would be nothing for it to discharge.
+fun can_define_directly(spec :: FunSpec) :: Boolean:
+  cond
+  | spec.clauses.length() != 1: #false
+  | spec.measure: #false
+  | ~else:
+      let cl :~ DefClause = spec.clauses[0]
+      let vars = for values(acc :~ List = []) (p in cl.pats):
+                   if p is_a FVar | acc ++ [p] | acc
+      cond
+      | vars.length() != cl.pats.length(): #false
+      | distinct_vars(vars).length() != vars.length(): #false
+      | ~else: !mentions(mk_const(spec.name, fun_type(spec)), cl.rhs)
+
+fun distinct_vars(vs :: List.of(FVar)) :: List.of(FVar):
+  for values(acc :~ List = []) (v in vs):
+    if acc.contains(v) | acc | acc ++ [v]
 
 fun clause_vars(who :: Symbol, cl :: DefClause) :: List.of(FVar):
   for values(acc :~ List = []) (p in cl.pats): acc ++ pattern_vars(who, p)

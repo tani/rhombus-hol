@@ -1,0 +1,242 @@
+#lang rhombus/static
+
+// The observers a datatype declaration installs -- discriminators,
+// selectors, destructor-elimination rules -- built once, for both the
+// non-recursive construction (`datatype_gen.rhm`) and the recursive one
+// (`datatype_rec.rhm`).
+//
+// None of this looks at how the type was represented.  A discriminator is
+// `is_Ci(x) := ?fields. x = Ci(fields)`, and everything about it follows from
+// the constructors' injectivity, their pairwise distinctness and the cases
+// theorem -- which both constructions now supply in the same shape.  So the
+// two share the code rather than proving it twice, and a change to what an
+// observer means can only be made in one place.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/names open
+  rhombus/hol/kernel open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "datatype.rhm" open
+
+export:
+  ctor_leaf_target_at_g
+  exists_intro_chain
+  not_eq_sym
+  build_observers
+  split_left_conj
+  congruence_chain
+
+// `?a0..ak. x = Ci(a0,..,ak)` -- the shape a discriminator unfolds to, and
+// the shape a `cases` disjunct already has.
+fun ctor_leaf_target_at_g(spec :: DatatypeSpec,
+                          ctor_applied :: Function.of_arity(2),
+                          i :: Int, x_term :: Term) :: Term:
+  let c = spec.ctors[i] :~ Ctor
+  let xs = mk_field_vars(c.fields, "a")
+  let body = mk_eq(x_term, ctor_applied(i, xs.map(fun (v :: FVar): v :~ Term)))
+  for values(acc :~ Term = body) (v in xs.reverse()): mk_exists(v :~ FVar, acc)
+
+fun mk_field_vars(fields :: List.of(Field), prefix :: String) :: List.of(FVar):
+  for List (f in fields, i in List.iota(fields.length())):
+    mk_var(Symbol.from_string(prefix ++ to_string(i)), (f :~ Field).ty)
+
+// `|- ?z0..z_{m-1}. leaf`, given the *exact* target term and a witness for
+// each `z`, substituting one variable at a time rather than rebuilding the
+// partially substituted term by hand.
+fun exists_intro_chain(thy :: Theory, target :: Term, ws :: List.of(Term),
+                       leaf_prover) :: Thm:
+  match ws
+  | []: leaf_prover(target)
+  | List.cons(w, wrest):
+      let [zv, inner] = (match dest_exists(target) | l: l)
+      let zv :~ FVar = zv
+      let inner_at_w = inst_fvar([[w, zv]], inner)
+      EXISTS(thy, target, w, exists_intro_chain(thy, inner_at_w, wrest, leaf_prover))
+
+fun congruence_chain(thy :: Theory, f :: Term, eqs :: List.of(Thm)) :: Thm:
+  (match eqs
+   | List.cons(e0, rest):
+       for values(acc :~ Thm = AP_TERM(thy, f, e0)) (e in rest): MK_COMB(acc, e))
+
+fun split_left_conj(thy :: Theory, th :: Thm, k :: Int) :: List.of(Thm):
+  cond
+  | k == 1: [th]
+  | ~else: split_left_conj(thy, CONJUNCT1(thy, th), k - 1) ++ [CONJUNCT2(thy, th)]
+
+// `|- not (a = b)`  ==>  `|- not (b = a)`.
+fun not_eq_sym(thy :: Theory, th :: Thm) :: Thm:
+  let inner = (match dest_neg(concl_of(th)) | p: p)
+  let [a, b] = (match dest_eq(inner) | l: l)
+  let asm = ASSUME(thy, mk_eq(b, a))
+  let false_th = MP(thy, NOT_ELIM(thy, th), SYM(thy, asm))
+  NOT_INTRO(thy, DISCH(thy, mk_eq(b, a), false_th))
+
+// `ctor_const(i)` is the constructor constant, `injectivity` is keyed by
+// constructor name as `DatatypeThms` keys it, `ctor_distinct(i, j)` is the
+// `i < j` distinctness theorem, and `cases` is the exhaustiveness theorem.
+fun build_observers(thy :: Theory, spec :: DatatypeSpec,
+                    ctor_const :: Function.of_arity(1),
+                    injectivity :: Map.of(Symbol, Thm),
+                    ctor_distinct :: Function.of_arity(2),
+                    cases :: Thm)
+     :: values(Theory, List.of(Thm), List.of(Thm), List.of(Thm)):
+  let n = spec.ctors.length()
+  let self = mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol): mk_tyvar(p)))
+  fun ctor_applied(i :: Int, args :: List.of(Term)) :: Term:
+    list_mk_comb(ctor_const(i), args)
+  fun ctor_leaf_target_at(i :: Int, x_term :: Term) :: Term:
+    ctor_leaf_target_at_g(spec, ctor_applied, i, x_term)
+  let xv = mk_var(#'x, self)
+  // -- discriminators: `is_Ci(x) := exists a0...ak-1. x = Ci(a0,...,ak-1)`,
+  // a total predicate identical in shape to `ctor_leaf_target`'s own
+  // disjunction leaves -- so `Ci(ys)` matching it (`i=j`) or refuting it
+  // (`i!=j`, via the already-proved `distinctness`) is all `is_Ci` ever
+  // needs to say.
+  let thy = for values(t :~ Theory = thy) (c in spec.ctors, i in List.iota(n)):
+              let c :~ Ctor = c
+              let dv = mk_var(#'d, self)
+              let (t2, _) = new_basic_definition(t, mk_eq(mk_var(discriminator_name(c), mk_fun(self, bool)), mk_abs(dv, ctor_leaf_target_at(i, dv))))
+              t2
+  fun disc_def(i :: Int) :: Thm:
+    (match definition_of(thy, discriminator_name(spec.ctors[i] :~ Ctor))
+     | th :: Thm: th
+     | #false: error(~who: #'build_observers, "discriminator definition missing"))
+  // `|- exists a0...ak-1. Ci(ys) = Ci(a0,...)`, witnessed by `ys` itself.
+  fun ctor_self_witness(i :: Int, ys :: List.of(Term)) :: Thm:
+    exists_intro_chain(thy, ctor_leaf_target_at(i, ctor_applied(i, ys)), ys, fun (leaf :: Term) :: Thm: REFL(thy, ctor_applied(i, ys)))
+  // `|- not (Cj(ys) = Ci(chosen))`, `i != j`, reusing the pairwise
+  // `distinctness` theorem, flipped/reordered to match.
+  fun ctor_distinct_stmt(i :: Int, j :: Int, ys :: List.of(Term), chosen :: List.of(Term)) :: Thm:
+    (if i < j
+     | not_eq_sym(thy, SPECL(thy, chosen ++ ys, ctor_distinct(i, j)))
+     | SPECL(thy, ys ++ chosen, ctor_distinct(j, i)))
+  // `{target} |- false`, peeling one existential layer at a time via
+  // `CHOOSE` until the leaf equation contradicts `distinctness`.
+  fun disc_disprove(i :: Int, j :: Int, ys :: List.of(Term), stmt :: Term, chosen :: List.of(Term)) :: Thm:
+    cond
+    | !is_exists(stmt):
+        MP(thy, NOT_ELIM(thy, ctor_distinct_stmt(i, j, ys, chosen)), ASSUME(thy, stmt))
+    | ~else:
+        let [zv, ibody] = (match dest_exists(stmt) | l: l)
+        let zv :~ FVar = zv
+        let gv = genvar(zv.ty)
+        let ibody_gv = inst_fvar([[gv, zv]], ibody)
+        CHOOSE(thy, gv, ASSUME(thy, stmt), disc_disprove(i, j, ys, ibody_gv, chosen ++ [gv]))
+  fun discriminator_pair(i :: Int, j :: Int) :: Thm:
+    let cj = spec.ctors[j] :~ Ctor
+    let ys_v = mk_field_vars(cj.fields, "y")
+    let ys_t = ys_v.map(fun (v :: FVar): v :~ Term)
+    let ufd = unfold_def(thy, disc_def(i), [ctor_applied(j, ys_t)])
+    let iff_th = (if i == j
+                  | TRANS(ufd, EQT_INTRO(thy, ctor_self_witness(i, ys_t)))
+                  | let target = rhs_of(ufd)
+                    TRANS(ufd, EQF_INTRO(thy, NOT_INTRO(thy, DISCH(thy, target, disc_disprove(i, j, ys_t, target, []))))))
+    GENL(thy, ys_v, iff_th)
+  let discriminators = for values(acc :~ List = []) (ci in spec.ctors, i in List.iota(n)):
+                          for values(acc2 :~ List = acc) (cj in spec.ctors, j in List.iota(n)):
+                            acc2 ++ [discriminator_pair(i, j)]
+
+  // -- selectors: `Ci_fj(x) := select(\v. exists z0...zk-1. x=Ci(zs) and
+  // zj=v)`, total via `select`; "z"-prefixed internal vars so the
+  // existential can never collide with a caller's own "x"-prefixed field
+  // vars once both appear together in an instantiated statement.
+  let thy = for values(t :~ Theory = thy) (c in spec.ctors, i in List.iota(n)):
+              let c :~ Ctor = c
+              for values(t2 :~ Theory = t) (f in c.fields, j in List.iota(c.fields.length())):
+                let f :~ Field = f
+                let sv = mk_var(#'s, self)
+                let zs = mk_field_vars(c.fields, "z")
+                let zs_t = zs.map(fun (v :: FVar): v :~ Term)
+                let vv = mk_var(#'v, f.ty)
+                let exists_body = mk_conj(mk_eq(sv, ctor_applied(i, zs_t)), mk_eq(zs_t[j], vv))
+                let pred_body = for values(acc :~ Term = exists_body) (z in zs.reverse()): mk_exists(z, acc)
+                let (t3, _) = new_basic_definition(t2, mk_eq(mk_var(selector_name(c, f), mk_fun(self, f.ty)), mk_abs(sv, mk_select(vv, pred_body))))
+                t3
+  fun sel_def(i :: Int, j :: Int) :: Thm:
+    let c = spec.ctors[i] :~ Ctor
+    let f = c.fields[j] :~ Field
+    (match definition_of(thy, selector_name(c, f))
+     | th :: Thm: th
+     | #false: error(~who: #'build_observers, "selector definition missing"))
+  // `|- forall x0...x_{k-1}. Ci_fj(Ci(x0,...,x_{k-1})) = xj`, via
+  // `SELECT_UNIQUE`: existence is witnessed by the field vars themselves,
+  // uniqueness comes from `injectivity`.
+  fun selector_theorem(i :: Int, j :: Int) :: Thm:
+    let c = spec.ctors[i] :~ Ctor
+    let f = c.fields[j] :~ Field
+    let xs_v = mk_field_vars(c.fields, "x")
+    let xs_t = xs_v.map(fun (v :: FVar): v :~ Term)
+    let target_j = xs_t[j]
+    let ufd = unfold_def(thy, sel_def(i, j), [ctor_applied(i, xs_t)])
+    let (_, pred_abs) = dest_comb(rhs_of(ufd))
+    let (vv2, body_at_xs) = dest_abs(pred_abs)
+    let vv2 :~ FVar = vv2
+    let pred = mk_abs(vv2, body_at_xs)
+    let body_at_xs_j = inst_fvar([[target_j, vv2]], body_at_xs)
+    let leaf_pf = CONJ(thy, REFL(thy, ctor_applied(i, xs_t)), REFL(thy, target_j))
+    let pa_reduced = exists_intro_chain(thy, body_at_xs_j, xs_t, fun (leaf :: Term) :: Thm: leaf_pf)
+    let beta_pa = (match BETA_CONV(thy, mk_comb(pred, target_j))
+                   | th :: Thm: th
+                   | #false: error(~who: #'build_observers, "beta failed"))
+    let pa = EQ_MP(SYM(thy, beta_pa), pa_reduced)
+    let vfresh = genvar(f.ty)
+    let body_at_v = inst_fvar([[vfresh, vv2]], body_at_xs)
+    fun uniq_peel(stmt :: Term, th :: Thm, chosen :: List.of(Term)) :: Thm:
+      cond
+      | is_exists(stmt):
+          let [zv, ibody] = (match dest_exists(stmt) | l: l)
+          let zv :~ FVar = zv
+          let gv = genvar(zv.ty)
+          let ibody_gv = inst_fvar([[gv, zv]], ibody)
+          let inner = uniq_peel(ibody_gv, ASSUME(thy, ibody_gv), chosen ++ [gv])
+          CHOOSE(thy, gv, th, inner)
+      | ~else:
+          // stmt : Ci(xs_t) = Ci(chosen) and chosen[j] = vfresh
+          let ctor_eq = CONJUNCT1(thy, th)
+          let field_eq_j = CONJUNCT2(thy, th)
+          let inj_th = (match injectivity[c.name] | th2 :: Thm: th2 | #false: error(~who: #'build_observers, "injectivity missing"))
+          let conj_all = EQ_MP(SPECL(thy, xs_t ++ chosen, inj_th), ctor_eq)
+          let xj_eq_chosenj = split_left_conj(thy, conj_all, xs_t.length())[j]
+          SYM(thy, TRANS(xj_eq_chosenj, field_eq_j))
+    let uniq_result = uniq_peel(body_at_v, ASSUME(thy, body_at_v), [])
+    let uniq = GEN(thy, vfresh, DISCH(thy, body_at_v, uniq_result))
+    GENL(thy, xs_v, TRANS(ufd, SELECT_UNIQUE(thy, vv2, body_at_xs, target_j, pa, uniq)))
+  let selectors = for values(acc :~ List = []) (c in spec.ctors, i in List.iota(n)):
+                     let c :~ Ctor = c
+                     for values(acc2 :~ List = acc) (f in c.fields, j in List.iota(c.fields.length())):
+                       acc2 ++ [selector_theorem(i, j)]
+
+  // -- elim rules: `forall x. is_Ci(x) ==> Ci(Ci_f0(x),...) === x`, from
+  // `is_Ci`'s own unfolding (an `x = Ci(chosen)` witness once every
+  // existential is peeled) rewritten through `selector_theorem`.
+  fun elim_rule(i :: Int) :: Thm:
+    let c = spec.ctors[i] :~ Ctor
+    let k = c.fields.length()
+    let disc_x = mk_comb(mk_const(discriminator_name(c), mk_fun(self, bool)), xv)
+    let exists_th = EQ_MP(unfold_def(thy, disc_def(i), [xv]), ASSUME(thy, disc_x))
+    fun peel(stmt :: Term, th :: Thm, chosen :: List.of(Term)) :: Thm:
+      cond
+      | is_exists(stmt):
+          let [zv, ibody] = (match dest_exists(stmt) | l: l)
+          let zv :~ FVar = zv
+          let gv = genvar(zv.ty)
+          let ibody_gv = inst_fvar([[gv, zv]], ibody)
+          let inner = peel(ibody_gv, ASSUME(thy, ibody_gv), chosen ++ [gv])
+          CHOOSE(thy, gv, th, inner)
+      | ~else:
+          // stmt (= concl_of(th)) : x = Ci(chosen)
+          let x_eq_ci = th
+          let sel_eqs = for List (f in c.fields, m in List.iota(k)):
+                          let f :~ Field = f
+                          let sel_const = mk_const(selector_name(c, f), mk_fun(self, f.ty))
+                          TRANS(AP_TERM(thy, sel_const, x_eq_ci), SPECL(thy, chosen, selector_theorem(i, m)))
+          (if k == 0
+           | SYM(thy, x_eq_ci)
+           | TRANS(congruence_chain(thy, ctor_const(i), sel_eqs), SYM(thy, x_eq_ci)))
+    GEN(thy, xv, DISCH(thy, disc_x, peel(concl_of(exists_th), exists_th, [])))
+  let elim_rules = for List (i in List.iota(n)): elim_rule(i)
+  values(thy, discriminators, selectors, elim_rules)

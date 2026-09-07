@@ -39,6 +39,7 @@ import:
   "drule.rhm" open
   "algebra.rhm" open
   "datatype.rhm" open
+  "datatype_common.rhm" open
 
 export:
   is_nonrecursive_spec
@@ -56,7 +57,6 @@ export:
   collect_field_eqs
   left_fold_conj
   conj_all_term
-  congruence_chain
   mk_field_vars
   unpack_payload_exists
   choose_through_and_rewrap
@@ -116,15 +116,6 @@ fun not_iff_left(thy :: Theory, iff_th :: Thm, not_p :: Thm) :: Thm:
   let p_th = EQ_MP(iff_th, asm)
   let false_th = MP(thy, NOT_ELIM(thy, not_p), p_th)
   NOT_INTRO(thy, DISCH(thy, qq, false_th))
-
-// `|- not (a = b)`  ==>  `|- not (b = a)`.
-fun not_eq_sym(thy :: Theory, th :: Thm) :: Thm:
-  let inner = (match dest_neg(concl_of(th)) | p: p)
-  let [a, b] = (match dest_eq(inner) | l: l)
-  let asm = ASSUME(thy, mk_eq(b, a))
-  let flipped = SYM(thy, asm)
-  let false_th = MP(thy, NOT_ELIM(thy, th), flipped)
-  NOT_INTRO(thy, DISCH(thy, mk_eq(b, a), false_th))
 
 // `|- not (inject_from(ptys,i,pa) = inject_from(ptys,j,pb))`, `i != j`.
 // Generalizes `datatype_derived.rhm`'s `enum_distinct_repr` to arbitrary
@@ -243,15 +234,6 @@ fun conj_all_term(xs :: List.of(Term), ys :: List.of(Term)) :: Term:
   let eqs = for List (x in xs, y in ys): mk_eq(x, y)
   (match eqs
    | List.cons(t0, rest): for values(acc :~ Term = t0) (t in rest): mk_conj(acc, t))
-
-fun split_left_conj(thy :: Theory, th :: Thm, k :: Int) :: List.of(Thm):
-  cond
-  | k == 1: [th]
-  | ~else: split_left_conj(thy, CONJUNCT1(thy, th), k - 1) ++ [CONJUNCT2(thy, th)]
-
-fun congruence_chain(thy :: Theory, f :: Term, eqs :: List.of(Thm)) :: Thm:
-  (match eqs
-   | List.cons(e0, rest): for values(acc :~ Thm = AP_TERM(thy, f, e0)) (e in rest): MK_COMB(acc, e))
 
 // `|- a = b`  ==>  `|- pa = pb`, given `a = inject_from(ptys,i,pa)`,
 // `b = inject_from(ptys,i,pb)` (same index `i` both sides).
@@ -550,152 +532,10 @@ fun build_nonrecursive_datatype_thms(thy :: Theory, spec :: DatatypeSpec,
     let disch_hyp = DISCH(thy, case_conj, disch_x)
     GEN(thy, bigP, disch_hyp)
 
-  // -- discriminators: `is_Ci(x) := exists a0...ak-1. x = Ci(a0,...,ak-1)`,
-  // a total predicate identical in shape to `ctor_leaf_target`'s own
-  // disjunction leaves -- so `Ci(ys)` matching it (`i=j`) or refuting it
-  // (`i!=j`, via the already-proved `distinctness`) is all `is_Ci` ever
-  // needs to say.
-  let thy = for values(t :~ Theory = thy) (c in spec.ctors, i in List.iota(n)):
-              let c :~ Ctor = c
-              let dv = mk_var(#'d, self)
-              let (t2, _) = new_basic_definition(t, mk_eq(mk_var(discriminator_name(c), mk_fun(self, bool)), mk_abs(dv, ctor_leaf_target_at(i, dv))))
-              t2
-  fun disc_def(i :: Int) :: Thm:
-    (match definition_of(thy, discriminator_name(spec.ctors[i] :~ Ctor))
-     | th :: Thm: th
-     | #false: error(~who: #'build_nonrecursive_datatype_thms, "discriminator definition missing"))
-  // `|- exists a0...ak-1. Ci(ys) = Ci(a0,...)`, witnessed by `ys` itself.
-  fun ctor_self_witness(i :: Int, ys :: List.of(Term)) :: Thm:
-    exists_intro_chain(thy, ctor_leaf_target_at(i, ctor_applied(i, ys)), ys, fun (leaf :: Term) :: Thm: REFL(thy, ctor_applied(i, ys)))
-  // `|- not (Cj(ys) = Ci(chosen))`, `i != j`, reusing the pairwise
-  // `distinctness` theorem, flipped/reordered to match.
-  fun ctor_distinct_stmt(i :: Int, j :: Int, ys :: List.of(Term), chosen :: List.of(Term)) :: Thm:
-    (if i < j
-     | not_eq_sym(thy, SPECL(thy, chosen ++ ys, ctor_distinct(i, j)))
-     | SPECL(thy, ys ++ chosen, ctor_distinct(j, i)))
-  // `{target} |- false`, peeling one existential layer at a time via
-  // `CHOOSE` until the leaf equation contradicts `distinctness`.
-  fun disc_disprove(i :: Int, j :: Int, ys :: List.of(Term), stmt :: Term, chosen :: List.of(Term)) :: Thm:
-    cond
-    | !is_exists(stmt):
-        MP(thy, NOT_ELIM(thy, ctor_distinct_stmt(i, j, ys, chosen)), ASSUME(thy, stmt))
-    | ~else:
-        let [zv, ibody] = (match dest_exists(stmt) | l: l)
-        let zv :~ FVar = zv
-        let gv = genvar(zv.ty)
-        let ibody_gv = inst_fvar([[gv, zv]], ibody)
-        CHOOSE(thy, gv, ASSUME(thy, stmt), disc_disprove(i, j, ys, ibody_gv, chosen ++ [gv]))
-  fun discriminator_pair(i :: Int, j :: Int) :: Thm:
-    let cj = spec.ctors[j] :~ Ctor
-    let ys_v = mk_field_vars(cj.fields, "y")
-    let ys_t = ys_v.map(fun (v :: FVar): v :~ Term)
-    let ufd = unfold_def(thy, disc_def(i), [ctor_applied(j, ys_t)])
-    let iff_th = (if i == j
-                  | TRANS(ufd, EQT_INTRO(thy, ctor_self_witness(i, ys_t)))
-                  | let target = rhs_of(ufd)
-                    TRANS(ufd, EQF_INTRO(thy, NOT_INTRO(thy, DISCH(thy, target, disc_disprove(i, j, ys_t, target, []))))))
-    GENL(thy, ys_v, iff_th)
-  let discriminators = for values(acc :~ List = []) (ci in spec.ctors, i in List.iota(n)):
-                          for values(acc2 :~ List = acc) (cj in spec.ctors, j in List.iota(n)):
-                            acc2 ++ [discriminator_pair(i, j)]
-
-  // -- selectors: `Ci_fj(x) := select(\v. exists z0...zk-1. x=Ci(zs) and
-  // zj=v)`, total via `select`; "z"-prefixed internal vars so the
-  // existential can never collide with a caller's own "x"-prefixed field
-  // vars once both appear together in an instantiated statement.
-  let thy = for values(t :~ Theory = thy) (c in spec.ctors, i in List.iota(n)):
-              let c :~ Ctor = c
-              for values(t2 :~ Theory = t) (f in c.fields, j in List.iota(c.fields.length())):
-                let f :~ Field = f
-                let sv = mk_var(#'s, self)
-                let zs = mk_field_vars(c.fields, "z")
-                let zs_t = zs.map(fun (v :: FVar): v :~ Term)
-                let vv = mk_var(#'v, f.ty)
-                let exists_body = mk_conj(mk_eq(sv, ctor_applied(i, zs_t)), mk_eq(zs_t[j], vv))
-                let pred_body = for values(acc :~ Term = exists_body) (z in zs.reverse()): mk_exists(z, acc)
-                let (t3, _) = new_basic_definition(t2, mk_eq(mk_var(selector_name(c, f), mk_fun(self, f.ty)), mk_abs(sv, mk_select(vv, pred_body))))
-                t3
-  fun sel_def(i :: Int, j :: Int) :: Thm:
-    let c = spec.ctors[i] :~ Ctor
-    let f = c.fields[j] :~ Field
-    (match definition_of(thy, selector_name(c, f))
-     | th :: Thm: th
-     | #false: error(~who: #'build_nonrecursive_datatype_thms, "selector definition missing"))
-  // `|- forall x0...x_{k-1}. Ci_fj(Ci(x0,...,x_{k-1})) = xj`, via
-  // `SELECT_UNIQUE`: existence is witnessed by the field vars themselves,
-  // uniqueness comes from `injectivity`.
-  fun selector_theorem(i :: Int, j :: Int) :: Thm:
-    let c = spec.ctors[i] :~ Ctor
-    let f = c.fields[j] :~ Field
-    let xs_v = mk_field_vars(c.fields, "x")
-    let xs_t = xs_v.map(fun (v :: FVar): v :~ Term)
-    let target_j = xs_t[j]
-    let ufd = unfold_def(thy, sel_def(i, j), [ctor_applied(i, xs_t)])
-    let (_, pred_abs) = dest_comb(rhs_of(ufd))
-    let (vv2, body_at_xs) = dest_abs(pred_abs)
-    let vv2 :~ FVar = vv2
-    let pred = mk_abs(vv2, body_at_xs)
-    let body_at_xs_j = inst_fvar([[target_j, vv2]], body_at_xs)
-    let leaf_pf = CONJ(thy, REFL(thy, ctor_applied(i, xs_t)), REFL(thy, target_j))
-    let pa_reduced = exists_intro_chain(thy, body_at_xs_j, xs_t, fun (leaf :: Term) :: Thm: leaf_pf)
-    let beta_pa = (match BETA_CONV(thy, mk_comb(pred, target_j))
-                   | th :: Thm: th
-                   | #false: error(~who: #'build_nonrecursive_datatype_thms, "beta failed"))
-    let pa = EQ_MP(SYM(thy, beta_pa), pa_reduced)
-    let vfresh = genvar(f.ty)
-    let body_at_v = inst_fvar([[vfresh, vv2]], body_at_xs)
-    fun uniq_peel(stmt :: Term, th :: Thm, chosen :: List.of(Term)) :: Thm:
-      cond
-      | is_exists(stmt):
-          let [zv, ibody] = (match dest_exists(stmt) | l: l)
-          let zv :~ FVar = zv
-          let gv = genvar(zv.ty)
-          let ibody_gv = inst_fvar([[gv, zv]], ibody)
-          let inner = uniq_peel(ibody_gv, ASSUME(thy, ibody_gv), chosen ++ [gv])
-          CHOOSE(thy, gv, th, inner)
-      | ~else:
-          // stmt : Ci(xs_t) = Ci(chosen) and chosen[j] = vfresh
-          let ctor_eq = CONJUNCT1(thy, th)
-          let field_eq_j = CONJUNCT2(thy, th)
-          let inj_th = (match injectivity[c.name] | th2 :: Thm: th2 | #false: error(~who: #'build_nonrecursive_datatype_thms, "injectivity missing"))
-          let conj_all = EQ_MP(SPECL(thy, xs_t ++ chosen, inj_th), ctor_eq)
-          let xj_eq_chosenj = split_left_conj(thy, conj_all, xs_t.length())[j]
-          SYM(thy, TRANS(xj_eq_chosenj, field_eq_j))
-    let uniq_result = uniq_peel(body_at_v, ASSUME(thy, body_at_v), [])
-    let uniq = GEN(thy, vfresh, DISCH(thy, body_at_v, uniq_result))
-    GENL(thy, xs_v, TRANS(ufd, SELECT_UNIQUE(thy, vv2, body_at_xs, target_j, pa, uniq)))
-  let selectors = for values(acc :~ List = []) (c in spec.ctors, i in List.iota(n)):
-                     let c :~ Ctor = c
-                     for values(acc2 :~ List = acc) (f in c.fields, j in List.iota(c.fields.length())):
-                       acc2 ++ [selector_theorem(i, j)]
-
-  // -- elim rules: `forall x. is_Ci(x) ==> Ci(Ci_f0(x),...) === x`, from
-  // `is_Ci`'s own unfolding (an `x = Ci(chosen)` witness once every
-  // existential is peeled) rewritten through `selector_theorem`.
-  fun elim_rule(i :: Int) :: Thm:
-    let c = spec.ctors[i] :~ Ctor
-    let k = c.fields.length()
-    let disc_x = mk_comb(mk_const(discriminator_name(c), mk_fun(self, bool)), xv)
-    let exists_th = EQ_MP(unfold_def(thy, disc_def(i), [xv]), ASSUME(thy, disc_x))
-    fun peel(stmt :: Term, th :: Thm, chosen :: List.of(Term)) :: Thm:
-      cond
-      | is_exists(stmt):
-          let [zv, ibody] = (match dest_exists(stmt) | l: l)
-          let zv :~ FVar = zv
-          let gv = genvar(zv.ty)
-          let ibody_gv = inst_fvar([[gv, zv]], ibody)
-          let inner = peel(ibody_gv, ASSUME(thy, ibody_gv), chosen ++ [gv])
-          CHOOSE(thy, gv, th, inner)
-      | ~else:
-          // stmt (= concl_of(th)) : x = Ci(chosen)
-          let x_eq_ci = th
-          let sel_eqs = for List (f in c.fields, m in List.iota(k)):
-                          let f :~ Field = f
-                          let sel_const = mk_const(selector_name(c, f), mk_fun(self, f.ty))
-                          TRANS(AP_TERM(thy, sel_const, x_eq_ci), SPECL(thy, chosen, selector_theorem(i, m)))
-          (if k == 0
-           | SYM(thy, x_eq_ci)
-           | TRANS(congruence_chain(thy, ctor_const(i), sel_eqs), SYM(thy, x_eq_ci)))
-    GEN(thy, xv, DISCH(thy, disc_x, peel(concl_of(exists_th), exists_th, [])))
-  let elim_rules = for List (i in List.iota(n)): elim_rule(i)
+  // Discriminators, selectors and destructor-elimination rules do not look
+  // at how the type was represented -- they follow from injectivity,
+  // distinctness and cases -- so they are built by `datatype_common.rhm`,
+  // which the recursive construction uses too.
+  let (thy, discriminators, selectors, elim_rules):
+    build_observers(thy, spec, ctor_const, injectivity, ctor_distinct, cases)
   values(thy, DatatypeThms(spec, injectivity, distinctness, induction, cases, discriminators, selectors, elim_rules))

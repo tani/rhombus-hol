@@ -30,6 +30,7 @@ import:
   "algebra.rhm" open
   "datatype.rhm" open
   "datatype_gen.rhm" open
+  "datatype_common.rhm" open
   "infinity.rhm" open
   "treerep.rhm" open
 
@@ -45,6 +46,7 @@ export:
   restate_distinctness
   restate_induction
   restate_cases
+  build_recursive_datatype_thms
 
 def unitty :: HType = mk_tyapp(ty_unit, [])
 
@@ -640,3 +642,53 @@ fun restate_cases(thy :: Theory, spec :: DatatypeSpec, cs :: RecCtors,
       match BETA_CONV(thy, concl_of(at_x))
       | th :: Thm: EQ_MP(th, at_x)
       | ~else: at_x)
+
+// -- the whole construction ---------------------------------------------------
+//
+// A self-recursive `DatatypeSpec` in, a `DatatypeThms` out, with every
+// theorem proved.  The observers come from `datatype_common.rhm`, the same
+// code the non-recursive construction uses: what a discriminator or a
+// selector means does not depend on how the type was built, only on
+// injectivity, distinctness and cases -- which are now derived here too.
+fun build_recursive_datatype_thms(thy0 :: Theory, spec :: DatatypeSpec,
+                                  ind :: IndThms,
+                                  alg :: AlgebraThms = algebra_base_thms())
+     :: values(Theory, DatatypeThms):
+  let (thy1, rc) = carve_recursive_datatype(thy0, spec, alg)
+  let tree = derive_tree_theorems(thy1, rc, alg, ind)
+  let (thy2, cs) = define_recursive_ctors(thy1, spec, rc)
+
+  let injectivity:
+    for values(acc :~ Map = {}) (c in spec.ctors, i in List.iota(spec.ctors.length())):
+      cond
+      | (c :~ Ctor).fields.length() == 0: acc
+      | ~else:
+          acc ++ {(c :~ Ctor).name:
+                    restate_injectivity(thy2, spec, alg, rc, cs,
+                                        (tree.injectivity[i] :~ Thm), i)}
+  // `i < j` in the order `DatatypeThms` states them, and `derive_tree_theorems`
+  // produced them in that same order
+  let distinctness :~ List:
+    let pairs = for values(acc :~ List = []) (i in List.iota(spec.ctors.length())):
+                  for values(a2 :~ List = acc) (j in List.iota(spec.ctors.length())):
+                    (if i < j | a2 ++ [[i, j]] | a2)
+    for List (ij in pairs, t in tree.distinctness):
+      restate_distinctness(thy2, spec, rc, cs, t :~ Thm,
+                           ((ij :~ List)[0] :~ Int), ((ij :~ List)[1] :~ Int))
+  let induction = restate_induction(thy2, spec, alg, rc, cs, tree.induction)
+  let cases = restate_cases(thy2, spec, cs, induction)
+
+  fun ctor_distinct(i :: Int, j :: Int) :: Thm:
+    let idx:
+      recur loop (a = 0, b = 1, k = 0):
+        cond
+        | a == i && b == j: k
+        | b == spec.ctors.length() - 1: loop(a + 1, a + 2, k + 1)
+        | ~else: loop(a, b + 1, k + 1)
+    (distinctness[idx] :~ Thm)
+  let (thy, discriminators, selectors, elim_rules):
+    build_observers(thy2, spec, fun (i :: Int): (cs.terms[i] :~ Term),
+                    injectivity, ctor_distinct, cases)
+  values(thy,
+         DatatypeThms(spec, injectivity, distinctness, induction, cases,
+                      discriminators, selectors, elim_rules))

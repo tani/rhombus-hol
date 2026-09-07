@@ -406,6 +406,25 @@ fun parse_function_decl(thy :: Theory, stx :: Syntax) :: FunSpec:
 // `pats` is the row built so far: initially the bare parameters, refined one
 // position at a time -- possibly nested inside an earlier refinement -- as
 // the matching descends.
+// Whether `t` mentions the constant being defined -- i.e. whether it holds a
+// recursive call.
+fun mentions_constant(name :: Symbol, t :: Term) :: Boolean:
+  match t
+  | Const(n, _): n == name
+  | Comb(f, x): mentions_constant(name, f) || mentions_constant(name, x)
+  | Abs(_, b): mentions_constant(name, b)
+  | ~else: #false
+
+// Whether `sub` occurs as a subterm of `t`.
+fun occurs_in(sub :: Term, t :: Term) :: Boolean:
+  cond
+  | t == sub: #true
+  | ~else:
+      match t
+      | Comb(f, x): occurs_in(sub, f) || occurs_in(sub, x)
+      | Abs(_, b): occurs_in(sub, b)
+      | ~else: #false
+
 fun parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
                pats :: List.of(Term), env :: Map.of(Symbol, Term),
                body :: Syntax, at :: Syntax) :: List.of(DefClause):
@@ -426,7 +445,34 @@ fun parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
       // error below, the same as any other unrecognised body shape.
       let v = elab_expr(thy, self_name, self, env, '$rhs ...')
       let env2 = env ++ {Syntax.unwrap(n): v}
-      parse_body(thy, self_name, self, pats, env2, '$more; ...', at)
+      let clauses = parse_body(thy, self_name, self, pats, env2,
+                               '$more; ...', at)
+      // A `let` is substituted, not bound: the initializer survives in the
+      // equations only where the variable is read.  The emitted Rhombus
+      // evaluates it either way, so an initializer that some clause never
+      // reads disappears from the logic while still running -- and with it
+      // any recursive call inside it.  `function bad(n): let unused = bad(n);
+      // zero()` elaborated to `!n. bad(n) = zero`, with the termination check
+      // seeing no recursion, while `bad(zero())` diverges.
+      //
+      // So the condition is not "the initializer recurses" but "a clause
+      // dropped it": every clause this body produces must still contain the
+      // initializer's value.  A `let` whose call is genuinely used everywhere
+      // is unaffected; one used in only some branches of a `match` is
+      // refused, because the other branches evaluate it and forget it.
+      //
+      // This is still a check on a substituted term.  Beta-reduction can
+      // erase a call however it is written, so the real fix is to check
+      // termination against an evaluation-ordered core (PLAN.md 9.26).
+      when mentions_constant(self_name, v)
+             && (for any (c in clauses): !occurs_in(v, (c :~ DefClause).rhs))
+      | syntax_error(#'function,
+                     "this `let` initializer contains a recursive call, but "
+                       ++ "some clause of the body never uses it: the logical "
+                       ++ "reading would drop the call while the compiled "
+                       ++ "program still evaluates it",
+                     '$rhs ...')
+      clauses
   | ~else:
       [DefClause(pats, elab_expr(thy, self_name, self, env, body))]
 

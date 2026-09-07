@@ -1,0 +1,50 @@
+#lang rhombus/static
+
+// A `let` initializer's evaluation is an obligation, even when its value is
+// not used (PLAN.md section 9.26).
+//
+// `let` is substituted rather than bound, so an initializer only reaches the
+// equations where the variable is read.  The compiled Rhombus evaluates it
+// regardless.  Left alone, that lets a function be *proved* about while its
+// compiled form diverges:
+//
+//   function bad(n :: Nat) :: Nat:
+//     let unused = bad(n)
+//     zero()
+//
+// elaborated to `!n. bad(n) = zero`, derived with no axioms, termination
+// method `none` -- and `bad(zero())` never returns.  The theorem is not false
+// in HOL, where functions are total; what it is not is a statement about the
+// program that was compiled.
+
+import:
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  rhombus/hol/driver open
+  "fixtures/let_recursive_ok.rhm" as ok
+  "fixtures/let_recursive_ok.rhm"!hol_theory as okm
+
+fun load(mp :: ModulePath):
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }: Evaluator.instantiate(mp)
+
+// -- the call a clause would drop is refused ---------------------------------
+check:
+  load(ModulePath'lib("rhombus/hol/tests/fixtures/let_recursive_bad.rhm")')
+  ~throws "some clause of the body never uses it"
+
+// -- a call every clause keeps is not ----------------------------------------
+//
+// The condition is "a clause dropped it", not "the initializer recurses":
+// refusing every recursive initializer would be a cheaper rule and would cost
+// this definition, which is perfectly well-behaved.
+def st :~ HolState = okm.theory
+
+check st.funs[#'dbl].recinfo.method ~is #'structural
+check:
+  st.funs[#'dbl].equations.map(fun (t :: Thm): show(concl_of(t)))
+  ~is ["dbl(zero) === zero",
+       "forall (x :: Nat): dbl(succ(x)) === succ(succ(dbl(x)))"]
+
+// and it runs, which is the half the logic cannot see
+check ok.dbl(ok.succ(ok.zero())) ~is ok.succ(ok.succ(ok.zero()))

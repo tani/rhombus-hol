@@ -1876,6 +1876,49 @@ raco test rhombus-hol/rhombus/hol/tests     1386/1386
 raco setup --pkgs rhombus-hol               0 errors
 ```
 
+### 9.34 進捗（本セッション）: body の二つの読み -- `core.rhm`
+
+第四次レビュー項目 5。`function` の body には**二つの読み**があり、同じ
+ものではない。
+
+* **論理的な読み** = HOL 項。定義方程式が述べること。`let` はここに現れない
+  -- 方程式は値についての主張で、`let x = e; body` は `body` の `x` に `e`
+  を置いたものを表す。
+* **操作的な読み** = コンパイルされた Rhombus がすること。`body` が `x` を
+  読むかどうかに関わらず `e` を評価する。
+
+停止性は後者の性質であって前者のではない。項へ直接 elaborate すると前者
+しか残らないので、`e` の中の再帰呼び出しは停止性検査が走る前に消えていた。
+
+`core.rhm` は両方を保つ形。body を一度組み、二つの読みは二つの関数:
+
+```text
+core_term          論理的な読み -- 方程式が述べること
+core_obligations   評価が必ず通る部分項
+```
+
+`CoreLet` の規則が要点: obligations は initializer のものと body のものの
+**和**。だから論理的な読みが落とす呼び出しも停止性検査には残る。
+
+**§9.26 の暫定 guard を削除した。** あれは「ある節が initializer を落とした
+なら拒否」という構文的な条件で、*停止する*再帰 initializer まで巻き添えに
+していた。今は呼び出しが見えるので、中身で判断される:
+
+* `let unused = bad(n)` -- 降下しない → `cannot see that the definition
+  terminates`、しかも論理的な読みには存在しない呼び出しを名指しして落ちる。
+* `let ignored = unread(k)`（`k` は `succ(k)` から）-- 降下する → **通る**。
+  方程式は `unread(succ x) === succ(zero)` で initializer に触れない。それで
+  正しい。方程式は値についての主張だから。
+
+`CoreLeaf` が式の形を丸ごと写していないのは手抜きではない。`let` だけが
+「部分式が、それが表す項に現れないことがある」構文である -- 適用も条件式も
+match も全オペランドを保つので、オペランドごとのノードは項が既に持って
+いない情報を運ばない。むしろ式文法の二つ目の写しになり、それこそこの
+モジュールが防ごうとしている drift である。
+
+`DefClause` に `obligations` が付き、`check_termination` は
+`[pats, terms]` を取る（`terms` は節が評価する全項）。
+
 ## 10. 外部レビュー（2026-09-07）への対応状況
 
 レビューは `rhombus-hol-kernel` を標準 HOL Light 型カーネルへ寄せ、

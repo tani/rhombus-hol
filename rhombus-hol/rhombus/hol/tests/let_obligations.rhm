@@ -16,6 +16,11 @@
 // method `none` -- and `bad(zero())` never returns.  The theorem is not false
 // in HOL, where functions are total; what it is not is a statement about the
 // program that was compiled.
+//
+// The clause now carries its evaluation obligations beside its right-hand
+// side (`core.rhm`), and the termination checker reads both.  So the call is
+// *seen*: `bad` is refused because it does not terminate, and a recursive
+// initializer that does terminate is accepted.
 
 import:
   rhombus/hol/kernel open
@@ -28,16 +33,15 @@ fun load(mp :: ModulePath):
   let e = Evaluator.make_rhombus()
   parameterize { Evaluator.current: e }: Evaluator.instantiate(mp)
 
-// -- the call a clause would drop is refused ---------------------------------
+// -- the dropped call is seen, and judged on its merits ----------------------
+//
+// Refused for non-termination -- naming the call the logical reading does
+// not contain -- rather than for the syntactic shape of the declaration.
 check:
   load(ModulePath'lib("rhombus/hol/tests/fixtures/let_recursive_bad.rhm")')
-  ~throws "some clause of the body never uses it"
+  ~throws "cannot see that the definition terminates"
 
-// -- a call every clause keeps is not ----------------------------------------
-//
-// The condition is "a clause dropped it", not "the initializer recurses":
-// refusing every recursive initializer would be a cheaper rule and would cost
-// this definition, which is perfectly well-behaved.
+// -- and a terminating one is accepted ---------------------------------------
 def st :~ HolState = okm.theory
 
 check st.funs[#'dbl].recinfo.method ~is #'structural
@@ -48,3 +52,14 @@ check:
 
 // and it runs, which is the half the logic cannot see
 check ok.dbl(ok.succ(ok.zero())) ~is ok.succ(ok.succ(ok.zero()))
+
+// `unread`'s initializer recurses and its body never reads it.  The call
+// descends, so it is fine -- and the equation says nothing about it, which
+// is correct: the equation is about the value.
+check st.funs[#'unread].recinfo.method ~is #'structural
+check:
+  st.funs[#'unread].equations.map(fun (t :: Thm): show(concl_of(t)))
+  ~is ["unread(zero) === zero",
+       "forall (x :: Nat): unread(succ(x)) === succ(zero)"]
+
+check ok.unread(ok.succ(ok.zero())) ~is ok.succ(ok.zero())

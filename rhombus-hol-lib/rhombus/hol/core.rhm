@@ -1,0 +1,76 @@
+#lang rhombus/static
+
+// The evaluation-ordered reading of a function body (PLAN.md section 9.34).
+//
+// A `function`'s body has two readings, and they are not the same reading.
+//
+// The *logical* one is a HOL term: what the defining equation says. A `let`
+// does not appear in it, because a definition's equations are about values,
+// and `let x = e; body` denotes `body` with `e` put where `x` was.
+//
+// The *operational* one is what the compiled Rhombus does, and it evaluates
+// `e` whether or not `body` mentions `x`. Termination is a property of that
+// reading, not of the first: `function bad(n): let unused = bad(n); zero()`
+// denotes `zero` and diverges.
+//
+// Elaborating straight to a term keeps only the first, so the recursive call
+// in `e` disappeared before the termination checker ran. This module is the
+// shape that keeps both: the body is built once, and the two readings are
+// two functions over it.
+//
+//   core_term          the logical reading -- what the equation states
+//   core_obligations   the subterms evaluation reaches regardless
+//
+// The rule that matters is `CoreLet`'s: its obligations are the
+// initializer's *and* the body's, so a call in an initializer survives into
+// the termination analysis even when the logical reading drops it. That is
+// what lets such a definition be accepted -- and checked -- rather than
+// refused, which is what this replaced.
+//
+// `CoreLeaf` holds an already-elaborated term rather than mirroring every
+// expression form. That is not a simplification of the IR: `let` is the only
+// construct whose subexpressions can fail to appear in the term it denotes.
+// An application, a conditional and a match all keep every operand, so a
+// node per operand would carry no information the term does not already
+// carry -- and it would be a second copy of the expression grammar to drift
+// against the first, which is the failure this module exists to prevent.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+
+export:
+  CoreExpr
+  CoreLeaf
+  CoreLet
+  core_term
+  core_obligations
+
+class CoreExpr():
+  nonfinal
+
+// An expression with no evaluation the term does not show.
+class CoreLeaf(term :: Term):
+  extends CoreExpr
+
+// `let name = init; body`.  `init` is elaborated where it is written, and
+// `body` is elaborated with `name` already standing for it, so the logical
+// reading is just the body's.
+class CoreLet(name :: Symbol, init :: CoreExpr, body :: CoreExpr):
+  extends CoreExpr
+
+fun core_term(c :: CoreExpr) :: Term:
+  match c
+  | CoreLeaf(t): t
+  | CoreLet(_, _, body): core_term(body :~ CoreExpr)
+  | ~else: error(~who: #'core_term, "unknown core expression")
+
+// Every term the compiled program evaluates on the way to the value, the
+// body's own included.  `calls(Let(e1, e2)) = calls(e1) + calls(e2)`: the
+// union, not the body's alone.
+fun core_obligations(c :: CoreExpr) :: List.of(Term):
+  match c
+  | CoreLeaf(t): [t]
+  | CoreLet(_, init, body):
+      core_obligations(init :~ CoreExpr) ++ core_obligations(body :~ CoreExpr)
+  | ~else: error(~who: #'core_obligations, "unknown core expression")

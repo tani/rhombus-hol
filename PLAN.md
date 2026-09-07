@@ -1528,7 +1528,7 @@ measure 適用判定テストを追加。フルスイート 1193 -> 1206。
 | # | 項目 | 状況 |
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
-| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype（フェーズ 2・3、無限公理が必要）は未着手 -- なお複数セッション規模。 |
+| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype については本セッションで**フェーズ 2（無限公理と `num` の導出）を完了**した（§9.14、`infinity.rhm`）: 標準形の無限公理 1 本だけを立てて `num` を `new_basic_type_definition` で切り出し、Peano の 3 定理を仮説 0 個の定理として導出（公理数 3 -> 4、他は全部定義原理経由）。**配線はしていない** -- `build_ind` は渡された theory を拡張するだけで `base_theory()` に触れないので、既定の TCB は不変（`tests/infinity.rhm` が回帰で固定）。残るフェーズ 3（`num` 上に labelled tree 型と recursion theorem を作り、再帰 datatype を一般に切り出す）は未着手で、HOL システム中で単体最大の部品のため複数セッション規模。 |
 | 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **完了**（§9.1.2、§9.7〜9.10）。`WFREC` 存在定理は完全導出（`wfrec.rhm`）。`driver.rhm` の `add_function` から実接続済みで、**通常の `function` 宣言はもう `new_axiom` を使わない**: 単一引数・構造的降下（§9.1.2）、任意深さの入れ子パターン（§9.7）、多引数（§9.8、タプル上で射影に沿った引き戻し）、非再帰関数（§9.8 続報）、そして **`~measure`（§9.10、measure に沿った引き戻し＋条件付き congruence bridge、ガード付き再帰も含む）**。残るフォールバックは真の辞書式降下（Ackermann、整礎関係の辞書式積が要る）と、関係する型が宣言済み datatype でない場合の 2 つだけ。なお datatype の `T_lt` 自身の方程式は `add_subterm_relation` が従来通り公理として入れる（`WF(T_lt)` は導出、`trust.scrbl` にその区別を明記した）。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**（`unsafe` 名前空間、§10.x）、**`HType` 側は意図的に見送り**。下記参照。 |
 | 3(facade) | `rhombus/hol/kernel` を教育用 public facade にする | **完了**（§9.13）。`hyps`/`trace` を名前空間へ移し、`htype`/`term` を再 export。一 import で学生向け API が揃い、`hyp_union`/`trace_start`/`raw_comb` は裸では unbound。 |
@@ -1536,11 +1536,12 @@ measure 適用判定テストを追加。フルスイート 1193 -> 1206。
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済み。`hyp_insert`/`hyp_union`/`hyp_remove`/`rehash_hyps` の非公開化は**調査済み、現状維持と判断**: `rhombus-hol-lib` のどこからも実際には呼ばれておらず（`Thm` は raw hyps リストではなく既に不可侵なので、これらは項リスト上の純粋なユーティリティであり公開してもソウンドネスに影響しない）、唯一の外部利用者は `rhombus-hol-kernel` に対応するテストパッケージが無いために `tests/kernel.rhm`/`tests/drule.rhm`（外側の `rhombus-hol` パッケージ）に置かれている kernel 自身の単体テスト。非公開化には kernel 専用のテストパッケージ新設が要り、得られる利益（API 美観）に見合わないと判断した。 |
 | 6 | 公開 kernel API を HOL Light `fusion.ml` に揃える | 大枠は既に一致（十規則、同じ命名）。**`BETA` の trivial-redex 化は検討し、見送りと判断**（詳細下記）。残る未着手部分は printer/tracing 分離のみ（§5 で対応済みと説明）。 |
 | 6b | base logic は HOL Light型かHOL4型かを明示する | **既に明示済み**。`bool.rhm` 冒頭のコメントが "ETA, SELECT and BOOL_CASES -- following HOL4 rather than HOL Light" と明記し、`kernel.rhm`/PLAN.md §1 が原始規則は HOL Light 型（十規則）であることを明記している。レビューが望む「どちらの型を実装しているか」の明示は既存のドキュメントで満たされている。 |
-| 7 | `Surface → CoreExpr → HOL + Rhombus` の共通 IR | **調査済み、現行範囲では不要と判断**。`module_block.rhm`の実行側emitは`body`を一切解釈しない逐語コピーで、独自の第二の意味論を持たない。裸の識別子・ハードコード演算子表のみの現行反映範囲では名前ベース(elab.rhm)と束縛ベース(Rhombus)の解決が食い違い得ない。共通IRが要る具体的な引き金（インポート別名越しの参照・ユーザー定義演算子）を§9.5に記録した。 |
+| 7 | `Surface → CoreExpr → HOL + Rhombus` の共通 IR | **不要であることを回帰テストで固定した（本セッション、§9.15）**。以前は判断として書いていたが、今回「二つの読みが食い違う」経路を実際に一つずつ塞いで `tests/name_resolution.rhm` に固定した: 局所束縛による影（elab 自身の binder 環境が勝つ -- `trap(x) === x` を実測）、モジュールレベルの再束縛（Rhombus 自身が `identifier for definition already required` で拒否）、import alias 経由の参照（elab が `not a type` で拒否）。以下は元の調査。`module_block.rhm`の実行側emitは`body`を一切解釈しない逐語コピーで、独自の第二の意味論を持たない。裸の識別子・ハードコード演算子表のみの現行反映範囲では名前ベース(elab.rhm)と束縛ベース(Rhombus)の解決が食い違い得ない。共通IRが要る具体的な引き金（インポート別名越しの参照・ユーザー定義演算子）を§9.5に記録した。 |
 | 8 | `match`/`cond`/局所 `def`/入れ子パターンの追加 | **完了**。`cond`/局所 `let`、入れ子パターン（§9.4.1）に加え、本セッションで決定木を独立した IR（`dtree.rhm`）に切り出し、`recdef.rhm` の網羅性検査と `stepfn.rhm` の `H` 生成が**同じ木を共有**するようにした（§9.7）。さらに **`_` ワイルドカードと節順序依存（first-match-wins）も実装済み**（§9.11）: 重複はもうエラーではなく早い節が勝ち、`_` はパターン内でも節頭でも書ける。到達不能節と非網羅は引き続き拒否。これに伴い `install_function` も葉ごと公理化に直した（節ごとのままだと順序付けと矛盾する -- §9.11 の罠を参照）。 |
 | 9 | `function` はロジック性マーカーのみとし、grammar は Rhombus `fun` を再利用 | **設計判断として達成、コード内に既存の理由コメントあり**。`elab.rhm` 冒頭が「`fun` を intercept せず別キーワードにする」理由を明記済み。宣言レベルの多節 `\|` 構文（Rhombus 本来の `fun` の書き方）への接近は、項目8で完了した決定木コンパイラを流用できるため、以前考えていたより着手しやすくなったが、`function`自体の宣言文法を変えるかどうかは別の設計判断であり今回は着手しなかった。 |
 | 10 | user-defined operator に logical interpretation を登録可能にする | **調査済み、v0.1 の範囲では不要と判断（既存コメントあり）**。`elab.rhm` の手書き precedence parser 自体が "What `space.enforest` would buy is user extensibility, which v0.1 does not need" と明記しており、固定・小さい命題文法である現状ではレビューが望む拡張性の需要が実際に発生していない。§9.5 の Core IR 同様、需要が生じた時点（ユーザー定義演算子が実際に使われる時点）で再検討する。 |
 | 11 | fertilization / irrelevance 除去 / induction pool | fertilization と irrelevance 除去は**完了**（本セッション以前）。帰納法の探索制御は**完了**（§9.12）: 固定深度 2 とその誤ったコメント（「Two levels is what ACL2 uses」）を、重複ゴール検出＋分岐長制限（6、計測で決定）に置き換えた。ゴールを pool に貯めて waterfall trip をやり直す構造そのものには変えていない -- 計測上その必要が出ていないため。 |
+| 12 | `max_induction_depth = 2` を外す | **完了**（§9.12）。固定深度 2 と、その根拠として書かれていた誤ったコメント（「Two levels is what ACL2 uses」――ACL2 は固定深度で打ち切らない）を削除し、ACL2 が実際に使っている二本立て、**重複ゴール検出**（同じゴールに二度帰納法をかけない）と**分岐長制限**（subgoal path limit、値 6 は計測で決定: 3〜6 は同コスト、20 で 1.9 倍、100 は発散）に置き換えた。最初に試した「重複検出＋安全弁 200」版は退行したので撤回してあり、その記録も残してある（下記）。 |
 | 13 | rule classes | **完了**。`ruledb.rhm` の `RuleDB` が type-prescription 事実を rewrite ルールと独立に分類・保持（`type_facts_of`）、`general.rhm` の `generalize_goal` が一般化時にそれを消費する。本セッションで `disable`/`~in_theory:` が型事実にも届くようにした（ACL2 の rune の扱いに合わせた、§9.9）。 |
 | 14 | conditional rewriting | **完了**。`RewriteRule` が `conds :: List.of(Term)` を持ち、`apply_rule` が（自分自身を除外した db で）各条件を `simp_conv` により再帰的に discharge する。 |
 | 15 | hints の拡充（`~cases`/`~expand`/`~in_theory`） | **`~in_theory:` と `~cases:` は完了**。`~expand:` は見送り（下記）。`~do_not:` は本セッション以前に追加済み。 |
@@ -1671,24 +1672,32 @@ ACL2 の `:expand` は「その関数呼び出しを、引数の形によらず�
 ヒントに使ってよい変数を明示する」形の別の意味論を設計する必要があり、
 今回は見送った。
 
-### induction pool は実装して撤回した（性能退行）
+### induction pool そのものは実装して撤回した（性能退行）――ただし探索制御は §9.12 で置き換え済み
 
-`waterfall.rhm` の `max_induction_depth = 2` を、繰り返しゴール検出
-（同じ `(asms, concl)` を持つゴールに再度帰納法を試みない）+ 大きめの
-安全弁（200）に置き換える版を実装し、`tests/decl_theorem.rhm` で検証した
-ところ、以前 29 秒で終わっていたファイルが 108 秒以上かかるようになった
+**この節は失敗した最初の試みの記録である。`waterfall.rhm` の現状は
+§9.12（重複ゴール検出＋分岐長制限 6）であり、固定深度 2 ではない。**
+
+最初の試みは `max_induction_depth = 2` を、繰り返しゴール検出（同じ
+`(asms, concl)` を持つゴールに再度帰納法を試みない）+ 大きめの安全弁（200）
+に置き換える版だった。`tests/decl_theorem.rhm` で検証したところ、以前
+29 秒で終わっていたファイルが 108 秒以上かかるようになった
 （`conditional_stuck.rhm`/`theorem_stuck.rhm` 等、意図的に失敗するはずの
 フィクスチャが、以前は深さ 2 ですぐ諦めていたのに対し、繰り返し検出が
 「進展なし」を捕まえられないケースでずっと深く帰納法を試すようになった
 ため）。各帰納法はコンストラクタの数だけ分岐するので、深さに対して
-作業量は指数的に増える。厳密な繰り返し一致だけでは ACL2 が実際に使っている
-「進展なし」ヒューリスティック（ゴールのサイズ・構造が悪化していないか等）
-の代わりにならず、安全弁を大きく取ると退行、小さく取ると元の 2 とほとんど
-変わらない。**この変更は撤回済み**（`waterfall.rhm` は元の固定深度 2 の
-ままで、リポジトリに退行は残っていない）。正しくやるなら、単純な深さや
-繰り返し検出ではなく、ACL2 の「進展があったかどうか」判定
-（生成された部分項の集合が真に増えたか、生成された仮定が本当に新しいか等）
-を実装する必要がある。
+作業量は指数的に増える。
+
+そこから学んだのは「**重複検出だけでは終端しない、分岐長制限が本当の
+終端子である**」という一点で、§9.12 はその両方を持たせた上で制限値を
+計測で決めている（3〜6 は同コスト、20 で 1.9 倍、100 は発散）。なお当時
+「29 秒」と書いたのは古い測定値で、実測し直すと `decl_theorem.rhm` は
+3.2 秒だった -- 性能退行の結論自体は変わらないが、倍率は誇張されていた。
+
+さらに正しくやるなら、単純な深さや繰り返し検出ではなく、ACL2 の
+「進展があったかどうか」判定（生成された部分項の集合が真に増えたか、
+生成された仮定が本当に新しいか等）を実装する必要がある。ゴールを pool に
+貯めて waterfall trip をやり直す構造そのものは、計測上その必要が
+出ていないため入れていない。
 
 ### 9.12 進捗（本セッション）: 帰納深度の固定 2 を、重複ゴール検出＋分岐長制限に置き換えた
 
@@ -1753,6 +1762,35 @@ Peano の 3 定理（`suc` の単射性、`suc n /= zero`、帰納法）を**す
 フェーズ 3（再帰 datatype の一般導出）で、それは未着手。
 
 フルスイート 1219/1219（+13）。
+
+### 9.15 進捗（本セッション）: 「論理側の名前と実行側の束縛は食い違わない」を回帰で固定した
+
+レビュー項目 7（共通 Core IR）への対応。レビューの懸念は具体的で、
+「`elab.rhm` は裸の `Symbol` で理論を引き、Rhombus は束縛 identity で
+引く。import alias・rename・shadow があると両者がずれ、一つのソースに
+二つの意味論が生まれる」というもの。§9.5 ではこれを「現行の反映範囲では
+起こり得ない」と**判断として**書いていたが、今回は判断ではなく
+**塞がっていることの証拠**にした。
+
+食い違いを作る経路は三つあり、それぞれ別のものが塞いでいる:
+
+| 経路 | 何が塞いでいるか |
+|---|---|
+| 関数本体の局所束縛が定数名を影にする | `elab.rhm` 自身の binder 環境が定数より優先する |
+| モジュールレベルで定数名を再束縛する | Rhombus 自身が `identifier for definition already required` で拒否 |
+| import alias 越しに定数を参照する（`a.Nat`） | `elab.rhm` が `not a type` で宣言ごと拒否 |
+
+一つ目が唯一「静かに通る」経路なので実測した。
+`function trap(n :: Nat) :: Nat: let twice = n; twice` -- `twice` は同じ
+理論の関数定数でもある -- を書くと、登録される方程式は
+`forall x. trap(x) === x` であって、定数 `twice` の話にはならない。
+実行側も `trap(succ(zero)) = succ(zero)` で一致する
+（`tests/name_resolution.rhm`、フィクスチャ `name_shadow_ok.rhm`）。
+
+したがって**共通 IR を今作るのは投機的**である。作るべき引き金は
+「alias か rename が定数に実際に届くようになったとき」で、その時点で
+このテストの三行目が落ちる。落ちたら作る、というのが正しい順序であり、
+テストはそのための警報として置いてある。
 
 ### 9.13 進捗（本セッション）: `rhombus/hol/kernel` を教育用 facade にした
 

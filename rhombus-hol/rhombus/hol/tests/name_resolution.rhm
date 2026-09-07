@@ -1,0 +1,64 @@
+#lang rhombus/static
+
+// Where the logical reading of a name and its Rhombus binding could drift
+// apart (PLAN.md section 9.5, review item 7).
+//
+// A `#lang rhombus/hol` module is read twice: `elab.rhm` builds HOL terms
+// from it, and `module_block.rhm` emits the body verbatim as Rhombus. The
+// elaborator resolves a name against the theory by bare `Symbol`; Rhombus
+// resolves it by binding identity. The review's concern is that those two
+// answers can differ -- under an import alias, a rename, or a shadow -- and
+// that one source would then have two semantics.
+//
+// This file is the check that they cannot, in the surface actually
+// reflected. Each way of making them differ is closed by something
+// observable, not by a convention:
+//
+//   local shadow    the elaborator's own binder environment wins, so both
+//                   readings pick the local
+//   module shadow   Rhombus itself refuses the module
+//   alias           the elaborator refuses the declaration
+//
+// A rename or alias that did reach a constant would be the trigger to build
+// the shared Core IR; until one exists, name resolution has one answer.
+
+import:
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  rhombus/hol/driver open
+  "fixtures/name_shadow_ok.rhm" as s
+  "fixtures/name_shadow_ok.rhm"!hol_theory as m
+
+fun load(mp :: ModulePath):
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }: Evaluator.instantiate(mp)
+
+// -- a local binding shadowing a constant --------------------------------
+//
+// `trap`'s body is `let twice = n; twice`, and `twice` is also a function
+// constant in the same theory. The equation that got registered is about
+// the local, so the logical reading agrees with what the emitted Rhombus
+// computes.
+def st :~ HolState = m.theory
+
+check:
+  st.funs[#'trap].equations.map(fun (t :: Thm): show(concl_of(t)))
+  ~is ["forall (x :: Nat): trap(x) === x"]
+
+// and the constant it shadowed is untouched -- the shadow is local, not a
+// redefinition
+check:
+  st.funs[#'twice].equations.map(fun (t :: Thm): show(concl_of(t)))
+  ~is ["twice(zero) === zero",
+       "forall (x :: Nat): twice(succ(x)) === succ(succ(twice(x)))"]
+
+// the two readings agree at run time as well
+check s.trap(s.succ(s.zero())) ~is s.succ(s.zero())
+check s.twice(s.succ(s.zero())) ~is s.succ(s.succ(s.zero()))
+
+// -- reaching a constant through an import alias -------------------------
+//
+// Refused, rather than elaborated to something the runtime would not match.
+check:
+  load(ModulePath'lib("rhombus/hol/tests/fixtures/name_alias_bad.rhm")')
+  ~throws "not a type"

@@ -53,6 +53,7 @@ import:
   "algebra.rhm" open
   "subterm.rhm" open
   "wellfounded.rhm" open
+  "lexorder.rhm" open
   "wfrec.rhm" open
   "recdef.rhm" open
   "dtree.rhm" open
@@ -60,6 +61,7 @@ import:
 
 export:
   can_derive_structurally
+  lex_descent_columns
   descent_column
   measure_result_type
   install_structural_function
@@ -136,9 +138,21 @@ fun can_derive_structurally(spec :: FunSpec, recinfo :: RecursionInfo,
       schematic_datatype(dts, measure_result_type(spec))
   | recinfo.method != #'structural && recinfo.method != #'none: #false
   | ~else:
-      descent_column(spec, mk_const(spec.name, fun_type(spec)),
-                     ~usable: fun (ty :: HType): schematic_datatype(dts, ty))
-        != #false
+      let fn_ph = mk_const(spec.name, fun_type(spec))
+      cond
+      | descent_column(spec, fn_ph,
+                       ~usable: fun (ty :: HType):
+                                  schematic_datatype(dts, ty)) != #false: #true
+      // No single column descends everywhere, but the tuple of the
+      // lexicographic order's columns does (PLAN.md 9.31).
+      //
+      // A call nested inside another call's *arguments* is refused here.
+      // The descent fact for the outer call is stated about the tuple its
+      // arguments build, and that tuple would mention the function being
+      // defined -- which does not exist yet in the theory the derivation
+      // runs in.  Ackermann's third clause is the example.
+      | !no_nested_calls(spec, fn_ph): #false
+      | ~else: lex_descent_columns(spec, fn_ph, dts) != #false
 
 // What `~measure(e)` lands in: `e`'s type with the parameters peeled off.
 // `check_termination` has already refused a measure that does not take every
@@ -324,6 +338,129 @@ fun measure_carrier(thy :: Theory, name :: Symbol, prod_thms :: ProdThms,
                        | [prod_thms.fst_pair, prod_thms.snd_pair])
   values(thy2, Carrier(dom, rel, wf, arg_terms, build, split, open_c),
          [rel_eq, m_eq] ++ projs)
+
+// Several arguments descending *lexicographically*: no single column shrinks
+// at every call, but the tuple of the ordered columns does
+// (PLAN.md section 9.31).  The domain is unchanged -- still the tuple of
+// every argument -- and the order is the right-nested lexicographic product
+// of the ordered columns' subterm relations, pulled back along the
+// projection onto just those columns.
+//
+// With one ordered column this is exactly `tuple_carrier`, which is why the
+// caller only reaches here when there are two or more: keeping the simple
+// case on the simple path keeps the common derivation's terms small.
+fun lex_carrier(thy :: Theory, name :: Symbol, alg :: AlgebraThms,
+                tys :: List.of(HType), ks :: List.of(Int),
+                wf_of :: Function.of_arity(1))
+     :: values(Theory, Carrier, List.of(Thm)):
+  let prod_thms :~ ProdThms = alg.prod
+  let (dom, arg_terms, build, split, open_c) = shape_of(prod_thms, tys)
+  let key_tys = for List (k in ks): tys[k] :~ HType
+  let pv = mk_var(#'_lxp, dom)
+  // `\p. (p.k1, (p.k2, ...))`, the tuple the order compares
+  let key_of = mk_tuple(for List (k in ks): tuple_proj(tys, k, pv :~ Term))
+  let (thy1, proj, proj_eq):
+    name_function(thy, Symbol.from_string(to_string(name) ++ "_key"), dom,
+                  key_of, pv)
+  // the order, and its well-foundedness, nested the same way as the tuple
+  fun order_of(ts :: List.of(HType)) :: Term:
+    match ts
+    | [t]: subterm_rel(t :~ HType)
+    | List.cons(t, rest):
+        mk_lex(subterm_rel(t :~ HType), order_of(rest))
+  fun wf_order(ts :: List.of(HType)) :: Thm:
+    match ts
+    | [t]: wf_of(t :~ HType)
+    | List.cons(t, rest):
+        prove_wf_lex(thy1, alg, wf_of(t :~ HType), wf_order(rest))
+  // one unfolding per level of the nesting, so a descent obligation can be
+  // rewritten all the way down to the components' own subterm relations
+  fun unfoldings(ts :: List.of(HType)) :: List.of(Thm):
+    match ts
+    | [_]: []
+    | List.cons(t, rest):
+        [lex_unfold(thy1, subterm_rel(t :~ HType), order_of(rest))]
+          ++ unfoldings(rest)
+  let (thy2, rel, wf, rel_eq):
+    name_relation(thy1, name, dom,
+                  prove_wf_pullback(thy1, wf_order(key_tys), proj))
+  values(thy2, Carrier(dom, rel, wf, arg_terms, build, split, open_c),
+         [rel_eq, proj_eq, prod_thms.fst_pair, prod_thms.snd_pair]
+           ++ unfoldings(key_tys))
+
+// A declared datatype's subterm relation, as a constant.
+fun subterm_rel(ty :: HType) :: Term:
+  match ty
+  | TyApp(n, _): mk_const(subterm_relation_name(n), mk_fun(ty, mk_fun(ty, bool)))
+  | ~else: error(~who: #'lex_carrier, "not a datatype",
+                 error.val(~label: "type", type_to_string(ty)))
+
+// The equations that are about one relation.  `install_structural_function`
+// is handed the union over every datatype the definition touches, because a
+// lexicographic order needs more than one, and `prove_wf_t_lt` needs each
+// datatype's own in its constructor order -- which filtering preserves.
+fun equations_about(rel :: Symbol, eqs :: List.of(Thm)) :: List.of(Thm):
+  for values(acc :~ List = []) (th in eqs):
+    cond
+    | equation_head(concl_of(th :~ Thm)) == rel: acc ++ [th]
+    | ~else: acc
+
+fun equation_head(t :: Term) :: maybe(Symbol):
+  let (_, body) = strip_forall(t)
+  match dest_eq(body)
+  | [lhs, _]:
+      recur peel (u :~ Term = lhs):
+        match u
+        | Comb(g, _): peel(g)
+        | Const(n, _): n
+        | ~else: #false
+  | ~else: #false
+
+// No recursive call sits inside another recursive call's arguments.
+fun no_nested_calls(spec :: FunSpec, fn_ph :: Term) :: Boolean:
+  let arity = spec.arg_types.length()
+  for all (cl in spec.clauses):
+    let sites = call_sites_in(#'function, spec.name, fn_ph, arity,
+                              (cl :~ DefClause).rhs)
+    for all ([_, args] in sites):
+      for all (a in args :~ List): !mentions(fn_ph, a :~ Term)
+
+// The columns a lexicographic order descends in, or `#false` if there is no
+// such order over declared datatypes.  This is `terminate.rhm`'s own greedy
+// search -- the same one that decided the definition terminates -- narrowed
+// to columns whose type has a subterm relation to compare in.
+fun lex_descent_columns(spec :: FunSpec, fn_ph :: Term,
+                        dts :: Map.of(Symbol, DatatypeThms)) :: maybe(List):
+  let arity = spec.arg_types.length()
+  let all_sites = for values(acc :~ List = []) (cl in spec.clauses):
+                    let cl :~ DefClause = cl
+                    let sites = call_sites_in(#'function, spec.name, fn_ph,
+                                              arity, cl.rhs)
+                    acc ++ sites.map(fun ([conds, args]): [cl.pats, conds, args])
+  match lexicographic_order(arity, all_sites)
+  | #false: #false
+  | order :~ List:
+      // `lexicographic_order` appends columns that descend everywhere but
+      // are not needed; they would only make the order bigger, so the
+      // needed prefix is the one that settles every site.
+      let needed = settling_prefix(all_sites, order)
+      cond
+      | needed.length() < 2: #false
+      | (for all (k in needed): schematic_datatype(dts, spec.arg_types[k])):
+          needed
+      | ~else: #false
+
+// The shortest prefix of `order` that already accounts for every call site.
+fun settling_prefix(all_sites :: List, order :: List) :: List:
+  recur loop (pending :~ List = all_sites, used :~ List = [], k = 0):
+    cond
+    | pending.length() == 0 || k >= order.length(): used
+    | ~else:
+        let col :~ Int = order[k]
+        let rest = pending.filter(
+          ~keep: fun ([pats, _, args]):
+                   !descends_at((pats :~ List)[col], (args :~ List)[col]))
+        loop(rest, used ++ [col], k + 1)
 
 // One discharged measure obligation, tied back to the call it came from.
 //
@@ -893,26 +1030,45 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
   let self = self_type(dt.spec)
   // `dt` is the datatype the recursion's order comes from: the descending
   // argument's for structural descent, the *measure's result type* for a
-  // `~measure`.  Either way its `T_lt` is what gets pulled back.
+  // `~measure`.  Either way its `T_lt` is what gets pulled back.  For
+  // lexicographic descent there is more than one, and they are recovered
+  // from `t_lt_equations` by which relation each equation is about.
   let t_lt = mk_const(subterm_name(dt.spec), mk_fun(self, mk_fun(self, bool)))
-  let wf_t_lt = prove_wf_t_lt(thy, dt.spec, t_lt_equations, dt.induction)
+  fun wf_of(ty :: HType) :: Thm:
+    let n = (match ty | TyApp(n, _): n)
+    let d :~ DatatypeThms = dts[n]
+    prove_wf_t_lt(thy, d.spec, equations_about(subterm_relation_name(n),
+                                               t_lt_equations),
+                  d.induction)
+  let wf_t_lt = prove_wf_t_lt(thy, dt.spec,
+                              equations_about(subterm_name(dt.spec),
+                                              t_lt_equations),
+                              dt.induction)
   let (thy0, carrier :~ Carrier, proj_rules :~ List):
     cond
     | spec.measure:
         measure_carrier(thy, spec.name, alg.prod, spec.arg_types,
                         spec.measure :~ Term, wf_t_lt)
     | ~else:
-        let k = (match descent_column(spec, fn_ph,
-                                      ~usable: fun (ty :: HType): schematic_datatype(dts, ty))
-                 | #false:
-                     error(~who: #'install_structural_function,
-                           "no argument column descends at every recursive call",
-                           error.val(~label: "name", spec.name))
-                 | c: c :~ Int)
-        cond
-        | arity == 1: values(thy, direct_carrier(self, t_lt, wf_t_lt), [])
+        match descent_column(spec, fn_ph,
+                             ~usable: fun (ty :: HType):
+                                        schematic_datatype(dts, ty))
+        | k :: Int:
+            cond
+            | arity == 1: values(thy, direct_carrier(self, t_lt, wf_t_lt), [])
+            | ~else:
+                tuple_carrier(thy, spec.name, alg.prod, spec.arg_types, k,
+                              wf_t_lt)
         | ~else:
-            tuple_carrier(thy, spec.name, alg.prod, spec.arg_types, k, wf_t_lt)
+            // No single column descends everywhere; the tuple of the
+            // lexicographic order's columns does.
+            match lex_descent_columns(spec, fn_ph, dts)
+            | #false:
+                error(~who: #'install_structural_function,
+                      "no argument column descends at every recursive call",
+                      error.val(~label: "name", spec.name))
+            | ks :: List:
+                lex_carrier(thy, spec.name, alg, spec.arg_types, ks, wf_of)
   let msites = (if spec.measure
                 | measure_sites(spec, fn_ph, t_lt, recinfo)
                 | [])

@@ -1759,9 +1759,32 @@ base_theory() -> algebra_base_theory() -> tc_base_theory()
   -> lex_base_theory() -> wfrec_base_theory() -> infinity_base_theory()
 ```
 
-回帰は `tests/lexorder.rhm`。**まだ配線していない** -- `stepfn.rhm` の
-WFREC 導出が各呼び出し位置の降下義務を `LEX` の選言として組み立てる
-必要があり、それは別の作業。現時点で `ack`・`merge` は依然 postulate する。
+回帰は `tests/lexorder.rhm`。
+
+**配線もした。** `stepfn.rhm` に `lex_carrier` を足した -- 定義域は
+これまで通り全引数のタプルで、順序は「順序付けられた列」だけを取り出す
+射影に沿って引き戻した、それらの部分項関係の右結合な辞書式積。
+降下義務の証明には**新しい仕組みが要らなかった**: 既存の構造的経路は
+`rel(v, concrete)` を規則データベースで `true` へ書き換えるだけなので、
+`LEX` の展開方程式を carrier の facts に足せば、`fst_pair`/`snd_pair` で
+成分が出て、各成分の `T_lt` 方程式が効き、選言が命題的に潰れる。
+
+回帰 `tests/lex_derived.rhm`: 第一引数を縮めて第二を伸ばす呼び出しと、
+第一を据え置いて第二を縮める呼び出しを持つ `g` -- どの単独列も全呼び出しで
+降下しない -- が**公理 0 本**で導出される。
+
+**それでも `ack` と `merge` は postulate のまま**で、理由は辞書式順序では
+なかった。切り分けた結果:
+
+* `merge(xs :: List(Nat), ys :: List(Nat))` -- 引数型が `List(Nat)` で
+  あって schematic self type `List(~a)` ではない。既知の別制限。
+* `ack` -- 第三節が `ack(m, ack(succ m, k))`、つまり**再帰呼び出しの引数の
+  中に再帰呼び出しがある**。外側の呼び出しの降下事実はその引数が作る
+  タプルについて述べられるが、そのタプルは「まだ宣言されていない定数」を
+  含む（関数の定義は導出の最後に入る）。`check_term` が正しく弾く。
+
+後者は `can_derive_structurally` で明示的に拒否するようにした。導出できると
+言っておいて途中で落ちるのは、postulate するより悪い。
 
 ## 10. 外部レビュー（2026-09-07）への対応状況
 

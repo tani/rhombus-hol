@@ -237,33 +237,40 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
         cond
         | !can_derive_structurally(spec, recinfo, tree, st.dts): #false
         | ~else:
-            // `can_derive_structurally` has already checked the descending
-            // column's type is a declared datatype at its own schematic self
-            // type; what is left is that the type's subterm relation was
-            // actually installed, which it is for every datatype `add_type`
-            // declared.
-            // The order's own type: the measure's result type for a
-            // `~measure`, the descending column's otherwise.
-            let order_ty:
+            // `can_derive_structurally` has already checked that every type
+            // the order compares in is a declared datatype at its own
+            // schematic self type; what is left is that each one's subterm
+            // relation was actually installed, which it is for every
+            // datatype `add_type` declared.
+            //
+            // The types the order compares in: the measure's result type
+            // for a `~measure`, the descending column's for structural
+            // descent, and every ordered column's when the descent is
+            // lexicographic.  Each one needs its subterm relation to have
+            // been installed -- true of every *recursive* datatype
+            // `add_type` declared, and of no other -- so a definition over
+            // a non-recursive datatype has no order here and takes the
+            // definitional path instead.
+            let order_tys:
               cond
-              | spec.measure: measure_result_type(spec)
+              | spec.measure: [measure_result_type(spec)]
               | ~else:
-                  let k = (match descent_column(spec, fn_ph,
-                                                ~usable: fun (ty :: HType):
-                                                           match ty
-                                                           | TyApp(n, _): st.dts.get(n, #false) != #false
-                                                           | ~else: #false)
-                           | c: c :~ Int)
-                  spec.arg_types[k]
-            let tyname = (match order_ty | TyApp(n, _): n)
-            match st.dts.get(tyname, #false)
-            | #false: #false
-            | thms:
-                match st.funs.get(subterm_relation_name(tyname), #false)
-                | #false: #false
-                | tlt_info:
-                    [thms :~ DatatypeThms, (tlt_info :~ FunInfo).equations,
-                     recinfo, tree]
+                  match descent_column(spec, fn_ph,
+                                       ~usable: fun (ty :: HType):
+                                                  declared_datatype(st, ty))
+                  | k :: Int: [spec.arg_types[k]]
+                  | ~else:
+                      match lex_descent_columns(spec, fn_ph, st.dts)
+                      | ks :: List: for List (k in ks): spec.arg_types[k]
+                      | ~else: #false
+            cond
+            | !order_tys: #false
+            | !(for all (ty in order_tys :~ List): has_subterm_relation(st, ty)):
+                #false
+            | ~else:
+                let tyname = (match (order_tys :~ List)[0] | TyApp(n, _): n)
+                [st.dts[tyname] :~ DatatypeThms, all_subterm_equations(st),
+                 recinfo, tree]
   let (thy2, info0) = try:
                         match derivable
                         | [thms, t_lt_equations, recinfo, tree]:
@@ -300,6 +307,31 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   let db2 = add_thms(thy2, st.db, spec.name, info.equations)
   HolState(thy2, db2, st.dts, st.funs ++ {spec.name: info}, st.thms,
            st.names ++ [spec.name], st.wfrec_def)
+
+// A type this module declared as a datatype, at its own schematic self type.
+fun declared_datatype(st :: HolState, ty :: HType) :: Boolean:
+  match ty
+  | TyApp(n, _): st.dts.get(n, #false) != #false
+  | ~else: #false
+
+// A declared datatype whose subterm relation was actually installed, which
+// is every recursive one and no other.
+fun has_subterm_relation(st :: HolState, ty :: HType) :: Boolean:
+  match ty
+  | TyApp(n, _):
+      st.dts.get(n, #false) != #false
+        && st.funs.get(subterm_relation_name(n), #false) != #false
+  | ~else: #false
+
+// Every declared datatype's subterm-relation equations, together.  A
+// lexicographic order compares in more than one datatype, and the extra
+// equations are harmless where it compares in only one: they are rewrite
+// rules about relations the definition never mentions.
+fun all_subterm_equations(st :: HolState) :: List.of(Thm):
+  for values(acc :~ List = []) ((n, _) in st.dts):
+    match st.funs.get(subterm_relation_name(n), #false)
+    | #false: acc
+    | info: acc ++ (info :~ FunInfo).equations
 
 // No clause's right-hand side mentions the function being declared, so there
 // is no recursion to justify -- whatever the patterns look like.

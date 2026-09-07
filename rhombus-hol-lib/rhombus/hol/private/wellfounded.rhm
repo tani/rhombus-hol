@@ -40,6 +40,7 @@ export:
   unfold_wf
   prove_wf_induction
   prove_wf_from_induction
+  prove_wf_pullback
 
 // `WF(R)` unfolded at a concrete relation `r`, instantiating the schematic
 // element type to `r`'s own domain the same way `unfold_forall` does for the
@@ -181,3 +182,81 @@ fun prove_wf_from_induction(thy :: Theory, bigR :: Term, ind_scheme :: Thm) :: T
   let disch1 = DISCH(thy, mk_exists(x, mk_comb(bigP, x)), min_ex)
   let unfolded_wf = GEN(thy, bigP, disch1)
   EQ_MP(SYM(thy, unfold_wf(thy, bigR)), unfolded_wf)
+
+// `WF(R) ==> WF(\x y. R(f x, f y))` for any `f :: A -> B` -- well-foundedness
+// pulls back along an arbitrary function.  This is what lets a `~measure`
+// obligation reuse a declared datatype's own well-founded subterm relation:
+// `Rwf(x,y) := T_lt(measure(x), measure(y))` is well-founded whenever
+// `T_lt` is, for *any* measure, not just the identity (PLAN.md section
+// 9.1.2, wiring item 3).
+//
+// Standard argument: given a nonempty `P` over `A`, push it forward along
+// `f` to `Q(z) := ?x. f(x) = z and P(x)` over `B`.  `WF(R)` gives a
+// `Q`-minimal `z0`; any `x0` with `f(x0) = z0 and P(x0)` (which `Q(z0)`
+// supplies) is `Rf`-minimal for `P`: if some `y` had `R(f(y), z0)` (i.e.
+// `Rf(y, x0)`) and `P(y)`, then `f(y)` would witness `Q(f(y))`,
+// contradicting `z0`'s `R`-minimality.
+fun prove_wf_pullback(thy :: Theory, wf_r :: Thm, f :: Term) :: Thm:
+  let (_, bigR) = dest_comb(concl_of(wf_r))
+  let (tyA, tyB) = dest_fun(type_of(f))
+  let bigP = mk_var(#'P, mk_fun(tyA, bool))
+  let x = mk_var(#'x, tyA)
+  let x1 = mk_var(#'x1, tyA)
+  let x0 = mk_var(#'x0, tyA)
+  let y = mk_var(#'y, tyA)
+  let z = mk_var(#'z, tyB)
+  let w = mk_var(#'w, tyB)
+  let zm = mk_var(#'zm, tyB)
+
+  let rf = mk_abs(x, mk_abs(y, list_mk_comb(bigR, [mk_comb(f, x), mk_comb(f, y)])))
+  let qbody = mk_exists(x1, mk_conj(mk_eq(mk_comb(f, x1), z), mk_comb(bigP, x1)))
+  let qpred = mk_abs(z, qbody)
+
+  let exists_px = ASSUME(thy, mk_exists(x, mk_comb(bigP, x)))
+  let exists_qz:
+    let px_asm_x = ASSUME(thy, mk_comb(bigP, x))
+    let target_qfx = mk_exists(x1, mk_conj(mk_eq(mk_comb(f, x1), mk_comb(f, x)), mk_comb(bigP, x1)))
+    let q_at_fx = EXISTS(thy, target_qfx, x, CONJ(thy, REFL(thy, mk_comb(f, x)), px_asm_x))
+    let exists_qz_at_x = EXISTS(thy, mk_exists(z, qbody), mk_comb(f, x), q_at_fx)
+    CHOOSE(thy, x, exists_px, exists_qz_at_x)
+
+  let wf_unfold = EQ_MP(unfold_wf(thy, bigR), wf_r)
+  let wf_at_q = BETA_RULE(thy, SPEC(thy, qpred, wf_unfold))
+  let min_ex = MP(thy, wf_at_q, exists_qz)
+
+  let q_at_zm = mk_exists(x1, mk_conj(mk_eq(mk_comb(f, x1), zm), mk_comb(bigP, x1)))
+  let minimality_at_zm = mk_forall(w, mk_imp(list_mk_comb(bigR, [w, zm]), mk_neg(mk_exists(x1, mk_conj(mk_eq(mk_comb(f, x1), w), mk_comb(bigP, x1))))))
+  let min_body_at_zm = mk_conj(q_at_zm, minimality_at_zm)
+
+  let target_result = mk_exists(x0, mk_conj(mk_comb(bigP, x0), mk_forall(y, mk_imp(list_mk_comb(bigR, [mk_comb(f, y), mk_comb(f, x0)]), mk_neg(mk_comb(bigP, y))))))
+
+  let per_zm:
+    let asm_zm = ASSUME(thy, min_body_at_zm)
+    let q_zm = CONJUNCT1(thy, asm_zm)
+    let minimality = CONJUNCT2(thy, asm_zm)
+    let per_x0:
+      let asm_x0 = ASSUME(thy, mk_conj(mk_eq(mk_comb(f, x0), zm), mk_comb(bigP, x0)))
+      let fx0_eq_zm = CONJUNCT1(thy, asm_x0)
+      let px0 = CONJUNCT2(thy, asm_x0)
+      let py_step:
+        let rf_y_x0 = list_mk_comb(bigR, [mk_comb(f, y), mk_comb(f, x0)])
+        let rf_hyp = ASSUME(thy, rf_y_x0)
+        let r_partial = mk_comb(bigR, mk_comb(f, y))
+        let r_fy_zm = EQ_MP(AP_TERM(thy, r_partial, fx0_eq_zm), rf_hyp)
+        let minimality_at_fy = SPEC(thy, mk_comb(f, y), minimality)
+        let not_qfy = MP(thy, minimality_at_fy, r_fy_zm)
+        let not_py:
+          let py_asm = ASSUME(thy, mk_comb(bigP, y))
+          let witness_y = EXISTS(thy,
+                                 mk_exists(x1, mk_conj(mk_eq(mk_comb(f, x1), mk_comb(f, y)), mk_comb(bigP, x1))),
+                                 y, CONJ(thy, REFL(thy, mk_comb(f, y)), py_asm))
+          let contra = MP(thy, NOT_ELIM(thy, not_qfy), witness_y)
+          NOT_INTRO(thy, DISCH(thy, mk_comb(bigP, y), contra))
+        DISCH(thy, rf_y_x0, not_py)
+      let conj_result = CONJ(thy, px0, GEN(thy, y, py_step))
+      EXISTS(thy, target_result, x0, conj_result)
+    CHOOSE(thy, x0, q_zm, per_x0)
+  let result_at_min_ex = CHOOSE(thy, zm, min_ex, per_zm)
+  let disch1 = DISCH(thy, mk_exists(x, mk_comb(bigP, x)), result_at_min_ex)
+  let unfolded_wf_rf = GEN(thy, bigP, disch1)
+  EQ_MP(SYM(thy, BETA_RULE(thy, unfold_wf(thy, rf))), unfolded_wf_rf)

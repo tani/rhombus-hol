@@ -1910,7 +1910,22 @@ Peano の 3 定理（`suc` の単射性、`suc n /= zero`、帰納法）を**す
 して `driver.rhm` に繋ぐ部分。モジュール内の自己再帰 `type` 宣言は今も
 公理を置く。
 
-フルスイート 1285/1285。
+さらに抽象側のコンストラクタまで進めた（`Carved`／`prove_rep_in_set`／
+`prove_abs_injective`／`mk_abs_ctor`／`prove_ctor_injective`）。
+
+    C_i(a, x1..xn) = abs(node(label_i a, kids [rep x1, ..., rep xn]))
+
+について **injectivity を導出した**（仮説 0）。リストの `Cons` で
+`Cons(h1,t1) = Cons(h2,t2) ==> h1 = h2 and t1 = t2` を回帰に固定。
+段取りは 4 段で、どれも既にある道具だけを使う: 両辺が集合に入る
+（閉包定理に子の所属を食わせる）→ その上で `abs` は単射 → `node` の単射性
+（§9.22）でラベルと子に分かれる → ラベルの直和の単射性でフィールドが、
+`kids` の単射性で各子の代表元が取れ、`abs_rep` で子そのものに戻る。
+
+これで**自己再帰 datatype が公理として置いている 4 本のうち 1 本目
+（injectivity）が導出になった**。
+
+フルスイート 1289/1289。
 
 ### 9.20 進捗（本セッション）: `num` を `DatatypeThms` に梱包し、公理版と差分一致を取った
 

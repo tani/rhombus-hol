@@ -52,6 +52,11 @@ export:
   mk_ctor_term
   mk_rep_pred
   prove_rep_closed
+  Carved
+  prove_rep_in_set
+  prove_abs_injective
+  mk_abs_ctor
+  prove_ctor_injective
 
 fun path_ty() :: HType: mk_fun(num_ty(), num_ty())
 
@@ -419,3 +424,114 @@ fun prove_rep_closed(thy :: Theory, inl :: Term, junk :: Term,
     for values(acc :~ Thm = rep_built) (v in ts.reverse()):
       DISCH(thy, mk_comb(rep, (v :~ FVar) :~ Term), acc)
   GENL(thy, [a] ++ ts, discharged)
+
+// -- from the representation to the type -------------------------------------
+//
+// What `new_basic_type_definition` hands back, kept together: the carved
+// type, its two coercions, and the two theorems relating them.  `rep_const`
+// is the `REP` constant the type was carved against.
+class Carved(ty :: HType, abs :: Term, rep :: Term,
+             rep_const :: Term, abs_rep :: Thm, rep_pred :: Thm)
+
+// `|- REP(rep x)`: everything in the type came from the set.  The kernel
+// states its two theorems about fixed variables, so this instantiates them
+// rather than reaching for anything by name.
+fun prove_rep_in_set(thy :: Theory, cv :: Carved, x :: Term) :: Thm:
+  let (tree_ty, _) = dest_fun(type_of(cv.rep_const))
+  let rv = mk_var(v_rep, tree_ty)
+  let av = mk_var(v_alpha, cv.ty)
+  let at_r = INST(thy, [[mk_comb(cv.rep, x), rv]], cv.rep_pred)
+  EQ_MP(SYM(thy, at_r),
+        AP_TERM(thy, cv.rep, INST(thy, [[x, av]], cv.abs_rep)))
+
+// `abs` is injective where `REP` holds: given `|- REP t1`, `|- REP t2` and
+// `|- abs t1 = abs t2`, conclude `|- t1 = t2`.  This is where the carving
+// does its work -- the type is exactly the set, so two representatives that
+// abstract alike were equal already.
+fun prove_abs_injective(thy :: Theory, cv :: Carved, t1 :: Term, t2 :: Term,
+                        r1 :: Thm, r2 :: Thm, eq :: Thm) :: Thm:
+  let rv = mk_var(v_rep, type_of(t1))
+  let ra = EQ_MP(INST(thy, [[t1, rv]], cv.rep_pred), r1)
+  let rb = EQ_MP(INST(thy, [[t2, rv]], cv.rep_pred), r2)
+  TRANS(SYM(thy, ra), TRANS(AP_TERM(thy, cv.rep, eq), rb))
+
+// `C_i(a, x1..xn) = abs(node(label_i a, kids [rep x1, ..., rep xn]))`
+fun mk_abs_ctor(inl :: Term, junk :: Term, cv :: Carved, c :: CtorRep,
+                a :: Term, xs :: List.of(Term)) :: Term:
+  mk_comb(cv.abs,
+          mk_ctor_term(inl, junk, c, a,
+                       xs.map(fun (x :: Term): mk_comb(cv.rep, x))))
+
+// `|- !a xs a' xs'. C_i(a, xs) = C_i(a', xs') ==> a = a' and xs = xs'`.
+//
+// Four steps, each one already available: both sides are in the set (the
+// closure theorem, fed the children's own membership), so `abs` is injective
+// on them; `node` is injective, splitting label from children; the label's
+// own injection separates `a`; and `kids` gives back each child's
+// representative, which `abs_rep` turns back into the child.
+//
+// `label_inj` is `!x y. label_i x = label_i y <=> x = y`, which the caller
+// has from whatever sum encodes the tags.
+fun prove_ctor_injective(thy :: Theory, inl :: Term, junk :: Term,
+                         ctors :: List.of(CtorRep), cv :: Carved,
+                         closed :: Thm, node_inj :: Thm, label_inj :: Thm,
+                         kids_inj :: Function.of_arity(3),
+                         i :: Int) :: Thm:
+  let c :~ CtorRep = ctors[i]
+  let (aty, _) = dest_fun(type_of(c.label))
+  let av = mk_var(v_alpha, cv.ty)
+  let a1 = mk_var(#'a1, aty)
+  let a2 = mk_var(#'a2, aty)
+  let xs1 = for List (k in List.iota(c.arity)):
+              mk_var(Symbol.from_string("x1_" ++ to_string(k)), cv.ty)
+  let xs2 = for List (k in List.iota(c.arity)):
+              mk_var(Symbol.from_string("x2_" ++ to_string(k)), cv.ty)
+  fun reps(xs :: List) :: List.of(Term):
+    for List (x in xs): mk_comb(cv.rep, (x :~ FVar) :~ Term)
+  fun tree(a :: Term, xs :: List) :: Term:
+    mk_ctor_term(inl, junk, c, a, reps(xs))
+  fun in_set(a :: Term, xs :: List) :: Thm:
+    let base = SPECL(thy, [a] ++ reps(xs), closed)
+    cond
+    | c.arity == 0: base
+    | ~else:
+        let ms = for List (x in xs):
+                   prove_rep_in_set(thy, cv, (x :~ FVar) :~ Term)
+        let prem:
+          recur loop (k = ms.length() - 1, acc :~ Thm = ms[ms.length() - 1]):
+            cond
+            | k <= 0: acc
+            | ~else: loop(k - 1, CONJ(thy, ms[k - 1] :~ Thm, acc))
+        MP(thy, base, prem)
+
+  let asm_t = mk_eq(mk_comb(cv.abs, tree(a1 :~ Term, xs1)),
+                    mk_comb(cv.abs, tree(a2 :~ Term, xs2)))
+  let asm = ASSUME(thy, asm_t)
+  let nodes_eq = prove_abs_injective(thy, cv, tree(a1 :~ Term, xs1),
+                                     tree(a2 :~ Term, xs2),
+                                     in_set(a1 :~ Term, xs1),
+                                     in_set(a2 :~ Term, xs2), asm)
+  let parts:
+    EQ_MP(SPECL(thy, [mk_comb(c.label, a1 :~ Term), mk_kids(junk, reps(xs1)),
+                      mk_comb(c.label, a2 :~ Term), mk_kids(junk, reps(xs2))],
+                node_inj),
+          nodes_eq)
+  let field_eq = EQ_MP(SPECL(thy, [a1 :~ Term, a2 :~ Term], label_inj),
+                       CONJUNCT1(thy, parts))
+  let child_eqs = for List (k in List.iota(c.arity)):
+                    let reps_eq = MP(thy, kids_inj(reps(xs1), reps(xs2), k),
+                                     CONJUNCT2(thy, parts))
+                    TRANS(SYM(thy, INST(thy, [[(xs1[k] :~ FVar) :~ Term, av]],
+                                        cv.abs_rep)),
+                          TRANS(AP_TERM(thy, cv.abs, reps_eq),
+                                INST(thy, [[(xs2[k] :~ FVar) :~ Term, av]],
+                                     cv.abs_rep)))
+  // the field equation and one per child, conjoined left to right
+  let concl:
+    let parts = [field_eq] ++ child_eqs
+    recur loop (k = parts.length() - 1,
+                acc :~ Thm = (parts[parts.length() - 1] :~ Thm)):
+      cond
+      | k <= 0: acc
+      | ~else: loop(k - 1, CONJ(thy, (parts[k - 1] :~ Thm), acc))
+  GENL(thy, [a1] ++ xs1 ++ [a2] ++ xs2, DISCH(thy, asm_t, concl))

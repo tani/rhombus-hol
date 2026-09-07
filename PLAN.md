@@ -932,8 +932,9 @@ namespace・複数 theory import」を調査した。現状の制約
 | 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype（フェーズ 2・3、無限公理が必要）は未着手 -- なお複数セッション規模。 |
 | 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **`WFREC` 存在定理は完全導出**（§9.1.2）。`wellfounded.rhm` の `WF_INDUCTION`/逆方向（§9.1.1）に加え、汎用 inductive-relations パッケージなしで単一の最小不動点関係 `wfrec_rel` を直接構成し、closure/inversion/uniqueness/existence を経て `soln x = H soln x`（`WF(Rwf)`・congruence を仮説に）を導出（`wfrec.rhm`、1106 → 1112 テスト）。**残るのは `recdef.rhm` への配線のみ**（節→ステップ関数、測度→整礎性、congruence 側条件の構成。§9.1.2 参照）-- `recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
+| 4 | 内部は locally nameless、外部 API は標準 HOL にする | **`mk_abs`/`dest_abs` により実質的に達成済みと判断**。詳細下記。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済み。`hyp_insert`/`hyp_union`/`hyp_remove`/`rehash_hyps` の非公開化は**調査済み、現状維持と判断**: `rhombus-hol-lib` のどこからも実際には呼ばれておらず（`Thm` は raw hyps リストではなく既に不可侵なので、これらは項リスト上の純粋なユーティリティであり公開してもソウンドネスに影響しない）、唯一の外部利用者は `rhombus-hol-kernel` に対応するテストパッケージが無いために `tests/kernel.rhm`/`tests/drule.rhm`（外側の `rhombus-hol` パッケージ）に置かれている kernel 自身の単体テスト。非公開化には kernel 専用のテストパッケージ新設が要り、得られる利益（API 美観）に見合わないと判断した。 |
-| 6 | 公開 kernel API を HOL Light `fusion.ml` に揃える | 大枠は既に一致（十規則、同じ命名）。未着手部分は上記の printer/tracing 分離のみ。 |
+| 6 | 公開 kernel API を HOL Light `fusion.ml` に揃える | 大枠は既に一致（十規則、同じ命名）。**`BETA` の trivial-redex 化は検討し、見送りと判断**（詳細下記）。残る未着手部分は printer/tracing 分離のみ（§5 で対応済みと説明）。 |
 | 7 | `Surface → CoreExpr → HOL + Rhombus` の共通 IR | **調査済み、現行範囲では不要と判断**。`module_block.rhm`の実行側emitは`body`を一切解釈しない逐語コピーで、独自の第二の意味論を持たない。裸の識別子・ハードコード演算子表のみの現行反映範囲では名前ベース(elab.rhm)と束縛ベース(Rhombus)の解決が食い違い得ない。共通IRが要る具体的な引き金（インポート別名越しの参照・ユーザー定義演算子）を§9.5に記録した。 |
 | 8 | `match`/`cond`/局所 `def`/入れ子パターンの追加 | **`cond`/局所 `let` は完了、入れ子パターンは未着手**。詳細と、入れ子パターンを安全に進めるための必須の前提条件（下記参照）は §9.4 にまとめた。 |
 | 11 | fertilization / irrelevance 除去 / induction pool | fertilization と irrelevance 除去は**完了**（本セッション以前）。induction pool は**試みて撤回**。下記参照。 |
@@ -958,6 +959,100 @@ namespace・複数 theory import」を調査した。現状の制約
 群の**構築**箇所（パターンマッチ箇所は触らなくてよい ── `constructor ~none`
 は構築だけを塞ぐ）を機械的に置き換える。
 
+
+### `BETA` を trivial-redex 専用にする件は検討し、見送った（locally nameless では概念自体が成立しない）
+
+レビュー項目 5 は「`kernel.BETA` は HOL Light 同様 `(\x.t)x = t` という
+trivial redex 専用にし、任意の redex への一般 beta 変換は派生層
+（`lib.BETA_CONV`）に置くべき」と提案している。`kernel.rhm` の `BETA` 実装
+コメントは既にこれを検討済みで、見送りの理由を一行で記録している
+（"under a locally nameless representation `subst_bvar` cannot capture,
+so the general case needs no renaming and is exactly as primitive as the
+trivial one"）。今回、この一行の主張を掘り下げて検証した。
+
+HOL Light で trivial redex と一般 redex を区別する理由は**変数捕獲**
+である: named representation では `(\x.t)x` （引数が束縛変数自身と同名）
+は無条件に安全だが、`(\x.t)u`（任意の `u`）は `u` の自由変数が `t` の中の
+別の束縛子に捕獲されないよう、束縛変数のリネームという**追加の機構**が
+要る。だからこそ HOL Light は前者だけを無条件に安全な原始規則とし、
+後者は `INST`（自由変数の置換、捕獲回避込み）を経由する派生規則
+（`BETA_CONV`）として構成する:
+`(\x.t)x = t`（trivial BETA）を `INST [u/x]` で書き換えて
+`(\x.t)u = t[u/x]` を得る、という段取りである。
+
+ところが locally nameless 表現では、束縛変数はそもそも**名前を持たない**
+（`Abs(arg_ty, body)` は `body` 内の `BVar(0)` を束縛するだけで、"どの名前の
+変数を束縛しているか" という情報が最初から存在しない）。したがって
+"引数が束縛変数**自身と同名**" という trivial redex の定義そのものが、
+この表現の上では**書き下せない**。`BVar` を一旦 `dest_abs`/`open_abs` で
+新鮮な `FVar` に開いてから、その変数を引数として「trivial redex」を
+作ろうとしても、それは実質的に `subst_bvar(fresh_var, body)` という
+**現在の一般 `BETA` と同じ 1 ステップの置換**を、わざわざ遠回りして
+書いているだけになる（開いた新鮮変数を使う分、むしろ手数が増える）。
+しかも locally nameless の `subst_bvar` は定義上**捕獲が起こり得ない**
+（`BVar` の de Bruijn 添字は `Abs` を跨ぐたびに shift されるので、任意の
+項 `u` を代入しても `u` の中の自由変数が新しく `t` の束縛子に捕まる余地が
+ない）。つまり HOL Light が「trivial 専用」にする**唯一の理由**（捕獲回避
+機構をカーネルに持ち込みたくない）が、この表現では最初から発生しない。
+
+結論: 「trivial 版だけを原始規則にする」という区別は、locally nameless
+表現の上では**意味のある選択肢として存在しない**（名前を持たない束縛変数
+について「引数が束縛変数と同名か」を問うこと自体ができない）。無理に
+"trivial 版" を定義しようとしても、それは一般版の言い換えにしかならず、
+実装の複雑さもカーネルの信頼境界も一切変わらない。したがって、この項目は
+「HOL Light の見た目に合わせるためだけの空虚な書き換え」であり、
+実施を見送った。一方で `conv.rhm` の `BETA_CONV`/`HEAD_BETA_CONV`/
+`BETA_RULE` は既に「派生層のユーティリティ」として存在しており
+（`kernel.BETA` を安全にラップし、redex でなければ `#false` を返す
+total な wrapper。§2 参照）、レビューが望む「kernel には最小限、
+便利な反復簡約は派生層に」という**役割分担そのもの**は既に達成されている
+── 変わるとすれば「原始規則の宣言が一つ trivial になる」という表面上の
+ラベルだけで、実質的な設計は不変である。
+
+### 「locally nameless 内部・標準 HOL API 外部」は `mk_abs`/`dest_abs` で実質達成済み
+
+レビュー項目 4 は、内部表現は locally nameless のまま、公開 API では
+`FVar`/`BVar` の区別を見せず、`Var(name,ty)`/`Const(name,ty)`/`Comb(f,x)`/
+`Abs(v,body)` という標準的な見た目にし、構築・分解を
+`mk_abs : var -> term -> term` / `dest_abs : term -> var * term` 経由に
+する、という提案である。
+
+`term.rhm` を確認したところ、**この API 自体は既に存在する**:
+
+```rhombus
+fun mk_abs(v :: FVar, body :: Term) :: Abs           // 名前付き変数を渡して抽象化
+fun dest_abs(t :: Term) :: values(FVar, Term)        // 新鮮な名前付き変数で開く
+fun strip_abs(t :: Term) :: values(List.of(FVar), Term)
+```
+
+`dest_abs` は `Abs` の中の `BVar` を直接見せず、`fresh_for` で選んだ新鮮な
+`FVar` に置き換えた `(変数, 本体)` の組を返す（`term.rhm` 冒頭のコメント
+"callers never need to build a `BVar` by hand" の通り）。したがって
+`mk_abs`/`dest_abs`/`strip_abs`/`list_mk_abs` だけを使う限り、呼び出し側は
+`BVar` の存在を一度も意識しない -- これは提案の API 形そのものである。
+
+**まだ達成していないのは、`FVar`/`BVar` を判別する `match` パターン自体を
+完全に塞ぐこと**（例えば `match t | FVar(_,_): ... | BVar(_,_): ...` という
+分岐が今も型として可能）。これを塞ぐには `Term` を「外部向けの `Var`/
+`Const`/`Comb`/`Abs` の 4 種だけを見せるビュー」と「内部実装の 5 種
+（`FVar`/`BVar` 分離）」の 2 層に分離する必要があるが、`drule.rhm`/
+`conv.rhm` の相当数の関数（`ETA_CONV` の `Abs(aty, Comb(f, BVar(0,_)))`
+パターン、`is_locally_closed`、`ABS_CONV` の新鮮変数処理など）は**まさに
+この `FVar`/`BVar` の区別に本質的に依存して実装されている**。これらは
+`dest_abs`/`mk_abs` の**内部実装**であって、この区別を隠すと実装できなく
+なる（そもそも `dest_abs` 自身が `BVar` を見て `FVar` に置換する関数
+なので、`BVar` を完全に見えなくするとその実装場所が無くなる）。
+
+したがって「`FVar`/`BVar` をユーザー向け `match` から完全に塞ぐ」ことは、
+kernel 自身の実装言語からこの区別を奪うに等しく、レビューが `HType` の
+生構築非公開化について許容している「型ではなく項固有の不変条件が本質」
+という区別を思い出すと、ここでの本質は「構築を smart constructor 経由に
+すること」であって「分解時にどう見えるか」ではない。構築は既に
+`constructor ~none` で閉じており（本セッション以前に完了）、分解の
+標準 HOL 的な入り口（`mk_abs`/`dest_abs`）も既に用意されている。
+残っているのは「実装の道具箱としての `FVar`/`BVar` を kernel 自身からも
+隠す」という、review の意図（教育的な公開 API を整える）を超えた作業に
+なるため、追加の対応はしないと判断した。
 
 ### `~expand:` は見送った（この設計では素直な意味論がない）
 

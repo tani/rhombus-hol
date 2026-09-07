@@ -1786,6 +1786,35 @@ base_theory() -> algebra_base_theory() -> tc_base_theory()
 後者は `can_derive_structurally` で明示的に拒否するようにした。導出できると
 言っておいて途中で落ちるのは、postulate するより悪い。
 
+### 9.32 進捗（本セッション）: 「導出した」を主張から検査に変える
+
+第三次レビュー項目 7 が移行中の道具として挙げていた `require_no_new_axioms`
+を、恒久的なガードとして入れた。
+
+```text
+fun require_no_new_axioms(who, before, after, what, at)
+```
+
+導出を謳う宣言経路すべてに置いた: `type`（再帰・非再帰とも）、
+subterm relation の導出、非再帰 `function` の定義経路、そして WFREC 経由の
+再帰 `function`。`install_function` の postulate 用 seam **だけ**が検査対象
+外で、それがまさに「公理を足してよい唯一の枝」であることをコードが
+言っている。
+
+コストは長さの比較 1 回。得るものは、**「導出した」がコメントの主張では
+なくコンパイラの不変条件になる**こと。`type` 宣言が黙って公理スキーマへ
+落ちる、という以前実際にあった壊れ方は、これで宣言時に落ちる。
+
+ガードが実際に噛むことを確認した（導出経路にわざと `new_axiom` を挿す）:
+
+```text
+type: a derived declaration introduced 1 new axiom(s): Nat_lt
+```
+
+回帰 `tests/no_new_axioms.rhm` は、4 つの導出経路を通る 4 モジュール
+（再帰 datatype 2 つ + subterm relation、decision tree から定義した関数、
+辞書式再帰、`~measure`）がいずれも基礎の 4 公理しか持たないことを固定する。
+
 ## 10. 外部レビュー（2026-09-07）への対応状況
 
 レビューは `rhombus-hol-kernel` を標準 HOL Light 型カーネルへ寄せ、

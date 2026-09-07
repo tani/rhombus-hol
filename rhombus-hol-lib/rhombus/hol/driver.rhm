@@ -148,6 +148,7 @@ fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
                             build_recursive_datatype_thms(st.thy, spec,
                                                           infinity_base_ind()))
                        ~catch e :: Exn.Fail: hol_reraise(e, at)
+  require_no_new_axioms(#'type, st.thy, thy2, spec.name, at)
   // Every equation the datatype brings -- injectivity, distinctness,
   // discriminators, selectors -- goes straight into the rule database, which
   // is what makes `match`-defined functions simplify.
@@ -184,6 +185,7 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
       let (thy2, equations) = try:
                                 derive_subterm_relation(st.thy, spec, dt)
                                 ~catch e :: Exn.Fail: hol_reraise(e, at)
+      require_no_new_axioms(#'type, st.thy, thy2, fs.name, at)
       let self = mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol):
                                                        mk_tyvar(p) :~ HType))
       // Not defined by recursion any more, so there is no descent to record.
@@ -302,6 +304,10 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
                                                  ~discharge: discharger(st))
                         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let info :~ FunInfo = info0
+  // Both derived paths claim to add no axiom; only `install_function`'s
+  // seam is allowed to, and it is the one branch not checked here.
+  when derivable || nonrecursive_function(st, spec)
+  | require_no_new_axioms(#'function, st.thy, thy2, spec.name, at)
   // The defining equations become rewrite rules straight away: that is what
   // makes a `match`-defined function compute during simplification.
   let db2 = add_thms(thy2, st.db, spec.name, info.equations)
@@ -313,6 +319,25 @@ fun declared_datatype(st :: HolState, ty :: HType) :: Boolean:
   match ty
   | TyApp(n, _): st.dts.get(n, #false) != #false
   | ~else: #false
+
+// A path that claims to derive must not have added an axiom.  Every
+// declaration below that is documented as derived runs through this, so the
+// claim is checked at each one rather than resting on the reader following
+// the construction.  It costs a length comparison.
+//
+// This is the check that would have caught the `type` declaration quietly
+// falling back to the axiom schema, and it is why the fallback's removal is
+// something the compiler enforces rather than something a comment asserts.
+fun require_no_new_axioms(who :: Symbol, before :: Theory, after :: Theory,
+                          what :: Symbol, at :: Syntax) :: Void:
+  let n0 = axioms_of(before).length()
+  let n1 = axioms_of(after).length()
+  unless n1 == n0
+  | hol_error(who,
+              "a derived declaration introduced "
+                ++ to_string(n1 - n0)
+                ++ " new axiom(s): " ++ to_string(what),
+              at)
 
 // A declared datatype whose subterm relation was actually installed, which
 // is every recursive one and no other.

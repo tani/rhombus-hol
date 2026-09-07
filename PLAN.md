@@ -1422,7 +1422,7 @@ datatype 上の関数（`T_lt` が無いので整礎関係が無い）である�
 （`tests/ruledb.rhm`）は `disable` 後に `Q(g)` が一般化に付かなくなり、
 `enable` で戻ることを確認する。
 
-### 9.10 残件: `~measure` の `WFREC` 化 -- 設計は確定、未実装
+### 9.10 `~measure` の `WFREC` 化 -- 前提部品は実装済み、残り 3 点
 
 carrier 抽象ができたので、関係は「`M_lt` を measure に沿って引き戻したもの」
 = `prove_wf_pullback(thy, wf_M_lt, measure_const)` でよく、§9.8 のタプル
@@ -1450,29 +1450,36 @@ congruence 証明の `cong_rewrite` は `f1(v)` を `f2(v)` へ**無条件に**
    その場で measure 証明を `SPEC` して `conds` を `ASSUME` で discharge し、
    `f1(v) = f2(v)` を作る。
 
-これで `down` のような guarded recursion も通る…と考えて `COND_CONG` を
-実際に書き、単体テストまで通した（`BOOL_CASES_AX` で場合分けし、
-`conditionals` を**分岐の型に `INST_TYPE` してから** `SPECL` する -- これを
-忘れると `SPEC: instantiation has the wrong type` で落ちる。テストが先に
-捕まえた）。しかしその先で**二つ目の障害**に当たったため、未使用の機構を
-信頼層に残さないよう `COND_CONG` ごと撤回した:
+これで `down` のような guarded recursion も通る。**1 と 2 は実装して
+`stepfn.rhm` に入っている**（`COND_CONG`・`bridge_calls`）。構造的降下の
+場合は条件を参照しないだけで同じ bridge を通っており、フルスイート
+1193 全通過・所要 40 秒（変化なし）で回帰は無い。
 
-3. **義務側の条件と、簡約後の `H` 本体に残る条件は同じ形とは限らない**。
-   義務は節の変数で書かれた `conds`（例: `nul(n)`）を持ち、葉では
-   `n := succ(k)` を代入して `nul(succ(k))` になる。一方 congruence 証明が
-   歩くのは `reduce_h` が `simp_conv` で正規化した後の本体で、そこに残って
-   いる条件は簡約済みの形である。条件が定数まで簡約できた場合は `cond`
-   ごと消えて再帰呼び出しも消えるので問題ないが、部分的に簡約された場合、
-   `ASSUME` した条件と義務の条件が構文的に一致せず `MP` できない。
-   解決には「義務の条件を同じ `db` で簡約して突き合わせる」か、
-   「`H` を作る段階で条件を義務と同じ形に固定する」かの設計判断が要る。
+`COND_CONG` を書くときに踏んだ罠: `taut.rhm` の `conditionals` は分岐型が
+スキーマなので、`SPECL` の前に `INST_TYPE` で実際の分岐型に当てる必要が
+ある（忘れると `SPEC: instantiation has the wrong type`）。また条件自体の
+書き換えは `cong_rewrite` ではなく `cond` の頭への `AP_TERM`/`AP_THM` で
+狙う -- 構造的書き換えだと枝の中の `c` まで置換してしまい、
+`cond(true,a,b)` を潰す規則が当たらなくなる。
 
-したがってこの項目は**設計 3 点セット（COND_CONG・条件付き bridge・
-条件形の突き合わせ）が揃って初めて着手可能**であり、工数は独立した 1
-セッション規模（新しい派生規則 + congruence bridge の作り直し + carrier +
-driver 配線 + テスト）と見積もる。今回は 1 と 2 の設計を確定し、3 を
-発見した段階で止めた。
+**三つ目の障害も解ける見込みが立った**。義務側の条件と簡約後の本体に
+残る条件が食い違う件は、`ASSUME` している側が**すでに簡約後の形**である
+ことを使えばよい: 義務の条件を同じ `db` で `reduce` して、その右辺が
+`ASSUME` した条件と一致すれば `EQ_MP` で橋渡しできる。一致しなければ
+導出をあきらめて `install_function` に落とす（安全側）。
 
+**残っているのは 3 つ**:
+
+* `at_leaf` の fact クロージャの measure 版 -- 呼び出し地点と
+  `RecursionInfo.proofs` の対応付け（節ごとの `recursive_calls` の
+  並び順が `calls_in` と一致することに依存する)、`SPEC`/`INST` での
+  具体化、`conds` の discharge。
+* measure carrier -- 関係は `prove_wf_pullback(thy, wf_M_lt, measure_const)`。
+  `Carrier` を「形（dom/arg_terms/build/split/open）」と「順序（rel/wf）」に
+  分け、形は既存の direct/tuple を再利用して順序だけ差し替える。
+  measure も定数にする必要があるのは §9.8 と同じ理由。
+* `driver.rhm` の配線 -- `dt`/`t_lt_equations` を降下列の型ではなく
+  **measure の結果型**のものに切り替える。
 
 ### 9.11 進捗（本セッション）: `_` ワイルドカードと節順序依存（first-match-wins）
 

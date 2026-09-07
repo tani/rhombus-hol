@@ -450,6 +450,80 @@ fun cong_rewrite(thy :: Theory, facts :: List.of(Thm), t :: Term) :: Thm:
       | ~else: REFL(thy, t)
   | th :: Thm: th
 
+// `A, c |- a = a'`, `B, not c |- b = b'`, `|- c = c'`
+//   ==>  `A u B |- cond(c, a, b) = cond(c', a', b')`
+//
+// By cases on `c` (`BOOL_CASES_AX`, the same skeleton as `CCONTR`).  With
+// `c = true` both conditionals collapse to their `then` branch and the
+// hypothesis `c` the left theorem carries is what `EQT_ELIM` supplies; with
+// `c = false` the same on the `else` side with `not c` from `EQF_ELIM`.
+//
+// The step that rewrites the test itself goes through `AP_TERM`/`AP_THM` on
+// the conditional's own head rather than `cong_rewrite`: a structural
+// rewrite would also replace occurrences of `c` *inside* the branches, and
+// then the collapse rule -- whose left-hand side is `cond(true, a, b)` with
+// `a`, `b` as they were -- would no longer match.
+//
+// `conditionals` states its rules at the schematic branch type, so each has
+// to be instantiated at the branch type in hand before its `t1`/`t2` can be
+// specialised.
+fun COND_CONG(thy :: Theory, th_cond :: Thm,
+              th_then :: Thm, th_else :: Thm) :: Thm:
+  let c = lhs_of(th_cond)
+  let a = lhs_of(th_then)
+  let a2 = rhs_of(th_then)
+  let b = lhs_of(th_else)
+  let b2 = rhs_of(th_else)
+  let (cond_op, _) = strip_comb(mk_cond(c, a, b))
+  let [cond_true, cond_false] = conditionals(thy)
+  let branch_ty = type_of(a)
+  fun side(which :: Boolean) :: Thm:
+    let lit = (if which | tm_true | tm_false)
+    let ceq = ASSUME(thy, mk_eq(c, lit))
+    let c2eq = TRANS(SYM(thy, th_cond), ceq)
+    let rule = INST_TYPE(thy, {#'a: branch_ty},
+                         (if which | cond_true | cond_false) :~ Thm)
+    let inner = (if which
+                 | PROVE_HYP(thy, EQT_ELIM(thy, ceq), th_then)
+                 | PROVE_HYP(thy, EQF_ELIM(thy, ceq), th_else))
+    let to_lit = AP_THM(thy, AP_THM(thy, AP_TERM(thy, cond_op, ceq), a), b)
+    let collapse = SPECL(thy, [a, b], rule)
+    let rebuild = SYM(thy, SPECL(thy, [a2, b2], rule))
+    let back = SYM(thy, AP_THM(thy, AP_THM(thy, AP_TERM(thy, cond_op, c2eq), a2), b2))
+    TRANS(to_lit, TRANS(collapse, TRANS(inner, TRANS(rebuild, back))))
+  DISJ_CASES(thy, SPEC(thy, c, base_axiom(#'BOOL_CASES_AX)),
+             side(#true), side(#false))
+
+// `|- t = t'`, where `fact` has replaced whatever it recognised.
+//
+// Like `cong_rewrite`, but carrying the branch conditions that reach each
+// subterm: descending into `cond(c, a, b)` adds `c` on the way into `a` and
+// `not c` on the way into `b`, and `COND_CONG` puts the pieces back
+// together.  A structurally recursive definition never looks at `conds` --
+// `T_lt` relates a field to its constructor unconditionally -- but a
+// `~measure` one must, because that is how its obligation was discharged:
+// the measure only decreases down the branch the guard admits.
+fun bridge_calls(thy :: Theory, t :: Term, conds :: List.of(Term),
+                 fact) :: Thm:
+  match fact(t, conds)
+  | #false:
+      match dest_cond(t)
+      | [c, a, b]:
+          COND_CONG(thy,
+                    bridge_calls(thy, c, conds, fact),
+                    bridge_calls(thy, a, conds ++ [c], fact),
+                    bridge_calls(thy, b, conds ++ [mk_neg(c)], fact))
+      | ~else:
+          match t
+          | Comb(g, x):
+              MK_COMB(bridge_calls(thy, g, conds, fact),
+                      bridge_calls(thy, x, conds, fact))
+          | Abs(_, _):
+              let (v, body) = dest_abs(t)
+              ABS(thy, v, bridge_calls(thy, body, conds, fact))
+          | ~else: REFL(thy, t)
+  | th :: Thm: th
+
 // The distinct carrier terms the recursive calls in `t` are made at, in
 // order of first occurrence.
 fun call_carriers(fn_ph :: Term, arity :: Int, build,
@@ -483,8 +557,9 @@ fun call_carriers(fn_ph :: Term, arity :: Int, build,
 // field just as it covers an immediate one; for several because `R` is
 // exactly `T_lt` on the descending column, which `descent_column` checked
 // every call shrinks.  So the hypothesis gives `f1(v) = f2(v)` there, and
-// `cong_rewrite` carries that through whatever the body builds around the
-// call.
+// `bridge_calls` carries that through whatever the body builds around the
+// call -- including down into the branches of a `cond`, which it rebuilds
+// with `COND_CONG`.
 fun prove_congruence(thy :: Theory, spec :: FunSpec,
                      dts :: Map.of(Symbol, DatatypeThms), tree :: DecisionTree,
                      carrier :: Carrier, fn_ph :: Term, h_const :: Term,
@@ -514,6 +589,12 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec,
                    let b :~ DTBinding = b
                    [path_subterm(cargs, b.path), b.var]
     let rhs_here = inst_fvar(rename, cl.rhs)
+    // Structural descent holds unconditionally, so the facts can all be
+    // built up front and the branch conditions `bridge_calls` offers are
+    // not consulted.  Descending into `cond` still goes through
+    // `COND_CONG` rather than plain congruence, which costs a case split
+    // per conditional and is what a `~measure` definition would need to
+    // reach its obligation (PLAN.md section 9.10).
     let call_facts = for List (v in call_carriers(fn_ph, arity, carrier.build,
                                                   rhs_here)):
                        let v :~ Term = v
@@ -524,7 +605,8 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec,
                        MP(thy, SPEC(thy, v, hyp), below_xv)
     let l1 = reduce_h(thy, db, def_h, f1, concrete)
     let l2 = reduce_h(thy, db, def_h, f2, concrete)
-    let bridge = cong_rewrite(thy, call_facts, rhs_of(l1))
+    let bridge = bridge_calls(thy, rhs_of(l1), [],
+                              fun (t :: Term, _conds): find_fact(call_facts, t))
     let step_at_c = TRANS(l1, TRANS(bridge, SYM(thy, l2)))
     let lift1 = AP_TERM(thy, mk_comb(h_const, f1), x_eq)
     let lift2 = AP_TERM(thy, mk_comb(h_const, f2), x_eq)

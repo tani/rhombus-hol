@@ -720,6 +720,63 @@ function classify(b1 :: Boolean, b2 :: Boolean, m :: Nat, n :: Nat, k :: Nat) ::
 だけ、コンストラクタ1段だけ」という前提に依存しているため、あわせて
 一般化が必要になる可能性が高い。
 
+### 9.5 進捗（本セッション）: Core IR 調査 -- 現行の反映範囲では未着手のままでよい
+
+レビュー項目 7（`Surface -> CoreExpr -> HOL + Rhombus` の共通 IR）を、
+実装ではなく**まず調査**した。`expand.rhm`/`module_block.rhm` を読み、
+実際に「二つの読み」がどう配線されているかを追った結論:
+
+`expand.rhm`の`plan_one`（`#'function`分岐）は`elab.function_decl_shape(form)`
+を呼び、その`body`をそのまま`Decl`に積む。`module_block.rhm`の`emit_function`
+は**その`body`を一切解釈せず、そのままテンプレートへ埋め込むだけ**
+（`'fun $name($p, ...): $body'`）。論理側は`driver.rhm`が**改めて`d.form`
+全体を`elab.parse_function_decl`で再パース**する（`elab.rhm`冒頭のコメント
+「Everything here is called twice ... Both go through the same functions
+on the same syntax」の通り）。したがって:
+
+- 実行側は「解釈ゼロの逐語コピー」であり、そもそも**独自の第二の意味論を
+  持たない** -- 変な言い方をすれば、実行側は「Rhombus自身が、たまたま
+  同じソースを普通に展開したもの」そのものである。
+- 論理側（`elab.rhm`）は識別子を`Syntax.unwrap`で**裸のSymbol名**に
+  落として`const_type(thy, name)`のような**名前ベース**の照合をする。
+  実行側はRhombus自身の**束縛ベース**の名前解決を使う。この二つが
+  食い違い得るのは、ある綴りについて名前ベースの照合結果と束縛ベースの
+  解決結果が異なる場合だけである。
+
+現行の反映される部分集合（裸の識別子・名前付き適用・`if`/`cond`/`let`/
+ブール演算子・ハードコードされた演算子表のみ、モジュール修飾名も
+ユーザー定義演算子もインポート別名の参照も文法外）では、この食い違いが
+**そもそも起こり得ない**:
+
+- 修飾名（`f.Cons`のような）は`parse_application`が`'$(id :: Identifier)'`
+  （裸の識別子）しか受け付けないため、書けたら即座に構文エラーになる。
+  インポート別名を経由した名前の食い違いはこの経路を通らない。
+- ローカルの`let`/パターン変数によるシャドウイングは、`env`（名前→`Term`
+  のマップ）を`elab.rhm`が唯一の権威として、ソースの字面上のネストと
+  厳密に同じ順序で拡張・参照するので、Rhombus自身のレキシカルシャドウ
+  イングと**構造的に同じ**規則になる（内側の束縛が勝つ）。
+- ユーザー定義演算子（項目10、別項目）はまだ導入していない。
+
+つまり、**現行の反映範囲に対しては「同じソースを2回読む」設計は健全**
+であり、共通IRを今導入するのは解決すべき実際のバグがない状態での
+先行投資になる。共通IR（束縛identity を保持する`CoreDecl`/`CoreExpr`）
+が実際に必要になる、具体的な引き金は以下のいずれかを反映範囲に
+追加する時である:
+
+1. インポート別名・モジュール修飾参照（`import: "x.rhm" as f` の後
+   `f.Cons`のような参照）を許すとき -- 名前ベース照合ではエイリアスの
+   先を辿れない。
+2. ユーザー定義演算子（項目10）に論理的解釈を持たせるとき -- 演算子の
+   優先順位・結合はRhombus側のマクロ定義が持つので、名前だけでは
+   引けない。
+3. `function`本体の外側（`type`宣言のフィールド型等）でも同様の
+   識別子経由の参照が増えるとき。
+
+これらのどれかに着手する回にあわせて、`elab.rhm`/`module_block.rhm`を
+今の「同じソースを関数を共有して2回読む」設計から、`Syntax`の束縛
+identity（`Syntax.bind_id`相当）をキーにした共通の中間表現へ切り替える
+ことを検討する。それまでは、現状維持がむしろ正しい判断である。
+
 ---
 
 ## 10. 外部レビュー（2026-09-07）への対応状況
@@ -736,7 +793,7 @@ function classify(b1 :: Boolean, b2 :: Boolean, m :: Nat, n :: Nat, k :: Nat) ::
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済みだが、hyp_insert 等の非公開化は未着手。 |
 | 6 | 公開 kernel API を HOL Light `fusion.ml` に揃える | 大枠は既に一致（十規則、同じ命名）。未着手部分は上記の printer/tracing 分離のみ。 |
-| 7 | `Surface → CoreExpr → HOL + Rhombus` の共通 IR | **未着手**。`elab.rhm`（HOL 側）と `module_block.rhm`（Rhombus 側）は今も同じソースを別々に読む二経路のまま。 |
+| 7 | `Surface → CoreExpr → HOL + Rhombus` の共通 IR | **調査済み、現行範囲では不要と判断**。`module_block.rhm`の実行側emitは`body`を一切解釈しない逐語コピーで、独自の第二の意味論を持たない。裸の識別子・ハードコード演算子表のみの現行反映範囲では名前ベース(elab.rhm)と束縛ベース(Rhombus)の解決が食い違い得ない。共通IRが要る具体的な引き金（インポート別名越しの参照・ユーザー定義演算子）を§9.5に記録した。 |
 | 8 | `match`/`cond`/局所 `def`/入れ子パターンの追加 | **`cond`/局所 `let` は完了、入れ子パターンは未着手**。詳細と、入れ子パターンを安全に進めるための必須の前提条件（下記参照）は §9.4 にまとめた。 |
 | 11 | fertilization / irrelevance 除去 / induction pool | fertilization と irrelevance 除去は**完了**（本セッション以前）。induction pool は**試みて撤回**。下記参照。 |
 | 13 | rule classes | **完了**。`ruledb.rhm` の `RuleDB` が type-prescription 事実を rewrite ルールと独立に分類・保持（`type_facts_of`）、`general.rhm` の `generalize_goal` が一般化時にそれを消費する。 |

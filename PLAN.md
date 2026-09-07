@@ -1468,18 +1468,34 @@ congruence 証明の `cong_rewrite` は `f1(v)` を `f2(v)` へ**無条件に**
 `ASSUME` した条件と一致すれば `EQ_MP` で橋渡しできる。一致しなければ
 導出をあきらめて `install_function` に落とす（安全側）。
 
-**残っているのは 3 つ**:
+**carrier の分解も済んでいる**。`Carrier` は「形」（`shape_of`:
+dom/arg_terms/build/split/open）と「順序」（`name_relation` が名前を付けた
+rel/wf）に分かれ、`direct_carrier`/`tuple_carrier` はどちらもその組み立て
+になった。measure carrier は `prove_wf_pullback(thy, wf_M_lt,
+<f>_measure)` を `name_relation` に通すだけで、形は既存のものをそのまま
+使える（`name_function` が measure を定数にする -- §9.8 と同じ理由）。
+一度書いて動かしたが、下の fact クロージャが無いと呼び出し元が無く、
+信頼層に未使用の機構を残さないため撤回した。
 
-* `at_leaf` の fact クロージャの measure 版 -- 呼び出し地点と
-  `RecursionInfo.proofs` の対応付け（節ごとの `recursive_calls` の
-  並び順が `calls_in` と一致することに依存する)、`SPEC`/`INST` での
-  具体化、`conds` の discharge。
-* measure carrier -- 関係は `prove_wf_pullback(thy, wf_M_lt, measure_const)`。
-  `Carrier` を「形（dom/arg_terms/build/split/open）」と「順序（rel/wf）」に
-  分け、形は既存の direct/tuple を再利用して順序だけ差し替える。
-  measure も定数にする必要があるのは §9.8 と同じ理由。
+**残っているのは実質 1 つ、`at_leaf` の fact クロージャの measure 版**:
+
+* 呼び出し地点と `RecursionInfo.proofs` の対応付け。`check_termination` は
+  `all_sites` を節順・節内は `calls_in` 順で作り `proofs` をそれに 1:1 で
+  並べる。`recdef.rhm` の `recursive_calls` は `calls_in` と**同じ順序**で
+  歩く（`cond` は c→then→else、それ以外は f→x）ので位置で対応付けられる。
+  ただし `conds` は `recursive_calls` が返さないので、`terminate.rhm` の
+  `calls_in` を公開する必要がある。
+* 義務の全称束縛子の順序は `mk_forall_list(free_vars(guarded), guarded)` で
+  決まるので、`guarded` を節の変数で組み直せば `SPECL` に渡す順序が確定する
+  （`spec_all_vars` では束縛子名が失われるので使えない）。
+* `conds` の discharge と最終形合わせは、**両辺を同じ `db` で `reduce` して
+  比べる**: `reduce(rel(v, concrete))` の右辺と、義務を具体化・discharge
+  して得た定理を `reduce` した右辺が一致すれば `EQ_MP` 二回で
+  `|- rel(v, concrete)` になる。一致しなければ導出を諦めて
+  `install_function` に落ちる（安全側）。
 * `driver.rhm` の配線 -- `dt`/`t_lt_equations` を降下列の型ではなく
-  **measure の結果型**のものに切り替える。
+  **measure の結果型**のものに切り替え、`can_derive_structurally` が
+  `#'measure` も通すようにする。
 
 ### 9.11 進捗（本セッション）: `_` ワイルドカードと節順序依存（first-match-wins）
 

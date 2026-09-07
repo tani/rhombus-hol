@@ -191,64 +191,91 @@ class Carrier(dom :: HType,
               split :: Function.of_arity(1),
               open :: Function.of_arity(3))
 
-fun direct_carrier(dom :: HType, rel :: Term, wf :: Thm) :: Carrier:
-  Carrier(dom, rel, wf,
-          fun (x :: Term): [x],
-          fun (args :: List.of(Term)): args[0],
-          fun (c :: Term): [c],
-          fun (thy :: Theory, x :: FVar, k): k(REFL(thy, x :~ Term)))
+// How the definition's arguments sit inside the recursion's domain, which
+// is all the carrier's shape amounts to: for one argument the domain *is*
+// that argument, for several it is their tuple.  The order the recursion
+// runs in (`rel`/`wf`) is chosen separately -- structural descent pulls
+// `T_lt` back along a projection, a `~measure` pulls it back along the
+// measure -- and everything else is the same either way.
+fun shape_of(prod_thms :: maybe(ProdThms), tys :: List.of(HType))
+     :: values(HType, Function, Function, Function, Function):
+  cond
+  | tys.length() == 1:
+      values(tys[0],
+             fun (x :: Term): [x],
+             fun (args :: List.of(Term)): args[0],
+             fun (c :: Term): [c],
+             fun (thy :: Theory, x :: FVar, k): k(REFL(thy, x :~ Term)))
+  | ~else:
+      values(tuple_ty(tys),
+             fun (x :: Term):
+               for List (j in List.iota(tys.length())): tuple_proj(tys, j, x),
+             fun (args :: List.of(Term)): mk_tuple(args),
+             fun (c :: Term): split_tuple(tys, c),
+             fun (thy :: Theory, x :: FVar, k):
+               open_tuple(thy, prod_thms :~ ProdThms, tys, x :~ Term, k))
 
-// `T_lt` pulled back along the projection onto column `k`: `Rp(p, q)` holds
-// exactly when `p`'s `k`-th component is a proper subterm of `q`'s.  That is
-// well-founded because `T_lt` is (`prove_wf_pullback`), and every recursive
-// call satisfies it because `descent_column` said column `k` descends at
-// every one of them.
+// A relation given a name of its own, with its defining equation for the
+// reduction database and `WF` transported onto the name.
 //
-// Both the projection and the relation are given names of their own rather
-// than passed as lambdas.  `prove_wf_pullback` builds terms around `f(x)`
-// and matches them against each other, and `wfrec.rhm` beta-reduces
-// wholesale (`BETA_RULE`) inside its own derivation; with either argument a
-// literal abstraction, those applications are redexes that some steps
-// reduce and others do not, and the match fails.  This is the same
-// invariant `H` is kept behind a constant for -- see `reduce_h` -- applied
-// to the other two arguments `WFREC` takes.  Their defining equations go
-// into the reduction database (returned alongside) so that the relation
-// still computes on a literal tuple.
-//
-// Returns the extended theory, the carrier, and the rules the reduction
-// database needs on top of the datatype's own.
-fun tuple_carrier(thy :: Theory, name :: Symbol, prod_thms :: ProdThms,
-                  tys :: List.of(HType), k :: Int, wf_t_lt :: Thm)
-     :: values(Theory, Carrier, List.of(Thm)):
-  let dom = tuple_ty(tys)
-  let pv = mk_var(#'_tpp, dom)
-  let pname = Symbol.from_string(to_string(name) ++ "_arg")
-  let pty = mk_fun(dom, tys[k])
-  let proj_rhs = mk_abs(pv, tuple_proj(tys, k, pv :~ Term))
-  let (thy1, def_proj) = new_basic_definition(thy,
-                                              mk_eq(mk_var(pname, pty), proj_rhs))
-  let proj = mk_const(pname, pty)
-  let qv = mk_var(#'_tpq, dom)
-  let proj_eq = GEN(thy1, qv, unfold_def(thy1, def_proj, [qv :~ Term]))
-  let wf0 = prove_wf_pullback(thy1, wf_t_lt, proj)
+// `prove_wf_pullback` hands back `WF(\x y. R(f x, f y))`, a literal
+// abstraction, and `wfrec.rhm` beta-reduces wholesale (`BETA_RULE`) inside
+// its own derivation -- with the relation a lambda, its applications are
+// redexes that some steps reduce and others do not, and `CHOOSE` ends up
+// reporting its chosen variable free in the other hypotheses.  This is the
+// same invariant `H` is kept behind a constant for (see `reduce_h`),
+// applied to the relation `WFREC` takes.
+fun name_relation(thy :: Theory, name :: Symbol, dom :: HType, wf0 :: Thm)
+     :: values(Theory, Term, Thm, Thm):
   let (wf_op, rel_rhs) = dest_comb(concl_of(wf0))
   let rname = Symbol.from_string(to_string(name) ++ "_rel")
   let rty = type_of(rel_rhs)
-  let (thy2, def_rel) = new_basic_definition(thy1,
+  let (thy1, def_rel) = new_basic_definition(thy,
                                              mk_eq(mk_var(rname, rty), rel_rhs))
   let rel = mk_const(rname, rty)
-  let wf = EQ_MP(SYM(thy2, AP_TERM(thy2, wf_op, def_rel)), wf0)
+  let wf = EQ_MP(SYM(thy1, AP_TERM(thy1, wf_op, def_rel)), wf0)
   let av = mk_var(#'_tra, dom)
   let bv = mk_var(#'_trb, dom)
-  let rel_eq = GENL(thy2, [av, bv], unfold_def(thy2, def_rel, [av :~ Term, bv :~ Term]))
-  values(thy2,
-         Carrier(dom, rel :~ Term, wf,
-                 fun (x :: Term):
-                   for List (j in List.iota(tys.length())): tuple_proj(tys, j, x),
-                 fun (args :: List.of(Term)): mk_tuple(args),
-                 fun (c :: Term): split_tuple(tys, c),
-                 fun (thy3 :: Theory, x :: FVar, k2):
-                   open_tuple(thy3, prod_thms, tys, x :~ Term, k2)),
+  let rel_eq = GENL(thy1, [av, bv],
+                    unfold_def(thy1, def_rel, [av :~ Term, bv :~ Term]))
+  values(thy1, rel :~ Term, wf, rel_eq)
+
+// A function given a name of its own, for the same reason: the thing
+// `prove_wf_pullback` pulls back along has to be a constant too, since it
+// builds terms around `f(x)` and matches them against each other.
+fun name_function(thy :: Theory, nm :: Symbol, dom :: HType,
+                  body :: Term, v :: FVar) :: values(Theory, Term, Thm):
+  let fty = mk_fun(dom, type_of(body))
+  let (thy1, def_f) = new_basic_definition(thy, mk_eq(mk_var(nm, fty),
+                                                      mk_abs(v, body)))
+  let f = mk_const(nm, fty)
+  let qv = mk_var(#'_nfq, dom)
+  values(thy1, f :~ Term, GEN(thy1, qv, unfold_def(thy1, def_f, [qv :~ Term])))
+
+// One argument, descending structurally: the domain is the argument's own
+// type and the order is its datatype's subterm relation, already a
+// constant with equations in the database.
+fun direct_carrier(dom :: HType, rel :: Term, wf :: Thm) :: Carrier:
+  let (_, arg_terms, build, split, open_c) = shape_of(#false, [dom])
+  Carrier(dom, rel, wf, arg_terms, build, split, open_c)
+
+// Several arguments, descending structurally in column `k`: the domain is
+// their tuple and the order is `T_lt` pulled back along the projection onto
+// that column -- `R(p, q)` holds exactly when `p`'s `k`-th component is a
+// proper subterm of `q`'s.  Well-founded because `T_lt` is
+// (`prove_wf_pullback`), and every recursive call satisfies it because
+// `descent_column` said column `k` descends at every one of them.
+fun tuple_carrier(thy :: Theory, name :: Symbol, prod_thms :: ProdThms,
+                  tys :: List.of(HType), k :: Int, wf_t_lt :: Thm)
+     :: values(Theory, Carrier, List.of(Thm)):
+  let (dom, arg_terms, build, split, open_c) = shape_of(prod_thms, tys)
+  let pv = mk_var(#'_tpp, dom)
+  let (thy1, proj, proj_eq):
+    name_function(thy, Symbol.from_string(to_string(name) ++ "_arg"), dom,
+                  tuple_proj(tys, k, pv :~ Term), pv)
+  let (thy2, rel, wf, rel_eq):
+    name_relation(thy1, name, dom, prove_wf_pullback(thy1, wf_t_lt, proj))
+  values(thy2, Carrier(dom, rel, wf, arg_terms, build, split, open_c),
          [rel_eq, proj_eq, prod_thms.fst_pair, prod_thms.snd_pair])
 
 // The components of a literal tuple, as they stand.

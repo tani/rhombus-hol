@@ -48,6 +48,7 @@ export:
   prove_lit_distinct
   mk_kids
   prove_kids_injective
+  prove_kids_cong
   CtorRep
   mk_ctor_term
   mk_rep_pred
@@ -56,7 +57,10 @@ export:
   prove_rep_in_set
   prove_abs_injective
   mk_abs_ctor
+  prove_ctor_in_set
   prove_ctor_injective
+  prove_ctor_distinct
+  prove_datatype_induction
 
 fun path_ty() :: HType: mk_fun(num_ty(), num_ty())
 
@@ -301,6 +305,26 @@ fun prove_kids_injective(thy :: Theory, ind :: IndThms, junk :: Term,
         TRANS(SYM(thy, prove_kids_at(thy, ind, junk, ts, m)),
               TRANS(at, prove_kids_at(thy, ind, junk, us, m))))
 
+// `|- mk_kids(junk, us) = mk_kids(junk, vs)`, given `|- u_k = v_k` for each
+// slot.  Congruence under the binder: the packing is a chain of conditionals
+// whose tests do not mention the children, so only the branches move.
+fun prove_kids_cong(thy :: Theory, junk :: Term,
+                    eqs :: List.of(Thm)) :: Thm:
+  let nty = num_ty()
+  let j = mk_var(#'j, nty)
+  let rty = type_of(junk)
+  let cc = mk_const(c_cond, mk_fun(bool, mk_fun(rty, mk_fun(rty, rty))))
+  let body:
+    recur loop (k = eqs.length() - 1, acc :~ Thm = REFL(thy, junk)):
+      cond
+      | k < 0: acc
+      | ~else:
+          let test = REFL(thy, mk_eq(j :~ Term, num_lit(k)))
+          loop(k - 1, MK_COMB(MK_COMB(AP_TERM(thy, cc, test),
+                                      (eqs[k] :~ Thm)),
+                              acc))
+  ABS(thy, j, body)
+
 // -- the carved set ----------------------------------------------------------
 //
 // A datatype's representation is the *least* set of trees closed under its
@@ -491,18 +515,8 @@ fun prove_ctor_injective(thy :: Theory, inl :: Term, junk :: Term,
   fun tree(a :: Term, xs :: List) :: Term:
     mk_ctor_term(inl, junk, c, a, reps(xs))
   fun in_set(a :: Term, xs :: List) :: Thm:
-    let base = SPECL(thy, [a] ++ reps(xs), closed)
-    cond
-    | c.arity == 0: base
-    | ~else:
-        let ms = for List (x in xs):
-                   prove_rep_in_set(thy, cv, (x :~ FVar) :~ Term)
-        let prem:
-          recur loop (k = ms.length() - 1, acc :~ Thm = ms[ms.length() - 1]):
-            cond
-            | k <= 0: acc
-            | ~else: loop(k - 1, CONJ(thy, ms[k - 1] :~ Thm, acc))
-        MP(thy, base, prem)
+    prove_ctor_in_set(thy, cv, closed, c, a,
+                      xs.map(fun (x :: FVar): x :~ Term))
 
   let asm_t = mk_eq(mk_comb(cv.abs, tree(a1 :~ Term, xs1)),
                     mk_comb(cv.abs, tree(a2 :~ Term, xs2)))
@@ -535,3 +549,221 @@ fun prove_ctor_injective(thy :: Theory, inl :: Term, junk :: Term,
       | k <= 0: acc
       | ~else: loop(k - 1, CONJ(thy, (parts[k - 1] :~ Thm), acc))
   GENL(thy, [a1] ++ xs1 ++ [a2] ++ xs2, DISCH(thy, asm_t, concl))
+
+// `|- REP(node (label_i a) (kids [rep x1, ..., rep xn]))`: the constructor's
+// own tree is in the carved set, because each child's representative is.
+fun prove_ctor_in_set(thy :: Theory, cv :: Carved, closed :: Thm,
+                      c :: CtorRep, a :: Term,
+                      xs :: List.of(Term)) :: Thm:
+  let reps = xs.map(fun (x :: Term): mk_comb(cv.rep, x))
+  let base = SPECL(thy, [a] ++ reps, closed)
+  cond
+  | c.arity == 0: base
+  | ~else:
+      let ms = for List (x in xs): prove_rep_in_set(thy, cv, x :~ Term)
+      let prem:
+        recur loop (k = ms.length() - 1, acc :~ Thm = (ms[ms.length() - 1] :~ Thm)):
+          cond
+          | k <= 0: acc
+          | ~else: loop(k - 1, CONJ(thy, (ms[k - 1] :~ Thm), acc))
+      MP(thy, base, prem)
+
+// `|- !a xs b ys. not (C_i(a, xs) = C_j(b, ys))`, for `i /= j`.
+//
+// If they were equal then, both being in the set, their trees would be --
+// and `node`'s injectivity would make their labels equal, which the tag
+// sum says they are not.  `label_distinct` is
+// `!x y. not (label_i x = label_j y)`.
+fun prove_ctor_distinct(thy :: Theory, inl :: Term, junk :: Term,
+                        ctors :: List.of(CtorRep), cv :: Carved,
+                        closed_i :: Thm, closed_j :: Thm, node_inj :: Thm,
+                        label_distinct :: Thm, i :: Int, j :: Int) :: Thm:
+  let ci :~ CtorRep = ctors[i]
+  let cj :~ CtorRep = ctors[j]
+  let (ity, _) = dest_fun(type_of(ci.label))
+  let (jty, _) = dest_fun(type_of(cj.label))
+  let a = mk_var(#'a, ity)
+  let b = mk_var(#'b, jty)
+  let xs = for List (k in List.iota(ci.arity)):
+             mk_var(Symbol.from_string("x" ++ to_string(k)), cv.ty)
+  let ys = for List (k in List.iota(cj.arity)):
+             mk_var(Symbol.from_string("y" ++ to_string(k)), cv.ty)
+  fun reps(vs :: List) :: List.of(Term):
+    for List (v in vs): mk_comb(cv.rep, (v :~ FVar) :~ Term)
+  let ti = mk_ctor_term(inl, junk, ci, a :~ Term, reps(xs))
+  let tj = mk_ctor_term(inl, junk, cj, b :~ Term, reps(ys))
+  let asm_t = mk_eq(mk_comb(cv.abs, ti), mk_comb(cv.abs, tj))
+  let asm = ASSUME(thy, asm_t)
+  let nodes_eq:
+    prove_abs_injective(thy, cv, ti, tj,
+                        prove_ctor_in_set(thy, cv, closed_i, ci, a :~ Term,
+                                          xs.map(fun (v :: FVar): v :~ Term)),
+                        prove_ctor_in_set(thy, cv, closed_j, cj, b :~ Term,
+                                          ys.map(fun (v :: FVar): v :~ Term)),
+                        asm)
+  let labels_eq:
+    CONJUNCT1(thy,
+              EQ_MP(SPECL(thy, [mk_comb(ci.label, a :~ Term),
+                                mk_kids(junk, reps(xs)),
+                                mk_comb(cj.label, b :~ Term),
+                                mk_kids(junk, reps(ys))], node_inj),
+                    nodes_eq))
+  let contra = MP(thy, NOT_ELIM(thy, SPECL(thy, [a :~ Term, b :~ Term],
+                                           label_distinct)),
+                  labels_eq)
+  GENL(thy, [a] ++ xs ++ [b] ++ ys,
+       NOT_INTRO(thy, DISCH(thy, asm_t, contra)))
+
+// `|- !P. (for each constructor: !a xs. P x1 and ... and P xn
+//                                      ==> P (C_i(a, xs)))
+//         ==> !x. P x`
+//
+// The carved set was defined as the least one closed under the constructors,
+// so this is that minimality read through the bijection.  The predicate it is
+// applied to is `\t. REP t and P (abs t)`: the `REP t` conjunct is not
+// decoration, because the step needs `rep(abs t) = t` to see that the
+// hypothesis's `C_i(a, [abs t1, ...])` is the very tree being built, and that
+// only holds for `t` in the set.
+fun prove_datatype_induction(thy :: Theory, inl :: Term, junk :: Term,
+                             ctors :: List.of(CtorRep), cv :: Carved,
+                             closed :: List.of(Thm), node_inj :: Thm,
+                             rep_at :: Function.of_arity(1)) :: Thm:
+  let rty = type_of(junk)
+  let bigP = mk_var(#'P, mk_fun(cv.ty, bool))
+  let t = mk_var(#'t, rty)
+  let x = mk_var(#'x, cv.ty)
+  let av = mk_var(v_alpha, cv.ty)
+  let rv = mk_var(v_rep, rty)
+
+  // the datatype-level case for constructor `i`
+  fun case_term(i :: Int) :: Term:
+    let c :~ CtorRep = ctors[i]
+    let (aty, _) = dest_fun(type_of(c.label))
+    let a = mk_var(Symbol.from_string("ca" ++ to_string(i)), aty)
+    let xs = for List (k in List.iota(c.arity)):
+               mk_var(Symbol.from_string("cx" ++ to_string(i) ++ "_" ++ to_string(k)),
+                      cv.ty)
+    let built = mk_abs_ctor(inl, junk, cv, c, a :~ Term,
+                            xs.map(fun (v :: FVar): v :~ Term))
+    let concl = mk_comb(bigP, built)
+    let body:
+      cond
+      | c.arity == 0: concl
+      | ~else:
+          let prem:
+            recur loop (k = xs.length() - 1,
+                        acc :~ Term = mk_comb(bigP, (xs[xs.length() - 1] :~ FVar) :~ Term)):
+              cond
+              | k <= 0: acc
+              | ~else: loop(k - 1, mk_conj(mk_comb(bigP, (xs[k - 1] :~ FVar) :~ Term), acc))
+          mk_imp(prem, concl)
+    mk_forall_list([a] ++ xs, body)
+
+  let cases = for List (i in List.iota(ctors.length())): case_term(i)
+  let hyp_term:
+    recur loop (k = cases.length() - 1, acc :~ Term = cases[cases.length() - 1]):
+      cond
+      | k <= 0: acc
+      | ~else: loop(k - 1, mk_conj(cases[k - 1], acc))
+  let hyp = ASSUME(thy, hyp_term)
+  fun case_of(i :: Int) :: Thm:
+    recur loop (k = 0, acc :~ Thm = hyp):
+      cond
+      | k == ctors.length() - 1: acc
+      | k == i: CONJUNCT1(thy, acc)
+      | ~else: loop(k + 1, CONJUNCT2(thy, acc))
+
+  // `Q = \t. REP t and P (abs t)`
+  let qbody = mk_conj(mk_comb(cv.rep_const, t :~ Term),
+                      mk_comb(bigP, mk_comb(cv.abs, t :~ Term)))
+  let q = mk_abs(t, qbody)
+  fun q_at(u :: Term) :: Thm:
+    match BETA_CONV(thy, mk_comb(q, u))
+    | th :: Thm: th
+    | ~else: error(~who: #'prove_datatype_induction, "beta failed")
+
+  // `Q` survives every constructor
+  fun q_case(i :: Int) :: Thm:
+    let c :~ CtorRep = ctors[i]
+    let (aty, _) = dest_fun(type_of(c.label))
+    let a = mk_var(#'qa, aty)
+    let ts = for List (k in List.iota(c.arity)):
+               mk_var(Symbol.from_string("qt" ++ to_string(k)), rty)
+    let tts = ts.map(fun (v :: FVar): v :~ Term)
+    let q_asms = for List (u in tts): ASSUME(thy, mk_comb(q, u))
+    let parts = for List (u in tts, qa in q_asms):
+                  EQ_MP(q_at(u), qa :~ Thm)
+    let reps = for List (pp in parts): CONJUNCT1(thy, pp :~ Thm)
+    let ps = for List (pp in parts): CONJUNCT2(thy, pp :~ Thm)
+    // the tree is in the set
+    let in_set:
+      let base = SPECL(thy, [a :~ Term] ++ tts, (closed[i] :~ Thm))
+      cond
+      | c.arity == 0: base
+      | ~else:
+          let prem:
+            recur loop (k = reps.length() - 1, acc :~ Thm = (reps[reps.length() - 1] :~ Thm)):
+              cond
+              | k <= 0: acc
+              | ~else: loop(k - 1, CONJ(thy, (reps[k - 1] :~ Thm), acc))
+          MP(thy, base, prem)
+    // and `P` holds of it: the hypothesis, at the children's abstractions
+    let p_holds:
+      let abs_ts = for List (u in tts): mk_comb(cv.abs, u)
+      let inst = SPECL(thy, [a :~ Term] ++ abs_ts, case_of(i))
+      let got:
+        cond
+        | c.arity == 0: inst
+        | ~else:
+            let prem:
+              recur loop (k = ps.length() - 1, acc :~ Thm = (ps[ps.length() - 1] :~ Thm)):
+                cond
+                | k <= 0: acc
+                | ~else: loop(k - 1, CONJ(thy, (ps[k - 1] :~ Thm), acc))
+            MP(thy, inst, prem)
+      // `C_i(a, [abs t]) = abs(node(label a)(kids ts))`, since `rep(abs t) = t`
+      cond
+      | c.arity == 0: got
+      | ~else:
+          let back = for List (u in tts, rp in reps):
+                       EQ_MP(INST(thy, [[u, rv]], cv.rep_pred), rp :~ Thm)
+          let kids_eq = prove_kids_cong(thy, junk, back)
+          let node_eq:
+            let lab = mk_comb(c.label, a :~ Term)
+            let bwd = SPECL(thy, [lab, mk_kids(junk, for List (u in tts): mk_comb(cv.rep, mk_comb(cv.abs, u))),
+                                  lab, mk_kids(junk, tts)], node_inj)
+            EQ_MP(SYM(thy, bwd), CONJ(thy, REFL(thy, lab), kids_eq))
+          EQ_MP(AP_TERM(thy, bigP, AP_TERM(thy, cv.abs, node_eq)), got)
+    let built = mk_ctor_term(inl, junk, c, a :~ Term, tts)
+    let q_built = EQ_MP(SYM(thy, q_at(built)), CONJ(thy, in_set, p_holds))
+    let discharged:
+      cond
+      | c.arity == 0: q_built
+      | ~else:
+          let prem_term:
+            recur loop (k = tts.length() - 1,
+                        acc :~ Term = mk_comb(q, tts[tts.length() - 1])):
+              cond
+              | k <= 0: acc
+              | ~else: loop(k - 1, mk_conj(mk_comb(q, tts[k - 1]), acc))
+          DISCH(thy, prem_term, q_built)
+    GENL(thy, [a] ++ ts, discharged)
+
+  // Hmm: `closed(Q)` is stated with the conjunction of `Q t_k` as premise,
+  // which is what `q_case` discharges above.
+  let q_closed:
+    let cs = for List (i in List.iota(ctors.length())): q_case(i)
+    recur loop (k = cs.length() - 1, acc :~ Thm = (cs[cs.length() - 1] :~ Thm)):
+      cond
+      | k <= 0: acc
+      | ~else: loop(k - 1, CONJ(thy, (cs[k - 1] :~ Thm), acc))
+
+  // and then every element of the type is reached
+  let rep_x = mk_comb(cv.rep, x :~ Term)
+  let q_rep = MP(thy, SPEC(thy, q, EQ_MP(rep_at(rep_x),
+                                         prove_rep_in_set(thy, cv, x :~ Term))),
+                 q_closed)
+  let p_abs = CONJUNCT2(thy, EQ_MP(q_at(rep_x), q_rep))
+  let p_x = EQ_MP(AP_TERM(thy, bigP, INST(thy, [[x :~ Term, av]], cv.abs_rep)),
+                  p_abs)
+  GEN(thy, bigP, DISCH(thy, hyp_term, GEN(thy, x, p_x)))

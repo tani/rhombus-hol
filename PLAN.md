@@ -1925,7 +1925,28 @@ Peano の 3 定理（`suc` の単射性、`suc n /= zero`、帰納法）を**す
 これで**自己再帰 datatype が公理として置いている 4 本のうち 1 本目
 （injectivity）が導出になった**。
 
-フルスイート 1289/1289。
+**distinctness と induction も導出した**（`prove_ctor_distinct`、
+`prove_datatype_induction`、および補助の `prove_kids_cong`）。
+
+* distinctness -- 等しければ両者とも集合の中なので木も等しく、`node` の
+  単射性でラベルが等しくなるが、タグの直和がそれを禁じる。
+* induction -- `REP` を「コンストラクタで閉じた**最小**集合」と定義した
+  ことの見返り。述語 `\t. REP t and P(abs t)` に最小性を当てる。
+  `REP t` の連言項は必須で、step で `rep(abs t) = t`（集合の中でのみ成立）
+  が要るからである。
+
+リストで実際に出る形は
+
+    !P. P(Nil) and (!h t. P t ==> P(Cons h t)) ==> !x. P x
+
+（`Nil`/`Cons` は abs-node 定義に展開された形）。
+
+**自己再帰 datatype が公理として置いている 4 本のうち 3 本
+（injectivity・distinctness・induction）が導出になった。** 残るのは
+cases（induction から出る）と、それらを `DatatypeSpec` から自動生成して
+`driver.rhm` に繋ぐ配線である。
+
+フルスイート 1293/1293。
 
 ### 9.20 進捗（本セッション）: `num` を `DatatypeThms` に梱包し、公理版と差分一致を取った
 

@@ -299,3 +299,14 @@ logical.
 
 These exist for testing the language itself. They are documented because they
 are visible, not because a proof development needs them.
+
+@section{@rhombus(axiomatic_function, ~datum)}
+
+The same grammar as @rhombus(function, ~datum), and a different contract: it
+@emph{postulates} its clausal equations instead of deriving them.
+
+@rhombus(function, ~datum) refuses a definition whose recursion it cannot
+build a well-founded order for, so that an ordinary declaration never extends
+the theory by assumption. This is the form to write when the definition is
+exhaustive and terminating and you want it anyway; see @secref("trust") for
+what that costs and @secref("termination") for when it is conservative.

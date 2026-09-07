@@ -1919,6 +1919,44 @@ match も全オペランドを保つので、オペランドごとのノード�
 `DefClause` に `obligations` が付き、`check_termination` は
 `[pats, terms]` を取る（`terms` は節が評価する全項）。
 
+### 9.35 進捗（本セッション）: 残りの小項目
+
+第四次レビュー項目 6〜10。
+
+**6. `term_ord` の文言。** 「total order」は強すぎた。表示名で比較するので、
+同じ表示名を持つ相異なる uninterned symbol を分離できない -- 前順序であって
+`0` は「等しい」ではなく「この比較では区別できない」。`term.rhm`・
+`htype.rhm`・`order.rhm` を直した。ACL2 順序の健全性は損なわれない:
+規則は**厳密な**減少でしか発火しないので、区別できない組は「発火しない」に
+倒れる -- 安全側。
+
+**7. printer freshness を表示名で判定。** `fresh_for` は
+`(u :~ FVar).name == name`（symbol 等価）で衝突を見ていた。この名前は
+*読まれるため*に存在するので、比較は `to_string` で行うべき。実測: 本体に
+uninterned な `x` がいるとき、修正前は binder を `x` と名付けながら printer
+は `y` と表示していた -- `dest_abs` が返す名前と `show` が出す名前が食い違う。
+これは comment が謳っている唯一の不変条件そのものなので、修正で回復した。
+回帰は `tests/term.rhm`。
+
+**8. search budget を proof option に。** `auto(~search_steps: n)`。
+入れ子探索が新しい予算を作らない・side condition も同じ予算を使う、という
+安全側の不変条件はそのまま。予算切れは `theorem` の位置で報告するようにした。
+回帰 2 本（上げる / 3 歩に絞って落ちる）。
+
+**9. `require_no_new_axioms` の強化。** 公理数だけでは主張の全部ではない。
+theory lineage（`descends`）と、登録する equation が**仮説 0 かつその理論の
+定理**であることを足した。後者は「公理は増えていないが未 discharge の仮説を
+持つ方程式を rewrite rule として登録した」という別系統のバグを捕まえる。
+両方とも実際に噛むことを確認（導出経路に `ADD_ASSUM` を挿すと
+`produced an equation with 1 undischarged hypothesis(es)`）。
+
+**10. stale comment の一掃。** `datatype.rhm` は「v0.1 は initial-algebra
+properties を postulate する / この file が trust boundary」と書いたままだった
+-- 今は導出経路から外れ、差分テストの基準としてだけ残っている。
+`stepfn.rhm` は「measure と辞書式は scope 外で fallback に落ちる」と書いて
+いた -- どちらも導出する。`subterm.rhm`・`trust.scrbl`・`declarations.scrbl`
+も合わせ、`axiomatic_function` を docs に追加した。
+
 ## 10. 外部レビュー（2026-09-07）への対応状況
 
 レビューは `rhombus-hol-kernel` を標準 HOL Light 型カーネルへ寄せ、

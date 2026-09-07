@@ -187,6 +187,7 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
                                 derive_subterm_relation(st.thy, spec, dt)
                                 ~catch e :: Exn.Fail: hol_reraise(e, at)
       require_no_new_axioms(#'type, st.thy, thy2, fs.name, at)
+      require_closed_theorems(#'type, thy2, fs.name, equations, at)
       let self = mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol):
                                                        mk_tyvar(p) :~ HType))
       // Not defined by recursion any more, so there is no descent to record.
@@ -340,6 +341,7 @@ fun install_declared_function(st :: HolState, form :: Syntax, at :: Syntax,
   // the two forms.
   unless postulate
   | require_no_new_axioms(#'function, st.thy, thy2, spec.name, at)
+    require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
   // The defining equations become rewrite rules straight away: that is what
   // makes a `match`-defined function compute during simplification.
   let db2 = add_thms(thy2, st.db, spec.name, info.equations)
@@ -388,6 +390,18 @@ fun declared_datatype(st :: HolState, ty :: HType) :: Boolean:
 // something the compiler enforces rather than something a comment asserts.
 fun require_no_new_axioms(who :: Symbol, before :: Theory, after :: Theory,
                           what :: Symbol, at :: Syntax) :: Void:
+  // Three things, because "added no axiom" on its own is not the whole
+  // claim and each of the other two is a different way to break it while
+  // satisfying the count.
+  //
+  // The theory has to be an *extension* of the one we started from: a
+  // declaration that returned a theory off to the side would pass an axiom
+  // count and be unusable with everything already proved.
+  unless descends(before.stamp, after.stamp)
+  | hol_error(who,
+              "a derived declaration did not extend the theory it was given: "
+                ++ to_string(what),
+              at)
   let n0 = axioms_of(before).length()
   let n1 = axioms_of(after).length()
   unless n1 == n0
@@ -396,6 +410,28 @@ fun require_no_new_axioms(who :: Symbol, before :: Theory, after :: Theory,
                 ++ to_string(n1 - n0)
                 ++ " new axiom(s): " ++ to_string(what),
               at)
+
+// And the theorems it hands back have to be theorems *of* that theory, with
+// nothing left assumed.  An equation with an undischarged hypothesis costs
+// no axiom and is not the equation it looks like: registered as a rewrite
+// rule, it would rewrite unconditionally on the strength of something never
+// proved.
+fun require_closed_theorems(who :: Symbol, thy :: Theory,
+                            what :: Symbol, equations :: List.of(Thm),
+                            at :: Syntax) :: Void:
+  for (th in equations):
+    let th :~ Thm = th
+    unless hyps_of(th).length() == 0
+    | hol_error(who,
+                "a derived declaration produced an equation with "
+                  ++ to_string(hyps_of(th).length())
+                  ++ " undischarged hypothesis(es): " ++ to_string(what),
+                at)
+    unless descends(stamp_of(th), thy.stamp)
+    | hol_error(who,
+                "a derived declaration produced an equation from another "
+                  ++ "theory: " ++ to_string(what),
+                at)
 
 // A declared datatype whose subterm relation was actually installed, which
 // is every recursive one and no other.
@@ -446,7 +482,8 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
   let (statement, names) = try:
                              elab.parse_theorem_statement(st.thy, stmt)
                              ~catch e :: Exn.Fail: hol_reraise(e, at)
-  let [induct, using_names, do_not_names, in_theory_names, case_stxs] = elab.parse_tactic(tactic)
+  let [induct, using_names, do_not_names, in_theory_names, case_stxs,
+       search_steps] = elab.parse_tactic(tactic)
   // `~using:` adds named theorems for this proof only, and overrides
   // `disable_rules`: an explicit request beats a blanket one.
   let db0 = for values(d :~ RuleDB = st.db) (u in (using_names :~ List)):
@@ -484,11 +521,24 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
           try:
             elab.parse_prop(st.thy, tyvars, env, c :~ Syntax)
             ~catch e :: Exn.Fail: hol_reraise(e, at)
+  // A budget the proof asked for, or the default.  Nested searches still
+  // join it rather than opening one of their own -- that is what makes the
+  // number mean anything -- so this raises the ceiling for the whole proof,
+  // side conditions included.
+  let limits :~ SearchLimits:
+    match search_steps
+    | #false: SearchLimits()
+    | n: SearchLimits(n :~ NonnegInt)
+  // Reported at the `theorem`, like every other failure of this
+  // declaration: running out of budget is something one proof did, and the
+  // reader needs to know which.
   let (th, node) = try:
                      prove(ctx, statement, ~names: names,
                            ~induct: (induct :~ maybe(Symbol)),
                            ~do_not: do_not,
-                           ~cases: cases)
+                           ~cases: cases,
+                           ~limits: limits)
+                     ~catch e :: Exn.Fail: hol_reraise(e, at)
   match th
   | #false: hol_error(#'theorem, residue_message(name, node), at)
   | proved :~ Thm:

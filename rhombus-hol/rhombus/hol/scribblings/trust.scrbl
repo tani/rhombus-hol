@@ -118,13 +118,11 @@ theorem. The equations then follow from the closure's induction principle
 
 @section{What is postulated beyond that}
 
-One construction can still add axioms, and only in one corner of its range:
-a @rhombus(function, ~datum) whose recursion this version cannot build a
-well-founded relation for. Everything else --- both kinds of datatype, the
-subterm relation each brings, and every function that either does not
-recurse or recurses in a way the deriver handles --- is proved. Which one
-you get is decided by a check, not by a flag, and counting the axioms a
-module's theory ends up with is the way to tell (@tt{axioms_of}).
+Nothing, unless you write it. Both kinds of datatype, the subterm relation
+each brings, and every @rhombus(function, ~datum) are proved; a definition
+this version cannot derive is refused rather than assumed. One declaration
+form postulates, @rhombus(axiomatic_function, ~datum), and it says so in its
+name.
 
 You do not have to count, though, because the compiler does. Every
 declaration that takes a derived path checks that the theory it produced has
@@ -168,32 +166,37 @@ and its selectors for the variables, @rhombus(new_basic_definition) takes
 that, and the clausal equations --- one per leaf, so that ordered clauses
 resolve the way they were written --- are proved by unfolding it.
 
-A @rhombus(function, ~datum) that does recurse is @emph{derived} whenever the
-recursion has a well-founded relation this version can build: its clausal
+A @rhombus(function, ~datum) that does recurse is @emph{derived}: its clausal
 equations are proved from a well-founded recursion theorem (itself derived,
 not postulated) applied to a step function compiled from the same decision
-tree. That covers structural descent in any one argument column, several
-arguments (derived over their tuple, with the relation pulled back along the
-projection onto the descending column), patterns nested to any depth, and an
-explicit @rhombus(~measure) --- whose order is the measure's own result
-type's subterm relation pulled back along the measure, and whose descent
-facts are the obligations the termination check discharged, used under the
-branch conditions they were discharged under.
+tree. The order it recurses in is built from the descent the termination
+check found --- one column's subterm relation, the lexicographic product of
+several columns' when no single one shrinks everywhere (Ackermann's), or the
+measure's result type's pulled back along the measure. Several arguments are
+derived over their tuple; patterns may nest to any depth; the types the order
+compares in may be any instance of a datatype declared here, @tt{List(Nat)}
+as much as @tt{List(~a)}.
 
-What still postulates one equation per shape: a definition whose descent is
-genuinely lexicographic, where no single column shrinks at every call
-(Ackermann's function), since that needs a lexicographic product rather than
-a pullback along one projection; and one whose relevant type --- the
-descending argument's, or the measure's result --- is not a datatype this
-module declared. Those are a conservative extension exactly when the
-definition is exhaustive and terminating, which is what
-@secref("termination") is about.
+@bold{An ordinary @rhombus(function, ~datum) never adds an axiom.} If the
+recursion has no order this version can build, the declaration is
+@emph{refused}, naming which of the possible reasons applies, and the theory
+is left as it was. This is checked and not merely intended: each derived
+declaration compares the axioms of the theory it produced against the theory
+it was given, checks that the second extends the first, and checks that every
+equation it registered is hypothesis-free and belongs to that theory.
 
-That last seam is the only one left in the system, and it sits behind a
-narrow gate. The derivations that have replaced the others changed nothing
-above them: the theorems have the same statements, so the rule database, the
-waterfall and @rhombus(match) compilation cannot tell which side a given
-datatype or function came from.
+@rhombus(axiomatic_function, ~datum) is the escape hatch, with the same
+grammar and a different contract: it postulates the equations of a definition
+that is exhaustive and terminating but that the compiler cannot derive. That
+is a conservative extension exactly when those two conditions hold, which is
+what @secref("termination") is about. It is a separate word so that a reader
+scanning a module can see which declarations extended the theory by
+assumption without having to know which recursion schemes this version
+happens to handle.
+
+None of these derivations changed anything above them: the theorems have the
+same statements, so the rule database, the waterfall and @rhombus(match)
+compilation cannot tell which route a given datatype or function came by.
 
 @section{Theories}
 
@@ -231,10 +234,12 @@ ordinary Rhombus. It is small enough to read, and it is structured so that
 reading it is the intended way to gain confidence, but nothing has been proved
 about it.
 
-@bold{Type variables in postulated axioms.} Datatype and definition axioms are
-polymorphic, and their instantiation goes through the same @tt{INST_TYPE} as
-everything else. That is standard, but it means the positivity checker has to
-be right about parameterised types, not merely about ground ones.
+@bold{Type variables in specialised theorems.} A datatype's theorems are
+proved at its own type and instantiated at each use through the same
+@tt{INST_TYPE} as everything else, and the same holds for the equations an
+@rhombus(axiomatic_function, ~datum) postulates. That is standard, but it
+means the positivity checker has to be right about parameterised types, not
+merely about ground ones.
 
 @section{Limitations of this version}
 

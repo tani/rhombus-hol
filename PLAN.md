@@ -1405,6 +1405,55 @@ Ackermann のような真の辞書式降下はここで `#false` になり、従
 `~measure`・真の辞書式降下・再帰 datatype の公理スキーマ・非再帰
 datatype 上の関数（`T_lt` が無いので整礎関係が無い）である。
 
+### 9.9 `~in_theory:`/`disable_rules` が type-prescription 事実にも届くようにした
+
+`type_facts_of` は `disabled` で濾していなかった。「型事実は
+`generalize_goal` のヒューリスティックであって rewrite として発火する
+わけではないから、同名の rewrite ルールを無効にしても黙らせるものは無い」
+という理由がコメントに書かれていたが、ACL2 の `disable` は名前を取って
+**その名前を持つ rune を全部**（`(:rewrite f)` も `(:type-prescription f)`
+も）落とす。`~in_theory: [f]` と書くユーザが求めているのは
+「その名前で知っていることを使うのをやめろ」であり、一般化のときだけ
+こっそり参照し続けるのは in-theory ヒントの趣旨と逆である。
+
+`type_by_head` の各要素を `[登録名, 定理]` に変え（キーは従来通り対象の
+関数記号 -- 「`length` について何を知っているか」という引き方は変えない）、
+`type_facts_of` が登録名で濾すようにした。回帰テスト
+（`tests/ruledb.rhm`）は `disable` 後に `Q(g)` が一般化に付かなくなり、
+`enable` で戻ることを確認する。
+
+### 9.10 残件: `~measure` の `WFREC` 化 -- 設計は確定、未実装
+
+carrier 抽象ができたので、関係は「`M_lt` を measure に沿って引き戻したもの」
+= `prove_wf_pullback(thy, wf_M_lt, measure_const)` でよく、§9.8 のタプル
+射影とまったく同じ機構である（measure も定数にする必要があるのも同じ）。
+**残る本質的な障害は 1 つだけ**: 降下事実の出どころが違う。
+
+構造的降下では `reduce(rel(call, concrete))` が `T_lt` の方程式で `true`
+まで計算できる。measure では `RecursionInfo.proofs` が呼び出し地点ごとに
+`|- !vars. conds ==> M_lt(measure(args), measure(pats))` を持っており、
+`conds` は本体中の `if` が付ける**分岐条件**である
+（`measure_ok.rhm` の `down` がまさにこれ、`count` は `conds` が空）。
+
+congruence 証明の `cong_rewrite` は `f1(v)` を `f2(v)` へ**無条件に**
+置き換えるので、条件付きの降下事実を使えない。必要なのは:
+
+1. `COND_CONG`: `c \|- a = a'`、`not c \|- b = b'`、`\|- c = c'` から
+   `\|- cond(c,a,b) = cond(c',a',b')`。`BOOL_CASES_AX` で `c` について
+   場合分けし、`taut.rhm` の `conditionals` で分岐を潰す。
+   `CCONTR`（`drule.rhm`）がまさに同じ骨格なので、それを写せばよい。
+   条件の置換は `cong_rewrite` ではなく `AP_TERM`/`AP_THM` で
+   `cond` の頭だけを狙う（`c` が枝の中にも現れる場合に壊れないため）。
+2. `cong_rewrite` を「いま仮定している分岐条件のリスト」を持って歩く版に
+   置き換え、`cond` に出会ったら then 側に `c`・else 側に `not c` を足して
+   再帰し、`COND_CONG` で組み直す。再帰呼び出し地点に着いた時点で、
+   その場で measure 証明を `SPEC` して `conds` を `ASSUME` で discharge し、
+   `f1(v) = f2(v)` を作る。
+
+これで `down` のような guarded recursion も通る。工数は独立した 1
+セッション規模（新しい派生規則 + congruence bridge の作り直し + carrier +
+driver 配線 + テスト）と見積もり、今回は着手しなかった。
+
 ---
 
 ## 10. 外部レビュー（2026-09-07）への対応状況

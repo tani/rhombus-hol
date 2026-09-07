@@ -39,6 +39,14 @@ export:
   mk_snd
   ProdThms
   build_prod
+  ty_sum
+  sum_ty
+  c_inl
+  c_inr
+  mk_inl_term
+  mk_inr_term
+  SumThms
+  build_sum
 
 // -- unit --------------------------------------------------------------
 //
@@ -328,3 +336,232 @@ fun build_prod(thy :: Theory) :: values(Theory, ProdThms):
     GENL(thy, [av, bv], CHOOSE(thy, gw, holds_at_select, bv_eq_snd))
 
   values(thy, ProdThms(pair_eq, surjective, fst_pair, snd_pair))
+
+// -- sum -------------------------------------------------------------
+//
+// Tagged unions, HOL Light `sum.ml` style: `mk_inl_rep(a) := \x y t. t and
+// x=a` and `mk_inr_rep(b) := \x y t. (not t) and y=b`, two ordinary
+// (non-recursive) definitions over `bool`, distinguished by how they treat
+// the `t` slot -- an `INL` value answers `t` with `true` and ignores `y`,
+// an `INR` value answers with `false` and ignores `x`.  `sum` is whatever is
+// in bijection with the subset of `A -> B -> bool -> bool` that one or the
+// other actually reaches.  Injectivity of each constructor, their mutual
+// distinctness, and cases (every value came from one or the other) all
+// follow as theorems about that bijection.
+
+def ty_sum :: Symbol = #'sum
+def c_mk_inl_rep :: Symbol = #'mk_inl_rep
+def c_mk_inr_rep :: Symbol = #'mk_inr_rep
+def c_inl :: Symbol = #'inl
+def c_inr :: Symbol = #'inr
+
+fun sum_ty(a :: HType, b :: HType) :: HType: TyApp(ty_sum, [a, b])
+
+fun mk_inl_term(a :: Term, b_ty :: HType) :: Term:
+  mk_comb(mk_const(c_inl, mk_fun(type_of(a), sum_ty(type_of(a), b_ty))), a)
+
+fun mk_inr_term(a_ty :: HType, b :: Term) :: Term:
+  mk_comb(mk_const(c_inr, mk_fun(type_of(b), sum_ty(a_ty, type_of(b)))), b)
+
+// `inl_inj`   : |- !a1 a2. INL(a1) = INL(a2) <=> a1 = a2
+// `inr_inj`   : |- !b1 b2. INR(b1) = INR(b2) <=> b1 = b2
+// `distinct`  : |- !a b. not (INL(a) = INR(b))
+// `cases`     : |- !s. (?a. s = INL(a)) or (?b. s = INR(b))
+class SumThms(inl_inj :: Thm, inr_inj :: Thm, distinct :: Thm, cases :: Thm)
+
+fun build_sum(thy :: Theory) :: values(Theory, SumThms):
+  let tyA :: HType = TyVar(#'a)
+  let tyB :: HType = TyVar(#'b)
+  let av = mk_var(#'a, tyA)
+  let bv = mk_var(#'b, tyB)
+  let xv = mk_var(#'x, tyA)
+  let yv = mk_var(#'y, tyB)
+  let tv = mk_var(#'t, bool)
+  let rel_ty = mk_fun(tyA, mk_fun(tyB, mk_fun(bool, bool)))
+  let inl_rep_ty = mk_fun(tyA, rel_ty)
+  let inr_rep_ty = mk_fun(tyB, rel_ty)
+
+  // mk_inl_rep := \a x y t. t and (x = a)
+  let inl_rhs = mk_abs(av, mk_abs(xv, mk_abs(yv, mk_abs(tv, mk_conj(tv, mk_eq(xv, av))))))
+  let (thy, def_inl_rep) = new_basic_definition(thy, mk_eq(mk_var(c_mk_inl_rep, inl_rep_ty), inl_rhs))
+  // mk_inr_rep := \b x y t. (not t) and (y = b)
+  let inr_rhs = mk_abs(bv, mk_abs(xv, mk_abs(yv, mk_abs(tv, mk_conj(mk_neg(tv), mk_eq(yv, bv))))))
+  let (thy, def_inr_rep) = new_basic_definition(thy, mk_eq(mk_var(c_mk_inr_rep, inr_rep_ty), inr_rhs))
+  let inl_rep_c = mk_const(c_mk_inl_rep, inl_rep_ty)
+  let inr_rep_c = mk_const(c_mk_inr_rep, inr_rep_ty)
+  fun inl_applied(a :: Term) :: Term: mk_comb(inl_rep_c, a)
+  fun inr_applied(b :: Term) :: Term: mk_comb(inr_rep_c, b)
+
+  // predicate: \f:(A->B->bool->bool). (?a. f = mk_inl_rep(a)) or (?b. f = mk_inr_rep(b))
+  let fv = mk_var(#'f, rel_ty)
+  let pred_body = mk_disj(mk_exists(av, mk_eq(fv, inl_applied(av))),
+                          mk_exists(bv, mk_eq(fv, inr_applied(bv))))
+  let pred = mk_abs(fv, pred_body)
+
+  // `|- pred(mk_inl_rep(a))`, for arbitrary `a`.
+  fun pred_holds_at_inl(a :: Term) :: Thm:
+    let ga = genvar(tyA)
+    let gb = genvar(tyB)
+    let left_ex = EXISTS(thy, mk_exists(ga, mk_eq(inl_applied(a), inl_applied(ga))),
+                         a, REFL(thy, inl_applied(a)))
+    let right_target = mk_exists(gb, mk_eq(inl_applied(a), inr_applied(gb)))
+    let disj_th = DISJ1(thy, left_ex, right_target)
+    let beta_th = (match BETA_CONV(thy, mk_comb(pred, inl_applied(a)))
+                   | th :~ Thm: th
+                   | #false: error(~who: #'build_sum, "beta failed"))
+    EQ_MP(SYM(thy, beta_th), disj_th)
+
+  // `|- pred(mk_inr_rep(b))`, symmetric.
+  fun pred_holds_at_inr(b :: Term) :: Thm:
+    let ga = genvar(tyA)
+    let gb = genvar(tyB)
+    let left_target = mk_exists(ga, mk_eq(inr_applied(b), inl_applied(ga)))
+    let right_ex = EXISTS(thy, mk_exists(gb, mk_eq(inr_applied(b), inr_applied(gb))),
+                          b, REFL(thy, inr_applied(b)))
+    let disj_th = DISJ2(thy, left_target, right_ex)
+    let beta_th = (match BETA_CONV(thy, mk_comb(pred, inr_applied(b)))
+                   | th :~ Thm: th
+                   | #false: error(~who: #'build_sum, "beta failed"))
+    EQ_MP(SYM(thy, beta_th), disj_th)
+
+  // witness: every type is inhabited, so `mk_inl_rep(a0)` (for some closed
+  // `a0 :: A`) satisfies `pred`.
+  let a0 = mk_select(av, tm_true)
+  let witness = pred_holds_at_inl(a0)
+
+  let (thy, th_abs_rep, th_pred) = new_basic_type_definition(thy, ty_sum, #'abs_sum, #'rep_sum, witness)
+  let sty = sum_ty(tyA, tyB)
+  let abs_c = mk_const(#'abs_sum, mk_fun(rel_ty, sty))
+  let rep_c = mk_const(#'rep_sum, mk_fun(sty, rel_ty))
+
+  // INL(a) := abs_sum(mk_inl_rep(a)); INR(b) := abs_sum(mk_inr_rep(b))
+  let inl_ty = mk_fun(tyA, sty)
+  let inr_ty = mk_fun(tyB, sty)
+  let (thy, def_inl) = new_basic_definition(thy, mk_eq(mk_var(c_inl, inl_ty), mk_abs(av, mk_comb(abs_c, inl_applied(av)))))
+  let (thy, def_inr) = new_basic_definition(thy, mk_eq(mk_var(c_inr, inr_ty), mk_abs(bv, mk_comb(abs_c, inr_applied(bv)))))
+  let inl_c = mk_const(c_inl, inl_ty)
+  let inr_c = mk_const(c_inr, inr_ty)
+
+  // `|- rep_sum(INL(a)) = mk_inl_rep(a)`, and symmetrically for `INR`.
+  fun rep_inl_eq(a :: Term) :: Thm:
+    let unfold_inl = unfold_def(thy, def_inl, [a])
+    let rep_of_abs = AP_TERM(thy, rep_c, unfold_inl)
+    let th_pred_at = INST(thy, [[inl_applied(a), mk_var(v_rep, rel_ty)]], th_pred)
+    let rhs_eq = EQ_MP(th_pred_at, pred_holds_at_inl(a))
+    TRANS(rep_of_abs, rhs_eq)
+
+  fun rep_inr_eq(b :: Term) :: Thm:
+    let unfold_inr = unfold_def(thy, def_inr, [b])
+    let rep_of_abs = AP_TERM(thy, rep_c, unfold_inr)
+    let th_pred_at = INST(thy, [[inr_applied(b), mk_var(v_rep, rel_ty)]], th_pred)
+    let rhs_eq = EQ_MP(th_pred_at, pred_holds_at_inr(b))
+    TRANS(rep_of_abs, rhs_eq)
+
+  // -- injectivity: INL(a1)=INL(a2) <=> a1=a2 ------------------------------
+
+  let pa1 = mk_var(#'a1, tyA)
+  let pa2 = mk_var(#'a2, tyA)
+  let b0 = mk_select(bv, tm_true)
+
+  let inl_inj:
+    let fwd_imp:
+      let asm = ASSUME(thy, mk_eq(mk_comb(inl_c, pa1), mk_comb(inl_c, pa2)))
+      let rep_eq = AP_TERM(thy, rep_c, asm)
+      let mpr_eq = TRANS(SYM(thy, rep_inl_eq(pa1)), TRANS(rep_eq, rep_inl_eq(pa2)))
+      let applied_raw = AP_THM(thy, AP_THM(thy, AP_THM(thy, mpr_eq, pa1), b0), tm_true)
+      let unfold_l = unfold_def(thy, def_inl_rep, [pa1, pa1, b0, tm_true])
+      let unfold_r = unfold_def(thy, def_inl_rep, [pa2, pa1, b0, tm_true])
+      let applied_pts = TRANS(SYM(thy, unfold_l), TRANS(applied_raw, unfold_r))
+      let lhs_true = EQT_INTRO(thy, CONJ(thy, TRUTH(thy), REFL(thy, pa1)))
+      let rhs_true = TRANS(SYM(thy, lhs_true), applied_pts)
+      let conj_result = EQT_ELIM(thy, SYM(thy, rhs_true))
+      DISCH(thy, concl_of(asm), CONJUNCT2(thy, conj_result))
+    let bwd_imp:
+      let asm2 = ASSUME(thy, mk_eq(pa1, pa2))
+      DISCH(thy, concl_of(asm2), AP_TERM(thy, inl_c, asm2))
+    GENL(thy, [pa1, pa2], IMP_ANTISYM_RULE(thy, fwd_imp, bwd_imp))
+
+  let pb1 = mk_var(#'b1, tyB)
+  let pb2 = mk_var(#'b2, tyB)
+
+  let inr_inj:
+    let fwd_imp:
+      let asm = ASSUME(thy, mk_eq(mk_comb(inr_c, pb1), mk_comb(inr_c, pb2)))
+      let rep_eq = AP_TERM(thy, rep_c, asm)
+      let mpr_eq = TRANS(SYM(thy, rep_inr_eq(pb1)), TRANS(rep_eq, rep_inr_eq(pb2)))
+      let applied_raw = AP_THM(thy, AP_THM(thy, AP_THM(thy, mpr_eq, a0), pb1), tm_false)
+      let unfold_l = unfold_def(thy, def_inr_rep, [pb1, a0, pb1, tm_false])
+      let unfold_r = unfold_def(thy, def_inr_rep, [pb2, a0, pb1, tm_false])
+      let applied_pts = TRANS(SYM(thy, unfold_l), TRANS(applied_raw, unfold_r))
+      let not_false = NOT_INTRO(thy, DISCH(thy, tm_false, ASSUME(thy, tm_false)))
+      let lhs_true = EQT_INTRO(thy, CONJ(thy, not_false, REFL(thy, pb1)))
+      let rhs_true = TRANS(SYM(thy, lhs_true), applied_pts)
+      let conj_result = EQT_ELIM(thy, SYM(thy, rhs_true))
+      DISCH(thy, concl_of(asm), CONJUNCT2(thy, conj_result))
+    let bwd_imp:
+      let asm2 = ASSUME(thy, mk_eq(pb1, pb2))
+      DISCH(thy, concl_of(asm2), AP_TERM(thy, inr_c, asm2))
+    GENL(thy, [pb1, pb2], IMP_ANTISYM_RULE(thy, fwd_imp, bwd_imp))
+
+  // -- distinctness: not (INL(a) = INR(b)) ---------------------------------
+
+  let distinct:
+    let asm = ASSUME(thy, mk_eq(mk_comb(inl_c, av), mk_comb(inr_c, bv)))
+    let rep_eq = AP_TERM(thy, rep_c, asm)
+    let mpr_eq = TRANS(SYM(thy, rep_inl_eq(av)), TRANS(rep_eq, rep_inr_eq(bv)))
+    let applied_raw = AP_THM(thy, AP_THM(thy, AP_THM(thy, mpr_eq, av), bv), tm_true)
+    let unfold_l = unfold_def(thy, def_inl_rep, [av, av, bv, tm_true])
+    let unfold_r = unfold_def(thy, def_inr_rep, [bv, av, bv, tm_true])
+    let applied_pts = TRANS(SYM(thy, unfold_l), TRANS(applied_raw, unfold_r))
+    let lhs_true = EQT_INTRO(thy, CONJ(thy, TRUTH(thy), REFL(thy, av)))
+    let rhs_true = TRANS(SYM(thy, lhs_true), applied_pts)
+    let conj_result = EQT_ELIM(thy, SYM(thy, rhs_true))
+    let not_true_th = CONJUNCT1(thy, conj_result)
+    let false_th = MP(thy, NOT_ELIM(thy, not_true_th), TRUTH(thy))
+    GENL(thy, [av, bv], NOT_INTRO(thy, DISCH(thy, concl_of(asm), false_th)))
+
+  // -- cases: !s. (?a. s = INL(a)) or (?b. s = INR(b)) ---------------------
+
+  let sv = mk_var(#'s, sty)
+  let abs_rep_s = INST(thy, [[sv, mk_var(v_alpha, sty)]], th_abs_rep)
+  let th_pred_at_reps = INST(thy, [[mk_comb(rep_c, sv), mk_var(v_rep, rel_ty)]], th_pred)
+  let rhs_holds_s = AP_TERM(thy, rep_c, abs_rep_s)
+  let pred_rep_s = EQ_MP(SYM(thy, th_pred_at_reps), rhs_holds_s)
+  let beta_pred_s = (match BETA_CONV(thy, mk_comb(pred, mk_comb(rep_c, sv)))
+                     | th :~ Thm: th
+                     | #false: error(~who: #'build_sum, "beta failed"))
+  let disj_th = EQ_MP(beta_pred_s, pred_rep_s)
+
+  let cases:
+    let target = mk_disj(mk_exists(av, mk_eq(sv, mk_comb(inl_c, av))),
+                         mk_exists(bv, mk_eq(sv, mk_comb(inr_c, bv))))
+    let [ldisj, rdisj] = (match dest_disj(concl_of(disj_th)) | l: l)
+    let left_case:
+      let l_asm = ASSUME(thy, ldisj)
+      let [oa, obody] = (match dest_exists(ldisj) | l: l)
+      let oa :~ FVar = oa
+      let ga = genvar(tyA)
+      let obody_ga = inst_fvar([[ga, oa]], obody)
+      let inner_asm = ASSUME(thy, obody_ga)
+      let abs_mpr = AP_TERM(thy, abs_c, inner_asm)
+      let unfold_inl_ga = unfold_def(thy, def_inl, [ga])
+      let s_eq_inl = TRANS(SYM(thy, abs_rep_s), TRANS(abs_mpr, SYM(thy, unfold_inl_ga)))
+      let left_ex = EXISTS(thy, mk_exists(av, mk_eq(sv, mk_comb(inl_c, av))), ga, s_eq_inl)
+      let full = DISJ1(thy, left_ex, mk_exists(bv, mk_eq(sv, mk_comb(inr_c, bv))))
+      CHOOSE(thy, ga, l_asm, full)
+    let right_case:
+      let r_asm = ASSUME(thy, rdisj)
+      let [ob, obody] = (match dest_exists(rdisj) | l: l)
+      let ob :~ FVar = ob
+      let gb = genvar(tyB)
+      let obody_gb = inst_fvar([[gb, ob]], obody)
+      let inner_asm = ASSUME(thy, obody_gb)
+      let abs_mpr = AP_TERM(thy, abs_c, inner_asm)
+      let unfold_inr_gb = unfold_def(thy, def_inr, [gb])
+      let s_eq_inr = TRANS(SYM(thy, abs_rep_s), TRANS(abs_mpr, SYM(thy, unfold_inr_gb)))
+      let right_ex = EXISTS(thy, mk_exists(bv, mk_eq(sv, mk_comb(inr_c, bv))), gb, s_eq_inr)
+      let full = DISJ2(thy, mk_exists(av, mk_eq(sv, mk_comb(inl_c, av))), right_ex)
+      CHOOSE(thy, gb, r_asm, full)
+    GEN(thy, sv, DISJ_CASES(thy, disj_th, left_case, right_case))
+
+  values(thy, SumThms(inl_inj, inr_inj, distinct, cases))

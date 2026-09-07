@@ -1721,6 +1721,39 @@ time   3.19  3.07  3.06  3.05  3.08    5.75   終わらない
 （`decl_theorem` が 29 秒 -> 108 秒）は当時の状態のものである。現在は
 fertilization/irrelevance も入り、同ファイルは 3 秒で終わる。
 
+### 9.14 進捗（本セッション）: 無限公理と `num` を導出した（フェーズ2完了、未配線）
+
+§9.2 フェーズ 2。`infinity.rhm` を新設し、標準形の無限公理
+
+    exists f :: ind -> ind. (injective f) and not (surjective f)
+
+を 1 本だけ立てて、そこから `num` を `new_basic_type_definition` で切り出し、
+Peano の 3 定理（`suc` の単射性、`suc n /= zero`、帰納法）を**すべて定理として**
+導出した。仮説は 3 本とも 0 個。公理数は base の 3 -> 4 で、
+`IND_SUC`/`IND_0`/`NUM_REP`/`num`/`zero_num`/`suc_num` はすべて定義原理
+（`new_basic_definition` / `new_basic_type_definition`）経由なので 1 本も増えない。
+
+構成は HOL Light `nums.ml` と同じ道筋:
+
+1. 無限公理から choice で `IND_SUC`（単射かつ非全射）を取り出す。
+2. その像が外す点を choice で取り、`IND_0` とする。
+3. `NUM_REP a := !P. (P IND_0 and !x. P x ==> P (IND_SUC x)) ==> P a`
+   -- `IND_0` を含み `IND_SUC` で閉じた**最小**の部分集合。
+4. `NUM_REP(IND_0)` を witness に `num` を切り出す。
+5. `zero_num`/`suc_num` を `mk_num`/`dest_num` 越しに定義し、
+   3 定理を全単射に沿って輸送する。帰納法だけは `NUM_REP` の最小性を
+   述語 `\a. NUM_REP a and P(mk_num a)` に適用する（`NUM_REP a` の連言項は
+   飾りではなく、閉包ステップが `dest_num(mk_num x) = x` を要るため必須）。
+
+**配線していない**。`algebra.rhm` を導出したときと同じ扱いで、
+`build_ind` は渡された theory を拡張するだけで、`base_theory()` には何も
+入れない。したがって既定の TCB は 1 ビットも増えていない
+（`tests/infinity.rhm` が `base_theory()` の公理数不変と
+`type_arity(base, ind) = #false` を回帰で固定している）。消費者は
+フェーズ 3（再帰 datatype の一般導出）で、それは未着手。
+
+フルスイート 1219/1219（+13）。
+
 ### 9.13 進捗（本セッション）: `rhombus/hol/kernel` を教育用 facade にした
 
 レビュー §3 の要望。`private/` を平坦化した結果 `rhombus/hol/kernel.rhm`

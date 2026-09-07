@@ -18,6 +18,7 @@ import:
   lib("racket/base.rkt") as rb
   rhombus/hol/private/htype open
   rhombus/hol/private/term open
+  rhombus/hol/private/names open
   rhombus/hol/private/kernel open
   "bool.rhm" open
   "datatype.rhm" open
@@ -27,6 +28,9 @@ import:
   "ruledb.rhm" open
   "taut.rhm" open
   "waterfall.rhm" open
+  "wfrec.rhm" open
+  "terminate.rhm" open
+  "stepfn.rhm" open
   "elab.rhm" as elab
 
 export:
@@ -81,10 +85,21 @@ class HolState(thy :: Theory,
                funs :: Map.of(Symbol, FunInfo),
                thms :: Map.of(Symbol, Thm),
                // declaration order, for diagnostics
-               names :: List.of(Symbol))
+               names :: List.of(Symbol),
+               // `wfrec_rel`'s definition (`wfrec.rhm`'s `build_wfrec_rel`),
+               // installed exactly once at the very start of the session so
+               // every structurally derived `function` can share it --
+               // `new_basic_definition` refuses a second declaration of the
+               // same constant.
+               wfrec_def :: Thm)
 
 fun initial_state() :: HolState:
-  let thy = base_theory()
+  // `wfrec_base_theory()`/`wfrec_base_def()` (`wfrec.rhm`) are memoized the
+  // same way `bool.rhm`'s `base_theory()` is: `new_basic_definition` mints
+  // a fresh `Stamp` on every call, so calling `build_wfrec_rel` fresh here
+  // would give every module's `HolState.thy` an incomparable stamp,
+  // breaking `adopt`'s check the moment one module imports another's state.
+  let thy = wfrec_base_theory()
   // Propositional cleanup is in the database from the start: without it a
   // finished proof can look stuck at `true and true`.
   let db = for values(d :~ RuleDB = empty_db) (th in tautologies(thy)):
@@ -93,7 +108,7 @@ fun initial_state() :: HolState:
   // turn them off without also losing propositional cleanup.
   let db = for values(d :~ RuleDB = db) (th in conditionals(thy)):
              add_thm(thy, d, #'conditional, th)
-  HolState(thy, db, {}, {}, {}, [])
+  HolState(thy, db, {}, {}, {}, [], wfrec_base_def())
 
 fun declared_names(st :: HolState) :: List.of(Symbol):
   st.names
@@ -123,7 +138,7 @@ fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
               add_thm(thy2, d, spec.name, th)
   add_subterm_relation(
     HolState(thy2, db2, st.dts ++ {spec.name: thms}, st.funs, st.thms,
-             st.names ++ [spec.name]),
+             st.names ++ [spec.name], st.wfrec_def),
     spec, at)
 
 // Every recursive datatype brings its structural subterm relation with it, so
@@ -152,7 +167,7 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
       let info :~ FunInfo = info0
       let db2 = add_thms(thy2, st.db, fs.name, info.equations)
       HolState(thy2, db2, st.dts, st.funs ++ {fs.name: info}, st.thms,
-               st.names ++ [fs.name])
+               st.names ++ [fs.name], st.wfrec_def)
 
 // -- function ----------------------------------------------------------------
 
@@ -162,16 +177,68 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
                           ~catch e :: Exn.Fail: hol_reraise(e, at)
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
+  try:
+    check_function_spec(st.thy, spec, dt_specs)
+    ~catch e :: Exn.Fail: hol_reraise(e, at)
+  // A single-argument, un-measured definition that recurses structurally
+  // into a *known* (`st.dts`) datatype gets a genuine `WFREC` derivation
+  // (`stepfn.rhm`) instead of `new_axiom`; anything else -- several
+  // arguments, an explicit `~measure`, or an argument type this module
+  // never declared -- falls back to `install_function`'s postulating
+  // seam, exactly as `add_type` falls back to `datatype_axioms` for
+  // self-recursive types beside `datatype_gen.rhm`'s derivation.
+  let derivable:
+    cond
+    | spec.arg_types.length() != 1 || spec.measure: #false
+    | ~else:
+        match spec.arg_types[0]
+        | TyApp(tyname, _):
+            match st.dts.get(tyname, #false)
+            | #false: #false
+            | thms:
+                match st.funs.get(subterm_relation_name(tyname), #false)
+                | #false: #false
+                | tlt_info:
+                    // `install_structural_function` builds `H`/`T_lt` at the
+                    // datatype's own schematic self type
+                    // (`TyApp(tyname, params.map(TyVar))`); if the
+                    // argument's actual type does not match it exactly --
+                    // e.g. the function used a different type-variable name
+                    // than the datatype declared -- the two constructions
+                    // would disagree, and the honest response is to fall
+                    // back rather than hand `install_structural_function`
+                    // a type it cannot build a well-typed derivation for.
+                    let dt_spec :~ DatatypeSpec = (thms :~ DatatypeThms).spec
+                    let self_ty = TyApp(tyname, dt_spec.params.map(fun (p :: Symbol): TyVar(p) :~ HType))
+                    (if spec.arg_types[0] != self_ty
+                     | #false
+                     | let fn_ph = mk_const(spec.name, fun_type(spec))
+                       let recinfo = try:
+                                       check_termination(#'function, spec.name, 1,
+                                                         spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
+                                                         fn_ph)
+                                       ~catch e :: Exn.Fail: hol_reraise(e, at)
+                       (if can_derive_structurally(spec, recinfo)
+                        | [thms :~ DatatypeThms, (tlt_info :~ FunInfo).equations, recinfo]
+                        | #false))
+        | ~else: #false
   let (thy2, info0) = try:
-                        install_function(st.thy, spec, dt_specs,
-                                         ~discharge: discharger(st))
+                        match derivable
+                        | [thms, t_lt_equations, recinfo]:
+                            install_structural_function(st.thy, st.wfrec_def, spec,
+                                                        thms :~ DatatypeThms,
+                                                        t_lt_equations :~ List.of(Thm),
+                                                        recinfo :~ RecursionInfo)
+                        | #false:
+                            install_function(st.thy, spec, dt_specs,
+                                             ~discharge: discharger(st))
                         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let info :~ FunInfo = info0
   // The defining equations become rewrite rules straight away: that is what
   // makes a `match`-defined function compute during simplification.
   let db2 = add_thms(thy2, st.db, spec.name, info.equations)
   HolState(thy2, db2, st.dts, st.funs ++ {spec.name: info}, st.thms,
-           st.names ++ [spec.name])
+           st.names ++ [spec.name], st.wfrec_def)
 
 // Discharge a termination obligation against the state as it stands -- which
 // is to say, without the function being defined.  That is not a limitation to
@@ -240,7 +307,7 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
                      add_thm(st.thy, st.db, name, proved)
                  | ~else: st.db)
       HolState(st.thy, db2, st.dts, st.funs, st.thms ++ {name: proved},
-               st.names ++ [name])
+               st.names ++ [name], st.wfrec_def)
 
 // -- adopting an imported theory ----------------------------------------------
 
@@ -269,14 +336,15 @@ fun adopt(st :: HolState, imported :: HolState, at :: Syntax) :: HolState:
   // A rule switched off before the import stays off after it.
   let off = for values(acc :~ List = []) (n in st.db.disabled): acc ++ [n]
   HolState(imported.thy, disable(imported.db, off),
-           imported.dts, imported.funs, imported.thms, imported.names)
+           imported.dts, imported.funs, imported.thms, imported.names,
+           imported.wfrec_def)
 
 // -- rule control ------------------------------------------------------------
 
 fun set_rules(st :: HolState, on :: Boolean,
               names :: List.of(Symbol)) :: HolState:
   let db2 = (if on | enable(st.db, names) | disable(st.db, names))
-  HolState(st.thy, db2, st.dts, st.funs, st.thms, st.names)
+  HolState(st.thy, db2, st.dts, st.funs, st.thms, st.names, st.wfrec_def)
 
 fun datatype_rules(thms :: DatatypeThms) :: List.of(Thm):
   let inj = for values(acc :~ List = []) ((_, th) in thms.injectivity): acc ++ [th]
@@ -289,7 +357,7 @@ fun datatype_rules(thms :: DatatypeThms) :: List.of(Thm):
 // which is worth having because everything else depends on it.
 
 fun note_decl(st :: HolState, n :: Symbol) :: HolState:
-  HolState(st.thy, st.db, st.dts, st.funs, st.thms, st.names ++ [n])
+  HolState(st.thy, st.db, st.dts, st.funs, st.thms, st.names ++ [n], st.wfrec_def)
 
 fun expect_declared(st :: HolState, expected :: List.of(Symbol),
                     ~at: at :: Syntax) :: HolState:

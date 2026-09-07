@@ -73,7 +73,8 @@ rhombus-hol/
 │           ├── datatype_derived.rhm  enum 限定の `DatatypeSpec -> DatatypeThms`（axiom-free、§9.2.1）
 │           ├── datatype_gen.rhm   enum を一般化: 任意の非再帰 `DatatypeSpec`（フィールド付き）の `DatatypeThms` 全 7 フィールド（axiom-free、§9.2.1）
 │           ├── wellfounded.rhm  `WF` <-> 整礎帰納法（recdef 導出化の第一段、§9.1.1）
-│           ├── wfrec.rhm        `WFREC` 存在定理（recdef 導出化の第二段、`recdef.rhm` へは未配線、§9.1.2）。`subterm.rhm` の `prove_wf_t_lt` が `WF(T_lt)` を完全導出（§9.1.6）
+│           ├── wfrec.rhm        `WFREC` 存在定理（recdef 導出化の第二段、`stepfn.rhm`/`driver.rhm` から実接続済み、§9.1.2）。`subterm.rhm` の `prove_wf_t_lt` が `WF(T_lt)` を完全導出（§9.1.6）
+│           ├── stepfn.rhm       単一引数・構造的降下する `function` の `H` 決定木コンパイラ。`WFREC` から節等式を導出し `new_axiom` を回避（§9.1.2）
 │           └── module_block.rhm  #%module_block 差し替え
 └── rhombus-hol/                  ドキュメント + テスト（deps: rhombus-hol-lib, rhombus-hol-kernel）
     ├── info.rkt
@@ -197,7 +198,7 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 | 論理定数 | `bool`（Church 流定数 + ETA/SELECT/BOOL_CASES）`conv` `drule` | `bool` `conv` `drule` |
 | データ型 | `datatype`：正値性チェッカ + 公理スキーマ | `datatype` `positivity` |
 | 非公理的型構成子 | `algebra`：`unit`/`prod`/`sum` を `new_basic_type_definition` から導出（フェーズ1土台完成、§9.2.1）。`datatype_derived`：enum（0引数コンストラクタのみ）を `DatatypeThms` まで配線。`datatype_gen`：任意の非再帰 `DatatypeSpec`（フィールド付き）を `DatatypeThms` まで配線 -- いずれも `datatype_axioms` と差分テストで完全一致 | `algebra` `datatype_derived` `datatype_gen` |
-| 停止性 | `terminate`（辞書式構造的降下 + 測度）`recdef`（節形式の再帰定義、現状は `new_axiom`）。`wellfounded`：`WF` <-> 整礎帰納法の導出。`wfrec`：`WFREC` 存在定理の完全導出（`recdef.rhm` へは未配線、§9.1.2）。`subterm`：任意の再帰的 datatype について `WF(T_lt)` を完全導出（§9.1.6） | `recdef` `wellfounded` `wfrec` `subterm` |
+| 停止性 | `terminate`（辞書式構造的降下 + 測度）`recdef`（節形式の再帰定義；単一引数・構造的降下は `stepfn.rhm`/`WFREC` から導出、それ以外は `new_axiom`）。`wellfounded`：`WF` <-> 整礎帰納法の導出。`wfrec`：`WFREC` 存在定理の完全導出、`stepfn.rhm`/`driver.rhm` から実接続済み（§9.1.2）。`subterm`：任意の再帰的 datatype について `WF(T_lt)` を完全導出（§9.1.6） | `recdef` `wellfounded` `wfrec` `subterm` `stepfn` |
 | 書き換え | `tmatch` `ruledb` `simp`：一階マッチ、規則 DB（rewrite ルール + type-prescription 事実の二重分類）、順序付き書き換え | `ruledb` |
 | 証明探索 | `goal` `induct` `waterfall`（簡約・デストラクタ除去・フェルティライズ・一般化・irrelevance 除去・帰納法の固定パイプライン、ACL2 準拠） | `spec_4_1` |
 | 一般化・デストラクタ除去・フェルティライズ・irrelevance 除去 | `general`（type-prescription 事実を一般化に反映）`destruct` `fertilize` `irrelevance` | `spec_4_2` `destruct` `fertilize` `irrelevance` |
@@ -726,6 +727,88 @@ redex にならない）と、`!x.Q(x)` を `x` で specialize する場合（�
 書き換えと関心事を共有する（§9.5 参照）ため、独立したセッション規模の
 作業と判断し、本セッションでは着手しなかった。
 
+### 9.1.7 進捗（本セッション）: `driver.rhm` への実接続を完了し、`recdef` の `new_axiom` 依存を解消
+
+§9.1.2/§9.1.6 で `stepfn.rhm`（`H` 決定木コンパイラ）と `WFREC` 存在定理
+（`wfrec.rhm`）の両方が単独では完成していたが、`driver.rhm` の
+`add_function` は依然として `install_function`（`new_axiom` 経由）だけを
+呼んでいた。本セッションでこの最後の配線を完了した。
+
+`recdef.rhm` に `check_function_spec`（`install_function` が内部で行って
+いた「制約チェック（引数数・型・重複変数・網羅性/非重複）」を独立関数として
+切り出したもの）を新設し、`add_function` から次の順で呼ぶ:
+
+```text
+check_function_spec(thy, spec, dts)          -- 形状・網羅性は常に先に検査
+  |
+  v
+単一引数・`~measure`なし・既知の datatype への構造的降下か?
+  |                                    |
+  yes                                  no（多引数・`~measure`・未知の型）
+  v                                    v
+install_structural_function              install_function
+(stepfn.rhm, WFREC 経由、new_axiom なし)  (recdef.rhm, new_axiom 経由)
+```
+
+適用可能性の判定は `check_termination` を候補として一度先に実行し
+（`install_function` が内部で行うのと**同じ**呼び出し）、その
+`RecursionInfo.method` が `#'structural` であることを
+`can_derive_structurally`（`stepfn.rhm`）で確認する。判定に失敗した場合
+（多引数、`~measure` 付き、または未宣言の型への降下）は
+`install_function` へフォールバックする。`check_function_spec` を
+**分岐の前**に置いたのは、`install_structural_function` 自身は
+網羅性検査を行わない（`clause_for_ctor` は最初に見つかった節を返すだけ
+で、重複節を静かに無視しうる）ため、分岐後にしか検査しないと
+「多引数/`~measure`付きなら `install_function` の網羅性エラーで弾かれる
+はずの不正な定義が、単一引数・構造的降下の形をしていれば検査を
+すり抜ける」という非対称な穴になるからである。
+
+**踏んだ罠（配線して初めて露見した設計ミス）**: `initial_state()` に
+`build_wfrec_rel(thy)` を素朴に足したところ、`import_theory.rhm` の
+13 個のテストが全滅した。原因は `new_basic_definition`
+（`build_wfrec_rel` が内部で呼ぶ）が呼び出しごとに `fresh_stamp()`
+（`kernel.rhm`）で**新しい**スタンプを鋳造すること: `bool.rhm` の
+`base_theory()` は `def base = build_base()` というモジュール最上位の
+一度きりの計算なので毎回同じ `Theory`（同じスタンプ）を返すが、
+`initial_state()` の中で `build_wfrec_rel` を毎回呼ぶと、**モジュール
+ごとに独立な**拡張になり、互いに他方の祖先でない兄弟スタンプになる。
+`driver.rhm` の `adopt`（他モジュールの理論を取り込む）は
+`st.thy.stamp == imported.thy.stamp || descends(...)` を要求するので、
+輸入元・輸入先が別々に `initial_state()` を呼んだ時点で判定に失敗する
+--- `base_theory()` 自身が拡張なしの間は誰も気づかなかった潜在的な罠が、
+`initial_state()` が初めて拡張を持つことで顕在化した。
+
+修正は `wfrec.rhm` に `base_theory()` と同じパターンの
+`def wfrec_base :: WfrecBase = build_wfrec_base()`（モジュール最上位、
+一度きり）を追加し、`wfrec_base_theory()`/`wfrec_base_def()` という
+アクセサ越しに `initial_state()` から使うよう変更しただけ --- `driver.rhm`
+自身は 1 行も変える必要がなかった。全モジュールが同一のメモ化済み
+`Theory`/`Thm` を共有するようになり、`adopt` のスタンプ比較が復活する。
+この罠は「1 回の拡張は 1 ノード」という §2 の不変条件そのものの帰結で
+あり、モジュールごとに独立な拡張を持ち込む変更（`initial_state()` に
+新しい定義を足すこと自体）は今後も同じ形で再発しうる --- 対策は
+`base_theory()` と同じ「モジュール最上位で一度だけ計算し、以後は
+アクセサ越しに参照する」パターンを踏襲すること。
+
+**検証**: 単一引数・多相 `List(~a)` への構造的降下（`length`）を実際の
+`#lang rhombus/hol` フィクスチャ経由で確認 -- `type List(~a)`/`Nat` の
+宣言だけの理論と、そこに `length` を足した理論の `axioms_of(...).length()`
+が完全に一致する（`length` は 1 個も新しい公理を追加しない）ことを
+実カーネルに対して確認済み。多引数の `plus`（`~a + ~a` タプリングが
+まだ配線されていないため未対応、意図通り）を同じフィクスチャに足すと
+`axioms_of` が実際に増え、フォールバック経路が今も機能していることも
+確認した。恒久的な回帰テストとして `tests/stepfn.rhm` を新設し
+（`List(~a)` 上の `length`、`Nat` 上の `double`、多引数定義が
+`can_derive_structurally` で `#false` になることの 3 点を、いずれも
+仮説 0 個・公理 0 個で確認）、フルテストスイート
+1129 → 1139（新規 10 個は `tests/stepfn.rhm`、既存 1129 は無変更で
+全通過）で確認済み。
+
+**残作業**: 多引数関数のタプリング配線（§9.1.5 で `algebra.rhm` に
+`mk_tuple`/`tuple_proj`/`prove_tuple_proj` は用意済みだが `stepfn.rhm`
+からは未使用）と、`~measure` 付き定義への一般化。いずれも独立した
+セッション規模。
+
 ### 9.2 `datatype`: 段階的に閉じる
 
 **フェーズ 1 (公理追加なし, 実利がすぐ出る)**: 自己再帰フィールドを一切持たない
@@ -1098,7 +1181,7 @@ namespace・複数 theory import」を調査した。現状の制約
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
 | 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype（フェーズ 2・3、無限公理が必要）は未着手 -- なお複数セッション規模。 |
-| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **`WFREC` 存在定理は完全導出**（§9.1.2）。`wellfounded.rhm` の `WF_INDUCTION`/逆方向（§9.1.1）に加え、汎用 inductive-relations パッケージなしで単一の最小不動点関係 `wfrec_rel` を直接構成し、closure/inversion/uniqueness/existence を経て `soln x = H soln x`（`WF(Rwf)`・congruence を仮説に）を導出（`wfrec.rhm`）。配線の前提のうち 4 点解消: `terminate.rhm` の discharge 証明保持（§9.1.3）、`WF` の pullback 補題（§9.1.4）、多引数タプル化（§9.1.5、`algebra.rhm` に `mk_tuple`/`tuple_proj`/`prove_tuple_proj` を追加）、datatype 帰納法→汎用WFの橋渡し（§9.1.6、`subterm.rhm` の `prove_wf_t_lt` が任意の再帰的 datatype について `WF(T_lt)` を導出）。**残るのは配線 1 点**（`H` の決定木コンパイル。§9.1.6 参照）-- `recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
+| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **完了**（§9.1.2）。`WFREC` 存在定理は完全導出（`wfrec.rhm`）。`wellfounded.rhm` の `WF_INDUCTION`/逆方向（§9.1.1）に加え、汎用 inductive-relations パッケージなしで単一の最小不動点関係 `wfrec_rel` を直接構成し、closure/inversion/uniqueness/existence を経て `soln x = H soln x`（`WF(Rwf)`・congruence を仮説に）を導出。配線の前提のうち 4 点解消: `terminate.rhm` の discharge 証明保持（§9.1.3）、`WF` の pullback 補題（§9.1.4）、多引数タプル化（§9.1.5、`algebra.rhm` に `mk_tuple`/`tuple_proj`/`prove_tuple_proj` を追加）、datatype 帰納法→汎用WFの橋渡し（§9.1.6、`subterm.rhm` の `prove_wf_t_lt` が任意の再帰的 datatype について `WF(T_lt)` を導出）。**単一引数・構造的降下の `function` について `H` 決定木コンパイラ（`stepfn.rhm`）を実装し、`driver.rhm` の `add_function` から実接続済み**（§9.1.2 続報）: 単一引数で既知の datatype へ構造的に降下する定義は `new_axiom` を一切使わず `WFREC` から導出、それ以外（多引数・`~measure`・未知の型）は従来通り `install_function` の公理スキーマへフォールバックする。フルテストスイート 1129 件全通過（回帰なし）。**残るのは多引数（タプリング配線）と `~measure` 付き定義への一般化のみ**、いずれも独立したセッション規模。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
 | 4 | 内部は locally nameless、外部 API は標準 HOL にする | **`mk_abs`/`dest_abs` により実質的に達成済みと判断**。詳細下記。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済み。`hyp_insert`/`hyp_union`/`hyp_remove`/`rehash_hyps` の非公開化は**調査済み、現状維持と判断**: `rhombus-hol-lib` のどこからも実際には呼ばれておらず（`Thm` は raw hyps リストではなく既に不可侵なので、これらは項リスト上の純粋なユーティリティであり公開してもソウンドネスに影響しない）、唯一の外部利用者は `rhombus-hol-kernel` に対応するテストパッケージが無いために `tests/kernel.rhm`/`tests/drule.rhm`（外側の `rhombus-hol` パッケージ）に置かれている kernel 自身の単体テスト。非公開化には kernel 専用のテストパッケージ新設が要り、得られる利益（API 美観）に見合わないと判断した。 |

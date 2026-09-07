@@ -43,6 +43,8 @@ import:
 
 export:
   build_wfrec_rel
+  wfrec_base_theory
+  wfrec_base_def
   WFREC
 
 def tyA :: HType = TyVar(#'a)
@@ -70,6 +72,27 @@ fun build_wfrec_rel(thy :: Theory) :: values(Theory, Thm):
   let body = mk_forall(p, mk_imp(rule_p, list_mk_comb(p :~ Term, [x, y])))
   let def_body = mk_abs(rwf, mk_abs(h, mk_abs(x, mk_abs(y, body))))
   new_basic_definition(thy, mk_eq(mk_var(c_wfrec_rel, wfrec_rel_ty_), def_body))
+
+// `build_wfrec_rel` runs `new_basic_definition`, which mints a fresh
+// `Stamp` (`fresh_stamp()`, kernel.rhm) on every call -- two independent
+// calls from the same `base_theory()` are *siblings*, neither descending
+// from the other, exactly like two modules each declaring their own
+// unrelated constant.  Calling it fresh inside `initial_state()` would
+// give every module's `HolState.thy` an incomparable stamp, breaking
+// `adopt`'s `descends`/`==` check the moment one module tries to import
+// another's state (both ran their own `initial_state()` first).  Computing
+// it once here, the same way `bool.rhm`'s `base` memoizes `build_base()`,
+// keeps every module sharing the identical extension.
+class WfrecBase(thy :: Theory, def_thm :: Thm)
+
+fun build_wfrec_base() :: WfrecBase:
+  let (thy2, wr_def) = build_wfrec_rel(base_theory())
+  WfrecBase(thy2, wr_def)
+
+def wfrec_base :: WfrecBase = build_wfrec_base()
+
+fun wfrec_base_theory() :: Theory: wfrec_base.thy
+fun wfrec_base_def() :: Thm: wfrec_base.def_thm
 
 // The instance type of `wfrec_rel` for a concrete `rwf :: A->A->bool`,
 // `h :: (A->B)->A->B` pair, read off `rwf`'s and `h`'s own types.
@@ -252,7 +275,7 @@ fun wfrec_unique(thy :: Theory, wr_def :: Thm, inv_thm :: Thm,
   let f1 = mk_var(#'f1, fty)
   let f2v = mk_var(#'f2, fty)
   let q_pred = mk_abs(x, mk_forall(y1, mk_forall(y2, mk_imp(mk_conj(mk_wfrec_rel(rwf, h, x, y1), mk_wfrec_rel(rwf, h, x, y2)), mk_eq(y1, y2)))))
-  let ind_applied = MP(thy, SPEC(thy, rwf, prove_wf_induction(thy)), wf_rwf)
+  let ind_applied = MP(thy, SPEC(thy, rwf, INST_TYPE(thy, {#'a: a_ty}, prove_wf_induction(thy))), wf_rwf)
   let ind_at_q = SPEC(thy, q_pred, ind_applied)
   let rwf_z_x = list_mk_comb(rwf, [z :~ Term, x])
   let ih_term = mk_forall(z, mk_imp(rwf_z_x, list_mk_comb(q_pred, [z :~ Term])))
@@ -338,7 +361,7 @@ fun wfrec_exists(thy :: Theory, wr_def :: Thm, closure_thm :: Thm,
   let y = mk_var(#'y, b_ty)
   let fsoln = wfrec_soln(rwf, h)
   let q_pred = mk_abs(x, mk_exists(y, mk_wfrec_rel(rwf, h, x, y)))
-  let ind_applied = MP(thy, SPEC(thy, rwf, prove_wf_induction(thy)), wf_rwf)
+  let ind_applied = MP(thy, SPEC(thy, rwf, INST_TYPE(thy, {#'a: a_ty}, prove_wf_induction(thy))), wf_rwf)
   let ind_at_q = SPEC(thy, q_pred, ind_applied)
   let rwf_z_x = list_mk_comb(rwf, [z :~ Term, x])
   let ih_term = mk_forall(z, mk_imp(rwf_z_x, list_mk_comb(q_pred, [z :~ Term])))

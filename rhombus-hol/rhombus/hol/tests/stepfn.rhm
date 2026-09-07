@@ -1,0 +1,131 @@
+#lang rhombus/static
+
+// `stepfn.rhm`: deriving a recursive function's clausal equations via
+// `WFREC` instead of postulating them with `new_axiom` (PLAN.md section
+// 9.1.2, wiring item 5 -- the `H` step-function decision-tree compiler).
+//
+// Scope: a single-argument, un-measured `function` whose termination check
+// finds plain structural descent into a *known* datatype.  `length` (over
+// the polymorphic `List(~a)`) and `double` (over the monomorphic `Nat`)
+// each exercise a different datatype shape; both are installed with zero
+// new axioms, unlike `install_function`'s postulating fallback.
+
+import:
+  rhombus/hol/private/htype open
+  rhombus/hol/private/term open
+  rhombus/hol/private/bool open
+  rhombus/hol/private/kernel open
+  rhombus/hol/private/printer open
+  rhombus/hol/private/datatype open
+  rhombus/hol/private/recdef open
+  rhombus/hol/private/subterm open
+  rhombus/hol/private/terminate open
+  rhombus/hol/private/wfrec open
+  rhombus/hol/private/stepfn open
+
+def tya = TyVar(#'a)
+def nat_ty = TyApp(#'Nat, [])
+def list_ty = TyApp(#'List, [tya])
+
+def nat_spec:
+  DatatypeSpec(#'Nat, [],
+               [Ctor(#'zero, []),
+                Ctor(#'succ, [Field(#'pred, nat_ty)])])
+def list_spec:
+  DatatypeSpec(#'List, [#'a],
+               [Ctor(#'Nil, []),
+                Ctor(#'Cons, [Field(#'head, tya), Field(#'tail, list_ty)])])
+
+// The datatype's own axioms, its subterm relation (installed the ordinary
+// way, `subterm.rhm`), and `wfrec_rel`'s definition, all in one theory --
+// exactly what `driver.rhm`'s `add_type`/`initial_state` hand
+// `install_structural_function` in the real pipeline.
+fun setup(base :: Theory, spec :: DatatypeSpec) :: values(Theory, DatatypeThms, List.of(Thm), Thm):
+  let (thy0, thms) = datatype_axioms(base, spec)
+  let (thy1, tlt_info) = install_function(thy0, subterm_spec(spec) :~ FunSpec,
+                                          {spec.name: spec})
+  let (thy2, wr_def) = build_wfrec_rel(thy1)
+  values(thy2, thms, (tlt_info :~ FunInfo).equations, wr_def)
+
+// `length`'s result type is `Nat`, so its theory needs both datatypes --
+// `Nat` declared first (plain, no subterm relation needed by `length`
+// itself), then `List` (with its own subterm relation and `wfrec_rel`).
+def (nat_base, _) = datatype_axioms(base_theory(), nat_spec)
+
+// -- length(xs :: List(~a)) :: Nat -------------------------------------------
+
+def (thy_l, list_thms, list_tlt_eqs, list_wr_def) = setup(nat_base, list_spec)
+def x_var = mk_var(#'x, tya)
+def rest_var = mk_var(#'rest, list_ty)
+def length_ph = mk_const(#'length, mk_fun(list_ty, nat_ty))
+def nil_ctor = mk_const(#'Nil, list_ty)
+def cons_ctor = mk_const(#'Cons, mk_fun(tya, mk_fun(list_ty, list_ty)))
+def zero_ctor = mk_const(#'zero, nat_ty)
+def succ_ctor = mk_const(#'succ, mk_fun(nat_ty, nat_ty))
+def length_spec:
+  FunSpec(#'length, [list_ty], nat_ty,
+          [DefClause([nil_ctor], zero_ctor),
+           DefClause([list_mk_comb(cons_ctor, [x_var, rest_var])],
+                     mk_comb(succ_ctor, mk_comb(length_ph, rest_var)))])
+def length_recinfo:
+  check_termination(#'function, #'length, 1,
+                    length_spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
+                    length_ph)
+
+check length_recinfo.method ~is #'structural
+check can_derive_structurally(length_spec, length_recinfo) ~is #true
+
+def axioms_before_length = axioms_of(thy_l).length()
+def (thy_length, length_info):
+  install_structural_function(thy_l, list_wr_def, length_spec, list_thms,
+                              list_tlt_eqs, length_recinfo)
+
+// No `new_axiom` anywhere in the derivation: same axiom count as the
+// datatype + its subterm relation alone.
+check axioms_of(thy_length).length() ~is axioms_before_length
+
+check:
+  (length_info :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
+  ~is ["length(Nil) === zero",
+       "forall (x :: 'a, y :: List('a)): length(Cons(x, y)) === succ(length(y))"]
+// Every equation is a closed theorem: derived, not assumed.
+check:
+  (length_info :~ FunInfo).equations.map(fun (t :: Thm): hyps_of(t))
+  ~is [[], []]
+
+// -- double(n :: Nat) :: Nat --------------------------------------------------
+
+def (thy_n, nat_thms, nat_tlt_eqs, nat_wr_def) = setup(base_theory(), nat_spec)
+def k_var = mk_var(#'k, nat_ty)
+def double_ph = mk_const(#'double, mk_fun(nat_ty, nat_ty))
+def double_spec:
+  FunSpec(#'double, [nat_ty], nat_ty,
+          [DefClause([zero_ctor], zero_ctor),
+           DefClause([mk_comb(succ_ctor, k_var)],
+                     mk_comb(succ_ctor, mk_comb(succ_ctor, mk_comb(double_ph, k_var))))])
+def double_recinfo:
+  check_termination(#'function, #'double, 1,
+                    double_spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
+                    double_ph)
+
+check double_recinfo.method ~is #'structural
+check can_derive_structurally(double_spec, double_recinfo) ~is #true
+
+def axioms_before_double = axioms_of(thy_n).length()
+def (thy_double, double_info):
+  install_structural_function(thy_n, nat_wr_def, double_spec, nat_thms,
+                              nat_tlt_eqs, double_recinfo)
+
+check axioms_of(thy_double).length() ~is axioms_before_double
+
+check:
+  (double_info :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
+  ~is ["double(zero) === zero",
+       "forall (x :: Nat): double(succ(x)) === succ(succ(double(x)))"]
+
+// -- a measured or multi-argument definition is out of this module's scope --
+
+check:
+  can_derive_structurally(FunSpec(#'plus, [nat_ty, nat_ty], nat_ty, []),
+                          RecursionInfo([0], #'structural, [], []))
+  ~is #false

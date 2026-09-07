@@ -40,6 +40,9 @@ expr = Id                          a parameter or pattern variable
 
 clause = CtorId(Id, ...): body
        | CtorId: body
+
+row = (pattern, ...): body      on the declaration, one per argument
+    | pattern: body             at one argument, parentheses optional
 }
 
 The operators are Rhombus's own, and they mean in the logic what they mean in
@@ -83,6 +86,37 @@ mistake however the clauses are arranged.
 @tt{_} stands for a position the clause does not name. It may appear inside
 a pattern (@tt{Cons(x, _)}) or as a whole clause head (@tt{| _: ...}), which
 is how a catch-all after a specific case is written.
+
+@subsection{Clauses on the declaration}
+
+The same matrix may be written on the declaration itself, one row of patterns
+per clause covering every argument, which is how Rhombus's own multi-case
+@rhombus(fun) is written:
+
+@rhombusblock(
+  function app(xs :: List(~a), ys :: List(~a)) :: List(~a)
+  | (Nil(), ys): ys
+  | (Cons(x, rest), ys): Cons(x, app(rest, ys))
+)
+
+A row must have one pattern per argument; at one argument the parentheses may
+be dropped, exactly as a one-argument @rhombus(match) clause drops them. The
+patterns are the same patterns, so nesting, @tt{_} and the ordering above all
+read the same way here, and a row may constrain every column at once ---
+which a nested @rhombus(match) cannot say in a single clause:
+
+@rhombusblock(
+  function eq2(m :: Nat, n :: Nat) :: Nat
+  | (zero(), zero()): zero()
+  | (succ(a), succ(b)): succ(eq2(a, b))
+  | (_, _): zero()
+)
+
+This is sugar in the strict sense: a row refines the same pattern vector the
+nested form refines, so nothing downstream --- the decision tree, coverage,
+termination, the @tt{WFREC} derivation --- can tell which form was written.
+The executable half becomes a multi-case @rhombus(fun) over the same
+patterns, so the first matching clause wins on both sides.
 
 A definition's equations are stated at the shapes each clause actually
 @emph{wins} at, not at its pattern as written --- @tt{| zero(): a | _: b}

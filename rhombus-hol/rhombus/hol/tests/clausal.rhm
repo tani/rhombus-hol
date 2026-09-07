@@ -1,0 +1,95 @@
+#lang rhombus/static
+
+// The clausal declaration form (review item 9, PLAN.md section 9.17).
+//
+// `function` stays the marker that says "this definition is meant to be
+// logical".  What the review asked for is that its *grammar* stop being a
+// dialect of its own: clauses should read like Rhombus's multi-case `fun`,
+// with a row of patterns per clause covering every argument, rather than a
+// `match` on one argument with the others destructured by nesting.
+//
+// This is sugar, and the point of the file is that it really is sugar --
+// the rows refine the same pattern vector the nested form refines, so the
+// decision tree, the coverage and termination checks and the `WFREC`
+// derivation see no difference.  What has to be checked is therefore not
+// that it parses, but that the logic and the runtime it produces are the
+// ones the clauses say, including where the two could disagree: ordering,
+// wildcards, and rows that constrain more than one column.
+
+import:
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  rhombus/hol/driver open
+  "fixtures/clausal_ok.rhm" open
+  "fixtures/clausal_ok.rhm"!hol_theory as m
+
+fun load(mp :: ModulePath):
+  let e = Evaluator.make_rhombus()
+  parameterize { Evaluator.current: e }: Evaluator.instantiate(mp)
+
+def st :~ HolState = m.theory
+fun eqs(n :: Symbol) :~ List:
+  st.funs[n].equations.map(fun (t :: Thm): show(concl_of(t)))
+fun hyps_count(n :: Symbol) :~ List:
+  st.funs[n].equations.map(fun (t :: Thm): hyps_of(t).length())
+
+// -- derived, not postulated ---------------------------------------------
+//
+// The clausal form goes down the same `WFREC` path the nested form does:
+// structural descent, equations proved, no hypotheses left over.
+check st.funs[#'app].recinfo.method ~is #'structural
+check st.funs[#'len].recinfo.method ~is #'structural
+check hyps_count(#'app) ~is [0, 0]
+check hyps_count(#'len) ~is [0, 0]
+
+// -- the equations are the clauses ---------------------------------------
+
+check:
+  eqs(#'app)
+  ~is ["forall (x :: List('a)): app(Nil, x) === x",
+       "forall (x :: 'a, y :: List('a), z :: List('a)): app(Cons(x, y), z) === Cons(x, app(y, z))"]
+
+// `_` binds nothing and the parentheses are optional at one argument
+check:
+  eqs(#'len)
+  ~is ["len(Nil) === zero",
+       "forall (x :: 'a, y :: List('a)): len(Cons(x, y)) === succ(len(y))"]
+
+// -- a row may constrain every column ------------------------------------
+//
+// This is what the nested form could not say in one clause.  The catch-all
+// row `(_, _)` covers the two mixed shapes, and the equations are stated at
+// those shapes rather than at the row as written -- which is what keeps an
+// ordered matrix consistent.
+check:
+  eqs(#'eq2)
+  ~is ["eq2(zero, zero) === zero",
+       "forall (x :: Nat): eq2(zero, succ(x)) === zero",
+       "forall (x :: Nat): eq2(succ(x), zero) === zero",
+       "forall (x :: Nat, y :: Nat): eq2(succ(x), succ(y)) === succ(eq2(x, y))"]
+
+// -- earlier rows win ----------------------------------------------------
+//
+// `both`'s first row claims `succ(succ(a))` in the first column, so the
+// catch-all only speaks for `zero` and `succ(zero)` there.
+check:
+  eqs(#'both)
+  ~is ["forall (x :: Nat): both(zero, x) === x",
+       "forall (x :: Nat): both(succ(zero), x) === x",
+       "forall (x :: Nat, y :: Nat): both(succ(succ(x)), y) === x"]
+
+// -- and the runtime computes the same thing -----------------------------
+//
+// The emitted Rhombus is a multi-case `fun` over the same patterns, so
+// first-match-wins holds on both sides of the module.
+check app(Cons(1, Nil()), Cons(2, Nil())) ~is Cons(1, Cons(2, Nil()))
+check len(Cons(1, Cons(2, Nil()))) ~is succ(succ(zero()))
+check eq2(succ(zero()), succ(succ(zero()))) ~is succ(zero())
+check eq2(zero(), succ(zero())) ~is zero()
+check both(succ(succ(zero())), succ(zero())) ~is zero()
+check both(zero(), succ(zero())) ~is succ(zero())
+
+// -- a row must cover every argument -------------------------------------
+check:
+  load(ModulePath'lib("rhombus/hol/tests/fixtures/clausal_arity.rhm")')
+  ~throws "1 pattern but the function takes 2"

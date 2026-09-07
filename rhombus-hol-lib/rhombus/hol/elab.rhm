@@ -160,6 +160,8 @@ fun type_decl_shape(stx :: Syntax) :: List:
 
 export:
   function_decl_shape
+  body_clauses
+  row_parts
   parse_function_decl
 
 // A declaration split into its parts: `[name, [param, ...], result_type,
@@ -180,13 +182,39 @@ fun function_parts(stx :: Syntax) :: List:
                    "expected `function name(param :: Type, ...) :: Type: body`",
                    stx)
 
-// `:: Type: body`, or `:: Type ~measure(e): body`.
+// `:: Type: body`, or `:: Type ~measure(e): body`, or the clausal form
+// `:: Type | (pat, ...): body | ...` -- see `clause_rows`.  The clausal form
+// is returned as a body of the same shape everything downstream already
+// reads, so only `parse_body` and the emitter have to know about it.
 fun split_signature(rest :: Syntax, at :: Syntax) :: List:
   match rest
   | ':: $ty ... ~measure($m): $body; ...': ['$ty ...', m, '$body; ...']
   | ':: $ty ...: $body; ...': ['$ty ...', #false, '$body; ...']
+  | ':: $ty ... ~measure($m)
+     | $c
+     | ...': ['$ty ...', m, clause_body([c, ...])]
+  | ':: $ty ...
+     | $c
+     | ...': ['$ty ...', #false, clause_body([c, ...])]
   | ~else:
       syntax_error(#'function, "a function needs a result type", at)
+
+// The clausal form's body, tagged so `parse_body` can tell it from an
+// ordinary expression body.  Keeping it a `Syntax` rather than a separate
+// field means `function_parts`, `fun_signature` and the measure path are
+// untouched.
+fun clause_body(cs :: List.of(Syntax)) :: Syntax:
+  let [c, ...] = cs
+  '#%hol_clauses:
+     $c
+     ...'
+
+// The clauses back out of that shape, for the emitter.  `#false` when the
+// body is an ordinary expression body.
+fun body_clauses(body :: Syntax) :: maybe(List.of(Syntax)):
+  match body
+  | '#%hol_clauses: $c; ...': [c, ...]
+  | ~else: #false
 
 // `[name, [param, ...], body]`, the executable half's view.
 fun function_decl_shape(stx :: Syntax) :: List:
@@ -385,6 +413,8 @@ fun parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
                pats :: List.of(Term), env :: Map.of(Symbol, Term),
                body :: Syntax, at :: Syntax) :: List.of(DefClause):
   match body
+  | '#%hol_clauses: $c; ...':
+      clause_rows(thy, self_name, self, pats, env, [c, ...], at)
   | 'match $(sv :: Identifier)
      | $c
      | ...':
@@ -402,6 +432,73 @@ fun parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
       parse_body(thy, self_name, self, pats, env2, '$more; ...', at)
   | ~else:
       [DefClause(pats, elab_expr(thy, self_name, self, env, body))]
+
+// The declaration-level clause matrix (review item 9): a row of patterns
+// covering *every* argument at once, the way Rhombus's own multi-case `fun`
+// is written, instead of a `match` on one argument with the rest destructured
+// by nesting.
+//
+//   function app(xs :: List(~a), ys :: List(~a)) :: List(~a)
+//   | (Nil(), ys): ys
+//   | (Cons(x, rest), ys): Cons(x, app(rest, ys))
+//
+// This is sugar in the strict sense: a row refines the same `pats` vector the
+// nested form refines, one column at a time, and produces the same
+// `DefClause` rows.  Everything downstream -- the decision tree, the coverage
+// and termination checks, the `WFREC` derivation -- sees no difference, which
+// is why ordering, `_` and nested patterns work here for free.
+fun clause_rows(thy :: Theory, self_name :: Symbol, self :: Term,
+                pats :: List.of(Term), env :: Map.of(Symbol, Term),
+                cs :: List.of(Syntax), at :: Syntax) :: List.of(DefClause):
+  for values(acc :~ List = []) (c in cs):
+    acc ++ clause_row(thy, self_name, self, pats, env, c, at)
+
+fun clause_row(thy :: Theory, self_name :: Symbol, self :: Term,
+               pats :: List.of(Term), env :: Map.of(Symbol, Term),
+               c :: Syntax, at :: Syntax) :: List.of(DefClause):
+  let (row, body) = row_parts(c, pats.length())
+  // Left to right, so a later column's pattern sees the variables an earlier
+  // one bound -- the same order the nested form reads in.
+  let (pats2, env2):
+    for values(ps :~ List = pats, e :~ Map = env) (col in List.iota(row.length())):
+      let v :~ FVar:
+        match ps[col]
+        | FVar(_, _): ps[col]
+        | ~else:
+            syntax_error(#'function,
+                         "this argument has already been matched",
+                         (row :~ List)[col])
+      let [pat, bound] = parse_sub_pattern(thy, (row :~ List)[col], v.ty)
+      values(refine_pats(ps, v, pat :~ Term),
+             for values(m :~ Map = e) (bv in bound :~ List):
+               m ++ {(bv :~ FVar).name: bv :~ Term})
+  parse_body(thy, self_name, self, pats2, env2, body, at)
+
+// `(pat, ...): body`, or `pat: body` when there is exactly one argument.
+fun row_parts(c :: Syntax, arity :: Int) :: values(List.of(Syntax), Syntax):
+  match c
+  | '($p, ...): $body; ...':
+      let ps = [p, ...]
+      unless ps.length() == arity
+      | syntax_error(#'function,
+                     "this clause has " ++ to_string(ps.length())
+                       ++ " patterns but the function takes "
+                       ++ to_string(arity),
+                     c)
+      values(ps, '$body; ...')
+  | '$pt ...: $body; ...':
+      let p = '$pt ...'
+      // One argument may drop the parentheses, exactly as a one-argument
+      // `match` clause does.
+      unless arity == 1
+      | syntax_error(#'function,
+                     "this clause has 1 pattern but the function takes "
+                       ++ to_string(arity),
+                     c)
+      values([p], '$body; ...')
+  | ~else:
+      syntax_error(#'function,
+                   "expected `(pattern, ...): body`", c)
 
 // The pattern variable a `match` refines: `n` must name something still a
 // *live*, unrefined position somewhere in `pats` -- a top-level parameter

@@ -4,25 +4,39 @@
 // postulating them with `new_axiom` (PLAN.md section 9.1, wiring item 5:
 // the `H` step-function decision-tree compiler).
 //
-// Scope of this module: a single-argument (`arity == 1`) function whose
-// termination check found *structural* descent (`RecursionInfo.method ==
-// #'structural`) on its one argument.  That is the case `check_termination`
-// settles without any measure obligation at all, so every recursive call's
-// argument is *literally* one of the matched constructor's own field
-// variables (`terminate.rhm`'s `descends_at`) -- which is exactly what
-// makes both the well-founded relation to recurse in (`T_lt`,
-// `subterm.rhm`) and the congruence hypothesis `WFREC` needs provable in
-// one uniform way, below.
+// Scope of this module: a function whose termination check found
+// *structural* descent (`RecursionInfo.method == #'structural`), and for
+// which some one argument column strictly descends at *every* recursive
+// call.  That is the case `check_termination` settles without any measure
+// obligation at all, so the descending argument is literally a constructor
+// subterm of the corresponding pattern (`terminate.rhm`'s `descends_at`) --
+// which is exactly what makes both the well-founded relation to recurse in
+// (`T_lt`, `subterm.rhm`) and the congruence hypothesis `WFREC` needs
+// provable in one uniform way, below.
 //
-// Multi-argument functions and `~measure`-based recursion are not attempted
-// here: multi-argument needs `algebra.rhm`'s tupling (which needs `prod`
-// installed at most once per theory, not yet threaded through the driver's
-// state), and a measure's decrease proof would pull `WF(T_lt)` back along
-// the measure (`prove_wf_pullback`) into a relation whose congruence
-// hypothesis this module's proof does not cover.  `install_function`
-// (`recdef.rhm`) remains the postulating fallback for both, exactly as
-// `datatype.rhm`'s axiom schema remains the fallback for self-recursive
-// types beside `datatype_gen.rhm`'s derivation.
+// `WFREC` recurses over a single domain, so a several-argument definition
+// is derived over the *tuple* of its arguments (`algebra.rhm`'s
+// `prod`/`mk_tuple`/`tuple_proj`) and the well-founded relation is `T_lt`
+// pulled back along the projection onto the descending column
+// (`wellfounded.rhm`'s `prove_wf_pullback`).  Everything between those two
+// ends -- building `H`, proving congruence, reading the equations back off
+// -- is written once against a `Carrier`, which is the only thing that
+// knows whether the recursion's domain is the argument itself or a tuple.
+//
+// Two cases are still out of scope and fall back to `install_function`
+// (`recdef.rhm`)'s postulating seam, exactly as `datatype.rhm`'s axiom
+// schema remains the fallback for self-recursive types beside
+// `datatype_gen.rhm`'s derivation:
+//
+//   * `~measure`-based recursion.  Its descent facts are discharged
+//     obligations rather than the syntactic `descends_at`, so the
+//     congruence proof would have to consume `RecursionInfo.proofs`
+//     instead of re-deriving each step from `T_lt`'s own equations.
+//
+//   * lexicographic descent, where no single column descends everywhere
+//     (Ackermann's function is the standard example).  That needs the
+//     lexicographic product of two well-founded relations, not a pullback
+//     along one projection.
 
 import:
   rhombus/hol/htype open
@@ -36,6 +50,7 @@ import:
   "taut.rhm" open
   "ruledb.rhm" open
   "datatype.rhm" open
+  "algebra.rhm" open
   "subterm.rhm" open
   "wellfounded.rhm" open
   "wfrec.rhm" open
@@ -45,49 +60,83 @@ import:
 
 export:
   can_derive_structurally
+  descent_column
   install_structural_function
 
 fun self_type(spec :: DatatypeSpec) :: HType:
   TyApp(spec.name, spec.params.map(fun (p :: Symbol): TyVar(p) :~ HType))
 
-// Whether this module's derivation applies: a single argument, termination
-// settled by plain structural descent (no measure), and every position the
+// -- applicability ---------------------------------------------------------
+
+// The one argument column every recursive call strictly descends in, or
+// `#false` if there is none.
+//
+// Not `RecursionInfo.positions`: that is the *lexicographic* order, whose
+// leading column is only required to shrink at some call sites and stay
+// equal at the rest.  A pullback along one projection needs strictly more
+// -- every call must descend in the same column, or the relation the
+// recursion runs in does not relate the call to its caller.  The tree is
+// not consulted here: descent is a property of the clauses as written, and
+// `descends_at` is the same check `check_termination` used.
+fun descent_column(spec :: FunSpec, fn_ph :: Term) :: maybe(Int):
+  let arity = spec.arg_types.length()
+  recur loop (k = 0):
+    cond
+    | k >= arity: #false
+    | ~else:
+        let ok = for all (cl in spec.clauses):
+                   let cl :~ DefClause = cl
+                   for all (call in recursive_calls(fn_ph, arity, cl.rhs)):
+                     descends_at(cl.pats[k], (call :~ List)[k])
+        (if ok | k | loop(k + 1))
+
+// Whether this module's derivation applies: termination settled by plain
+// structural descent (no measure), one column descending at every call,
+// that column landing in a declared datatype, and every position the
 // pattern matrix splits on carrying a datatype whose *schematic* self type
 // is exactly the type at that position.
 //
-// Pattern depth is no longer a condition.  `H` is now built from the
-// decision tree (`dtree.rhm`) rather than by zipping a clause's variables
-// against its constructor's own fields, and the tree records a selector
-// *path* to every variable -- so a nested pattern is just a `Switch` whose
-// branch holds another `Switch`, and the congruence proof case-splits at
-// the nested position exactly as it does at the top one.
+// Pattern depth is not a condition.  `H` is built from the decision tree
+// (`dtree.rhm`), which records a selector *path* to every variable, so a
+// nested pattern is just a `Switch` whose branch holds another `Switch`,
+// and the congruence proof case-splits at the nested position exactly as it
+// does at the top one.
 //
 // The type condition is what makes that case-split possible: it needs the
 // position's datatype `cases` theorem, which is stated at the schematic
-// self type, to apply at the position's type directly.  A field declared
-// at a concrete instance of another datatype would need `cases`
-// instantiated first, which this version does not do, so such a definition
-// falls back to `install_function`'s postulating seam.
+// self type, to apply at the position's type directly.  A field declared at
+// a concrete instance of another datatype would need `cases` instantiated
+// first, which this version does not do.
 fun can_derive_structurally(spec :: FunSpec, recinfo :: RecursionInfo,
                             tree :: DecisionTree,
                             dts :: Map.of(Symbol, DatatypeThms)) :: Boolean:
-  spec.arg_types.length() == 1 && recinfo.method == #'structural
-    && switch_types_ok(tree, dts)
+  cond
+  | recinfo.method != #'structural: #false
+  | spec.arg_types.length() == 0: #false
+  | ~else:
+      match descent_column(spec, mk_const(spec.name, fun_type(spec)))
+      | #false: #false
+      | k:
+          cond
+          | !schematic_datatype(dts, spec.arg_types[k :~ Int]): #false
+          | ~else: switch_types_ok(tree, dts)
+
+fun schematic_datatype(dts :: Map.of(Symbol, DatatypeThms),
+                       ty :: HType) :: Boolean:
+  match ty
+  | TyApp(n, _):
+      match dts.get(n, #false)
+      | #false: #false
+      | thms: self_type((thms :~ DatatypeThms).spec) == ty
+  | ~else: #false
 
 fun switch_types_ok(t :: DecisionTree,
                     dts :: Map.of(Symbol, DatatypeThms)) :: Boolean:
   match t
   | DTLeaf(_, _): #true
   | DTSwitch(_, self_ty, branches):
-      let ok:
-        match self_ty
-        | TyApp(n, _):
-            match dts.get(n, #false)
-            | #false: #false
-            | thms: self_type((thms :~ DatatypeThms).spec) == self_ty
-        | ~else: #false
       cond
-      | ! ok: #false
+      | !schematic_datatype(dts, self_ty): #false
       | ~else: for all (b in branches): switch_types_ok((b :~ DTBranch).tree, dts)
 
 // The `DatatypeThms` at a switched position's type.  Total in practice:
@@ -105,35 +154,164 @@ fun thms_at(dts :: Map.of(Symbol, DatatypeThms), ty :: HType) :: DatatypeThms:
       error(~who: #'install_structural_function,
             "cannot switch on a position of variable type")
 
-// The concrete subterm a path points at, once the scrutinee has been split
-// far enough that every step on the path is a literal constructor
-// application -- which the tree guarantees, a path's steps being exactly
-// the splits its own ancestors performed.  This is the proof-side twin of
-// `path_term`: the same position, reached by taking a constructor apart
-// rather than by wrapping a selector around it.
-fun path_subterm(t :: Term, p :: DTPath) :: Term:
-  for values(cur :~ Term = t) (s in p.steps):
-    let (_, args) = strip_comb(cur)
-    args[(s :~ DTStep).field]
+// The concrete subterm a path points at, given the concrete argument terms
+// -- once the scrutinee has been split far enough that every step on the
+// path is a literal constructor application, which the tree guarantees: a
+// path's steps are exactly the splits its own ancestors performed.  This is
+// the proof-side twin of `path_term`: the same position, reached by taking
+// a constructor apart rather than by wrapping a selector around it.
+fun path_subterm(args :: List.of(Term), p :: DTPath) :: Term:
+  for values(cur :~ Term = args[p.arg]) (s in p.steps):
+    let (_, sub) = strip_comb(cur)
+    sub[(s :~ DTStep).field]
+
+// -- the carrier -----------------------------------------------------------
+
+// What `WFREC` recurses over, and how the definition's several arguments
+// sit inside it.  There are exactly two instances: `direct_carrier` (one
+// argument, the domain *is* that argument's type) and `tuple_carrier`
+// (several, the domain is their product).  Everything below is written
+// against this and never asks which it has.
+//
+//   `arg_terms(x)`      the arguments, as terms, reading them out of a term
+//                       of the domain -- the identity, or projections
+//   `build(args)`       a term of the domain, from the argument terms
+//   `split(c)`          the argument terms *syntactically* inside a
+//                       concrete domain term (a literal tuple, or the term
+//                       itself); the inverse of `build` on things `build`
+//                       made
+//   `open(thy, x, k)`   `k` applied to `|- x = <domain term over fresh
+//                       variables>`, wrapped in whatever `CHOOSE`s
+//                       introducing those variables needs
+class Carrier(dom :: HType,
+              rel :: Term,
+              wf :: Thm,
+              arg_terms :: Function.of_arity(1),
+              build :: Function.of_arity(1),
+              split :: Function.of_arity(1),
+              open :: Function.of_arity(3))
+
+fun direct_carrier(dom :: HType, rel :: Term, wf :: Thm) :: Carrier:
+  Carrier(dom, rel, wf,
+          fun (x :: Term): [x],
+          fun (args :: List.of(Term)): args[0],
+          fun (c :: Term): [c],
+          fun (thy :: Theory, x :: FVar, k): k(REFL(thy, x :~ Term)))
+
+// `T_lt` pulled back along the projection onto column `k`: `Rp(p, q)` holds
+// exactly when `p`'s `k`-th component is a proper subterm of `q`'s.  That is
+// well-founded because `T_lt` is (`prove_wf_pullback`), and every recursive
+// call satisfies it because `descent_column` said column `k` descends at
+// every one of them.
+//
+// Both the projection and the relation are given names of their own rather
+// than passed as lambdas.  `prove_wf_pullback` builds terms around `f(x)`
+// and matches them against each other, and `wfrec.rhm` beta-reduces
+// wholesale (`BETA_RULE`) inside its own derivation; with either argument a
+// literal abstraction, those applications are redexes that some steps
+// reduce and others do not, and the match fails.  This is the same
+// invariant `H` is kept behind a constant for -- see `reduce_h` -- applied
+// to the other two arguments `WFREC` takes.  Their defining equations go
+// into the reduction database (returned alongside) so that the relation
+// still computes on a literal tuple.
+//
+// Returns the extended theory, the carrier, and the rules the reduction
+// database needs on top of the datatype's own.
+fun tuple_carrier(thy :: Theory, name :: Symbol, prod_thms :: ProdThms,
+                  tys :: List.of(HType), k :: Int, wf_t_lt :: Thm)
+     :: values(Theory, Carrier, List.of(Thm)):
+  let dom = tuple_ty(tys)
+  let pv = mk_var(#'_tpp, dom)
+  let pname = Symbol.from_string(to_string(name) ++ "_arg")
+  let pty = mk_fun(dom, tys[k])
+  let proj_rhs = mk_abs(pv, tuple_proj(tys, k, pv :~ Term))
+  let (thy1, def_proj) = new_basic_definition(thy,
+                                              mk_eq(mk_var(pname, pty), proj_rhs))
+  let proj = mk_const(pname, pty)
+  let qv = mk_var(#'_tpq, dom)
+  let proj_eq = GEN(thy1, qv, unfold_def(thy1, def_proj, [qv :~ Term]))
+  let wf0 = prove_wf_pullback(thy1, wf_t_lt, proj)
+  let (wf_op, rel_rhs) = dest_comb(concl_of(wf0))
+  let rname = Symbol.from_string(to_string(name) ++ "_rel")
+  let rty = type_of(rel_rhs)
+  let (thy2, def_rel) = new_basic_definition(thy1,
+                                             mk_eq(mk_var(rname, rty), rel_rhs))
+  let rel = mk_const(rname, rty)
+  let wf = EQ_MP(SYM(thy2, AP_TERM(thy2, wf_op, def_rel)), wf0)
+  let av = mk_var(#'_tra, dom)
+  let bv = mk_var(#'_trb, dom)
+  let rel_eq = GENL(thy2, [av, bv], unfold_def(thy2, def_rel, [av :~ Term, bv :~ Term]))
+  values(thy2,
+         Carrier(dom, rel :~ Term, wf,
+                 fun (x :: Term):
+                   for List (j in List.iota(tys.length())): tuple_proj(tys, j, x),
+                 fun (args :: List.of(Term)): mk_tuple(args),
+                 fun (c :: Term): split_tuple(tys, c),
+                 fun (thy3 :: Theory, x :: FVar, k2):
+                   open_tuple(thy3, prod_thms, tys, x :~ Term, k2)),
+         [rel_eq, proj_eq, prod_thms.fst_pair, prod_thms.snd_pair])
+
+// The components of a literal tuple, as they stand.
+fun split_tuple(tys :: List.of(HType), c :: Term) :: List.of(Term):
+  match tys
+  | [_]: [c]
+  | List.cons(_, rest):
+      let (_, args) = strip_comb(c)
+      List.cons(args[0], split_tuple(rest, args[1]))
+  | []: error(~who: #'install_structural_function, "empty tuple")
+
+// `kont` applied to `|- p = PAIR(g0, PAIR(g1, ... gn))` for fresh `gi`,
+// under the `CHOOSE`s that introduce them.  Surjective pairing, one nesting
+// level at a time: `|- !p. ?a b. p = PAIR(a, b)`.
+fun open_tuple(thy :: Theory, prod_thms :: ProdThms, tys :: List.of(HType),
+               p :: Term, kont) :: Thm:
+  match tys
+  | [_]: kont(REFL(thy, p))
+  | List.cons(t0, rest):
+      let rest_ty = tuple_ty(rest)
+      let inst = INST_TYPE(thy, {#'a: t0, #'b: rest_ty}, prod_thms.surjective)
+      let ex_a = SPEC(thy, p, inst)
+      let [va, body_a] = (match dest_exists(concl_of(ex_a)) | l: l)
+      let va :~ FVar = va
+      let ga = genvar(t0)
+      let body_ga = inst_fvar([[ga :~ Term, va]], body_a)
+      let ex_b = ASSUME(thy, body_ga)
+      let [vb, body_b] = (match dest_exists(body_ga) | l: l)
+      let vb :~ FVar = vb
+      let gb = genvar(rest_ty)
+      let body_gb = inst_fvar([[gb :~ Term, vb]], body_b)
+      let p_eq = ASSUME(thy, body_gb)
+      let inner = open_tuple(thy, prod_thms, rest, gb :~ Term,
+                             fun (gb_eq :: Thm):
+                               kont(TRANS(p_eq,
+                                          cong_rewrite(thy, [gb_eq], rhs_of(p_eq)))))
+      CHOOSE(thy, ga, ex_a, CHOOSE(thy, gb, ex_b, inner))
+  | []: error(~who: #'install_structural_function, "empty tuple")
 
 // -- building `H` ------------------------------------------------------
 
-// Every application of `fn_ph` inside `t` becomes an application of
-// `f_var` instead -- constructing a term, not proving anything.  Function
-// bodies in the reflected subset never introduce a lambda of their own, so
-// the `Abs` case (rebuilt through `dest_abs`/`mk_abs`, since raw `Abs`
-// construction is closed) is not exercised today, only defensive.
-fun rewrite_recursive_head(fn_ph :: Term, f_var :: Term, t :: Term) :: Term:
-  match t
-  | Comb(g, x) when g == fn_ph:
-      mk_comb(f_var, rewrite_recursive_head(fn_ph, f_var, x))
-  | Comb(g, x):
-      mk_comb(rewrite_recursive_head(fn_ph, f_var, g),
-              rewrite_recursive_head(fn_ph, f_var, x))
-  | Abs(_, _):
-      let (v, body) = dest_abs(t)
-      mk_abs(v, rewrite_recursive_head(fn_ph, f_var, body))
-  | ~else: t
+// Every full application of `fn_ph` inside `t` becomes an application of
+// `f_var` to the carrier term its arguments build -- for one argument that
+// is the argument itself, for several it is their tuple.  Constructing a
+// term, not proving anything.  Function bodies in the reflected subset
+// never introduce a lambda of their own, so the `Abs` case (rebuilt through
+// `dest_abs`/`mk_abs`, since raw `Abs` construction is closed) is not
+// exercised today, only defensive.
+fun rewrite_recursive_head(fn_ph :: Term, arity :: Int, f_var :: Term,
+                           build, t :: Term) :: Term:
+  fun go(t :: Term) :: Term:
+    let (head, args) = strip_comb(t)
+    cond
+    | head == fn_ph && args.length() == arity:
+        mk_comb(f_var, build(args.map(go)))
+    | ~else:
+        match t
+        | Comb(f, x): mk_comb(go(f), go(x))
+        | Abs(_, _):
+            let (v, body) = dest_abs(t)
+            mk_abs(v, go(body))
+        | ~else: t
+  go(t)
 
 // `H := \f x. <the decision tree, as nested `cond`s>`.
 //
@@ -141,14 +319,17 @@ fun rewrite_recursive_head(fn_ph :: Term, f_var :: Term, t :: Term) :: Term:
 // the last constructor is the final `else`, since the tree is exhaustive
 // and its branches are mutually exclusive.  A `Leaf` is its clause's own
 // body with every pattern variable replaced by the chain of selectors that
-// reads it back out of `x` (`path_term`), and every recursive self-call
-// replaced by an application of `f`.
+// reads it back out of `x` (`path_term`, off whichever argument the path
+// names), and every recursive self-call replaced by an application of `f`.
 //
-// Nesting needs nothing special here: a nested pattern is a `Switch`
-// inside a `Switch`, and the path already says how deep to read.
+// Neither nesting nor several arguments need anything special here: a
+// nested pattern is a `Switch` inside a `Switch`, and the path already says
+// which argument to start from and how deep to read.
 fun build_step_body(spec :: FunSpec, tree :: DecisionTree,
-                    dts :: Map.of(Symbol, DatatypeThms), fn_ph :: Term,
-                    f_var :: FVar, x_var :: FVar) :: Term:
+                    dts :: Map.of(Symbol, DatatypeThms), carrier :: Carrier,
+                    fn_ph :: Term, f_var :: FVar, x_var :: FVar) :: Term:
+  let arity = spec.arg_types.length()
+  let args :~ List = carrier.arg_terms(x_var :~ Term)
   fun dt_of(ty :: HType) :: DatatypeSpec: thms_at(dts, ty).spec
   fun go(t :: DecisionTree) :: Term:
     match t
@@ -156,10 +337,12 @@ fun build_step_body(spec :: FunSpec, tree :: DecisionTree,
         let cl :~ DefClause = spec.clauses[ci]
         let subst = for List (b in bindings):
                       let b :~ DTBinding = b
-                      [path_term(dt_of, [x_var :~ Term], b.path), b.var]
-        inst_fvar(subst, rewrite_recursive_head(fn_ph, f_var, cl.rhs))
+                      [path_term(dt_of, args, b.path), b.var]
+        inst_fvar(subst,
+                  rewrite_recursive_head(fn_ph, arity, f_var, carrier.build,
+                                         cl.rhs))
     | DTSwitch(path, self_ty, branches):
-        let scrut = path_term(dt_of, [x_var :~ Term], path)
+        let scrut = path_term(dt_of, args, path)
         recur build (bs :~ List = branches):
           match bs
           | [b]: go((b :~ DTBranch).tree)
@@ -180,19 +363,23 @@ fun build_step_body(spec :: FunSpec, tree :: DecisionTree,
 // selectors (to resolve `is_Ci`/selector applications once `x` is a
 // literal constructor application), `T_lt`'s own defining equations
 // (needed by `prove_congruence` to see `T_lt(v, C(vars)) = true` for a
-// field `v`), `cond`'s two reduction rules (once a discriminator has
-// resolved to a literal `true`/`false`), and propositional cleanup
-// (`refl_conv`, folded into `simp_conv` itself, handles `v = v -> true`;
-// the `or`/`true` tautologies then collapse the disjunction `T_lt`'s
-// equations expand a query into).
+// field `v`), `fst`/`snd` on a literal pair (so a tupled definition's
+// projections resolve the same way), `cond`'s two reduction rules (once a
+// discriminator has resolved to a literal `true`/`false`), and
+// propositional cleanup (`refl_conv`, folded into `simp_conv` itself,
+// handles `v = v -> true`; the `or`/`true` tautologies then collapse the
+// disjunction `T_lt`'s equations expand a query into).
 fun base_reduction_db(thy :: Theory, dt :: DatatypeThms,
-                      t_lt_equations :: List.of(Thm)) :: RuleDB:
+                      t_lt_equations :: List.of(Thm),
+                      extra :: List.of(Thm)) :: RuleDB:
   let db = for values(d :~ RuleDB = empty_db) (th in dt.discriminators):
              add_thm(thy, d, #'disc, th)
   let db = for values(d :~ RuleDB = db) (th in dt.selectors):
              add_thm(thy, d, #'sel, th)
   let db = for values(d :~ RuleDB = db) (th in t_lt_equations):
              add_thm(thy, d, #'tlt, th)
+  let db = for values(d :~ RuleDB = db) (th in extra):
+             add_thm(thy, d, #'proj, th)
   let db = for values(d :~ RuleDB = db) (th in tautologies(thy)):
              add_thm(thy, d, #'taut, th)
   for values(d :~ RuleDB = db) (th in conditionals(thy)):
@@ -253,65 +440,78 @@ fun cong_rewrite(thy :: Theory, facts :: List.of(Thm), t :: Term) :: Thm:
       | ~else: REFL(thy, t)
   | th :: Thm: th
 
+// The distinct carrier terms the recursive calls in `t` are made at, in
+// order of first occurrence.
+fun call_carriers(fn_ph :: Term, arity :: Int, build,
+                  t :: Term) :: List.of(Term):
+  for values(acc :~ List = []) (call in recursive_calls(fn_ph, arity, t)):
+    let v :~ Term = build(call :~ List)
+    (if acc.contains(v) | acc | acc ++ [v])
+
 // -- the congruence hypothesis --------------------------------------------
 
-// `|- !f1 f2 x. (!z. T_lt(z,x) ==> f1(z)=f2(z)) ==> H(f1)(x) = H(f2)(x)`.
+// `|- !f1 f2 x. (!z. R(z,x) ==> f1(z)=f2(z)) ==> H(f1)(x) = H(f2)(x)`.
 //
 // The proof walks the same decision tree `H` was built from, refining `x`
-// as it descends: at a `Switch` it splits the position's own variable with
-// that datatype's `cases` theorem, and carries the refinement into the
-// running `x_eq : |- x = <concrete>` by rewriting with the split equation.
-// Splitting at a *nested* position is the same move as splitting at the
-// top one, which is what lets nested patterns through: `H` cannot reduce
-// past a test whose scrutinee is still a variable, so the proof keeps
-// splitting until every test resolves -- which is exactly when the tree
-// reaches a leaf.
+// as it descends.  It starts by opening the carrier -- nothing to do when
+// the domain is the one argument, surjective pairing when it is a tuple --
+// and then, at a `Switch`, splits the position's own variable with that
+// datatype's `cases` theorem, carrying the refinement into the running
+// `x_eq : |- x = <concrete>` by rewriting with the split equation.
+//
+// Splitting at a *nested* position is the same move as splitting at the top
+// one, which is what lets nested patterns through: `H` cannot reduce past a
+// test whose scrutinee is still a variable, so the proof keeps splitting
+// until every test resolves -- which is exactly when the tree reaches a
+// leaf.
 //
 // At a leaf, `H_const(f1)` and `H_const(f2)` applied to the refined `x`
-// both reduce (`reduce_h`) to that clause's body with `f1`/`f2` standing
-// in for the recursive call.  The two differ only where a recursive call
-// reads a field, and `T_lt(field, <concrete>)` always holds -- `T_lt` is
-// the proper-subterm relation, so it covers a field of a field just as it
-// covers an immediate one -- so the hypothesis gives `f1(v) = f2(v)`
-// there, and `cong_rewrite` carries that through whatever the body builds
-// around the call.
-fun prove_congruence(thy :: Theory, spec :: FunSpec, dt :: DatatypeThms,
+// both reduce (`reduce_h`) to that clause's body with `f1`/`f2` standing in
+// for the recursive call.  The two differ only where a recursive call
+// happens, and `R(<call>, <concrete>)` always holds -- for one argument
+// because `T_lt` is the proper-subterm relation, so it covers a field of a
+// field just as it covers an immediate one; for several because `R` is
+// exactly `T_lt` on the descending column, which `descent_column` checked
+// every call shrinks.  So the hypothesis gives `f1(v) = f2(v)` there, and
+// `cong_rewrite` carries that through whatever the body builds around the
+// call.
+fun prove_congruence(thy :: Theory, spec :: FunSpec,
                      dts :: Map.of(Symbol, DatatypeThms), tree :: DecisionTree,
-                     fn_ph :: Term, h_const :: Term, def_h :: Thm, rel :: Term,
-                     db :: RuleDB) :: Thm:
-  let self = self_type(dt.spec)
-  let ret = spec.ret_type
-  let fty = mk_fun(self, ret)
+                     carrier :: Carrier, fn_ph :: Term, h_const :: Term,
+                     def_h :: Thm, db :: RuleDB) :: Thm:
+  let arity = spec.arg_types.length()
+  let dom = carrier.dom
+  let rel = carrier.rel
+  let fty = mk_fun(dom, spec.ret_type)
   let f1 = mk_var(#'_cgf1, fty)
   let f2 = mk_var(#'_cgf2, fty)
-  let xv = mk_var(#'_cgx, self)
-  let zv = mk_var(#'_cgz, self)
+  let xv = mk_var(#'_cgx, dom)
+  let zv = mk_var(#'_cgz, dom)
   let hyp_term = mk_forall(zv, mk_imp(list_mk_comb(rel, [zv :~ Term, xv]),
                                       mk_eq(mk_comb(f1, zv), mk_comb(f2, zv))))
   let hyp = ASSUME(thy, hyp_term)
 
-  // `x_eq : |- xv = concrete`, `concrete` being `xv` refined by every
-  // split taken to reach this leaf.  The clause's own variable names mean
-  // nothing here -- the concrete term is built from whichever fresh
-  // variables the `CHOOSE`s introduced -- so the body is re-expressed in
-  // terms of them, position by position, using the leaf's own bindings.
+  // `x_eq : |- xv = concrete`, `concrete` being `xv` refined by every split
+  // taken to reach this leaf.  The clause's own variable names mean nothing
+  // here -- the concrete term is built from whichever fresh variables the
+  // `CHOOSE`s introduced -- so the body is re-expressed in terms of them,
+  // position by position, using the leaf's own bindings.
   fun at_leaf(ci :: Int, bindings :: List.of(DTBinding), x_eq :: Thm) :: Thm:
     let concrete = rhs_of(x_eq)
+    let cargs :~ List = carrier.split(concrete)
     let cl :~ DefClause = spec.clauses[ci]
     let rename = for List (b in bindings):
                    let b :~ DTBinding = b
-                   [path_subterm(concrete, b.path), b.var]
+                   [path_subterm(cargs, b.path), b.var]
     let rhs_here = inst_fvar(rename, cl.rhs)
-    let calls = recursive_calls(fn_ph, 1, rhs_here)
-    let distinct_args = for values(acc :~ List = []) (call in calls):
-                          let v = (call :~ List)[0]
-                          (if acc.contains(v :~ Term) | acc | acc ++ [v])
-    // `f1(v) = f2(v)` for each distinct recursive-call argument `v`.
-    let call_facts = for List (v in distinct_args):
+    let call_facts = for List (v in call_carriers(fn_ph, arity, carrier.build,
+                                                  rhs_here)):
                        let v :~ Term = v
-                       let tlt_at_c = EQT_ELIM(thy, reduce(thy, db, list_mk_comb(rel, [v, concrete])))
-                       let tlt_at_xv = EQ_MP(SYM(thy, AP_TERM(thy, mk_comb(rel, v), x_eq)), tlt_at_c)
-                       MP(thy, SPEC(thy, v, hyp), tlt_at_xv)
+                       let below = EQT_ELIM(thy, reduce(thy, db,
+                                                        list_mk_comb(rel, [v, concrete])))
+                       let below_xv = EQ_MP(SYM(thy, AP_TERM(thy, mk_comb(rel, v), x_eq)),
+                                            below)
+                       MP(thy, SPEC(thy, v, hyp), below_xv)
     let l1 = reduce_h(thy, db, def_h, f1, concrete)
     let l2 = reduce_h(thy, db, def_h, f2, concrete)
     let bridge = cong_rewrite(thy, call_facts, rhs_of(l1))
@@ -327,7 +527,7 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec, dt :: DatatypeThms,
         let concrete = rhs_of(x_eq)
         // Always a variable: a position is split at most once, and the
         // path's own steps are the splits already taken above it.
-        let v :~ FVar = path_subterm(concrete, path)
+        let v :~ FVar = path_subterm(carrier.split(concrete), path)
         let dtt :~ DatatypeThms = thms_at(dts, self_ty)
         fun peel(sub :: DecisionTree, target :: Term) :: Thm:
           match dest_exists(target)
@@ -345,9 +545,9 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec, dt :: DatatypeThms,
         // `build_cases`): `((a0 or a1) or a2) or ... or an`.  Peeling from
         // the outside in, the left branch is the prefix disjunction
         // (recurse) and the right branch is one constructor's own case,
-        // walking the branches back to front as `upto` shrinks.  The
-        // tree's branch order is the datatype's own constructor order,
-        // which is the order `cases` disjoins them in.
+        // walking the branches back to front as `upto` shrinks.  The tree's
+        // branch order is the datatype's own constructor order, which is
+        // the order `cases` disjoins them in.
         fun combine(upto :: Int, stmt :: Term, th :: Thm) :: Thm:
           cond
           | upto == 0: peel((branches[0] :~ DTBranch).tree, stmt)
@@ -356,28 +556,29 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec, dt :: DatatypeThms,
               let left = combine(upto - 1, dl, ASSUME(thy, dl))
               let right = peel((branches[upto] :~ DTBranch).tree, dr)
               DISJ_CASES(thy, th, left, right)
-        let disj_at_v = SPEC(thy, v, dtt.cases)
+        let disj_at_v = SPEC(thy, v :~ Term, dtt.cases)
         combine(branches.length() - 1, concl_of(disj_at_v), disj_at_v)
 
-  let per_x = walk(tree, REFL(thy, xv))
+  let per_x = carrier.open(thy, xv, fun (x_eq :: Thm): walk(tree, x_eq))
   GENL(thy, [f1, f2], GEN(thy, xv, DISCH(thy, hyp_term, per_x)))
 
 // -- installation ----------------------------------------------------------
 
-// A leaf's fully refined argument, and which clause it belongs to.
-class LeafShape(clause :: Int, pattern :: Term, bindings :: List.of(DTBinding))
+// A leaf's fully refined argument row, and which clause it belongs to.
+class LeafShape(clause :: Int, patterns :: List.of(Term),
+                bindings :: List.of(DTBinding))
 
 // One shape per leaf of the tree.  For clauses that are one constructor
-// deep this is just each clause's own pattern back again, so the equations
-// come out exactly as they did before the tree existed.  Where a sibling
-// clause forced a split *below* a clause's own variable, that clause
-// contributes one shape per branch of the split -- and that is what its
-// equations have to be: `H` cannot reduce past a test whose scrutinee is
-// still a variable, so `f(Cons(x, ys))` has no closed form while a
+// deep this is just each clause's own pattern row back again, so the
+// equations come out exactly as they did before the tree existed.  Where a
+// sibling clause forced a split *below* a clause's own variable, that
+// clause contributes one shape per branch of the split -- and that is what
+// its equations have to be: `H` cannot reduce past a test whose scrutinee
+// is still a variable, so `f(Cons(x, ys))` has no closed form while a
 // sibling is asking whether `ys` is `Nil`.
 fun leaf_shapes(dts :: Map.of(Symbol, DatatypeThms), tree :: DecisionTree,
-                root :: Term) :: List.of(LeafShape):
-  fun go(t :: DecisionTree, concrete :: Term) :: List.of(LeafShape):
+                roots :: List.of(Term)) :: List.of(LeafShape):
+  fun go(t :: DecisionTree, concretes :: List.of(Term)) :: List.of(LeafShape):
     match t
     | DTLeaf(ci, bindings):
         // Hand the clause's own names back wherever the clause named the
@@ -385,13 +586,14 @@ fun leaf_shapes(dts :: Map.of(Symbol, DatatypeThms), tree :: DecisionTree,
         // the clause left to a sibling's split and never refers to.
         let rename = for values(acc :~ List = []) (b in bindings):
                        let b :~ DTBinding = b
-                       let w = path_subterm(concrete, b.path)
+                       let w = path_subterm(concretes, b.path)
                        cond
                        | w is_a FVar: acc ++ [[b.var :~ Term, w :~ FVar]]
                        | ~else: acc
-        [LeafShape(ci, inst_fvar(rename, concrete), bindings)]
+        [LeafShape(ci, concretes.map(fun (c :: Term): inst_fvar(rename, c)),
+                   bindings)]
     | DTSwitch(path, self_ty, branches):
-        let v :~ FVar = path_subterm(concrete, path)
+        let v :~ FVar = path_subterm(concretes, path)
         let dspec :~ DatatypeSpec = thms_at(dts, self_ty).spec
         for values(acc :~ List = []) (b in branches):
           let b :~ DTBranch = b
@@ -399,70 +601,124 @@ fun leaf_shapes(dts :: Map.of(Symbol, DatatypeThms), tree :: DecisionTree,
           let ws = for List (ty in ctor_field_types(dspec, self_ty, c)):
                      genvar(ty :~ HType) :~ Term
           let cterm = list_mk_comb(mk_const(c.name, ctor_type(dspec, c)), ws)
-          acc ++ go(b.tree, inst_fvar([[cterm, v]], concrete))
-  go(tree, root)
+          let refined = for List (t2 in concretes):
+                          inst_fvar([[cterm, v]], t2 :~ Term)
+          acc ++ go(b.tree, refined)
+  go(tree, roots)
+
+// `|- f a0 ... an-1 = soln(<carrier>)`, peeling the *definition's own*
+// binders and no further.
+//
+// Not plain `unfold_def`: `soln` is itself a lambda (`WFREC`'s solution
+// term), so with one argument `unfold_def` would beta-reduce `soln(a)` as
+// well and leave a right-hand side that no longer matches the `SPEC` of
+// `WFREC`'s own equation, which is stated about the unreduced application.
+// With one argument the definition has no binders to peel at all, so
+// `AP_THM` alone is the whole of it; with several, each `unfold_def` step
+// reduces exactly the redex that step's `AP_THM` created, and the last one
+// stops at `soln(<tuple>)` for the same reason -- `BETA_CONV` fires once,
+// at the top.
+fun apply_fn_def(thy :: Theory, def_fn :: Thm, arity :: Int,
+                 args :: List.of(Term)) :: Thm:
+  cond
+  | arity == 1: AP_THM(thy, def_fn, args[0])
+  | ~else: unfold_def(thy, def_fn, args)
+
+// The free variables of a whole pattern row, left to right, no duplicates.
+fun row_vars(pats :: List.of(Term)) :: List.of(FVar):
+  for values(acc :~ List = []) (p in pats):
+    for values(a :~ List = acc) (v in free_vars(p)):
+      (if a.contains(v :~ FVar) | a | a ++ [v])
 
 // `wr_def` is `build_wfrec_rel(thy)`'s result: `wfrec_rel`'s definition,
 // installed exactly once per theory (a `new_basic_definition`, not
 // reinstallable) and threaded in by the caller so every structurally
 // derived function in a session shares the one copy.
 //
-// `dts` is every declared datatype's theorems, not just the matched type's:
-// a nested pattern splits at a position whose type need not be the argument
-// type, and the congruence proof needs that type's own `cases`.
+// `dts` is every declared datatype's theorems, not just the recursion
+// type's: a nested pattern splits at a position whose type need not be the
+// descending argument's, and the congruence proof needs that type's own
+// `cases`.  `alg` supplies `prod` for the several-argument case; it is
+// unused when there is only one argument.
 fun install_structural_function(thy :: Theory, wr_def :: Thm,
                                 spec :: FunSpec, dt :: DatatypeThms,
                                 dts :: Map.of(Symbol, DatatypeThms),
                                 tree :: DecisionTree,
                                 t_lt_equations :: List.of(Thm),
-                                recinfo :: RecursionInfo)
+                                recinfo :: RecursionInfo,
+                                alg :: AlgebraThms)
      :: values(Theory, FunInfo):
+  let arity = spec.arg_types.length()
   let fty = fun_type(spec)
-  let self = self_type(dt.spec)
-  let rel = mk_const(subterm_name(dt.spec), mk_fun(self, mk_fun(self, bool)))
   let fn_ph = mk_const(spec.name, fty)
-  let f_var = mk_var(#'_stepf, fty)
-  let x_var = mk_var(#'_stepx, self)
-  let h_body = build_step_body(spec, tree, dts, fn_ph, f_var, x_var)
+  let self = self_type(dt.spec)
+  let k = (match descent_column(spec, fn_ph)
+           | #false:
+               error(~who: #'install_structural_function,
+                     "no argument column descends at every recursive call",
+                     error.val(~label: "name", spec.name))
+           | c: c :~ Int)
+  let t_lt = mk_const(subterm_name(dt.spec), mk_fun(self, mk_fun(self, bool)))
+  let wf_t_lt = prove_wf_t_lt(thy, dt.spec, t_lt_equations, dt.induction)
+  let (thy0, carrier, proj_rules):
+    cond
+    | arity == 1: values(thy, direct_carrier(self, t_lt, wf_t_lt), [])
+    | ~else:
+        tuple_carrier(thy, spec.name, alg.prod, spec.arg_types, k, wf_t_lt)
+
+  let hdom = mk_fun(carrier.dom, spec.ret_type)
+  let f_var = mk_var(#'_stepf, hdom)
+  let x_var = mk_var(#'_stepx, carrier.dom)
+  let h_body = build_step_body(spec, tree, dts, carrier, fn_ph, f_var, x_var)
   let h_term = mk_abs(f_var, mk_abs(x_var, h_body))
   // `H` stays behind an opaque constant everywhere `WFREC`'s own machinery
   // touches it -- see `reduce_h`'s comment for why a literal lambda there
   // is unsound to hand off.
   let h_name = Symbol.from_string(to_string(spec.name) ++ "_H")
-  let hfty = mk_fun(fty, fty)
-  let (thy1, def_h) = new_basic_definition(thy, mk_eq(mk_var(h_name, hfty), h_term))
+  let hfty = mk_fun(hdom, hdom)
+  let (thy1, def_h) = new_basic_definition(thy0, mk_eq(mk_var(h_name, hfty), h_term))
   let h_const = mk_const(h_name, hfty)
-  let db = base_reduction_db(thy1, dt, t_lt_equations)
-  let wf_rel = prove_wf_t_lt(thy1, dt.spec, t_lt_equations, dt.induction)
-  let congr = prove_congruence(thy1, spec, dt, dts, tree, fn_ph, h_const,
-                               def_h, rel, db)
-  let (soln, final_thm) = WFREC(thy1, wr_def, rel, h_const, wf_rel, congr)
-  let (thy2, def_fn) = new_basic_definition(thy1, mk_eq(mk_var(spec.name, fty), soln))
-  let eqs = for List (ls in leaf_shapes(dts, tree, mk_var(#'_eqx, self))):
+  let db = base_reduction_db(thy1, dt, t_lt_equations, proj_rules)
+  let congr = prove_congruence(thy1, spec, dts, tree, carrier, fn_ph, h_const,
+                               def_h, db)
+  let (soln, final_thm) = WFREC(thy1, wr_def, carrier.rel, h_const, carrier.wf, congr)
+  // One argument: the function *is* the solution.  Several: it is the
+  // solution composed with tupling, so that `f a b` and `soln(PAIR(a,b))`
+  // are interchangeable by `unfold_def` in both directions.
+  let fn_rhs:
+    cond
+    | arity == 1: soln
+    | ~else:
+        let params = for List (ty in spec.arg_types, i in List.iota(arity)):
+                       mk_var(Symbol.from_string("_fa" ++ to_string(i)), ty :~ HType)
+        list_mk_abs(params,
+                    mk_comb(soln, mk_tuple(params.map(fun (v :: FVar): v :~ Term))))
+  let (thy2, def_fn) = new_basic_definition(thy1, mk_eq(mk_var(spec.name, fty), fn_rhs))
+  let roots = for List (ty in spec.arg_types, i in List.iota(arity)):
+                mk_var(Symbol.from_string("_eqx" ++ to_string(i)), ty :~ HType) :~ Term
+  let eqs = for List (ls in leaf_shapes(dts, tree, roots)):
               let ls :~ LeafShape = ls
-              let c_vars = ls.pattern
+              let pats :~ List = ls.patterns
+              let carrier_at = carrier.build(pats)
               let cl :~ DefClause = spec.clauses[ls.clause]
               let rename = for List (b in ls.bindings):
                              let b :~ DTBinding = b
-                             [path_subterm(c_vars, b.path), b.var]
+                             [path_subterm(pats, b.path), b.var]
               let rhs_here = inst_fvar(rename, cl.rhs)
-              let fn_eq_soln_at_c = AP_THM(thy2, def_fn, c_vars)
-              let spec_at_c = SPEC(thy2, c_vars, final_thm)
-              let reduced = reduce_h(thy2, db, def_h, soln, c_vars)
-              // `reduced`'s right-hand side still carries `soln(v)`
+              // `|- f p0 ... pn = soln(<carrier>)`, which for one argument
+              // is `AP_THM` and for several is that plus the betas.
+              let fn_eq_soln = apply_fn_def(thy2, def_fn, arity, pats)
+              let spec_at_c = SPEC(thy2, carrier_at, final_thm)
+              let reduced = reduce_h(thy2, db, def_h, soln, carrier_at)
+              // `reduced`'s right-hand side still carries `soln(<carrier>)`
               // (a genuine lambda application, so `RuleDB` cannot rewrite
               // it) at every recursive-call site; fold each one back into
               // `fn` the same structural way `prove_congruence` bridges
               // `f1`/`f2`.
-              let calls = recursive_calls(fn_ph, 1, rhs_here)
-              let distinct_args = for values(acc :~ List = []) (call in calls):
-                                    let v = (call :~ List)[0]
-                                    (if acc.contains(v :~ Term) | acc | acc ++ [v])
-              let soln_facts = for List (v in distinct_args):
-                                 let v :~ Term = v
-                                 AP_THM(thy2, SYM(thy2, def_fn), v)
+              let soln_facts = for List (call in recursive_calls(fn_ph, arity, rhs_here)):
+                                 SYM(thy2, apply_fn_def(thy2, def_fn, arity, call :~ List))
               let folded = cong_rewrite(thy2, soln_facts, rhs_of(reduced))
               let final_reduced = TRANS(reduced, folded)
-              GENL(thy2, free_vars(c_vars),
-                   TRANS(fn_eq_soln_at_c, TRANS(spec_at_c, final_reduced)))
+              GENL(thy2, row_vars(pats),
+                   TRANS(fn_eq_soln, TRANS(spec_at_c, final_reduced)))
   values(thy2, FunInfo(spec, mk_const(spec.name, fty), eqs, recinfo))

@@ -23,6 +23,7 @@ import:
   "bool.rhm" open
   "datatype.rhm" open
   "datatype_gen.rhm" open
+  "algebra.rhm" open
   "recdef.rhm" open
   "dtree.rhm" open
   "subterm.rhm" open
@@ -181,56 +182,50 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   try:
     check_function_spec(st.thy, spec, dt_specs)
     ~catch e :: Exn.Fail: hol_reraise(e, at)
-  // A single-argument, un-measured definition that recurses structurally
-  // into a *known* (`st.dts`) datatype gets a genuine `WFREC` derivation
-  // (`stepfn.rhm`) instead of `new_axiom`; anything else -- several
-  // arguments, an explicit `~measure`, or an argument type this module
-  // never declared -- falls back to `install_function`'s postulating
-  // seam, exactly as `add_type` falls back to `datatype_axioms` for
-  // self-recursive types beside `datatype_gen.rhm`'s derivation.
+  // An un-measured definition that recurses structurally, with one argument
+  // column descending at every recursive call into a *known* (`st.dts`)
+  // datatype, gets a genuine `WFREC` derivation (`stepfn.rhm`) instead of
+  // `new_axiom`; several arguments are derived over their tuple.  Anything
+  // else -- an explicit `~measure`, lexicographic descent where no single
+  // column always shrinks, or an argument type this module never declared
+  // -- falls back to `install_function`'s postulating seam, exactly as
+  // `add_type` falls back to `datatype_axioms` for self-recursive types
+  // beside `datatype_gen.rhm`'s derivation.
+  let arity = spec.arg_types.length()
   let derivable:
     cond
-    | spec.arg_types.length() != 1 || spec.measure: #false
+    | arity == 0 || spec.measure: #false
     | ~else:
-        match spec.arg_types[0]
-        | TyApp(tyname, _):
+        let fn_ph = mk_const(spec.name, fun_type(spec))
+        let recinfo = try:
+                        check_termination(#'function, spec.name, arity,
+                                          spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
+                                          fn_ph)
+                        ~catch e :: Exn.Fail: hol_reraise(e, at)
+        // The same tree `check_function_spec` just checked, kept this time:
+        // `stepfn.rhm` builds `H` and its congruence proof from it, so the
+        // logical and executable readings of the patterns cannot drift.
+        let tree = try:
+                     function_decision_tree(#'function, spec, dt_specs)
+                     ~catch e :: Exn.Fail: hol_reraise(e, at)
+        cond
+        | !can_derive_structurally(spec, recinfo, tree, st.dts): #false
+        | ~else:
+            // `can_derive_structurally` has already checked the descending
+            // column's type is a declared datatype at its own schematic self
+            // type; what is left is that the type's subterm relation was
+            // actually installed, which it is for every datatype `add_type`
+            // declared.
+            let k = (match descent_column(spec, fn_ph) | c: c :~ Int)
+            let tyname = (match spec.arg_types[k] | TyApp(n, _): n)
             match st.dts.get(tyname, #false)
             | #false: #false
             | thms:
                 match st.funs.get(subterm_relation_name(tyname), #false)
                 | #false: #false
                 | tlt_info:
-                    // `install_structural_function` builds `H`/`T_lt` at the
-                    // datatype's own schematic self type
-                    // (`TyApp(tyname, params.map(TyVar))`); if the
-                    // argument's actual type does not match it exactly --
-                    // e.g. the function used a different type-variable name
-                    // than the datatype declared -- the two constructions
-                    // would disagree, and the honest response is to fall
-                    // back rather than hand `install_structural_function`
-                    // a type it cannot build a well-typed derivation for.
-                    let dt_spec :~ DatatypeSpec = (thms :~ DatatypeThms).spec
-                    let self_ty = TyApp(tyname, dt_spec.params.map(fun (p :: Symbol): TyVar(p) :~ HType))
-                    (if spec.arg_types[0] != self_ty
-                     | #false
-                     | let fn_ph = mk_const(spec.name, fun_type(spec))
-                       let recinfo = try:
-                                       check_termination(#'function, spec.name, 1,
-                                                         spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
-                                                         fn_ph)
-                                       ~catch e :: Exn.Fail: hol_reraise(e, at)
-                       // The same tree `check_function_spec` just checked,
-                       // kept this time: `stepfn.rhm` builds `H` and its
-                       // congruence proof from it, so the logical and
-                       // executable readings of the patterns cannot drift.
-                       let tree = try:
-                                    function_decision_tree(#'function, spec, dt_specs)
-                                    ~catch e :: Exn.Fail: hol_reraise(e, at)
-                       (if can_derive_structurally(spec, recinfo, tree, st.dts)
-                        | [thms :~ DatatypeThms, (tlt_info :~ FunInfo).equations,
-                           recinfo, tree]
-                        | #false))
-        | ~else: #false
+                    [thms :~ DatatypeThms, (tlt_info :~ FunInfo).equations,
+                     recinfo, tree]
   let (thy2, info0) = try:
                         match derivable
                         | [thms, t_lt_equations, recinfo, tree]:
@@ -239,7 +234,8 @@ fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
                                                         st.dts,
                                                         tree :~ DecisionTree,
                                                         t_lt_equations :~ List.of(Thm),
-                                                        recinfo :~ RecursionInfo)
+                                                        recinfo :~ RecursionInfo,
+                                                        algebra_base_thms())
                         | #false:
                             install_function(st.thy, spec, dt_specs,
                                              ~discharge: discharger(st))

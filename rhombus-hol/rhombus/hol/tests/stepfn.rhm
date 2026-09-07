@@ -23,6 +23,7 @@ import:
   rhombus/hol/wfrec open
   rhombus/hol/stepfn open
   rhombus/hol/dtree open
+  rhombus/hol/algebra open
 
 def tya = TyVar(#'a)
 def nat_ty = TyApp(#'Nat, [])
@@ -51,7 +52,8 @@ fun setup(base :: Theory, spec :: DatatypeSpec) :: values(Theory, DatatypeThms, 
 // `length`'s result type is `Nat`, so its theory needs both datatypes --
 // `Nat` declared first (plain, no subterm relation needed by `length`
 // itself), then `List` (with its own subterm relation and `wfrec_rel`).
-def (nat_base, nat_base_thms) = datatype_axioms(base_theory(), nat_spec)
+def alg = algebra_base_thms()
+def (nat_base, nat_base_thms) = datatype_axioms(algebra_base_theory(), nat_spec)
 
 // -- length(xs :: List(~a)) :: Nat -------------------------------------------
 
@@ -90,7 +92,7 @@ def axioms_before_length = axioms_of(thy_l).length()
 def (thy_length, length_info):
   install_structural_function(thy_l, list_wr_def, length_spec, list_thms,
                               all_thms, tree_of(length_spec),
-                              list_tlt_eqs, length_recinfo)
+                              list_tlt_eqs, length_recinfo, alg)
 
 // No `new_axiom` anywhere in the derivation: same axiom count as the
 // datatype + its subterm relation alone.
@@ -138,7 +140,7 @@ def axioms_before_cp = axioms_of(thy_l).length()
 def (thy_cp, cp_info):
   install_structural_function(thy_l, list_wr_def, cp_spec, list_thms,
                               all_thms, tree_of(cp_spec),
-                              list_tlt_eqs, cp_recinfo)
+                              list_tlt_eqs, cp_recinfo, alg)
 
 check axioms_of(thy_cp).length() ~is axioms_before_cp
 check:
@@ -153,7 +155,7 @@ check:
 
 // -- double(n :: Nat) :: Nat --------------------------------------------------
 
-def (thy_n, nat_thms, nat_tlt_eqs, nat_wr_def) = setup(base_theory(), nat_spec)
+def (thy_n, nat_thms, nat_tlt_eqs, nat_wr_def) = setup(algebra_base_theory(), nat_spec)
 def k_var = mk_var(#'k, nat_ty)
 def double_ph = mk_const(#'double, mk_fun(nat_ty, nat_ty))
 def nat_only_thms = {#'Nat: nat_thms}
@@ -177,7 +179,7 @@ def axioms_before_double = axioms_of(thy_n).length()
 def (thy_double, double_info):
   install_structural_function(thy_n, nat_wr_def, double_spec, nat_thms,
                               nat_only_thms, double_tree,
-                              nat_tlt_eqs, double_recinfo)
+                              nat_tlt_eqs, double_recinfo, alg)
 
 check axioms_of(thy_double).length() ~is axioms_before_double
 
@@ -186,10 +188,74 @@ check:
   ~is ["double(zero) === zero",
        "forall (x :: Nat): double(succ(x)) === succ(succ(double(x)))"]
 
-// -- a measured or multi-argument definition is out of this module's scope --
+// -- app(xs :: List(~a), ys :: List(~a)) :: List(~a) -------------------------
+//
+// Two arguments, so the recursion runs over their product and the relation
+// is `List_lt` pulled back along the first projection.  The equations come
+// back curried, exactly as if they had been postulated.
 
+def ys_var = mk_var(#'ys, list_ty)
+def app_ph = mk_const(#'app, mk_fun(list_ty, mk_fun(list_ty, list_ty)))
+def app_spec:
+  FunSpec(#'app, [list_ty, list_ty], list_ty,
+          [DefClause([nil_ctor, ys_var], ys_var),
+           DefClause([list_mk_comb(cons_ctor, [x_var, rest_var]), ys_var],
+                     list_mk_comb(cons_ctor,
+                                  [x_var,
+                                   list_mk_comb(app_ph, [rest_var, ys_var])]))])
+def app_recinfo:
+  check_termination(#'function, #'app, 2,
+                    app_spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
+                    app_ph)
+
+check app_recinfo.method ~is #'structural
+// The first column shrinks at the one recursive call; the second does not.
+check descent_column(app_spec, app_ph) ~is 0
 check:
-  can_derive_structurally(FunSpec(#'plus, [nat_ty, nat_ty], nat_ty, []),
-                          RecursionInfo([0], #'structural, [], []),
+  can_derive_structurally(app_spec, app_recinfo, tree_of(app_spec), all_thms)
+  ~is #true
+
+def axioms_before_app = axioms_of(thy_l).length()
+def (thy_app, app_info):
+  install_structural_function(thy_l, list_wr_def, app_spec, list_thms,
+                              all_thms, tree_of(app_spec),
+                              list_tlt_eqs, app_recinfo, alg)
+
+check axioms_of(thy_app).length() ~is axioms_before_app
+check (app_info :~ FunInfo).equations.map(fun (t :: Thm): hyps_of(t)) ~is [[], []]
+check:
+  (app_info :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
+  ~is ["forall (x :: List('a)): app(Nil, x) === x",
+       "forall (x :: 'a, y :: List('a), z :: List('a)): "
+         ++ "app(Cons(x, y), z) === Cons(x, app(y, z))"]
+
+// -- what is still out of this module's scope --------------------------------
+
+// Lexicographic descent: no single column shrinks at every call, so there
+// is no projection to pull `T_lt` back along.  (`f(succ(m), zero)` recurses
+// on `(m, k)` -- first column down, second up -- and `f(m, succ(k))` on
+// `(m, k)` too, but from a clause whose first column is a bare variable.)
+def lex_ph = mk_const(#'ack, mk_fun(nat_ty, mk_fun(nat_ty, nat_ty)))
+def m_var = mk_var(#'m, nat_ty)
+def lex_spec:
+  FunSpec(#'ack, [nat_ty, nat_ty], nat_ty,
+          [DefClause([zero_ctor, k_var], mk_comb(succ_ctor, k_var)),
+           DefClause([mk_comb(succ_ctor, m_var), zero_ctor],
+                     list_mk_comb(lex_ph, [m_var, mk_comb(succ_ctor, zero_ctor)])),
+           DefClause([mk_comb(succ_ctor, m_var), mk_comb(succ_ctor, k_var)],
+                     list_mk_comb(lex_ph,
+                                  [m_var,
+                                   list_mk_comb(lex_ph,
+                                                [mk_comb(succ_ctor, m_var), k_var])]))])
+check descent_column(lex_spec, lex_ph) ~is #false
+check:
+  can_derive_structurally(lex_spec,
+                          RecursionInfo([0, 1], #'structural, [], []),
                           DTLeaf(0, []), nat_only_thms)
+  ~is #false
+
+// A measure is settled by a discharged obligation, not by `descends_at`.
+check:
+  can_derive_structurally(double_spec, RecursionInfo([0], #'measure, [], []),
+                          double_tree, nat_only_thms)
   ~is #false

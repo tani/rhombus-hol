@@ -43,6 +43,8 @@ export:
   define_recursive_ctors
   restate_injectivity
   restate_distinctness
+  restate_induction
+  restate_cases
 
 def unitty :: HType = mk_tyapp(ty_unit, [])
 
@@ -395,3 +397,246 @@ fun restate_distinctness(thy :: Theory, spec :: DatatypeSpec, rc :: RecCarving,
                                   ++ [pack_fields(yn)] ++ yr, tree_dist)),
        node_eq)
   GENL(thy, xs ++ ys, NOT_INTRO(thy, DISCH(thy, stmt, contra)))
+
+// `|- !P. (for each constructor: !f1..fk. P(recursive fields) ==> P(C_i(fs)))
+//         ==> !x. P x`
+//
+// The representation's induction quantifies its case over one packed payload;
+// the declaration's quantifies over the non-recursive fields separately.  So
+// this is not a rewrite: given a payload, the fields have to be *recovered*
+// from it, which is surjective pairing (`unpack_payload_exists`), and at zero
+// non-recursive fields it is `unit`'s single-value theorem instead.
+fun restate_induction(thy :: Theory, spec :: DatatypeSpec, alg :: AlgebraThms,
+                      rc :: RecCarving, cs :: RecCtors,
+                      tree_induction :: Thm) :: Thm:
+  let cv :~ Carved = rc.carved
+  let bigP = mk_var(#'P, mk_fun(cv.ty, bool))
+  let x = mk_var(#'x, cv.ty)
+
+  // the declaration-level case for constructor `i`
+  fun case_term(i :: Int) :: Term:
+    let c :~ Ctor = spec.ctors[i]
+    let vs = ctor_field_vars(spec, c, "v")
+    let (_, rec) = split_fields(spec, c, vs)
+    let concl = mk_comb(bigP, list_mk_comb(cs.terms[i],
+                                           vs.map(fun (v :: FVar): v :~ Term)))
+    // curried, one implication per recursive field -- the shape
+    // `datatype_axioms` states, so the two are interchangeable
+    let body:
+      for values(acc :~ Term = concl) (t in rec.reverse()):
+        mk_imp(mk_comb(bigP, t :~ Term), acc)
+    mk_forall_list(vs, body)
+
+  let cases = for List (i in List.iota(spec.ctors.length())): case_term(i)
+  let hyp_term:
+    recur loop (k = cases.length() - 1, acc :~ Term = cases[cases.length() - 1]):
+      cond
+      | k <= 0: acc
+      | ~else: loop(k - 1, mk_conj(cases[k - 1], acc))
+  let hyp = ASSUME(thy, hyp_term)
+  fun case_of(i :: Int) :: Thm:
+    recur loop (k = 0, acc :~ Thm = hyp):
+      cond
+      | k == spec.ctors.length() - 1: acc
+      | k == i: CONJUNCT1(thy, acc)
+      | ~else: loop(k + 1, CONJUNCT2(thy, acc))
+
+  // the representation-level case for constructor `i`, from it
+  fun tree_case(i :: Int) :: Thm:
+    let c :~ Ctor = spec.ctors[i]
+    let nf = nonrec_fields(spec, c)
+    let a = mk_var(#'pa, rc.label_types[i])
+    let xs = for List (k in List.iota(rec_count(spec, c))):
+               mk_var(Symbol.from_string("tx" ++ to_string(k)), cv.ty)
+    let txs = xs.map(fun (v :: FVar): v :~ Term)
+    // the representation's case still conjoins its hypotheses; the
+    // declaration's curries them.  Assume each separately, use them one at a
+    // time, and rebuild the conjunction only where the tree case wants it.
+    let child_asms = for List (t in txs): ASSUME(thy, mk_comb(bigP, t :~ Term))
+    let prem_term:
+      cond
+      | txs.length() == 0: tm_true
+      | ~else:
+          recur loop (k = txs.length() - 1,
+                      acc :~ Term = mk_comb(bigP, txs[txs.length() - 1])):
+            cond
+            | k <= 0: acc
+            | ~else: loop(k - 1, mk_conj(mk_comb(bigP, txs[k - 1]), acc))
+
+    // `|- P (abs(node(label_i a, kids [rep x, ...])))`, given the payload's
+    // fields `fs` and `|- a = pack(fs)`
+    fun at_fields(fs :: List.of(Term), a_eq :: Thm) :: Thm:
+      let all_vs:
+        recur loop (k = 0, ni = 0, ri = 0, out :~ List = []):
+          cond
+          | k == c.fields.length(): out
+          | is_recursive_field(spec, (c.fields[k] :~ Field)):
+              loop(k + 1, ni, ri + 1, out ++ [txs[ri]])
+          | ~else: loop(k + 1, ni + 1, ri, out ++ [(fs[ni] :~ Term)])
+      let inst = SPECL(thy, all_vs, case_of(i))
+      let got:
+        for values(acc :~ Thm = inst) (a2 in child_asms):
+          MP(thy, acc, (a2 :~ Thm))
+      // unfold `C_i` and move the payload back to `a`
+      let unf = unfold_def(thy, (cs.defs[i] :~ Thm), all_vs)
+      let to_a:
+        cong_pack(thy, rc, cv, i, fs, a :~ Term, a_eq, txs)
+      EQ_MP(AP_TERM(thy, bigP, TRANS(unf, to_a)), got)
+
+    let body:
+      cond
+      | nf.length() == 0:
+          // payload is `unit`, so `a` is `one` and there is nothing to unpack
+          at_fields([], SPEC(thy, a, alg.unit_unique))
+      | ~else:
+          let ex = unpack_payload_exists(thy, alg.prod, nf, a :~ Term)
+          choose_through_and_rewrap(thy, ex, nf.length(),
+                                    fun (vars, flat_th):
+                                      at_fields(for List (v in (vars :~ List)):
+                                                  (v :~ FVar) :~ Term,
+                                                flat_th))
+    // the tree case wants one conjunctive premise, so put the individual
+    // assumptions back together before discharging
+    let discharged:
+      cond
+      | txs.length() == 0: body
+      | ~else:
+          let conj_asm = ASSUME(thy, prem_term)
+          let pieces = for List (k in List.iota(txs.length())):
+                         recur loop (n = 0, acc :~ Thm = conj_asm):
+                           cond
+                           | n == txs.length() - 1: acc
+                           | n == k: CONJUNCT1(thy, acc)
+                           | ~else: loop(n + 1, CONJUNCT2(thy, acc))
+          let reproved:
+            for values(acc :~ Thm = body) (k in List.iota(txs.length())):
+              PROVE_HYP(thy, (pieces[k] :~ Thm), acc)
+          DISCH(thy, prem_term, reproved)
+    GENL(thy, [a] ++ xs, discharged)
+
+  let parts = for List (i in List.iota(spec.ctors.length())): tree_case(i)
+  let prem:
+    recur loop (k = parts.length() - 1, acc :~ Thm = (parts[parts.length() - 1] :~ Thm)):
+      cond
+      | k <= 0: acc
+      | ~else: loop(k - 1, CONJ(thy, (parts[k - 1] :~ Thm), acc))
+  let all_p = MP(thy, SPEC(thy, bigP, tree_induction), prem)
+  GEN(thy, bigP, DISCH(thy, hyp_term, all_p))
+
+// `|- abs(node(label_i (pack fs), kids [rep x...]))
+//     = abs(node(label_i a,       kids [rep x...]))`, from `|- a = pack fs`.
+fun cong_pack(thy :: Theory, rc :: RecCarving, cv :: Carved, i :: Int,
+              fs :: List.of(Term), a :: Term, a_eq :: Thm,
+              txs :: List.of(Term)) :: Thm:
+  let lab = (rc.ctors[i] :~ CtorRep).label
+  let kids = mk_kids(rc.junk, txs.map(fun (t :: Term): mk_comb(cv.rep, t)))
+  let lab_eq = AP_TERM(thy, lab, SYM(thy, a_eq))
+  // `node` is built by `mk_node`, a lambda over the path, so congruence has
+  // to go under that binder
+  AP_TERM(thy, cv.abs,
+          node_cong(thy, rc.node_inl, mk_comb(lab, pack_fields(fs)),
+                    mk_comb(lab, a), kids, lab_eq))
+
+// `|- node(l1, k) = node(l2, k)` from `|- l1 = l2`
+fun node_cong(thy :: Theory, inl :: Term, l1 :: Term, l2 :: Term,
+              kids :: Term, lab_eq :: Thm) :: Thm:
+  let nty = num_ty()
+  let zero = mk_const(c_zero, nty)
+  let suc = mk_const(c_suc, mk_fun(nty, nty))
+  let pre = mk_const(c_pre, mk_fun(nty, nty))
+  let p = mk_var(#'p, path_ty())
+  let i = mk_var(#'i, nty)
+  let (_, oty) = dest_fun(type_of(inl))
+  let cc = mk_const(c_cond, mk_fun(bool, mk_fun(oty, mk_fun(oty, oty))))
+  let test = REFL(thy, mk_eq(mk_comb(p, zero), zero))
+  let branch = REFL(thy, mk_comb(mk_comb(kids, mk_comb(pre, mk_comb(p, zero))),
+                                 mk_abs(i, mk_comb(p, mk_comb(suc, i)))))
+  ABS(thy, p, MK_COMB(MK_COMB(AP_TERM(thy, cc, test),
+                              AP_TERM(thy, inl, lab_eq)),
+                      branch))
+
+// `|- !x. (?f1..fk. x = C_0(fs)) or ... or (?f1..fj. x = C_m(fs))`
+//
+// From the *restated* induction, so it never mentions the representation: the
+// predicate is the disjunction, and each constructor fills its own disjunct
+// with the fields in hand.  The case hypotheses go unused, which is the
+// content of the theorem -- exhaustiveness does not depend on anything
+// holding of the children.
+fun restate_cases(thy :: Theory, spec :: DatatypeSpec, cs :: RecCtors,
+                  induction :: Thm) :: Thm:
+  let self:
+    mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol): mk_tyvar(p)))
+  let m = spec.ctors.length()
+  let x = mk_var(#'x, self)
+
+  fun disjunct(scrut :: Term, i :: Int) :: Term:
+    let c :~ Ctor = spec.ctors[i]
+    let vs = mk_field_vars(c.fields, "d" ++ to_string(i) ++ "_")
+    let built = list_mk_comb(cs.terms[i], vs.map(fun (v :: FVar): v :~ Term))
+    for values(t :~ Term = mk_eq(scrut, built)) (v in vs.reverse()):
+      mk_exists(v :~ FVar, t)
+  fun rest(scrut :: Term, k :: Int) :: Term:
+    recur loop (n = m - 2, acc :~ Term = disjunct(scrut, m - 1)):
+      cond
+      | n < k: acc
+      | ~else: loop(n - 1, mk_disj(disjunct(scrut, n), acc))
+
+  let bigP = mk_abs(x, rest(x :~ Term, 0))
+  fun p_at(t :: Term) :: Thm:
+    match BETA_CONV(thy, mk_comb(bigP, t))
+    | th :: Thm: th
+    | ~else: error(~who: #'restate_cases, "beta failed")
+
+  fun premise_for(i :: Int) :: Thm:
+    let c :~ Ctor = spec.ctors[i]
+    let vs = mk_field_vars(c.fields, "f")
+    let args = vs.map(fun (v :: FVar): v :~ Term)
+    let built = list_mk_comb(cs.terms[i], args)
+    let witnessed:
+      recur loop (k = args.length() - 1, acc :~ Thm = REFL(thy, built)):
+        cond
+        | k < 0: acc
+        | ~else:
+            let target:
+              recur peel (n = 0, t :~ Term = disjunct(built, i)):
+                cond
+                | n == k: t
+                | ~else:
+                    match dest_exists(t)
+                    | [v, body]: peel(n + 1, inst_fvar([[args[n], v :~ FVar]], body))
+                    | ~else: error(~who: #'restate_cases, "shape")
+            loop(k - 1, EXISTS(thy, target, args[k], acc))
+    let innermost:
+      cond
+      | i == m - 1: witnessed
+      | ~else: DISJ1(thy, witnessed, rest(built, i + 1))
+    let chosen:
+      recur loop (k = i - 1, acc :~ Thm = innermost):
+        cond
+        | k < 0: acc
+        | ~else: loop(k - 1, DISJ2(thy, disjunct(built, k), acc))
+    let at_built = EQ_MP(SYM(thy, p_at(built)), chosen)
+    let recs = for values(acc :~ List = []) (f in c.fields, v in vs):
+                 (if is_recursive_field(spec, f :~ Field)
+                  | acc ++ [(v :~ FVar) :~ Term]
+                  | acc)
+    let body:
+      cond
+      | recs.length() == 0: at_built
+      | ~else:
+          for values(acc :~ Thm = at_built) (t in recs.reverse()):
+            DISCH(thy, mk_comb(bigP, t :~ Term), acc)
+    GENL(thy, vs, body)
+
+  let parts = for List (i in List.iota(m)): premise_for(i)
+  let prem:
+    recur loop (k = parts.length() - 1, acc :~ Thm = (parts[parts.length() - 1] :~ Thm)):
+      cond
+      | k <= 0: acc
+      | ~else: loop(k - 1, CONJ(thy, (parts[k - 1] :~ Thm), acc))
+  let all_p = MP(thy, SPEC(thy, bigP, induction), prem)
+  let at_x = SPEC(thy, x, all_p)
+  GEN(thy, x,
+      match BETA_CONV(thy, concl_of(at_x))
+      | th :: Thm: EQ_MP(th, at_x)
+      | ~else: at_x)

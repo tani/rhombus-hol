@@ -2035,7 +2035,35 @@ pack/unpack を挟む）と `driver.rhm` への配線。
 `unpack_payload_exists` を挟む）と、判別子・選択子・destructor elimination・
 `T_lt`、そして `driver.rhm` への配線。
 
-フルスイート 1312/1312。
+**induction と cases も宣言の形で述べ直し、公理版と完全一致した**
+（`restate_induction`／`restate_cases`）。
+
+    |- !P. P(MyNil) and (!h t. P t ==> P(MyCons(h,t))) ==> !x. P x
+    |- !x. x = MyNil or ?h t. x = MyCons(h,t)
+
+induction の述べ直しだけは書き換えではない。表現側は payload を 1 つに
+詰めて束縛するので、payload から**フィールドを取り戻す**必要があり、
+それが surjective pairing（`unpack_payload_exists`）である。非再帰
+フィールドが 0 個のときは payload が `unit` なので、代わりに
+`unit_unique` を使う。
+
+**差分テスト**（`tests/datatype_rec.rhm`）: 同じ spec に `datatype_axioms`
+を走らせ、4 種すべてを 1 本ずつ突き合わせた ── **全部一致**。
+
+| | 追加公理 |
+|---|---|
+| リスト: 公理スキーマ / 導出 | **12** / **1** |
+| 木（再帰フィールド 2 つ）: 公理スキーマ / 導出 | **14** / **1** |
+
+ここでも**再帰フィールド 2 つの木**が違いを炙り出した: スキーマは
+複数子の induction 仮説を**カリー化**して置く（`P l ==> P r ==> P(Node l r)`）
+のに対し、表現側の case は**連言**である。リストでは区別できない。
+宣言側をカリー化に揃え、内部で連言へ組み直すようにした。
+
+残るのは判別子・選択子・destructor elimination・`T_lt` と、
+`driver.rhm` への配線。
+
+フルスイート 1316/1316。
 
 ### 9.20 進捗（本セッション）: `num` を `DatatypeThms` に梱包し、公理版と差分一致を取った
 

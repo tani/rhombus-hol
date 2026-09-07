@@ -183,3 +183,60 @@ check:
                                 0, 1)
   [show(concl_of(th)), hyps_of(th).length()]
   ~is ["forall (x :: 'a, y :: MyList('a)): not (MyNil === MyCons(x, y))", 0]
+
+// -- the whole thing, against the axiom schema -------------------------------
+//
+// The claim this file exists to make precise: for a self-recursive spec, all
+// four theorems come out *statement for statement* the same as
+// `datatype_axioms` postulates them -- same theory, reached by proof.
+//
+// Getting there needed one correction worth keeping: the schema states a
+// multi-child induction case *curried* (`P l ==> P r ==> P (Node l r)`), and
+// the representation's own case conjoins them.  A list cannot tell those
+// apart; a tree can.
+fun derived_all(spec :: DatatypeSpec) :~ List:
+  let (thy1, rc) = carve_recursive_datatype(thy0, spec, alg)
+  let tt :~ RecTreeThms = derive_tree_theorems(thy1, rc, alg, ind)
+  let (thy, cs) = define_recursive_ctors(thy1, spec, rc)
+  let indn = restate_induction(thy, spec, alg, rc, cs, tt.induction)
+  [thy, cs,
+   for List (i in List.iota(spec.ctors.length())):
+     (if (spec.ctors[i] :~ Ctor).fields.length() == 0
+      | #false
+      | restate_injectivity(thy, spec, alg, rc, cs, (tt.injectivity[i] :~ Thm), i)),
+   restate_distinctness(thy, spec, rc, cs, (tt.distinctness[0] :~ Thm), 0, 1),
+   indn,
+   restate_cases(thy, spec, cs, indn)]
+
+fun agrees(spec :: DatatypeSpec) :~ List:
+  let [thy, cs, injs, dist, indn, cases] = derived_all(spec)
+  let (athy, ax0) = datatype_axioms(base, spec)
+  let ax :~ DatatypeThms = ax0
+  let same = for values(ok = #true) (i in List.iota(spec.ctors.length())):
+               let d = (injs :~ List)[i]
+               cond
+               | d is_a Thm:
+                   ok && show(concl_of(d)) == show(concl_of(ax.injectivity[(spec.ctors[i] :~ Ctor).name]))
+               | ~else: ok
+  [show(concl_of(indn :~ Thm)) == show(concl_of(ax.induction)),
+   show(concl_of(cases :~ Thm)) == show(concl_of(ax.cases)),
+   show(concl_of(dist :~ Thm)) == show(concl_of((ax.distinctness[0] :~ Thm))),
+   same,
+   axioms_of(thy :~ Theory).length() - axioms_of(base).length(),
+   axioms_of(athy).length() - axioms_of(base).length()]
+
+// derived agrees with postulated everywhere, at one axiom against twelve
+check agrees(list_spec) ~is [#true, #true, #true, #true, 1, 12]
+// and against fourteen, for the shape with two recursive fields
+check agrees(tree_spec) ~is [#true, #true, #true, #true, 1, 14]
+
+// the statements themselves, so a change to either side is visible here
+check:
+  let [_, _, _, _, indn, cases] = derived_all(list_spec)
+  [show(concl_of(indn :~ Thm)), show(concl_of(cases :~ Thm))]
+  ~is ["forall (x :: MyList('a) -> bool): x(MyNil) and (forall (y :: 'a, z :: MyList('a)): x(z) ==> x(MyCons(y, z))) ==> forall (y :: MyList('a)): x(y)",
+       "forall (x :: MyList('a)): x === MyNil or exists (y :: 'a, z :: MyList('a)): x === MyCons(y, z)"]
+check:
+  let [_, _, _, _, indn, _] = derived_all(tree_spec)
+  show(concl_of(indn :~ Thm))
+  ~is "forall (x :: MyTree('a) -> bool): (forall (y :: 'a): x(MyLeaf(y))) and (forall (y :: MyTree('a), z :: MyTree('a)): x(y) ==> x(z) ==> x(MyNode(y, z))) ==> forall (y :: MyTree('a)): x(y)"

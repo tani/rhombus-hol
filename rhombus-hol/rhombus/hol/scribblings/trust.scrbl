@@ -108,9 +108,12 @@ theorem. The equations then follow from the closure's induction principle
 
 @section{What is postulated beyond that}
 
-Two constructions can add axioms. Neither always does: each has a derivation
-that covers part of its range and a postulating fallback for the rest, and
-which one you get is decided by a check, not by a flag. Counting the axioms a
+One construction can still add axioms, and only in one corner of its range:
+a @rhombus(function, ~datum) whose recursion this version cannot build a
+well-founded relation for. Everything else --- both kinds of datatype, the
+subterm relation each brings, and every function that either does not
+recurse or recurses in a way the deriver handles --- is proved. Which one
+you get is decided by a check, not by a flag, and counting the axioms a
 module's theory ends up with is the way to tell (@tt{axioms_of}).
 
 @bold{Datatypes.} A @rhombus(type, ~datum) is @emph{derived}, recursive or
@@ -141,18 +144,24 @@ The @tech{strict positivity} check still guards the declaration, but it no
 longer guards a consistency claim about axioms nobody proved --- an
 ill-founded declaration now fails to be carved rather than being assumed.
 
-@bold{Function definitions.} A @rhombus(function, ~datum) is @emph{derived}
-whenever the recursion it performs has a well-founded relation this version
-can build: its clausal equations are proved from a well-founded recursion
-theorem (itself derived, not postulated) applied to a step function compiled
-from the clauses' decision tree. That covers structural descent in any one
-argument column, several arguments (derived over their tuple, with the
-relation pulled back along the projection onto the descending column), no
-recursion at all, patterns nested to any depth, and an explicit
-@rhombus(~measure) --- whose order is the measure's own result type's
-subterm relation pulled back along the measure, and whose descent facts are
-the obligations the termination check discharged, used under the branch
-conditions they were discharged under.
+@bold{Function definitions.} A @rhombus(function, ~datum) that does not call
+itself is @emph{defined}, whatever its patterns look like: its decision tree
+is written as a closed term with the datatype's discriminators for the tests
+and its selectors for the variables, @rhombus(new_basic_definition) takes
+that, and the clausal equations --- one per leaf, so that ordered clauses
+resolve the way they were written --- are proved by unfolding it.
+
+A @rhombus(function, ~datum) that does recurse is @emph{derived} whenever the
+recursion has a well-founded relation this version can build: its clausal
+equations are proved from a well-founded recursion theorem (itself derived,
+not postulated) applied to a step function compiled from the same decision
+tree. That covers structural descent in any one argument column, several
+arguments (derived over their tuple, with the relation pulled back along the
+projection onto the descending column), patterns nested to any depth, and an
+explicit @rhombus(~measure) --- whose order is the measure's own result
+type's subterm relation pulled back along the measure, and whose descent
+facts are the obligations the termination check discharged, used under the
+branch conditions they were discharged under.
 
 What still postulates one equation per shape: a definition whose descent is
 genuinely lexicographic, where no single column shrinks at every call
@@ -163,10 +172,11 @@ module declared. Those are a conservative extension exactly when the
 definition is exhaustive and terminating, which is what
 @secref("termination") is about.
 
-Both fallbacks sit behind a narrow seam, and the derivations that have
-replaced parts of them changed nothing above: the theorems have the same
-statements, so the rule database, the waterfall and @rhombus(match)
-compilation cannot tell which side a given datatype or function came from.
+That last seam is the only one left in the system, and it sits behind a
+narrow gate. The derivations that have replaced the others changed nothing
+above them: the theorems have the same statements, so the rule database, the
+waterfall and @rhombus(match) compilation cannot tell which side a given
+datatype or function came from.
 
 @section{Theories}
 

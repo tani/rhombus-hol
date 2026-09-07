@@ -1530,7 +1530,7 @@ measure 適用判定テストを追加。フルスイート 1193 -> 1206。
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
 | 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype については本セッションで**フェーズ 2（無限公理と `num` の導出）を完了**した（§9.14、`infinity.rhm`）: 標準形の無限公理 1 本だけを立てて `num` を `new_basic_type_definition` で切り出し、Peano の 3 定理を仮説 0 個の定理として導出（公理数 3 -> 4、他は全部定義原理経由）。**配線はしていない** -- `build_ind` は渡された theory を拡張するだけで `base_theory()` に触れないので、既定の TCB は不変（`tests/infinity.rhm` が回帰で固定）。さらに `num` の後続関係 `num_pred` を定義して `|- WF(num_pred)` を導出したので、**`num` 上の再帰は原理的に利用可能**になっている（§9.16。この検証中に `drule.rhm` の `EXISTS` の潜在的な捕獲バグも見つけて直した）。残るフェーズ 3（`num` 上に labelled tree 型と recursion theorem を作り、再帰 datatype を一般に切り出す）は未着手で、HOL システム中で単体最大の部品のため複数セッション規模。 |
 | 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **完了**（§9.1.2、§9.7〜9.10）。`WFREC` 存在定理は完全導出（`wfrec.rhm`）。`driver.rhm` の `add_function` から実接続済みで、**通常の `function` 宣言はもう `new_axiom` を使わない**: 単一引数・構造的降下（§9.1.2）、任意深さの入れ子パターン（§9.7）、多引数（§9.8、タプル上で射影に沿った引き戻し）、非再帰関数（§9.8 続報）、そして **`~measure`（§9.10、measure に沿った引き戻し＋条件付き congruence bridge、ガード付き再帰も含む）**。残るフォールバックは真の辞書式降下（Ackermann、整礎関係の辞書式積が要る）と、関係する型が宣言済み datatype でない場合の 2 つだけ。なお datatype の `T_lt` 自身の方程式は `add_subterm_relation` が従来通り公理として入れる（`WF(T_lt)` は導出、`trust.scrbl` にその区別を明記した）。 |
-| 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**（`unsafe` 名前空間、§10.x）、**`HType` 側は意図的に見送り**。下記参照。 |
+| 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **完了**。`Term` 側は `unsafe` 名前空間つきで以前から、`HType` 側は本セッションで `constructor ~none` + `mk_tyvar`/`mk_tyapp`（型には検査すべき不変条件が無いので裏口は作っていない）。下記参照。 |
 | 3(facade) | `rhombus/hol/kernel` を教育用 public facade にする | **完了**（§9.13）。`hyps`/`trace` を名前空間へ移し、`htype`/`term` を再 export。一 import で学生向け API が揃い、`hyp_union`/`trace_start`/`raw_comb` は裸では unbound。 |
 | 4 | 内部は locally nameless、外部 API は標準 HOL にする | **`mk_abs`/`dest_abs` により実質的に達成済みと判断**。詳細下記。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済み。`hyp_insert`/`hyp_union`/`hyp_remove`/`rehash_hyps` の非公開化は**調査済み、現状維持と判断**: `rhombus-hol-lib` のどこからも実際には呼ばれておらず（`Thm` は raw hyps リストではなく既に不可侵なので、これらは項リスト上の純粋なユーティリティであり公開してもソウンドネスに影響しない）、唯一の外部利用者は `rhombus-hol-kernel` に対応するテストパッケージが無いために `tests/kernel.rhm`/`tests/drule.rhm`（外側の `rhombus-hol` パッケージ）に置かれている kernel 自身の単体テスト。非公開化には kernel 専用のテストパッケージ新設が要り、得られる利益（API 美観）に見合わないと判断した。 |
@@ -1547,22 +1547,35 @@ measure 適用判定テストを追加。フルスイート 1193 -> 1206。
 | 15 | hints の拡充（`~cases`/`~expand`/`~in_theory`） | **`~in_theory:` と `~cases:` は完了**。`~expand:` は見送り（下記）。`~do_not:` は本セッション以前に追加済み。 |
 | (最終まとめ表 P2) | binding-aware logical names・namespace・複数 theory import | **調査済み、未着手**。`driver.rhm` の `adopt` が兄弟理論（互いに拡張関係にない2理論）を合流できないのは、`Const` の identity が裸の `Symbol` のみで名前空間の概念がないため。安全な合流にはカーネルの項表現そのもの（`Symbol` を定数識別子に使っている全箇所）の変更が要り、独立したセッション規模の課題。詳細は §9.6。 |
 
-### `HType`（`TyVar`/`TyApp`）の raw construction は意図的に隠していない
+### `HType`（`TyVar`/`TyApp`）の raw construction も隠した（本セッション）
 
-`Term` 側（`FVar`/`BVar`/`Const`/`Comb`/`Abs`）は `constructor ~none` +
-`internal` + testing 専用の `raw_fvar`/`raw_bvar`/`raw_const`/`raw_comb`/
-`raw_abs` で閉じた（`term.rhm`）。同じ手当てを `HType` にも、と検討したが
-見送った: `TyVar`/`TyApp` の生構築は `bool.rhm`・`datatype.rhm`・
-`subterm.rhm`・`elab.rhm`・`expand.rhm`・`terminate.rhm`・`kernel.rhm` 自身
-など 15 ファイル以上に、`mk_fun` 相当の「賢い構築子」なしで直接ちりばめ
-られており、レビューが実際に懸念していたのは（`BVar` の binder 型不一致の
-ような）型ではなく項固有の不変条件であって、型の生構築を隠す動機は
-「防御的 API・教育性」のみである。100+ 箇所の機械的だが広範なリネームを
-この一点の見た目のためだけに行うのは、費用対効果で見送るべきと判断した。
-着手する場合は `mk_tyvar`/`mk_tyapp` を `htype.rhm` に追加し、上記ファイル
-群の**構築**箇所（パターンマッチ箇所は触らなくてよい ── `constructor ~none`
-は構築だけを塞ぐ）を機械的に置き換える。
+`Term` 側（`FVar`/`BVar`/`Const`/`Comb`/`Abs`）は以前のセッションで
+`constructor ~none` + `internal` + testing 専用の `unsafe.raw_*` で
+閉じてあった（`term.rhm`）。`HType` 側は「機械的だが 100 箇所以上あり
+費用対効果が悪い」として見送っていたが、今回実施した。
 
+* `htype.rhm` の `TyVar`/`TyApp` に `constructor ~none` + `internal`。
+* 構築 API は `mk_tyvar`/`mk_tyapp` の 2 本だけ。
+* **`unsafe` 名前空間は作らなかった**。`Term` と違い型には検査すべき
+  不変条件が無い（型構成子のアリティは理論側にあり、定理に到達する
+  すべての型は `check_type` が検査する）ので、`mk_tyapp` が生の形
+  そのものである。安全版/生版の区別が存在しない以上、裏口も要らない。
+
+実際の作業量は見積もりよりずっと小さかった: **パターンマッチ位置は
+`constructor ~none` の影響を受けない**ので、コンパイラが「式位置での
+使用」だけを一つずつ報告する。その報告に従って機械的に潰すループを
+回して完了（lib/kernel/tests 合わせて約 120 箇所、うち式位置のみ）。
+以前の「100+ 箇所」という見積もりは *出現* 数であって *構築* 数では
+なかった、というのが見送りの根拠が弱かった理由である。
+
+回帰は `tests/htype.rhm`（`TyVar(...)`/`TyApp(...)` が式位置で unbound、
+注釈とパターンとしては健在）。`tests/kernel.rhm` の `~eval:` 系の
+否定テストも `mk_tyapp` に書き換えた -- 以前の書き方だと
+「`Thm` が unbound だから落ちた」のか「`TyApp` が unbound だから
+落ちた」のかが評価順序次第になり、ソウンドネス回帰が意図せず
+弱くなるため。
+
+フルスイート 1247/1247。
 
 ### `BETA` を trivial-redex 専用にする件は検討し、見送った（locally nameless では概念自体が成立しない）
 

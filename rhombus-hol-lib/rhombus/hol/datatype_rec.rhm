@@ -37,6 +37,8 @@ export:
   is_selfrecursive_spec
   RecCarving
   carve_recursive_datatype
+  RecTreeThms
+  derive_tree_theorems
 
 def unitty :: HType = mk_tyapp(ty_unit, [])
 
@@ -158,3 +160,106 @@ fun abstraction_name(n :: Symbol) :: Symbol:
   Symbol.from_string("abs_" ++ to_string(n))
 fun representation_name(n :: Symbol) :: Symbol:
   Symbol.from_string("rep_" ++ to_string(n))
+
+// -- the tag constants' own facts --------------------------------------------
+//
+// `treerep.rhm` asks for the label's injectivity and the labels' pairwise
+// distinctness; the tags are `inject_from` behind a name, so both come from
+// unfolding the name and handing the result to the sum machinery.
+
+// `|- !x y. lab_i x = lab_i y <=> x = y`
+fun prove_label_injective(thy :: Theory, alg :: AlgebraThms,
+                          rc :: RecCarving, i :: Int) :: Thm:
+  let pty = rc.label_types[i]
+  let lab = (rc.ctors[i] :~ CtorRep).label
+  let x = mk_var(#'x, pty)
+  let y = mk_var(#'y, pty)
+  fun unf(t :: Term) :: Thm:
+    unfold_def(thy, (rc.label_defs[i] :~ Thm), [t])
+  let lhs = mk_eq(mk_comb(lab, x :~ Term), mk_comb(lab, y :~ Term))
+  let fwd:
+    let inject_eq = TRANS(SYM(thy, unf(x :~ Term)),
+                          TRANS(ASSUME(thy, lhs), unf(y :~ Term)))
+    DISCH(thy, lhs,
+          payload_eq_from_inject_eq(thy, alg.sum, rc.label_types, i,
+                                    x :~ Term, y :~ Term, inject_eq))
+  let bwd:
+    let rhs = mk_eq(x :~ Term, y :~ Term)
+    let inj = inject_congr(thy, rc.label_types, i, ASSUME(thy, rhs))
+    DISCH(thy, rhs,
+          TRANS(unf(x :~ Term), TRANS(inj, SYM(thy, unf(y :~ Term)))))
+  GENL(thy, [x, y], IMP_ANTISYM_RULE(thy, fwd, bwd))
+
+// `|- !x y. not (lab_i x = lab_j y)`, for `i /= j`
+fun prove_label_distinct(thy :: Theory, alg :: AlgebraThms,
+                         rc :: RecCarving, i :: Int, j :: Int) :: Thm:
+  let x = mk_var(#'x, rc.label_types[i])
+  let y = mk_var(#'y, rc.label_types[j])
+  let li = (rc.ctors[i] :~ CtorRep).label
+  let lj = (rc.ctors[j] :~ CtorRep).label
+  let stmt = mk_eq(mk_comb(li, x :~ Term), mk_comb(lj, y :~ Term))
+  let inject_eq:
+    TRANS(SYM(thy, unfold_def(thy, (rc.label_defs[i] :~ Thm), [x :~ Term])),
+          TRANS(ASSUME(thy, stmt),
+                unfold_def(thy, (rc.label_defs[j] :~ Thm), [y :~ Term])))
+  let contra = MP(thy,
+                  NOT_ELIM(thy, distinct_repr(thy, alg.sum, rc.label_types,
+                                              i, j, x :~ Term, y :~ Term)),
+                  inject_eq)
+  GENL(thy, [x, y], NOT_INTRO(thy, DISCH(thy, stmt, contra)))
+
+// -- the four theorems, about the representation ------------------------------
+//
+// Still stated with the constructors spelled out as `abs(node(...))`: naming
+// them is the next layer's job.  What matters here is that all four are
+// derived, for any spec, from the pieces `carve_recursive_datatype` produced.
+class RecTreeThms(injectivity :: List.of(Thm),
+                  distinctness :: List.of(Thm),
+                  induction :: Thm,
+                  cases :: Thm)
+
+fun derive_tree_theorems(thy :: Theory, rc :: RecCarving, alg :: AlgebraThms,
+                         ind :: IndThms) :: RecTreeThms:
+  let cv :~ Carved = rc.carved
+  fun rep_at(t :: Term) :: Thm:
+    unfold_def(thy, rc.rep_def, [t])
+  let closed = for List (i in List.iota(rc.ctors.length())):
+                 prove_rep_closed(thy, rc.node_inl, rc.junk, rc.ctors,
+                                  cv.rep_const, rep_at, i)
+  let node_inj:
+    let (lab_ty, opt_ty) = dest_fun(type_of(rc.node_inl))
+    let (_, unit_side) = (match opt_ty
+                          | TyApp(_, [l, r]): values(l, r)
+                          | ~else: error(~who: #'derive_tree_theorems,
+                                         "option type is not a sum"))
+    prove_node_injective(thy, ind, rc.node_inl,
+                         INST_TYPE(thy, {#'a: lab_ty, #'b: unit_side},
+                                   alg.sum.inl_inj))
+  let injectivity:
+    for List (i in List.iota(rc.ctors.length())):
+      prove_ctor_injective(thy, rc.node_inl, rc.junk, rc.ctors, cv,
+                           (closed[i] :~ Thm), node_inj,
+                           prove_label_injective(thy, alg, rc, i),
+                           fun (ts :: List, us :: List, k :: Int):
+                             prove_kids_injective(thy, ind, rc.junk, ts, us, k),
+                           i)
+  // one per ordered pair `i < j`, the order `DatatypeThms` states them in
+  let distinctness:
+    for values(acc :~ List = []) (i in List.iota(rc.ctors.length())):
+      acc ++ (for values(a2 :~ List = []) (j in List.iota(rc.ctors.length())):
+                cond
+                | j <= i: a2
+                | ~else:
+                    a2 ++ [prove_ctor_distinct(thy, rc.node_inl, rc.junk,
+                                               rc.ctors, cv,
+                                               (closed[i] :~ Thm),
+                                               (closed[j] :~ Thm), node_inj,
+                                               prove_label_distinct(thy, alg,
+                                                                    rc, i, j),
+                                               i, j)])
+  let induction:
+    prove_datatype_induction(thy, rc.node_inl, rc.junk, rc.ctors, cv,
+                             closed, node_inj, rep_at)
+  RecTreeThms(injectivity, distinctness, induction,
+              prove_datatype_cases(thy, rc.node_inl, rc.junk, rc.ctors, cv,
+                                   induction))

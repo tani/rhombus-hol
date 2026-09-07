@@ -424,10 +424,34 @@ fun prove_rep_closed(thy :: Theory, inl :: Term, junk :: Term,
       | ~else: loop(k + 1, CONJUNCT2(thy, acc))
   let mine_at = SPECL(thy, [a :~ Term] ++ ts.map(fun (v :: FVar): v :~ Term),
                       mine)
+  // The children's memberships arrive as one conjunction, matching the shape
+  // the closure clause states -- not curried, which is what a caller feeding
+  // this to `MP` has in hand.
+  let members_term:
+    cond
+    | c.arity == 0: tm_true
+    | ~else:
+        recur loop (k = ts.length() - 1,
+                    acc :~ Term = mk_comb(rep, (ts[ts.length() - 1] :~ FVar) :~ Term)):
+          cond
+          | k <= 0: acc
+          | ~else: loop(k - 1, mk_conj(mk_comb(rep, (ts[k - 1] :~ FVar) :~ Term), acc))
+  let members_asm:
+    cond
+    | c.arity == 0: #false
+    | ~else: ASSUME(thy, members_term)
+  let member_of:
+    fun (k :: Int) :: Thm:
+      recur loop (n = 0, acc :~ Thm = (members_asm :~ Thm)):
+        cond
+        | n == ts.length() - 1: acc
+        | n == k: CONJUNCT1(thy, acc)
+        | ~else: loop(n + 1, CONJUNCT2(thy, acc))
   // `P t_k` for each child, from `REP t_k` and the same `closed`
-  let child_ps = for List (v in ts):
-                   MP(thy, SPEC(thy, p, EQ_MP(rep_at((v :~ FVar) :~ Term),
-                                              ASSUME(thy, mk_comb(rep, (v :~ FVar) :~ Term)))),
+  let child_ps = for List (k in List.iota(ts.length())):
+                   MP(thy, SPEC(thy, p,
+                                EQ_MP(rep_at((ts[k] :~ FVar) :~ Term),
+                                      member_of(k))),
                       closed_asm)
   let concl:
     cond
@@ -444,10 +468,10 @@ fun prove_rep_closed(thy :: Theory, inl :: Term, junk :: Term,
                            ts.map(fun (v :: FVar): v :~ Term))
   let rep_built = EQ_MP(SYM(thy, rep_at(built)),
                         GEN(thy, p, DISCH(thy, closed, concl)))
-  // discharge the children's `REP` assumptions, innermost first
   let discharged:
-    for values(acc :~ Thm = rep_built) (v in ts.reverse()):
-      DISCH(thy, mk_comb(rep, (v :~ FVar) :~ Term), acc)
+    cond
+    | c.arity == 0: rep_built
+    | ~else: DISCH(thy, members_term, rep_built)
   GENL(thy, [a] ++ ts, discharged)
 
 // -- from the representation to the type -------------------------------------
@@ -691,7 +715,28 @@ fun prove_datatype_induction(thy :: Theory, inl :: Term, junk :: Term,
     let ts = for List (k in List.iota(c.arity)):
                mk_var(Symbol.from_string("qt" ++ to_string(k)), rty)
     let tts = ts.map(fun (v :: FVar): v :~ Term)
-    let q_asms = for List (u in tts): ASSUME(thy, mk_comb(q, u))
+    // the children's `Q`s arrive as one conjunction, matching the closure
+    // clause's own shape -- assuming them separately would leave hypotheses
+    // that the single `DISCH` below could not remove
+    let prem_term:
+      cond
+      | c.arity == 0: tm_true
+      | ~else:
+          recur loop (k = tts.length() - 1,
+                      acc :~ Term = mk_comb(q, tts[tts.length() - 1])):
+            cond
+            | k <= 0: acc
+            | ~else: loop(k - 1, mk_conj(mk_comb(q, tts[k - 1]), acc))
+    let prem_asm:
+      cond
+      | c.arity == 0: #false
+      | ~else: ASSUME(thy, prem_term)
+    let q_asms = for List (k in List.iota(tts.length())):
+                   recur loop (n = 0, acc :~ Thm = (prem_asm :~ Thm)):
+                     cond
+                     | n == tts.length() - 1: acc
+                     | n == k: CONJUNCT1(thy, acc)
+                     | ~else: loop(n + 1, CONJUNCT2(thy, acc))
     let parts = for List (u in tts, qa in q_asms):
                   EQ_MP(q_at(u), qa :~ Thm)
     let reps = for List (pp in parts): CONJUNCT1(thy, pp :~ Thm)
@@ -740,14 +785,7 @@ fun prove_datatype_induction(thy :: Theory, inl :: Term, junk :: Term,
     let discharged:
       cond
       | c.arity == 0: q_built
-      | ~else:
-          let prem_term:
-            recur loop (k = tts.length() - 1,
-                        acc :~ Term = mk_comb(q, tts[tts.length() - 1])):
-              cond
-              | k <= 0: acc
-              | ~else: loop(k - 1, mk_conj(mk_comb(q, tts[k - 1]), acc))
-          DISCH(thy, prem_term, q_built)
+      | ~else: DISCH(thy, prem_term, q_built)
     GENL(thy, [a] ++ ts, discharged)
 
   // Hmm: `closed(Q)` is stated with the conjunction of `Q t_k` as premise,

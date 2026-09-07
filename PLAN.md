@@ -1998,7 +1998,27 @@ cases）がすべて導出になった。** リストを実際に切り出して
 （`abs(node(...))` 形から `C_i(f1..fk)` 形へ、payload の pack/unpack を
 挟んで）と、`driver.rhm` への配線。
 
-フルスイート 1305/1305。
+**4 定理も spec から生成できるようにした**（`derive_tree_theorems`）。
+タグ定数の単射性・相異性は、名前を unfold して `datatype_gen` の
+`payload_eq_from_inject_eq`/`inject_congr`/`distinct_repr` に渡すだけで出る。
+そこから §9.22/9.23 の関数群を回して injectivity（コンストラクタごと）・
+distinctness（順序対ごと）・induction・cases を得る。
+
+3 つの形すべてで仮説 0・追加公理 0 を回帰で固定（リスト、**再帰
+フィールド 2 つ**の木、3 コンストラクタの式）。
+
+**再帰フィールドが 2 つあるコンストラクタが、2 つのバグを炙り出した。**
+`prove_rep_closed` と `prove_datatype_induction` の内部が、子の前提を
+**カリー化**して積み上げていたのに、`REP` の閉包節そのものは**連言**で
+述べている。アリティ 1 では両者が一致するので露見せず、アリティ 2 で
+初めて `MP` と `ABS` が落ちた。どちらも連言を 1 つ `ASSUME` して
+`CONJUNCT` で取り出す形に直した。**「アリティ 1 だけで試すと通ってしまう」
+型の罠**である。
+
+残るのは `abs(node(...))` 形を `C_i(f1..fk)` 形へ述べ直す層（payload の
+pack/unpack を挟む）と `driver.rhm` への配線。
+
+フルスイート 1309/1309。
 
 ### 9.20 進捗（本セッション）: `num` を `DatatypeThms` に梱包し、公理版と差分一致を取った
 

@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 980 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 994 tests passed。
 §10 に外部レビュー対応の状況をまとめてある。
 
 ---
@@ -69,6 +69,7 @@ rhombus-hol/
 │           ├── conv.rhm          変換（equal.ml 相当）
 │           ├── drule.rhm         派生規則（bool.ml + drule.ml 相当）
 │           ├── datatype.rhm      データ型の公理（信頼境界②）
+│           ├── algebra.rhm       `unit`/`prod` の導出（datatype 公理の代替、フェーズ1途中、§9.2.1）
 │           ├── order.rhm         ACL2 term-order（順序付き書き換え用、ruledb.rhm 専用）
 │           └── module_block.rhm  #%module_block 差し替え
 └── rhombus-hol/                  ドキュメント + テスト（deps: rhombus-hol-lib, rhombus-hol-kernel）
@@ -192,6 +193,7 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 | カーネル | `Theory` `Stamp`（祖先集合）不可侵 `Thm`、基本 10 規則、理論拡張原理 | `kernel` |
 | 論理定数 | `bool`（Church 流定数 + ETA/SELECT/BOOL_CASES）`conv` `drule` | `bool` `conv` `drule` |
 | データ型 | `datatype`：正値性チェッカ + 公理スキーマ | `datatype` `positivity` |
+| 非公理的型構成子 | `algebra`：`unit`/`prod` を `new_basic_type_definition` から導出（`sum` は未着手、§9.2.1） | `algebra` |
 | 停止性 | `terminate`（辞書式構造的降下 + 測度）`recdef`（節形式の再帰定義） | `recdef` |
 | 書き換え | `tmatch` `ruledb` `simp`：一階マッチ、規則 DB（rewrite ルール + type-prescription 事実の二重分類）、順序付き書き換え | `ruledb` |
 | 証明探索 | `goal` `induct` `waterfall`（簡約・デストラクタ除去・フェルティライズ・一般化・irrelevance 除去・帰納法の固定パイプライン、ACL2 準拠） | `spec_4_1` |
@@ -448,6 +450,51 @@ cases/induction/discriminators/selectors はすべて sum と prod のその性�
 （一度だけ証明する）から**定理として**出る。`check_spec` の
 `nonrecursive_ctors` チェックは既にこの場合分けの入り口になっている。
 
+### 9.2.1 進捗（本セッション）: `unit` と `prod` を導出、`sum` は未着手
+
+フェーズ 1 が要求する 3 つの型構成子のうち、`unit` と `prod` を
+`rhombus-hol-lib/rhombus/hol/private/algebra.rhm` に実装し、
+`new_basic_type_definition` 経由で（公理を一切追加せず）導出した。
+`tests/algebra.rhm` で実カーネルに対して確認済み（980 → 994 テスト）。
+
+```text
+build_unit(thy) : Theory * Thm
+  |- forall (x :: unit): x === one          -- 1点のみ、cases も induction もこれ1本
+
+build_prod(thy) : Theory * ProdThms
+  pair_eq    : |- forall a1 b1 a2 b2. pair(a1,b1)===pair(a2,b2) <=> a1===a2 and b1===b2
+  surjective : |- forall p. exists a b. p === pair(a,b)         -- datatype の cases 相当
+  fst_pair   : |- forall a b. fst(pair(a,b)) === a
+  snd_pair   : |- forall a b. snd(pair(a,b)) === b
+```
+
+すべて仮説 0 個。`unit` は HOL Light 流に、`bool` の中で述語 `\x. x` が
+切り出す一点部分集合との全単射として構成した（唯一の値は `abs(true)`）。
+`prod` も HOL Light `pair.ml` 流に、`mk_pair_rep(a,b) := \x y. x===a and y===b`
+という非再帰的な `bool` 上の定義を経由し、`A -> B -> bool` の中でその像が
+切り出す部分集合との全単射として構成した。単射性・全射性・射影の 4 定理は
+すべて `mk_pair_rep`/`abs_prod`/`rep_prod` の性質から出る一般的な補題で、
+特定の datatype に依存しない。
+
+実装時に踏んだ罠: `mk_pair_rep(a,b)` は **定数**（`new_basic_definition` で
+導入した `Const`）の 2 引数適用であって、`(\a b x y. ...)` という生の
+lambda ではない。したがって `mk_pair_rep(a,b)` をさらに 2 点 `(x,y)` に
+適用した結果を簡約するには `BETA_RULE` ではなく `unfold_def`（定義方程式
+を経由する展開）が要る。最初 `BETA_RULE` で済むと誤り、`TRANS` が
+`"middle terms do not match"` で弾いてくれたので実カーネル相手のテストで
+即座に発覚した -- kernel が自分の主張をどこまで信用してよいかの実例。
+
+**残作業**: `sum` (タグ付き非交和) がまだない。設計は HOL Light `sum.ml`
+と同型: `ISL`/`ISR` を判別する述語つきで `A -> B -> bool` 的な表現型を経由し、
+`INL`/`INR` の単射性・`INL`/`INR` の像が互いに素であること（distinctness）・
+任意の値が `INL` か `INR` のどちらかであること（cases）を証明する。`unit`/
+`prod` と同じ技法（`new_basic_type_definition` + 選択公理での存在証人）が
+そのまま使える見込み。`sum` が揃って初めて、任意の非再帰 `DatatypeSpec` を
+`sum(prod(...), sum(prod(...), ...))` へエンコードして
+`datatype.rhm`/`check_spec` の `new_axiom` 経路と**同じ命題**が出ることを
+確認する差分テスト（9.3 参照）に進める。`datatype.rhm` 自体はまだ一切
+変更していない。
+
 **フェーズ 2 (無限公理の新設)**: `trust.scrbl` に「4 本目の公理」として
 明記した上で、`exists f :: ind -> ind. injective(f) and not (surjective(f))`
 という標準形の無限公理を導入し、そこから `Nat`（あるいは `ind` をそのまま
@@ -496,7 +543,7 @@ solely on the statements in DatatypeThms, never on how they were obtained」
 | # | 項目 | 状況 |
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
-| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **未着手**（§9.2 のまま）。フェーズ 1（非再帰 datatype）ですら `unit`/`sum`/`prod` の構成から要り、複数セッション規模。 |
+| 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **部分的**。フェーズ1の土台のうち `unit`/`prod` を導出済み（`algebra.rhm`、§9.2.1）。`sum` と、実際に `DatatypeSpec` をエンコードして `datatype.rhm` を書き換える結線は未着手 -- 複数セッション規模のまま。 |
 | 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **部分的**。`wellfounded.rhm` で `WF_INDUCTION` とその逆を導出（§9.1.1）。`WFREC` 本体（一番価値が高く、一番大きい部分）は未着手。`recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済みだが、hyp_insert 等の非公開化は未着手。 |

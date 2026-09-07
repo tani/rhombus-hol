@@ -31,12 +31,16 @@ import:
   rhombus/hol/private/term open
   "bool.rhm" open
   rhombus/hol/private/kernel open
+  "conv.rhm" open
+  "drule.rhm" open
+  "wellfounded.rhm" open
   "datatype.rhm" open
   "recdef.rhm" open
 
 export:
   subterm_name
   subterm_spec
+  prove_wf_t_lt
 
 fun subterm_name(spec :: DatatypeSpec) :: Symbol:
   subterm_relation_name(spec.name)
@@ -83,3 +87,175 @@ fun disjoin(ds :: List.of(Term)) :: Term:
   | []: tm_false
   | [d]: d
   | List.cons(d, more): mk_disj(d, disjoin(more))
+
+// -- WF(T_lt), derived from the datatype's own case-based induction --------
+//
+// PLAN.md section 9.1.2, wiring item 2: `WF_FROM_INDUCTION` (wellfounded.rhm)
+// expects the *generic* well-founded induction scheme
+// `!P. (!x. (!y. R y x ==> P y) ==> P x) ==> !x. P x`, but a datatype's own
+// `induction` axiom is constructor-case-shaped:
+// `!P. (case for C1) and ... ==> !x. P x`, each case threading the induction
+// hypothesis only through *its own* recursive fields.  This bridges the two
+// without a fresh axiom, for `R := T_lt`.
+//
+// Standard course-of-values strengthening: instead of proving `P` directly
+// by the datatype's induction, prove the stronger
+// `Q(x) := !y. (T_lt(y,x) or y=x) ==> P(y)`
+// ("`P` holds at `x` and at everything `T_lt`-below it").  Each constructor
+// case for `Q` follows from the case's own `Q`-hypotheses at the recursive
+// fields, via `T_lt`'s defining equation for that constructor (which says
+// exactly "`T_lt`-below `C(xs)` means equal to, or `T_lt`-below, a recursive
+// field") -- so proving the `Q`-case never needs anything beyond what the
+// datatype's own induction already supplies.  Once `!x. Q(x)` is established,
+// `Q(x)` specialised at `y := x` (using the trivial `x = x` disjunct) gives
+// `P(x)` outright.
+
+// `Q(x) := !y. (T_lt(y,x) or y=x) ==> P(y)`, as a term (not yet applied).
+fun cov_pred(rel :: Term, self :: HType, big_p :: Term) :: Term:
+  let cx = mk_var(#'cx, self)
+  let cy = mk_var(#'cy, self)
+  mk_abs(cx, mk_forall(cy, mk_imp(mk_disj(list_mk_comb(rel, [cy :~ Term, cx]), mk_eq(cy, cx)), mk_comb(big_p, cy))))
+
+// Given `disj_th : |- D0 or (D1 or (D2 or ...))` (right-associated, as
+// `subterm_clause`'s `disjoin` builds it) and a `handler(i, proof-of-Di)`
+// producing a proof of one common goal for each `i` (`Di` supplied as an
+// assumption when it is not itself a further disjunction), combine into one
+// proof of that goal via repeated `DISJ_CASES`.
+fun disj_case_chain(thy :: Theory, start :: Int, disj_th :: Thm,
+                    handler :: Function.of_arity(2)) :: Thm:
+  match dest_disj(concl_of(disj_th))
+  | #false: handler(start, disj_th)
+  | [d, rest_term]:
+      let case1 = handler(start, ASSUME(thy, d))
+      let case2 = disj_case_chain(thy, start + 1, ASSUME(thy, rest_term), handler)
+      DISJ_CASES(thy, disj_th, case1, case2)
+
+// `T_lt(w, C(xs)) |- P(w)`, given `Q` already holds at every recursive field
+// of `C` (`rec_fields`/`rec_q_thms`, same order) and `T_lt`'s defining
+// equation for `C` (`eqn_at_w`, `T_lt` already specialised at `w`).  A
+// constructor with no recursive fields has `T_lt(w, C(xs)) = false`, so `P(w)`
+// follows vacuously; otherwise each atomic disjunct (`w = field` or
+// `T_lt(w, field)`) feeds directly into that field's `Q`, specialised at `w`.
+fun prove_p_from_tlt(thy :: Theory, rel :: Term, big_p :: Term, w :: Term,
+                     rec_fields :: List.of(Term), rec_q_thms :: List.of(Thm),
+                     eqn_at_w :: Thm) :: Thm:
+  let tlt_w_c = ASSUME(thy, lhs_of(eqn_at_w))
+  let rhs_th = EQ_MP(eqn_at_w, tlt_w_c)
+  cond
+  | rec_fields.length() == 0: CONTR(thy, mk_comb(big_p, w), rhs_th)
+  | ~else:
+      fun handler(k :: Int, dk_th :: Thm) :: Thm:
+        let j = k div 2
+        let vj = rec_fields[j]
+        let qj_at_w = SPEC(thy, w, rec_q_thms[j])
+        let below_or_eq = (if k mod 2 == 0
+                           | DISJ2(thy, list_mk_comb(rel, [w, vj]), dk_th)
+                           | DISJ1(thy, dk_th, mk_eq(w, vj)))
+        MP(thy, qj_at_w, below_or_eq)
+      disj_case_chain(thy, 0, rhs_th, handler)
+
+// The recursive fields of `c`'s vars, in field order, and `Q` ASSUMEd at
+// each (unreduced, `mk_comb(qpred, field)`, matching what specialising the
+// induction axiom's own `bigP` at `qpred` leaves in the case's hypotheses)
+// alongside its beta-reduced form (for `SPEC`-ing inside the proof).
+fun rec_field_q_asms(thy :: Theory, spec :: DatatypeSpec, qpred :: Term,
+                     c :: Ctor, xs :: List.of(Term)) :: values(List.of(Term), List.of(Thm), List.of(Thm)):
+  for values(fields :~ List = [], unred :~ List = [], red :~ List = []) (x in xs, f in c.fields):
+    cond
+    | is_recursive_field(spec, f :: Field):
+        let asm_unreduced = ASSUME(thy, mk_comb(qpred, x))
+        let beta_th = (match BETA_CONV(thy, mk_comb(qpred, x))
+                       | #false: error(~who: #'prove_wf_t_lt, "beta failed")
+                       | th :: Thm: th)
+        values(fields ++ [x], unred ++ [asm_unreduced], red ++ [EQ_MP(beta_th, asm_unreduced)])
+    | ~else: values(fields, unred, red)
+
+// `!xs. Q(field1) ==> Q(field2) ==> ... ==> Q(C(xs))` -- the induction case
+// for `Q`, for one constructor, matching exactly the shape
+// `datatype.rhm`'s `build_induction` gives that constructor once `bigP` is
+// specialised at `qpred` (curried, unreduced `Q` applications, so `DISCH`
+// removes precisely what `induction_thm`'s own case supplies).  `strong_hyp`
+// is `!x. (!z. T_lt(z,x) ==> P(z)) ==> P(x)`, ASSUMEd once by the caller and
+// shared verbatim across every case (its hyp is only discharged once, after
+// all cases are combined).
+fun prove_q_case(thy :: Theory, rel :: Term, big_p :: Term, qpred :: Term,
+                 spec :: DatatypeSpec, c :: Ctor, t_lt_eqn :: Thm,
+                 strong_hyp :: Thm) :: Thm:
+  let self = self_type(spec)
+  let xs = for List (f in c.fields, i in List.iota(c.fields.length())):
+             mk_var(Symbol.from_string("qx" ++ to_string(i)), (f :~ Field).ty)
+  let (rec_fields, rec_q_unreduced, rec_q_reduced) = rec_field_q_asms(thy, spec, qpred, c, xs)
+  let c_xs = list_mk_comb(mk_const(c.name, ctor_type(spec, c)), xs)
+  let y = mk_var(#'qy, self)
+  let z = mk_var(#'qz, self)
+  let strong_case:
+    // `!z. T_lt(z, C(xs)) ==> P(z)`, then `P(C(xs))` via the strong hypothesis.
+    let eqn_at_z = SPECL(thy, [z :~ Term] ++ xs, t_lt_eqn)
+    let per_z = prove_p_from_tlt(thy, rel, big_p, z, rec_fields, rec_q_reduced, eqn_at_z)
+    GEN(thy, z, DISCH(thy, list_mk_comb(rel, [z :~ Term, c_xs]), per_z))
+  let q_c_xs:
+    let eqn_at_y = SPECL(thy, [y :~ Term] ++ xs, t_lt_eqn)
+    let below_or_eq_asm = ASSUME(thy, mk_disj(list_mk_comb(rel, [y :~ Term, c_xs]), mk_eq(y, c_xs)))
+    let case_below = prove_p_from_tlt(thy, rel, big_p, y, rec_fields, rec_q_reduced, eqn_at_y)
+    let case_eq:
+      let eq_hyp = ASSUME(thy, mk_eq(y, c_xs))
+      let p_c_xs = MP(thy, SPEC(thy, c_xs, strong_hyp), strong_case)
+      EQ_MP(SYM(thy, AP_TERM(thy, big_p, eq_hyp)), p_c_xs)
+    let per_y = DISJ_CASES(thy, below_or_eq_asm, case_below, case_eq)
+    GEN(thy, y, DISCH(thy, concl_of(below_or_eq_asm), per_y))
+  // `q_c_xs` proves the beta-*reduced* shape of `Q(C(xs))`; the induction
+  // case this must match (`build_induction`'s case, `bigP` substituted by
+  // `qpred`) has `Q(C(xs))` as a literal, *unreduced* application -- convert.
+  // (`SPEC` beta-reduces its own result automatically, but this application
+  // is built by hand with `mk_comb`, so it stays an unreduced redex here.)
+  let q_c_xs_applied = mk_comb(qpred, c_xs)
+  let beta_c_xs = (match BETA_CONV(thy, q_c_xs_applied)
+                   | #false: error(~who: #'prove_q_case, "beta failed")
+                   | th :: Thm: th)
+  let q_c_xs_unreduced = EQ_MP(SYM(thy, beta_c_xs), q_c_xs)
+  let disched = for values(acc :~ Thm = q_c_xs_unreduced) (v in rec_fields.reverse()):
+                  DISCH(thy, mk_comb(qpred, v), acc)
+  GENL(thy, xs, disched)
+
+// `WF(T_lt)`, for a recursive datatype -- see the walkthrough above.
+// `equations` is `T_lt`'s own defining equations, one per constructor, in
+// `spec.ctors` order (exactly what `install_function` hands back for the
+// `FunSpec` `subterm_spec` builds); `induction` is the datatype's own
+// case-based induction axiom (`DatatypeThms.induction`).
+fun prove_wf_t_lt(thy :: Theory, spec :: DatatypeSpec,
+                  equations :: List.of(Thm), induction :: Thm) :: Thm:
+  let self = self_type(spec)
+  let rel = mk_const(subterm_name(spec), mk_fun(self, mk_fun(self, bool)))
+  let big_p = mk_var(#'wfP, mk_fun(self, bool))
+  let x = mk_var(#'wfx, self)
+  let y = mk_var(#'wfy, self)
+  // `strong_hyp : !x. (!y. T_lt(y,x) ==> P(y)) ==> P(x)` -- the hypothesis
+  // every `Q`-case discharges against, ASSUMEd once and shared verbatim
+  // (structural equality) so the final `DISCH` removes every case's copy
+  // together.
+  let strong_hyp_term = mk_forall(x, mk_imp(mk_forall(y, mk_imp(list_mk_comb(rel, [y :~ Term, x]), mk_comb(big_p, y))), mk_comb(big_p, x)))
+  let strong_hyp = ASSUME(thy, strong_hyp_term)
+  let qpred = cov_pred(rel, self, big_p)
+  let per_ctor = for List (c in spec.ctors, eqn in equations):
+                   prove_q_case(thy, rel, big_p, qpred, spec, c :~ Ctor, eqn :~ Thm, strong_hyp)
+  let combined = (match per_ctor
+                  | [th]: th
+                  | List.cons(th0, rest):
+                      for values(acc :~ Thm = th0) (th in rest): CONJ(thy, acc, th))
+  // `induction` specialised at `qpred`: `SPEC` beta-reduces only the
+  // top-level redex it introduces, and substituting `qpred` for `bigP`
+  // inside an implication-shaped body does not create a *new* top-level
+  // redex, so every `Q(...)` application nested in the cases and in the
+  // conclusion stays literal and unreduced -- exactly what `prove_q_case`'s
+  // cases are built to match.
+  let ind_at_q = SPEC(thy, qpred, induction)
+  let all_q = MP(thy, ind_at_q, combined)
+  // `!x. Q(x)`, specialised at `x` and then again at `x` for `Q(x)`'s own
+  // leading `!y`, giving `(T_lt(x,x) or x=x) ==> P(x)` directly (`SPEC`
+  // beta-reduces every top-level redex it creates, so both specialisations
+  // land on the reduced form with no separate beta step needed).  Discharge
+  // the trivial right disjunct (`x=x`, by `REFL`) to recover `P(x)`.
+  let q_at_x = SPEC(thy, x, SPEC(thy, x, all_q))
+  let p_at_x = MP(thy, q_at_x, DISJ2(thy, list_mk_comb(rel, [x :~ Term, x]), REFL(thy, x)))
+  let ind_scheme = GEN(thy, big_p, DISCH(thy, strong_hyp_term, GEN(thy, x, p_at_x)))
+  prove_wf_from_induction(thy, rel, ind_scheme)

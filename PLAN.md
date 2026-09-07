@@ -1,6 +1,6 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1123 tests passed。
+R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1129 tests passed。
 §10 に外部レビュー対応の状況をまとめてある。
 
 ---
@@ -73,7 +73,7 @@ rhombus-hol/
 │           ├── datatype_derived.rhm  enum 限定の `DatatypeSpec -> DatatypeThms`（axiom-free、§9.2.1）
 │           ├── datatype_gen.rhm   enum を一般化: 任意の非再帰 `DatatypeSpec`（フィールド付き）の `DatatypeThms` 全 7 フィールド（axiom-free、§9.2.1）
 │           ├── wellfounded.rhm  `WF` <-> 整礎帰納法（recdef 導出化の第一段、§9.1.1）
-│           ├── wfrec.rhm        `WFREC` 存在定理（recdef 導出化の第二段、`recdef.rhm` へは未配線、§9.1.2）
+│           ├── wfrec.rhm        `WFREC` 存在定理（recdef 導出化の第二段、`recdef.rhm` へは未配線、§9.1.2）。`subterm.rhm` の `prove_wf_t_lt` が `WF(T_lt)` を完全導出（§9.1.6）
 │           └── module_block.rhm  #%module_block 差し替え
 └── rhombus-hol/                  ドキュメント + テスト（deps: rhombus-hol-lib, rhombus-hol-kernel）
     ├── info.rkt
@@ -197,7 +197,7 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 | 論理定数 | `bool`（Church 流定数 + ETA/SELECT/BOOL_CASES）`conv` `drule` | `bool` `conv` `drule` |
 | データ型 | `datatype`：正値性チェッカ + 公理スキーマ | `datatype` `positivity` |
 | 非公理的型構成子 | `algebra`：`unit`/`prod`/`sum` を `new_basic_type_definition` から導出（フェーズ1土台完成、§9.2.1）。`datatype_derived`：enum（0引数コンストラクタのみ）を `DatatypeThms` まで配線。`datatype_gen`：任意の非再帰 `DatatypeSpec`（フィールド付き）を `DatatypeThms` まで配線 -- いずれも `datatype_axioms` と差分テストで完全一致 | `algebra` `datatype_derived` `datatype_gen` |
-| 停止性 | `terminate`（辞書式構造的降下 + 測度）`recdef`（節形式の再帰定義、現状は `new_axiom`）。`wellfounded`：`WF` <-> 整礎帰納法の導出。`wfrec`：`WFREC` 存在定理の完全導出（`recdef.rhm` へは未配線、§9.1.2） | `recdef` `wellfounded` `wfrec` |
+| 停止性 | `terminate`（辞書式構造的降下 + 測度）`recdef`（節形式の再帰定義、現状は `new_axiom`）。`wellfounded`：`WF` <-> 整礎帰納法の導出。`wfrec`：`WFREC` 存在定理の完全導出（`recdef.rhm` へは未配線、§9.1.2）。`subterm`：任意の再帰的 datatype について `WF(T_lt)` を完全導出（§9.1.6） | `recdef` `wellfounded` `wfrec` `subterm` |
 | 書き換え | `tmatch` `ruledb` `simp`：一階マッチ、規則 DB（rewrite ルール + type-prescription 事実の二重分類）、順序付き書き換え | `ruledb` |
 | 証明探索 | `goal` `induct` `waterfall`（簡約・デストラクタ除去・フェルティライズ・一般化・irrelevance 除去・帰納法の固定パイプライン、ACL2 準拠） | `spec_4_1` |
 | 一般化・デストラクタ除去・フェルティライズ・irrelevance 除去 | `general`（type-prescription 事実を一般化に反映）`destruct` `fertilize` `irrelevance` | `spec_4_2` `destruct` `fertilize` `irrelevance` |
@@ -364,11 +364,13 @@ review が示唆する「`new_basic_type_definition` に置き換えれば済む
 ### 9.1 `recdef`: 公理を増やさずに導出できる（先に着手）
 
 `subterm.rhm` が既に指摘している通り、各 datatype の構造的部分項関係
-`T_lt` は導出済みの関数であり、その整礎性は「datatype の帰納法公理が
-無限降下列を禁じるから」という**書かれてはいるが証明されていない**論証に
-依拠している（`subterm.rhm` 冒頭のコメント参照）。`recdef.rhm` は
-`check_termination` が `T_lt` に沿った構造的減少を確認した後、各節を
-`new_axiom` で導入している（`install_function` 内、唯一のシーム）。
+`T_lt` は導出済みの関数である。**その整礎性はもはや「書かれてはいるが
+証明されていない」論証ではない**: `subterm.rhm` の `prove_wf_t_lt` が
+`|- WF(T_lt)` を実際に導出する（§9.1.6、`new_axiom` なし）。`recdef.rhm`
+は依然として `check_termination` が `T_lt` に沿った構造的減少を確認した
+後、各節を `new_axiom` で導入している（`install_function` 内、唯一の
+シーム）--- こちらは §9.1 の段 3（`WFREC` への配線）が残っている限り
+そのまま。
 
 導出への置き換えは 3 段:
 
@@ -640,11 +642,89 @@ prove_tuple_proj(thy, prod_thms, tys, i, args)
 3 要素タプルの 3 つの射影すべてが期待通りの項に等しく、仮説 0 個である
 ことを確認済み（`tests/algebra.rhm`、1117 → 1123 テスト）。
 
-**残作業（§9.1.2 参照）**: 2 点。datatype 帰納法 → 汎用 WF スキームの
-橋渡し（項目 2）と `H` の決定木コンパイル（項目 5）。どちらも
-per-datatype のコード生成 + 一般補題という組み合わせが要る、
-`datatype_gen.rhm`/`subterm.rhm` 級の独立したセッション規模の作業と
-判断し、本セッションでは着手しなかった。
+**残作業（§9.1.2 参照）**: 2 点残っていた（datatype 帰納法 → 汎用 WF
+スキームの橋渡し = 項目 2、`H` の決定木コンパイル = 項目 5）。項目 2 は
+本セッション中に §9.1.6 で解消済み。
+
+### 9.1.6 進捗（本セッション）: datatype 帰納法 → 汎用 WF スキームの橋渡しを完了
+
+§9.1.2 の残作業リスト項目 2 を解消した。`subterm.rhm` に `prove_wf_t_lt`
+を追加し、任意の再帰的 `DatatypeSpec` について `WF(T_lt)`（`T_lt` はその
+datatype の構造的部分項関係、`subterm_spec`/`install_function` 経由で
+すでに導出済み）を、新しい公理を一切足さずに導出する。
+
+標準的な course-of-values 強化: `P` を直接 datatype 自身の
+（コンストラクタ場合分け形の）`induction` で帰納するのではなく、より強い
+`Q(x) := !y. (T_lt(y,x) or y=x) ==> P(y)`（"`P` は `x` 自身とその下の
+すべてで成り立つ"）を帰納する。各コンストラクタでの `Q` の場合分けは、
+その場合が持つ `Q`-仮説（再帰フィールドについてのみ）と、そのコンスト
+ラクタについての `T_lt` の定義方程式（"`T_lt`-未満は再帰フィールドの
+いずれかに等しいか、その下"）だけから出る -- つまり datatype 自身の
+induction がすでに与えているもの以上は一切必要としない。`!x. Q(x)` が
+一度確立すれば、`y := x` に特殊化（自明な `x=x` 選言肢を使って）すれば
+`P(x)` が直ちに出る。これは丁度、`wellfounded.rhm` の
+`prove_wf_from_induction` が要求する形の `ind_scheme`
+（`!P. (!x. (!y. R(y,x) ==> P(y)) ==> P(x)) ==> !x. P(x)`）そのものを
+`R := T_lt` について構成していることになるので、それを渡すだけで
+`WF(T_lt)` が出る。`Nat`（単一自己再帰フィールド）・多相 `List`（自己
+再帰フィールドと非再帰フィールドの混在）・多相 `Tree`（1 コンストラクタ
+内に非再帰フィールドを挟んで自己再帰フィールドが 2 つ）の 3 形状すべてで
+実カーネルに対して確認済み、いずれも仮説 0 個（`tests/subterm.rhm`、
+1123 → 1129 テスト）。
+
+これで測度ベースの `~measure(e)` は、§9.1.4 の `prove_wf_pullback` と
+組み合わせて `WF(Rwf)`（`Rwf(x,y) := T_lt(measure(x), measure(y))`）が
+完全に導出可能になった -- `recdef.rhm` へ実配線すれば済む状態。
+
+途中で踏んだ罠、`SPEC` の自動簡約: `SPEC(thy, t, th)` は結果の結論を
+`BINOP_CONV(HEAD_BETA_CONV)` で自動的にベータ簡約してから返す
+（`drule.rhm` の実装）。これは通常「結論が既に簡約済みであること」を
+当てにするだけで済むが、束縛変数を specialize した結果自身が
+**新しいベータ基**になる場合（例: `!x. Q(x)` を `x` で specialize した
+結果 `Q(x)` の `Q` 自身が `\cx. ...` という lambda で、代入後の
+`(\cx....)(x)` がそのまま新しい redex になる場合）、`HEAD_BETA_CONV`
+は `REPEATC` により**それも続けて簡約する**ため、呼び出し側が「まだ
+unreduced のはず」と思っていた項が実際には完全に簡約済みで返ってくる。
+これに気づかず自前で追加の `BETA_CONV`/`EQ_MP` を呼んだところ、
+`BETA_CONV` は非redexに対して `#false` を返し、その `#false` が
+`EQ_MP`/`concl_of` に渡って「argument does not satisfy annotation」
+という一見無関係なコントラクト違反として表面化した（下記の `:~ Thm`
+バグと組み合わさって余計分かりにくくなった）。教訓: `SPEC`/`SPECL` の
+結果を渡す前に、それが本当にまだ unreduced か（`mk_comb`で自前構築した
+ものか、`SPEC` 自身が返したものか）を都度確認すること。`induction` を
+`qpred` で specialize する場合（本体が `==>` で、代入結果が新しい
+redex にならない）と、`!x.Q(x)` を `x` で specialize する場合（本体が
+裸の `Q(x)` 適用で、代入結果が新しい redex に**なる**）とで挙動が違う
+ことが根本原因 -- `prove_wf_t_lt` の実装コメントに詳細を残した。
+
+**もう一つ発見・全面修正したバグ（§9.1.3 の罠の水平展開）**: 上記の
+デバッグ中に、`match X | th :~ Thm: th | #false: error(...)` という
+アーム順序が `:~`（実行時判別をしない）の性質のせいで `#false` を
+握り潰す罠を §9.1.3 で一度発見・修正していたにもかかわらず、その修正は
+`terminate.rhm` の 1 箇所にしか適用されておらず、**同じ罠が
+`algebra.rhm`（7 箇所）・`datatype_derived.rhm`（5 箇所）・
+`datatype_gen.rhm`（7 箇所）・`drule.rhm`（1 箇所）・`wfrec.rhm`
+（7 箇所）の計 27 箇所**（`BETA_CONV`/`HEAD_BETA_CONV`/`definition_of`/
+マップ参照の失敗判定）に残っていたことを、全ファイルを対象にした
+スクリプトによる網羅的走査で発見した。これらはこれまで一度も失敗系を
+踏んでいなかった（成功パスでは `:~ Thm` が最初のアームでも正しい値に
+束縛されるので無害）ため、1123 個の既存テストはどれも検出できていな
+かった -- が、`#false` になるべき状況が実際に起きれば、投げるはずの
+診断的エラーの代わりに `#false` がそのまま `Thm` として下流に流れ、
+その先の呼び出しで無関係に見えるコントラクト違反として遅れて表面化する
+という、デバッグを著しく困難にする欠陥だった（今回がまさにその実例）。
+全 27 箇所を `th :~ Thm: th` → `th :: Thm: th`（`::` は実行時判別を
+行う）に修正した。`::` は判別を伴うのでアーム順序に依存せず、既存の
+アーム順序（`:~`/`#false` の並び）を変える必要はなかった。修正は
+成功パスの挙動を一切変えない（`::` は真に `Thm` である値を素通しする
+だけ）ので、フルテストスイート 1123 → 1129（新規 6 個は上記の
+`prove_wf_t_lt` 回帰テスト分、既存 1123 は無変更で全通過）で確認済み。
+
+**残作業（§9.1.2 参照）**: 1 点 -- 項目 5（`H` の決定木コンパイル）。
+これは各節のパターンから決定木（`If`/コンストラクタ判別/選択子）を
+コンパイルする専用のコンパイラが要り、入れ子パターンの coverage-checker
+書き換えと関心事を共有する（§9.5 参照）ため、独立したセッション規模の
+作業と判断し、本セッションでは着手しなかった。
 
 ### 9.2 `datatype`: 段階的に閉じる
 
@@ -1018,7 +1098,7 @@ namespace・複数 theory import」を調査した。現状の制約
 |---|---|---|
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
 | 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype（フェーズ 2・3、無限公理が必要）は未着手 -- なお複数セッション規模。 |
-| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **`WFREC` 存在定理は完全導出**（§9.1.2）。`wellfounded.rhm` の `WF_INDUCTION`/逆方向（§9.1.1）に加え、汎用 inductive-relations パッケージなしで単一の最小不動点関係 `wfrec_rel` を直接構成し、closure/inversion/uniqueness/existence を経て `soln x = H soln x`（`WF(Rwf)`・congruence を仮説に）を導出（`wfrec.rhm`）。配線の前提のうち 3 点解消: `terminate.rhm` の discharge 証明保持（§9.1.3）、`WF` の pullback 補題（§9.1.4）、多引数タプル化（§9.1.5、`algebra.rhm` に `mk_tuple`/`tuple_proj`/`prove_tuple_proj` を追加）。**残るのは配線 2 点**（datatype 帰納法→汎用WFの橋渡し、`H` の決定木コンパイル。§9.1.2/9.1.5 参照）-- `recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
+| 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **`WFREC` 存在定理は完全導出**（§9.1.2）。`wellfounded.rhm` の `WF_INDUCTION`/逆方向（§9.1.1）に加え、汎用 inductive-relations パッケージなしで単一の最小不動点関係 `wfrec_rel` を直接構成し、closure/inversion/uniqueness/existence を経て `soln x = H soln x`（`WF(Rwf)`・congruence を仮説に）を導出（`wfrec.rhm`）。配線の前提のうち 4 点解消: `terminate.rhm` の discharge 証明保持（§9.1.3）、`WF` の pullback 補題（§9.1.4）、多引数タプル化（§9.1.5、`algebra.rhm` に `mk_tuple`/`tuple_proj`/`prove_tuple_proj` を追加）、datatype 帰納法→汎用WFの橋渡し（§9.1.6、`subterm.rhm` の `prove_wf_t_lt` が任意の再帰的 datatype について `WF(T_lt)` を導出）。**残るのは配線 1 点**（`H` の決定木コンパイル。§9.1.6 参照）-- `recdef.rhm`/`datatype.rhm` はまだ `new_axiom` を使っている。 |
 | 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
 | 4 | 内部は locally nameless、外部 API は標準 HOL にする | **`mk_abs`/`dest_abs` により実質的に達成済みと判断**。詳細下記。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済み。`hyp_insert`/`hyp_union`/`hyp_remove`/`rehash_hyps` の非公開化は**調査済み、現状維持と判断**: `rhombus-hol-lib` のどこからも実際には呼ばれておらず（`Thm` は raw hyps リストではなく既に不可侵なので、これらは項リスト上の純粋なユーティリティであり公開してもソウンドネスに影響しない）、唯一の外部利用者は `rhombus-hol-kernel` に対応するテストパッケージが無いために `tests/kernel.rhm`/`tests/drule.rhm`（外側の `rhombus-hol` パッケージ）に置かれている kernel 自身の単体テスト。非公開化には kernel 専用のテストパッケージ新設が要り、得られる利益（API 美観）に見合わないと判断した。 |

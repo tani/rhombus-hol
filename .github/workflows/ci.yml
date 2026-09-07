@@ -1,0 +1,65 @@
+name: CI
+
+# The three commands `PLAN.md` treats as the completion condition:
+#
+#   raco make rhombus-hol-lib/rhombus/hol.rkt   the library compiles
+#   raco test rhombus-hol/rhombus/hol/tests     the suite passes
+#   raco setup --pkgs rhombus-hol               the documentation builds
+#
+# Nothing here needs Idris. `idris-hol-kernel/` is compiled by
+# `idris2 --cg racket` into a file checked in under the test package, because
+# `raco make` cannot run `idris2`; the differential and benchmark tests read
+# that file rather than the Idris sources.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A second push to a branch makes the first run's answer stale.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Bogdanp/setup-racket@v1.11
+        with:
+          version: current
+          variant: CS
+
+      # One install for all three, so the dependencies among them resolve as
+      # links to this checkout rather than as catalog lookups. `--auto` pulls
+      # in `rhombus-lib`; `--no-docs` leaves the documentation to the step
+      # that exists to check it.
+      - name: Install the packages
+        run: |
+          raco pkg install --auto --batch --no-docs \
+            rhombus-hol-kernel/ rhombus-hol-lib/ rhombus-hol/
+
+      - name: Compile the library
+        run: raco make rhombus-hol-lib/rhombus/hol.rkt
+
+      - name: Run the test suite
+        run: raco test rhombus-hol/rhombus/hol/tests
+
+      # `raco setup` reports a document it could not build and still exits 0,
+      # so the log is what has to be read. Fixtures that are *meant* not to
+      # compile are kept out of setup by `tests/fixtures/info.rkt`, so
+      # anything reported here is real.
+      - name: Build the documentation
+        run: |
+          set -o pipefail
+          raco setup --pkgs rhombus-hol 2>&1 | tee setup.log
+          if grep -q '^raco setup: error' setup.log; then
+            echo "::error::raco setup reported errors"
+            grep -A 3 '^raco setup: error' setup.log
+            exit 1
+          fi

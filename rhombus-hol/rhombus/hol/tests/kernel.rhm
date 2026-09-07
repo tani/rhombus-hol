@@ -75,6 +75,14 @@ check r0 is_a Thm ~is #true
 check (match r0 | Thm(h, c, _): [h, c == mk_eq(x, x)]) ~is [[], #true]
 check hyps_of(r0) ~is []
 check concl_of(r0) ~is mk_eq(x, x)
+// ...but not altered.  "You cannot build one" and "you cannot change one you
+// were given" are separate claims: without this, `th with (concl = ...)`
+// would hand back a `Thm` asserting anything at all, stamp and hypotheses
+// intact, without a rule ever running.
+check:
+  ~eval: kernel_eval
+  REFL(initial_theory(), mk_var(#'x, TyVar(#'a))) with (concl = mk_var(#'q, TyApp(#'bool, [])))
+  ~throws "does not support functional update"
 
 // `Theory` and `Stamp` are closed off the same way `Thm` is, and for a
 // soundness reason: a forged `Theory` could carry a real theory's `Stamp`
@@ -122,10 +130,15 @@ check:
 // still have to re-derive well-formedness for terms built through `mk_comb`
 // and `mk_abs`, so this is defense in depth, not the only line of defense),
 // but building one directly from outside the kernel package is not
-// possible.  `raw_fvar`/`raw_bvar`/`raw_const`/`raw_comb`/`raw_abs` exist
-// only so this file and `tests/term.rhm` can still construct and inspect
-// the raw locally-nameless shape, including the deliberately ill-formed
-// terms below.
+// possible.  The raw shape is reachable only through the `unsafe` namespace
+// (`unsafe.raw_fvar` and friends), which exists so that this file and
+// `tests/term.rhm` can construct and inspect it -- including the
+// deliberately ill-formed terms below.  Importing `rhombus/hol/term` alone
+// puts no unchecked constructor in scope at all:
+check:
+  ~eval: kernel_eval
+  raw_comb(mk_const(#'zero, TyApp(#'num, [])), mk_const(#'zero, TyApp(#'num, [])))
+  ~throws "raw_comb: undefined"
 check:
   ~eval: kernel_eval
   FVar(#'x, TyApp(#'num, []))
@@ -169,8 +182,8 @@ check check_term(thy, mk_const(#'zero, bl)) ~throws "non-instance type"
 check check_term(thy, mk_eq(x, y)) ~is #void
 check check_term(thy, mk_eq(px(x), qx(y))) ~is #void
 // a term built with the raw constructors, bypassing `mk_comb`, is still caught
-check check_term(thy, raw_comb(zero, x)) ~throws "operator is not a function"
-check check_term(thy, raw_comb(s, px(x))) ~throws "ill-typed application"
+check check_term(thy, unsafe.raw_comb(zero, x)) ~throws "operator is not a function"
+check check_term(thy, unsafe.raw_comb(s, px(x))) ~throws "ill-typed application"
 
 check is_bool(px(x)) ~is #true
 check is_bool(x) ~is #false
@@ -230,7 +243,7 @@ def beta_inner = mk_abs(y, pl(x, y))
 check:
   BETA(thy, mk_comb(mk_abs(x, beta_inner), y)).concl
   ~is mk_eq(mk_comb(mk_abs(x, beta_inner), y),
-            raw_abs(num, raw_comb(raw_comb(plus, y), raw_bvar(0, num))))
+            unsafe.raw_abs(num, unsafe.raw_comb(unsafe.raw_comb(plus, y), unsafe.raw_bvar(0, num))))
 check BETA(thy, sc(x)) ~throws "not a beta redex"
 
 // -- ASSUME ----------------------------------------------------------------
@@ -459,12 +472,12 @@ check:
 // Local closure: a dangling de Bruijn index is not a term
 // ==========================================================================
 
-check REFL(thy, raw_bvar(0, num)) ~throws "unbound de Bruijn index"
-check REFL(thy, raw_abs(num, raw_bvar(1, num))) ~throws "unbound de Bruijn index"
-check ASSUME(thy, raw_abs(num, raw_bvar(1, bl))) ~throws "unbound de Bruijn index"
-check REFL(thy, raw_abs(num, raw_bvar(0, num))) ~completes
+check REFL(thy, unsafe.raw_bvar(0, num)) ~throws "unbound de Bruijn index"
+check REFL(thy, unsafe.raw_abs(num, unsafe.raw_bvar(1, num))) ~throws "unbound de Bruijn index"
+check ASSUME(thy, unsafe.raw_abs(num, unsafe.raw_bvar(1, bl))) ~throws "unbound de Bruijn index"
+check REFL(thy, unsafe.raw_abs(num, unsafe.raw_bvar(0, num))) ~completes
 check:
-  INST(thy, [[raw_bvar(0, num), x]], e_xy)
+  INST(thy, [[unsafe.raw_bvar(0, num), x]], e_xy)
   ~throws "unbound de Bruijn index"
 
 // ==========================================================================
@@ -531,19 +544,19 @@ check:
 // `bool`.  Admitting it puts an ill-typed term inside a theorem, and from
 // there `type_of` is lying about everything built on top.
 
-def liar = raw_abs(num, raw_comb(pp, raw_bvar(0, bl)))
+def liar = unsafe.raw_abs(num, unsafe.raw_comb(pp, unsafe.raw_bvar(0, bl)))
 check type_of(liar) ~is mk_fun(num, bl)
 check is_locally_closed(liar) ~is #true
 check check_term(thy, liar) ~throws "does not match its binder"
 check REFL(thy, liar) ~throws "does not match its binder"
-check BETA(thy, raw_comb(liar, zero)) ~throws "does not match its binder"
+check BETA(thy, unsafe.raw_comb(liar, zero)) ~throws "does not match its binder"
 // the honest version of the same shape is fine
-check check_term(thy, raw_abs(num, raw_comb(pp, raw_bvar(0, num)))) ~is #void
+check check_term(thy, unsafe.raw_abs(num, unsafe.raw_comb(pp, unsafe.raw_bvar(0, num)))) ~is #void
 // a deeper index must match the binder it actually points at
 check:
-  check_term(thy, raw_abs(num, raw_abs(bl, raw_bvar(1, bl))))
+  check_term(thy, unsafe.raw_abs(num, unsafe.raw_abs(bl, unsafe.raw_bvar(1, bl))))
   ~throws "does not match its binder"
-check check_term(thy, raw_abs(num, raw_abs(bl, raw_bvar(1, num)))) ~is #void
+check check_term(thy, unsafe.raw_abs(num, unsafe.raw_abs(bl, unsafe.raw_bvar(1, num)))) ~is #void
 
 // -- a rule that takes a theory stamps its result with that theory ---------
 //

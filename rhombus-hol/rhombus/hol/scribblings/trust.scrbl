@@ -80,8 +80,11 @@ Three, following HOL4:
  @item{@bold{BOOL_CASES} --- @tt{(t <=> true) or (t <=> false)}}
 )
 
-There is deliberately no axiom of infinity: datatypes arrive axiomatically, so
-no infinite type ever has to be bootstrapped.
+There is deliberately no axiom of infinity. Non-recursive datatypes are
+derived from @tt{unit} and the kernel's own type definition principle, which
+needs no infinite type; recursive ones are postulated, which is the reason
+nothing here ever has to bootstrap one. Deriving recursive datatypes too is
+what would require it.
 
 BOOL_CASES is derivable from choice and eta, but taking it directly saves a
 long stretch of derived-rule scripting and costs nothing in confidence --- it
@@ -94,22 +97,39 @@ of every datatype.
 
 @section{What is postulated beyond that}
 
-Two constructions add axioms, each behind a checked condition that is the whole
-soundness argument for it.
+Two constructions can add axioms. Neither always does: each has a derivation
+that covers part of its range and a postulating fallback for the rest, and
+which one you get is decided by a check, not by a flag. Counting the axioms a
+module's theory ends up with is the way to tell (@tt{axioms_of}).
 
-@bold{Datatypes.} A @rhombus(type, ~datum) declaration postulates injectivity,
-distinctness, exhaustiveness and induction. These are consistent exactly when
-the declaration is @tech{strictly positive}, and the positivity checker is what
-enforces it. This is the single most load-bearing check in the system.
+@bold{Datatypes.} A non-recursive @rhombus(type, ~datum) --- any number of
+constructors, any number of fields, any number of type parameters --- is
+@emph{derived}: it is built as a sum of products of @tt{unit} over its field
+types via @tt{new_basic_type_definition}, and its injectivity, distinctness,
+exhaustiveness, induction, discriminators and selectors come out as theorems
+with no hypotheses. A @emph{self-recursive} @rhombus(type, ~datum) is still
+postulated: injectivity, distinctness, exhaustiveness and induction are
+axioms, consistent exactly when the declaration is @tech{strictly positive},
+and the positivity checker is what enforces it. That check is the single most
+load-bearing one in the system --- but it now guards recursive declarations
+only. Deriving those too needs an infinite type to bootstrap from, which is
+the axiom of infinity this version deliberately does not have.
 
-@bold{Function definitions.} A @rhombus(function, ~datum) declaration
-postulates one equation per clause. These are a conservative extension exactly
-when the definition is exhaustive, non-overlapping and terminating, which is
-what @secref("termination") is about.
+@bold{Function definitions.} A single-argument @rhombus(function, ~datum) with
+no @rhombus(~measure) whose termination check finds structural descent into a
+declared datatype is @emph{derived}: its clausal equations are proved from a
+well-founded recursion theorem (itself derived, not postulated) applied to a
+step function compiled from the clauses' decision tree. Patterns may nest to
+any depth. Everything else --- several arguments, an explicit
+@rhombus(~measure), an argument type no datatype declared --- still postulates
+one equation per clause, a conservative extension exactly when the definition
+is exhaustive, non-overlapping and terminating, which is what
+@secref("termination") is about.
 
-Both sit behind a narrow seam. Replacing either with a derivation --- a real
-initial-algebra construction, a well-founded recursion theorem --- would change
-nothing above it.
+Both fallbacks sit behind a narrow seam, and the derivations that have
+replaced parts of them changed nothing above: the theorems have the same
+statements, so the rule database, the waterfall and @rhombus(match)
+compilation cannot tell which side a given datatype or function came from.
 
 @section{Theories}
 

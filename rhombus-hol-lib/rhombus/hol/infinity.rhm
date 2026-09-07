@@ -1,0 +1,378 @@
+#lang rhombus/static
+
+// The axiom of infinity, and the natural numbers derived from it
+// (PLAN.md section 9.2, phase 2).
+//
+// This is the type every *recursive* datatype has to be carved out of.  HOL's
+// type definition principle can only cut a nonempty subset out of a type that
+// already exists, and every self-recursive datatype is infinite, so without
+// an infinite type in the base there is nothing to cut.  That is the whole
+// reason `datatype.rhm`'s axiom schema is still there for recursive
+// declarations: not a gap in the derivation, a missing foundation.
+//
+// The trade the review asks for is one standard axiom, audited once, in
+// place of a schema instantiated afresh for every recursive datatype a user
+// writes.  This module builds the axiom's consequences but does *not* put
+// the axiom in the session's base theory: `build_ind` extends whatever
+// theory it is handed, so a session that never declares a recursive datatype
+// pays nothing, exactly the way `algebra.rhm`'s `unit`/`prod`/`sum` were
+// built and tested before `add_type` used them (section 9.2.1).  Wiring
+// happens with phase 3, when the schema it replaces can actually be deleted.
+//
+// The construction is HOL Light's `nums.ml`, in the same order:
+//
+//   INFINITY_AX   ?f :: ind -> ind. one-one f and not onto f
+//   IND_SUC/IND_0 a witnessing pair, pinned down with the choice operator
+//   NUM_REP       the least subset of `ind` holding IND_0 and closed under
+//                 IND_SUC
+//   num           whatever is in bijection with NUM_REP
+//   zero/suc      IND_0 and IND_SUC carried across that bijection
+//
+// and the three Peano properties come out as theorems about the bijection:
+// `suc` is injective because IND_SUC is and `dest_num` is; `suc n` is never
+// `zero` because IND_SUC never hits IND_0; induction is NUM_REP's own
+// minimality, which is what "least subset" was chosen to mean.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/names open
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+
+export:
+  ty_ind
+  ty_num
+  c_zero
+  c_suc
+  num_ty
+  IndThms
+  build_ind
+
+def ty_ind :: Symbol = #'ind
+def ty_num :: Symbol = #'num
+def c_ind_suc :: Symbol = #'IND_SUC
+def c_ind_0 :: Symbol = #'IND_0
+def c_num_rep :: Symbol = #'NUM_REP
+def c_mk_num :: Symbol = #'mk_num
+def c_dest_num :: Symbol = #'dest_num
+def c_zero :: Symbol = #'zero_num
+def c_suc :: Symbol = #'suc_num
+
+fun ind_ty() :: HType: TyApp(ty_ind, [])
+fun num_ty() :: HType: TyApp(ty_num, [])
+
+// What a caller gets: the type is in the returned `Theory`, and these are
+// the three facts anything built on top of `num` needs.  Nothing else about
+// the construction escapes -- `ind`, `IND_SUC`, `NUM_REP` and the bijection
+// are implementation, the same way `unit`'s `rep_unit` is.
+//
+//   `suc_injective`  |- !m n. suc m = suc n <=> m = n
+//   `suc_not_zero`   |- !n. not (suc n = zero)
+//   `induction`      |- !P. P zero and (!n. P n ==> P (suc n)) ==> !n. P n
+class IndThms(suc_injective :: Thm, suc_not_zero :: Thm, induction :: Thm)
+
+// `|- P(@x. P x)` from `|- ?x. P x`.  The same derivation `wfrec.rhm` uses;
+// it is not exported from there, and duplicating six lines beats widening
+// that module's surface for one caller.
+fun select_intro(thy :: Theory, v :: FVar, body :: Term, ex :: Thm) :: Thm:
+  let pred = mk_abs(v, body)
+  let sel = mk_select(v, body)
+  let ax = INST_TYPE(thy, {#'a: v.ty}, base_axiom(#'SELECT_AX))
+  let ax_at_v = SPEC(thy, v :~ Term, SPEC(thy, pred, ax))
+  let beta_v = (match BETA_CONV(thy, mk_comb(pred, v))
+                | th :: Thm: th
+                | ~else: error(~who: #'select_intro, "beta failed"))
+  let pred_v = EQ_MP(SYM(thy, beta_v), ASSUME(thy, body))
+  let pred_sel = MP(thy, ax_at_v, pred_v)
+  let beta_sel = (match BETA_CONV(thy, mk_comb(pred, sel))
+                  | th :: Thm: th
+                  | ~else: error(~who: #'select_intro, "beta failed"))
+  CHOOSE(thy, v, ex, EQ_MP(beta_sel, pred_sel))
+
+// `one_one(f) and not_onto(f)`, written out rather than behind named
+// combinators: two extra constants would have to be defined, exported and
+// explained, and they are used exactly once each.
+//
+//   one_one   !x1 x2. f x1 = f x2 ==> x1 = x2
+//   not_onto  ?y. !x. not (f x = y)
+//
+// "not onto" is stated positively, as a point outside the image.  That is
+// classically the same thing and it is the form the construction actually
+// consumes -- IND_0 *is* that point.
+fun infinity_body(f :: Term, fty :: HType) :: Term:
+  let ity = ind_ty()
+  let x1 = mk_var(#'x1, ity)
+  let x2 = mk_var(#'x2, ity)
+  let x = mk_var(#'x, ity)
+  let y = mk_var(#'y, ity)
+  let inj_body = mk_imp(mk_eq(mk_comb(f, x1), mk_comb(f, x2)),
+                        mk_eq(x1 :~ Term, x2))
+  let one_one = mk_forall(x1, mk_forall(x2, inj_body))
+  let not_onto = mk_exists(y, mk_forall(x, mk_neg(mk_eq(mk_comb(f, x), y))))
+  mk_conj(one_one, not_onto)
+
+fun build_ind(thy0 :: Theory) :: values(Theory, IndThms):
+  let thy1 = new_type(thy0, ty_ind, 0)
+  let ity = ind_ty()
+  let fty = mk_fun(ity, ity)
+  let fv = mk_var(#'f, fty)
+
+  // -- the axiom ------------------------------------------------------------
+  let ax_stmt = mk_exists(fv, infinity_body(fv :~ Term, fty))
+  let (thy2, infinity_ax) = new_axiom(thy1, ax_stmt)
+
+  // -- IND_SUC: a witnessing injection, pinned down by choice ---------------
+  let suc_sel = mk_select(fv, infinity_body(fv :~ Term, fty))
+  let (thy3, def_suc):
+    new_basic_definition(thy2, mk_eq(mk_var(c_ind_suc, fty), suc_sel))
+  let ind_suc = mk_const(c_ind_suc, fty)
+  // `|- <body>[@f. body / f]`, then rewritten to talk about `IND_SUC`.
+  let at_sel = select_intro(thy2, fv, infinity_body(fv :~ Term, fty), infinity_ax)
+  let suc_props:
+    EQ_MP(cong_at(thy3, def_suc, concl_of(at_sel), suc_sel), at_sel)
+
+  // -- IND_0: the point outside IND_SUC's image -----------------------------
+  let yv = mk_var(#'y, ity)
+  let xv = mk_var(#'x, ity)
+  let miss_body = mk_forall(xv, mk_neg(mk_eq(mk_comb(ind_suc, xv), yv)))
+  let miss_ex = CONJUNCT2(thy3, suc_props)
+  let zero_sel = mk_select(yv, miss_body)
+  let (thy4, def_0):
+    new_basic_definition(thy3, mk_eq(mk_var(c_ind_0, ity), zero_sel))
+  let ind_0 = mk_const(c_ind_0, ity)
+  let at_zero_sel = select_intro(thy3, yv, miss_body, miss_ex)
+  let ind_suc_ne_0:
+    EQ_MP(cong_at(thy4, def_0, concl_of(at_zero_sel), zero_sel), at_zero_sel)
+  let ind_suc_inj = CONJUNCT1(thy4, suc_props)
+
+  // -- NUM_REP: the least subset holding IND_0 and closed under IND_SUC -----
+  let pv = mk_var(#'P, mk_fun(ity, bool))
+  let av = mk_var(#'a, ity)
+  let closed = mk_conj(mk_comb(pv, ind_0),
+                       mk_forall(xv, mk_imp(mk_comb(pv, xv),
+                                            mk_comb(pv, mk_comb(ind_suc, xv)))))
+  let rep_body = mk_forall(pv, mk_imp(closed, mk_comb(pv, av)))
+  let nrty = mk_fun(ity, bool)
+  let (thy5, def_rep):
+    new_basic_definition(thy4, mk_eq(mk_var(c_num_rep, nrty),
+                                     mk_abs(av, rep_body)))
+  let num_rep = mk_const(c_num_rep, nrty)
+
+  // `|- NUM_REP(a) <=> !P. ...` -- the defining equation, ready to use.
+  fun rep_at(t :: Term) :: Thm:
+    unfold_def(thy5, def_rep, [t])
+
+  // Witness for the type definition: `|- NUM_REP(IND_0)`.  Assume the two
+  // closure clauses; the first *is* `P IND_0`.
+  let witness:
+    let asm = ASSUME(thy5, closed)
+    let body = GEN(thy5, pv, DISCH(thy5, closed, CONJUNCT1(thy5, asm)))
+    EQ_MP(SYM(thy5, INST(thy5, [[ind_0, av]], rep_at(av :~ Term))), body)
+
+  let (thy6, abs_rep, rep_pred):
+    new_basic_type_definition(thy5, ty_num, c_mk_num, c_dest_num, witness)
+  let nty = num_ty()
+  let mk_num = mk_const(c_mk_num, mk_fun(ity, nty))
+  let dest_num = mk_const(c_dest_num, mk_fun(nty, ity))
+
+  // -- zero and suc ---------------------------------------------------------
+  let nv = mk_var(#'n, nty)
+  let mv = mk_var(#'m, nty)
+  let (thy7, def_zero):
+    new_basic_definition(thy6, mk_eq(mk_var(c_zero, nty), mk_comb(mk_num, ind_0)))
+  let zero = mk_const(c_zero, nty)
+  let sucty = mk_fun(nty, nty)
+  let (thy8, def_suc_num):
+    new_basic_definition(thy7,
+                         mk_eq(mk_var(c_suc, sucty),
+                               mk_abs(nv, mk_comb(mk_num,
+                                                  mk_comb(ind_suc,
+                                                          mk_comb(dest_num, nv))))))
+  let suc = mk_const(c_suc, sucty)
+
+  let thms = derive_peano(thy8, abs_rep, rep_pred, def_rep,
+                          def_zero, def_suc_num,
+                          ind_suc, ind_0, num_rep, mk_num, dest_num,
+                          zero, suc, ind_suc_inj, ind_suc_ne_0)
+  values(thy8, thms)
+
+// `|- t = t'` where `t'` is `t` with `rhs` replaced by the constant `def`
+// introduces for it.  `def : |- c = rhs`, so rewriting is `cong_rewrite`
+// with the equation the other way round.
+fun cong_at(thy :: Theory, def_th :: Thm, t :: Term, rhs :: Term) :: Thm:
+  cong_replace(thy, rhs, lhs_of(def_th), SYM(thy, def_th), t)
+
+// `|- t = t[to/from]`, structurally, justified by `eq : |- from = to`.
+fun cong_replace(thy :: Theory, from :: Term, to :: Term, eq :: Thm,
+                 t :: Term) :: Thm:
+  cond
+  | t == from: eq
+  | ~else:
+      match t
+      | Comb(g, x):
+          MK_COMB(cong_replace(thy, from, to, eq, g),
+                  cong_replace(thy, from, to, eq, x))
+      | Abs(_, _):
+          let (v, body) = dest_abs(t)
+          ABS(thy, v, cong_replace(thy, from, to, eq, body))
+      | ~else: REFL(thy, t)
+
+// The three Peano properties, transported across the bijection.
+//
+//   `abs_rep`   |- mk_num(dest_num a) = a          (kernel's own variables)
+//   `rep_pred`  |- NUM_REP(r) <=> dest_num(mk_num r) = r
+//
+// so `dest_num` is injective outright, and it commutes with the two
+// constructors wherever `NUM_REP` holds -- which is everywhere it is applied
+// to a `num`, since `NUM_REP(dest_num n)` follows from `abs_rep`.
+fun derive_peano(thy :: Theory, abs_rep :: Thm, rep_pred :: Thm,
+                 def_rep :: Thm, def_zero :: Thm, def_suc_num :: Thm,
+                 ind_suc :: Term, ind_0 :: Term, num_rep :: Term,
+                 mk_num :: Term, dest_num :: Term, zero :: Term, suc :: Term,
+                 ind_suc_inj :: Thm, ind_suc_ne_0 :: Thm) :: IndThms:
+  let ity = ind_ty()
+  let nty = num_ty()
+  let av = mk_var(v_alpha, nty)
+  let rv = mk_var(v_rep, ity)
+  let nv = mk_var(#'n, nty)
+  let mv = mk_var(#'m, nty)
+  let xv = mk_var(#'x, ity)
+  let pv = mk_var(#'P, mk_fun(ity, bool))
+
+  // `NUM_REP`'s defining equation, re-instantiated in *this* theory: the
+  // one `build_ind` used was closed over the theory before `num` existed.
+  fun rep_at(t :: Term) :: Thm:
+    unfold_def(thy, def_rep, [t])
+
+  // `|- NUM_REP(dest_num n)`: the right-hand side of `rep_pred` at
+  // `r := dest_num n` is `dest_num(mk_num(dest_num n)) = dest_num n`, which
+  // is `abs_rep` with `dest_num` applied to both sides.
+  fun num_rep_dest(n :: Term) :: Thm:
+    let at_r = INST(thy, [[mk_comb(dest_num, n), rv]], rep_pred)
+    let holds = AP_TERM(thy, dest_num, INST(thy, [[n, av]], abs_rep))
+    EQ_MP(SYM(thy, at_r), holds)
+
+  // `|- dest_num(mk_num x) = x`, given `|- NUM_REP(x)`.
+  fun dest_mk(x :: Term, rep_x :: Thm) :: Thm:
+    EQ_MP(INST(thy, [[x, rv]], rep_pred), rep_x)
+
+  // `|- NUM_REP(IND_0)`: exactly the witness the type definition used, which
+  // is not returned by the kernel, so it is re-derived here the same way.
+  // The closure premise, rebuilt rather than read back off the unfolded
+  // definition: a locally nameless binder has no name to recover, so
+  // `dest_forall` would hand back a fresh variable that `GEN` could not
+  // then bind.  Rebuilding at `pv` produces the same term.
+  let closed = mk_conj(mk_comb(pv, ind_0),
+                       mk_forall(xv, mk_imp(mk_comb(pv, xv),
+                                            mk_comb(pv, mk_comb(ind_suc, xv)))))
+  let num_rep_0:
+    let asm = ASSUME(thy, closed)
+    EQ_MP(SYM(thy, rep_at(ind_0)),
+          GEN(thy, pv, DISCH(thy, closed, CONJUNCT1(thy, asm))))
+
+  // `|- NUM_REP(IND_SUC x)`, given `|- NUM_REP(x)`.  Take any closed `P`:
+  // `NUM_REP(x)` hands over `P x`, and the closure clause carries it up.
+  fun num_rep_suc(x :: Term, rep_x :: Thm) :: Thm:
+    let sx = mk_comb(ind_suc, x)
+    let asm = ASSUME(thy, closed)
+    let p_x = MP(thy, SPEC(thy, pv :~ Term, EQ_MP(rep_at(x), rep_x)), asm)
+    let step = SPEC(thy, x, CONJUNCT2(thy, asm))
+    EQ_MP(SYM(thy, rep_at(sx)),
+          GEN(thy, pv, DISCH(thy, closed, MP(thy, step, p_x))))
+
+  // `|- dest_num(zero) = IND_0` and `|- dest_num(suc n) = IND_SUC(dest_num n)`.
+  let dest_zero = TRANS(AP_TERM(thy, dest_num, def_zero), dest_mk(ind_0, num_rep_0))
+  fun dest_suc(n :: Term) :: Thm:
+    let unf = unfold_def(thy, def_suc_num, [n])
+    let inner = mk_comb(ind_suc, mk_comb(dest_num, n))
+    TRANS(AP_TERM(thy, dest_num, unf),
+          dest_mk(inner, num_rep_suc(mk_comb(dest_num, n), num_rep_dest(n))))
+
+  // -- suc is injective ------------------------------------------------------
+  let suc_injective:
+    let lhs = mk_eq(mk_comb(suc, mv), mk_comb(suc, nv))
+    let fwd:
+      let asm = ASSUME(thy, lhs)
+      let on_ind = TRANS(SYM(thy, dest_suc(mv :~ Term)),
+                         TRANS(AP_TERM(thy, dest_num, asm), dest_suc(nv :~ Term)))
+      let dest_eq = MP(thy, SPEC(thy, mk_comb(dest_num, nv),
+                                 SPEC(thy, mk_comb(dest_num, mv), ind_suc_inj)),
+                       on_ind)
+      let back = AP_TERM(thy, mk_num, dest_eq)
+      TRANS(SYM(thy, INST(thy, [[mv :~ Term, av]], abs_rep)),
+            TRANS(back, INST(thy, [[nv :~ Term, av]], abs_rep)))
+    let bwd:
+      AP_TERM(thy, suc, ASSUME(thy, mk_eq(mv :~ Term, nv)))
+    GENL(thy, [mv, nv],
+         IMP_ANTISYM_RULE(thy, DISCH(thy, lhs, fwd),
+                          DISCH(thy, mk_eq(mv :~ Term, nv), bwd)))
+
+  // -- suc n is never zero ---------------------------------------------------
+  let suc_not_zero:
+    let eqn = mk_eq(mk_comb(suc, nv), zero)
+    let asm = ASSUME(thy, eqn)
+    let on_ind = TRANS(SYM(thy, dest_suc(nv :~ Term)),
+                       TRANS(AP_TERM(thy, dest_num, asm), dest_zero))
+    let contra = MP(thy, NOT_ELIM(thy, SPEC(thy, mk_comb(dest_num, nv),
+                                            ind_suc_ne_0)),
+                    on_ind)
+    GEN(thy, nv, NOT_INTRO(thy, DISCH(thy, eqn, contra)))
+
+  // -- induction -------------------------------------------------------------
+  //
+  // `NUM_REP`'s minimality, at the predicate `. NUM_REP(a) and P(mk_num a)`.
+  // The `NUM_REP(a)` conjunct is not decoration: the closure step needs
+  // `dest_num(mk_num x) = x`, which only holds under it.
+  let induction:
+    let qp = mk_var(#'Q, mk_fun(nty, bool))
+    let base = mk_comb(qp, zero)
+    let step_stmt = mk_forall(nv, mk_imp(mk_comb(qp, nv),
+                                         mk_comb(qp, mk_comb(suc, nv))))
+    let hyp = mk_conj(base, step_stmt)
+    let asm = ASSUME(thy, hyp)
+    let base_th = CONJUNCT1(thy, asm)
+    let step_th = CONJUNCT2(thy, asm)
+
+    let pred_body = mk_conj(mk_comb(num_rep, xv),
+                            mk_comb(qp, mk_comb(mk_num, xv)))
+    let pred = mk_abs(xv, pred_body)
+    fun pred_at(t :: Term) :: Thm:
+      (match BETA_CONV(thy, mk_comb(pred, t))
+       | th :: Thm: th
+       | ~else: error(~who: #'build_ind, "beta failed"))
+
+    // `pred(IND_0)`
+    let pred_0:
+      let q_zero = EQ_MP(AP_TERM(thy, qp, def_zero), base_th)
+      EQ_MP(SYM(thy, pred_at(ind_0)), CONJ(thy, num_rep_0, q_zero))
+    // `!x. pred(x) ==> pred(IND_SUC x)`
+    let pred_step:
+      let px = ASSUME(thy, mk_comb(pred, xv))
+      let parts = EQ_MP(pred_at(xv :~ Term), px)
+      let rep_x = CONJUNCT1(thy, parts)
+      let q_mk_x = CONJUNCT2(thy, parts)
+      let q_suc = MP(thy, SPEC(thy, mk_comb(mk_num, xv), step_th), q_mk_x)
+      // `suc(mk_num x) = mk_num(IND_SUC x)`, using `dest_num(mk_num x) = x`.
+      let unf = unfold_def(thy, def_suc_num, [mk_comb(mk_num, xv)])
+      let fix = AP_TERM(thy, mk_num,
+                        AP_TERM(thy, ind_suc, dest_mk(xv :~ Term, rep_x)))
+      let suc_mk = TRANS(unf, fix)
+      let q_at = EQ_MP(AP_TERM(thy, qp, suc_mk), q_suc)
+      let concl = CONJ(thy, num_rep_suc(xv :~ Term, rep_x), q_at)
+      GEN(thy, xv, DISCH(thy, mk_comb(pred, xv),
+                         EQ_MP(SYM(thy, pred_at(mk_comb(ind_suc, xv))), concl)))
+
+    // `NUM_REP(dest_num n)` instantiated at `pred` gives `pred(dest_num n)`.
+    let dn = mk_comb(dest_num, nv)
+    let closed_at = CONJ(thy, pred_0, pred_step)
+    let pred_dn = MP(thy, SPEC(thy, pred, EQ_MP(rep_at(dn), num_rep_dest(nv :~ Term))),
+                     closed_at)
+    let q_mk_dn = CONJUNCT2(thy, EQ_MP(pred_at(dn), pred_dn))
+    let q_n = EQ_MP(AP_TERM(thy, qp, INST(thy, [[nv :~ Term, av]], abs_rep)), q_mk_dn)
+    GEN(thy, qp, DISCH(thy, hyp, GEN(thy, nv, q_n)))
+
+  IndThms(suc_injective, suc_not_zero, induction)

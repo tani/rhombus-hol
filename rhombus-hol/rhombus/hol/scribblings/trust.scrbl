@@ -121,8 +121,14 @@ postulated: injectivity, distinctness, exhaustiveness and induction are
 axioms, consistent exactly when the declaration is @tech{strictly positive},
 and the positivity checker is what enforces it. That check is the single most
 load-bearing one in the system --- but it now guards recursive declarations
-only. Deriving those too needs an infinite type to bootstrap from, which is
-the axiom of infinity this version deliberately does not have.
+only. Deriving those too needs an infinite type to bootstrap from.
+@tt{rhombus/hol/infinity} builds one: @tt{build_ind} extends a theory with
+the axiom of infinity and carves @tt{num} out of it, deriving successor's
+injectivity, that no successor is zero, and induction --- three theorems, no
+hypotheses, for one axiom. Nothing imports it yet, so no theory reached
+through @tt{rhombus/hol} carries that axiom; a module's own
+@tt{axioms_of} count is what says whether it paid for one. Carving recursive
+datatypes out of @tt{num} is the step that would use it, and is not written.
 
 @bold{Function definitions.} A @rhombus(function, ~datum) is @emph{derived}
 whenever the recursion it performs has a well-founded relation this version

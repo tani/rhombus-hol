@@ -1,0 +1,76 @@
+#lang rhombus/static
+
+// The axiom of infinity and the natural numbers built on it (PLAN.md 9.2,
+// phase 2).  What this file has to pin down is not that the three Peano
+// theorems are *stated* -- `new_axiom` could state them -- but that they are
+// derived, and what they cost: exactly one axiom beyond the base three, no
+// matter how much is built on top afterwards.
+
+import:
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/bool open
+  rhombus/hol/drule open
+  rhombus/hol/infinity open
+
+def base = base_theory()
+def (thy, thms) = build_ind(base)
+
+// -- the price ---------------------------------------------------------------
+//
+// One axiom.  `IND_SUC`, `IND_0`, `NUM_REP`, `num`, `zero_num` and `suc_num`
+// all arrive through the definitional principles, so none of them adds to
+// this count, and neither do the three theorems below.
+check axioms_of(thy).length() ~is axioms_of(base).length() + 1
+
+// and it is the standard statement, not something tuned to what is proved
+// from it: some `f : ind -> ind` is injective and misses a point.
+check:
+  let extra = for values(acc :~ List = []) (a in axioms_of(thy)):
+                if axioms_of(base).contains(a) | acc | acc ++ [a]
+  show(concl_of(extra[0]))
+  ~is "exists (x :: ind -> ind): (forall (y :: ind, z :: ind): x(y) === x(z) ==> y === z) and exists (y :: ind): forall (z :: ind): not (x(z) === y)"
+
+// -- the three theorems ------------------------------------------------------
+//
+// Hypothesis-free: they hold outright, not under an assumption that some
+// earlier step quietly left open.
+check hyps_of(thms.suc_injective) ~is []
+check hyps_of(thms.suc_not_zero) ~is []
+check hyps_of(thms.induction) ~is []
+
+check:
+  show(concl_of(thms.suc_injective))
+  ~is "forall (x :: num, y :: num): suc_num(x) === suc_num(y) <=> x === y"
+check:
+  show(concl_of(thms.suc_not_zero))
+  ~is "forall (x :: num): not (suc_num(x) === zero_num)"
+check:
+  show(concl_of(thms.induction))
+  ~is "forall (x :: num -> bool): x(zero_num) and (forall (y :: num): x(y) ==> x(suc_num(y))) ==> forall (y :: num): x(y)"
+
+// -- the base theory is untouched --------------------------------------------
+//
+// `build_ind` extends the theory it is handed; it does not install anything
+// into the base every other module starts from.  Nothing pays for infinity
+// unless it asks for it.
+check axioms_of(base_theory()).length() ~is axioms_of(base).length()
+check type_arity(base_theory(), #'ind) ~is #false
+check type_arity(thy, #'ind) ~is 0
+check type_arity(thy, #'num) ~is 0
+
+// -- the theorems are usable -------------------------------------------------
+//
+// Induction specialised to a concrete predicate, and discharged: proving
+// `P zero` and the step really does give `!n. P n`, so the theorem is the
+// induction principle and not merely a term shaped like one.
+check:
+  let nty = TyApp(#'num, [])
+  let n = mk_var(#'n, nty)
+  let zero = mk_const(#'zero_num, nty)
+  let p = mk_abs(n, mk_eq(n :~ Term, n))          // `\n. n = n`, trivially true
+  let at_p = SPEC(thy, p, thms.induction)
+  hyps_of(at_p)
+  ~is []

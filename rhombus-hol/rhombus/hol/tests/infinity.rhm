@@ -14,6 +14,7 @@ import:
   rhombus/hol/bool open
   rhombus/hol/drule open
   rhombus/hol/conv open
+  rhombus/hol/datatype open
   rhombus/hol/wellfounded open
   rhombus/hol/driver open
   "fixtures/nat_declared.rhm"!hol_theory as decl
@@ -184,3 +185,60 @@ check:
   ~is ["double(zero_num) === zero_num", 0,
        "double(suc_num(n)) === suc_num(suc_num(double(n)))", 0,
        1]
+
+// -- num packaged as a datatype ----------------------------------------------
+//
+// Everything a self-recursive `type` declaration installs, for `num`, derived:
+// the subterm relation with its equations and its well-foundedness, plus the
+// full `DatatypeThms`. This is not about `num` being special -- it is the
+// exact shape phase 3 has to produce for an arbitrary recursive datatype,
+// built once by hand so that the target is a thing that exists rather than a
+// description of one.
+def (dthy, nd) = build_num_datatype(rthy, thms, rec)
+def dt :~ DatatypeThms = nd.thms
+
+// `wf_lt` comes from `subterm.rhm`'s own `prove_wf_t_lt`, unmodified: the
+// derived type does not merely resemble what the machinery consumes, it is
+// accepted by it.
+check show(concl_of(nd.wf_lt)) ~is "wf(num_lt)"
+
+check:
+  nd.lt_equations.map(fun (t :: Thm): show(concl_of(t)))
+  ~is ["forall (x :: num): num_lt(x, zero_num) <=> false",
+       "forall (x :: num, y :: num): num_lt(x, suc_num(y)) <=> x === y or num_lt(x, y)"]
+
+// nothing in the package is conditional, and none of it cost an axiom
+check:
+  let all = [nd.wf_lt] ++ nd.lt_equations
+              ++ [dt.induction, dt.cases, dt.injectivity[#'suc_num]]
+              ++ dt.distinctness ++ dt.discriminators ++ dt.selectors
+              ++ dt.elim_rules
+  [all.length(),
+   for values(m = 0) (t in all): math.max(m, hyps_of(t :~ Thm).length()),
+   axioms_of(dthy).length() - axioms_of(base).length()]
+  ~is [14, 0, 1]
+
+// -- and it is the same package the axiom schema would postulate -------------
+//
+// The differential that makes the claim precise: run `datatype_axioms` on the
+// same spec and compare every statement. They agree exactly -- so this is the
+// same theory, reached by proof instead of by assumption. The schema adds 11
+// axioms to say it; the derivation adds none beyond the one for infinity,
+// which is shared and not per-type.
+def (athy, axiomatic0) = datatype_axioms(base, num_spec())
+def axiomatic :~ DatatypeThms = axiomatic0
+
+check axioms_of(athy).length() - axioms_of(base).length() ~is 11
+
+check:
+  let derived = [dt.induction, dt.cases, dt.injectivity[#'suc_num]]
+                  ++ dt.distinctness ++ dt.discriminators ++ dt.selectors
+                  ++ dt.elim_rules
+  let posited = [axiomatic.induction, axiomatic.cases,
+                 axiomatic.injectivity[#'suc_num]]
+                  ++ axiomatic.distinctness ++ axiomatic.discriminators
+                  ++ axiomatic.selectors ++ axiomatic.elim_rules
+  [derived.length() == posited.length(),
+   for values(same = #true) (a in derived, b in posited):
+     same && show(concl_of(a :~ Thm)) == show(concl_of(b :~ Thm))]
+  ~is [#true, #true]

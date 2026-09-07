@@ -41,6 +41,8 @@ import:
   "wellfounded.rhm" open
   "wfrec.rhm" open
   "taut.rhm" open
+  "datatype.rhm" open
+  "subterm.rhm" open
   rhombus/hol/printer open
   "bool.rhm" open
   "conv.rhm" open
@@ -57,8 +59,11 @@ export:
   num_ty
   IndThms
   NumRec
+  NumDatatype
   build_ind
   build_num_recursion
+  num_spec
+  build_num_datatype
 
 def ty_ind :: Symbol = #'ind
 def ty_num :: Symbol = #'num
@@ -707,3 +712,145 @@ fun build_num_recursion(thy0 :: Theory, thms :: IndThms) :: values(Theory, NumRe
          NumRec(GENL(thy2, [e, f], EXISTS(thy2, target, rec_ef, both)),
                 GENL(thy2, [e, f], at_zero),
                 GENL(thy2, [e, f], at_suc)))
+
+// -- num as a datatype the rest of the system can consume --------------------
+//
+// Everything a self-recursive `type` declaration installs, for `num`, derived.
+// The point is not that `num` is special: this is the exact shape phase 3 has
+// to produce for an arbitrary recursive datatype, built once by hand so that
+// the target is a thing that exists rather than a description.
+//
+// `wf_lt` is produced by `subterm.rhm`'s own `prove_wf_t_lt`, unmodified --
+// which is the check that the derived type really does fit the machinery, and
+// not merely resemble it.
+class NumDatatype(thms :: DatatypeThms,
+                  lt_equations :: List.of(Thm),
+                  wf_lt :: Thm)
+
+// The declaration `num` would have had, if it had been written as one.
+fun num_spec() :: DatatypeSpec:
+  DatatypeSpec(ty_num, [],
+               [Ctor(c_zero, []),
+                Ctor(c_suc, [Field(#'pre, num_ty())])])
+
+fun build_num_datatype(thy0 :: Theory, ind :: IndThms,
+                       rec :: NumRec) :: values(Theory, NumDatatype):
+  let spec = num_spec()
+  let nty = num_ty()
+  let zero = mk_const(c_zero, nty)
+  let suc = mk_const(c_suc, mk_fun(nty, nty))
+  let pre = mk_const(c_pre, mk_fun(nty, nty))
+  let nb = mk_fun(nty, bool)
+  let x = mk_var(#'x, nty)
+  let y = mk_var(#'y, nty)
+  let k = mk_var(#'k, nty)
+  let r = mk_var(#'r, nb)
+
+  // -- the subterm relation, defined by recursion rather than postulated ----
+  //
+  //   num_lt x zero      <=> false
+  //   num_lt x (suc y)   <=> x = y or num_lt x y
+  //
+  // which is `num_rec` at `'b := num -> bool`, with the two arguments in the
+  // order `T_lt` uses.
+  let e0 = mk_abs(x, tm_false)
+  let f0 = mk_abs(r, mk_abs(y, mk_abs(x, mk_disj(mk_eq(x :~ Term, y),
+                                                 mk_comb(r, x)))))
+  let rec_ty = mk_fun(nb, mk_fun(mk_fun(nb, mk_fun(nty, nb)), mk_fun(nty, nb)))
+  let core = list_mk_comb(mk_const(c_num_rec, rec_ty), [e0, f0])
+  let lt_ty = mk_fun(nty, mk_fun(nty, bool))
+  let lt_name = subterm_name(spec)
+  let (thy, def_lt):
+    new_basic_definition(thy0,
+                         mk_eq(mk_var(lt_name, lt_ty),
+                               mk_abs(x, mk_abs(y, mk_comb(mk_comb(core, y),
+                                                           x :~ Term)))))
+  fun lt_at(a :: Term, b :: Term) :: Thm: unfold_def(thy, def_lt, [a, b])
+  let rz = SPECL(thy, [e0, f0], INST_TYPE(thy, {#'b: nb}, rec.at_zero))
+  let rs = SPECL(thy, [e0, f0], INST_TYPE(thy, {#'b: nb}, rec.at_suc))
+  let lt_zero:
+    GEN(thy, x, TRANS(lt_at(x :~ Term, zero),
+                      BETA_RULE(thy, AP_THM(thy, rz, x :~ Term))))
+  let lt_suc:
+    let disj_c = mk_const(c_disj, mk_fun(bool, mk_fun(bool, bool)))
+    let applied = BETA_RULE(thy, AP_THM(thy, SPEC(thy, y, rs), x :~ Term))
+    let fold = AP_TERM(thy, mk_comb(disj_c, mk_eq(x :~ Term, y)),
+                       SYM(thy, lt_at(x :~ Term, y :~ Term)))
+    GENL(thy, [x, y], TRANS(lt_at(x :~ Term, mk_comb(suc, y)),
+                            TRANS(applied, fold)))
+  let lt_eqs = [lt_zero, lt_suc]
+  let wf_lt = prove_wf_t_lt(thy, spec, lt_eqs, ind.induction)
+
+  // -- selector and discriminators ------------------------------------------
+  let sel_ty = mk_fun(nty, nty)
+  let (thy, def_sel):
+    new_basic_definition(thy, mk_eq(mk_var(selector_name(spec.ctors[1], (spec.ctors[1] :~ Ctor).fields[0]), sel_ty), pre))
+  let (thy, def_isz):
+    new_basic_definition(thy, mk_eq(mk_var(discriminator_name(spec.ctors[0]), nb),
+                                    mk_abs(x, mk_eq(x :~ Term, zero))))
+  let (thy, def_iss):
+    new_basic_definition(thy, mk_eq(mk_var(discriminator_name(spec.ctors[1]), nb),
+                                    mk_abs(x, mk_neg(mk_eq(x :~ Term, zero)))))
+  let sel = mk_const(selector_name(spec.ctors[1], (spec.ctors[1] :~ Ctor).fields[0]), sel_ty)
+  let isz = mk_const(discriminator_name(spec.ctors[0]), nb)
+  let iss = mk_const(discriminator_name(spec.ctors[1]), nb)
+
+  let sel_eq:
+    GEN(thy, x, TRANS(unfold_def(thy, def_sel, [mk_comb(suc, x)]),
+                      SPEC(thy, x, ind.pre_suc)))
+
+  let zero_true = EQT_INTRO(thy, REFL(thy, zero))
+  let suc_false = EQF_INTRO(thy, SPEC(thy, y, ind.suc_not_zero))
+  let disc_zz = TRANS(unfold_def(thy, def_isz, [zero]), zero_true)
+  let disc_zs:
+    GEN(thy, y, TRANS(unfold_def(thy, def_isz, [mk_comb(suc, y)]), suc_false))
+  let disc_sz:
+    let nz = mk_neg(mk_eq(zero, zero))
+    let contra = MP(thy, NOT_ELIM(thy, ASSUME(thy, nz)), REFL(thy, zero))
+    TRANS(unfold_def(thy, def_iss, [zero]),
+          EQF_INTRO(thy, NOT_INTRO(thy, DISCH(thy, nz, contra))))
+  let disc_ss:
+    GEN(thy, y, TRANS(unfold_def(thy, def_iss, [mk_comb(suc, y)]),
+                      EQT_INTRO(thy, SPEC(thy, y, ind.suc_not_zero))))
+
+  // -- distinctness, in the `[i, j]` order the schema states it -------------
+  let distinct:
+    let stmt = mk_eq(zero, mk_comb(suc, y))
+    let contra = MP(thy, NOT_ELIM(thy, SPEC(thy, y, ind.suc_not_zero)),
+                    SYM(thy, ASSUME(thy, stmt)))
+    GEN(thy, y, NOT_INTRO(thy, DISCH(thy, stmt, contra)))
+
+  // -- destructor elimination ------------------------------------------------
+  let elim_zero:
+    let asm = ASSUME(thy, mk_comb(isz, x))
+    GEN(thy, x, DISCH(thy, mk_comb(isz, x),
+                      SYM(thy, EQ_MP(unfold_def(thy, def_isz, [x :~ Term]),
+                                     asm))))
+  let elim_suc:
+    let asm = ASSUME(thy, mk_comb(iss, x))
+    let not_zero = EQ_MP(unfold_def(thy, def_iss, [x :~ Term]), asm)
+    let goal = mk_eq(mk_comb(suc, mk_comb(sel, x)), x :~ Term)
+    let from_zero:
+      CCONTR(thy, goal,
+             MP(thy, NOT_ELIM(thy, not_zero),
+                ASSUME(thy, mk_eq(x :~ Term, zero))))
+    let from_suc:
+      let a = ASSUME(thy, mk_eq(x :~ Term, mk_comb(suc, k)))
+      TRANS(AP_TERM(thy, suc, TRANS(AP_TERM(thy, sel, a),
+                                    SPEC(thy, k, sel_eq))),
+            SYM(thy, a))
+    let ex = mk_exists(k, mk_eq(x :~ Term, mk_comb(suc, k)))
+    GEN(thy, x, DISCH(thy, mk_comb(iss, x),
+                      DISJ_CASES(thy, SPEC(thy, x, ind.cases), from_zero,
+                                 CHOOSE(thy, k, ASSUME(thy, ex), from_suc))))
+
+  values(thy,
+         NumDatatype(DatatypeThms(spec,
+                                  {c_suc: ind.suc_injective},
+                                  [distinct],
+                                  ind.induction,
+                                  ind.cases,
+                                  [disc_zz, disc_zs, disc_sz, disc_ss],
+                                  [sel_eq],
+                                  [elim_zero, elim_suc]),
+                     lt_eqs, wf_lt))

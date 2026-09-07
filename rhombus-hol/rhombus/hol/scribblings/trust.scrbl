@@ -145,6 +145,13 @@ by recursion on the naturals and its clauses @emph{proved}. That is
 @tt{WFREC} --- itself derived --- applied to @tt{num_pred}, so it adds no
 axiom either.
 
+All of it is packaged as the @tt{DatatypeThms} a @rhombus(type, ~datum)
+declaration would install --- including the subterm relation, defined by
+recursion and proved well-founded by @tt{subterm.rhm}'s own derivation,
+unmodified. Run the axiom schema on the same specification and every one of
+the eleven statements agrees: the same theory, reached by proof instead of
+assumption, for eleven fewer axioms.
+
 That makes @tt{num} the first self-recursive type in this system whose
 characterisation is proved rather than assumed, and the first over which
 recursion is available without postulating anything. It is not yet the

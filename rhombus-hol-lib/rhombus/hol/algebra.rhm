@@ -51,6 +51,10 @@ export:
   mk_tuple
   tuple_proj
   prove_tuple_proj
+  AlgebraThms
+  build_algebra
+  algebra_base_theory
+  algebra_base_thms
 
 // -- unit --------------------------------------------------------------
 //
@@ -638,3 +642,45 @@ fun prove_tuple_proj(thy :: Theory, prod_thms :: ProdThms, tys :: List.of(HType)
           let cong = tuple_proj_cong(thy, rest_tys, i - 1, snd_at)
           let rec_thm = prove_tuple_proj(thy, prod_thms, rest_tys, i - 1, rest)
           TRANS(cong, rec_thm)
+
+// -- the shared bootstrap ------------------------------------------------
+//
+// `unit`, `prod` and `sum` are declared with fixed names, so building them
+// is a one-shot operation on any given theory: a second `build_unit` on a
+// theory that already has one dies in `new_basic_type_definition` with
+// "type constructor is already declared".  Every non-recursive datatype
+// needs all three (`datatype_gen.rhm`), so building them per declaration
+// made the *second* non-recursive `type` in a module fail outright.
+//
+// They are therefore built exactly once, here, at module level -- the same
+// treatment `bool.rhm` gives `base_theory()` and `wfrec.rhm` gives
+// `wfrec_rel`, and for the same reason: `new_basic_type_definition` and
+// `new_basic_definition` mint a fresh `Stamp` per call, so two independent
+// builds would be sibling theories neither of which descends from the
+// other, and their theorems could not be used together even if the names
+// somehow did not collide.  A session's theory chain is
+//
+//   base_theory()  ->  algebra_base_theory()  ->  wfrec_base_theory()  ->  user
+//
+// and every `AlgebraThms` theorem is stamped at the second link, so it is
+// usable in anything downstream of it.
+class AlgebraThms(unit_unique :: Thm, prod :: ProdThms, sum :: SumThms)
+
+// The raw one-shot build, exposed for tests that want their own copy in a
+// theory of their own.  Ordinary callers want `algebra_base_thms()`.
+fun build_algebra(thy :: Theory) :: values(Theory, AlgebraThms):
+  let (thy, unit_unique) = build_unit(thy)
+  let (thy, prodthms) = build_prod(thy)
+  let (thy, sumthms) = build_sum(thy)
+  values(thy, AlgebraThms(unit_unique, prodthms, sumthms))
+
+class AlgebraBase(thy :: Theory, thms :: AlgebraThms)
+
+fun build_algebra_base() :: AlgebraBase:
+  let (thy, thms) = build_algebra(base_theory())
+  AlgebraBase(thy, thms)
+
+def algebra_base :: AlgebraBase = build_algebra_base()
+
+fun algebra_base_theory() :: Theory: algebra_base.thy
+fun algebra_base_thms() :: AlgebraThms: algebra_base.thms

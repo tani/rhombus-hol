@@ -61,6 +61,7 @@ export:
   prove_ctor_injective
   prove_ctor_distinct
   prove_datatype_induction
+  prove_datatype_cases
 
 fun path_ty() :: HType: mk_fun(num_ty(), num_ty())
 
@@ -767,3 +768,106 @@ fun prove_datatype_induction(thy :: Theory, inl :: Term, junk :: Term,
   let p_x = EQ_MP(AP_TERM(thy, bigP, INST(thy, [[x :~ Term, av]], cv.abs_rep)),
                   p_abs)
   GEN(thy, bigP, DISCH(thy, hyp_term, GEN(thy, x, p_x)))
+
+// `|- !x. (?a. x = C_0(a, ...)) or ... or (?a xs. x = C_m(a, xs))`
+//
+// Exhaustiveness, from induction: take the predicate to be the disjunction
+// itself.  At each constructor the obligation is discharged by choosing that
+// disjunct and witnessing it with the arguments in hand, so the case
+// hypotheses are never used -- exhaustiveness does not depend on anything
+// holding of the children, only on there being no other way to build a value.
+fun prove_datatype_cases(thy :: Theory, inl :: Term, junk :: Term,
+                         ctors :: List.of(CtorRep), cv :: Carved,
+                         induction :: Thm) :: Thm:
+  let m = ctors.length()
+  let x = mk_var(#'x, cv.ty)
+
+  fun ctor_vars(i :: Int, prefix :: String) :: values(FVar, List.of(FVar)):
+    let c :~ CtorRep = ctors[i]
+    let (aty, _) = dest_fun(type_of(c.label))
+    values(mk_var(Symbol.from_string(prefix ++ "a" ++ to_string(i)), aty),
+           for List (k in List.iota(c.arity)):
+             mk_var(Symbol.from_string(prefix ++ to_string(i) ++ "_" ++ to_string(k)),
+                    cv.ty))
+
+  // `?a xs. scrut = C_i(a, xs)`
+  fun disjunct(scrut :: Term, i :: Int) :: Term:
+    let (a, xs) = ctor_vars(i, "d")
+    let built = mk_abs_ctor(inl, junk, cv, (ctors[i] :~ CtorRep), a :~ Term,
+                            xs.map(fun (v :: FVar): v :~ Term))
+    for values(t :~ Term = mk_eq(scrut, built)) (v in ([a] ++ xs).reverse()):
+      mk_exists(v :~ FVar, t)
+
+  // the disjunction of `d_k .. d_{m-1}`, nested to the right
+  fun rest(scrut :: Term, k :: Int) :: Term:
+    recur loop (n = m - 2, acc :~ Term = disjunct(scrut, m - 1)):
+      cond
+      | n < k: acc
+      | ~else: loop(n - 1, mk_disj(disjunct(scrut, n), acc))
+
+  let bigP = mk_abs(x, rest(x :~ Term, 0))
+  fun p_at(t :: Term) :: Thm:
+    match BETA_CONV(thy, mk_comb(bigP, t))
+    | th :: Thm: th
+    | ~else: error(~who: #'prove_datatype_cases, "beta failed")
+
+  // the induction premise for constructor `i`, discharged outright
+  fun premise_for(i :: Int) :: Thm:
+    let c :~ CtorRep = ctors[i]
+    let (a, xs) = ctor_vars(i, "c")
+    let args = [a :~ Term] ++ xs.map(fun (v :: FVar): v :~ Term)
+    let built = mk_abs_ctor(inl, junk, cv, c, a :~ Term,
+                            xs.map(fun (v :: FVar): v :~ Term))
+    // fill this disjunct's existentials from the inside out
+    let witnessed:
+      recur loop (k = args.length() - 1, acc :~ Thm = REFL(thy, built)):
+        cond
+        | k < 0: acc
+        | ~else:
+            let target:
+              recur peel (n = 0, t :~ Term = disjunct(built, i)):
+                cond
+                | n == k: t
+                | ~else:
+                    match dest_exists(t)
+                    | [v, body]: peel(n + 1, inst_fvar([[args[n], v :~ FVar]], body))
+                    | ~else: error(~who: #'prove_datatype_cases, "shape")
+            loop(k - 1, EXISTS(thy, target, args[k], acc))
+    // inject it into the disjunction: right first, then wrap leftwards
+    let innermost:
+      cond
+      | i == m - 1: witnessed
+      | ~else: DISJ1(thy, witnessed, rest(built, i + 1))
+    let chosen:
+      recur loop (k = i - 1, acc :~ Thm = innermost):
+        cond
+        | k < 0: acc
+        | ~else: loop(k - 1, DISJ2(thy, disjunct(built, k), acc))
+    let at_built = EQ_MP(SYM(thy, p_at(built)), chosen)
+    let body:
+      cond
+      | c.arity == 0: at_built
+      | ~else:
+          let prem:
+            recur loop (k = xs.length() - 1,
+                        acc :~ Term = mk_comb(bigP, (xs[xs.length() - 1] :~ FVar) :~ Term)):
+              cond
+              | k <= 0: acc
+              | ~else: loop(k - 1, mk_conj(mk_comb(bigP, (xs[k - 1] :~ FVar) :~ Term), acc))
+          DISCH(thy, prem, at_built)
+    GENL(thy, [a] ++ xs, body)
+
+  let parts = for List (i in List.iota(m)): premise_for(i)
+  let prem:
+    recur loop (k = parts.length() - 1, acc :~ Thm = (parts[parts.length() - 1] :~ Thm)):
+      cond
+      | k <= 0: acc
+      | ~else: loop(k - 1, CONJ(thy, (parts[k - 1] :~ Thm), acc))
+  let all_p = MP(thy, SPEC(thy, bigP, induction), prem)
+  // `SPEC` reduces the head application here but not inside the premise
+  // above, so reduce only if there is something left to reduce.
+  let at_x = SPEC(thy, x, all_p)
+  GEN(thy, x,
+      match BETA_CONV(thy, concl_of(at_x))
+      | th :: Thm: EQ_MP(th, at_x)
+      | ~else: at_x)

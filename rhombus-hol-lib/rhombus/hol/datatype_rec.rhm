@@ -1,0 +1,160 @@
+#lang rhombus/static
+
+// Carving a self-recursive datatype out of the labelled trees over `num`
+// (PLAN.md 9.2 phase 3).
+//
+// `treerep.rhm` supplies the representation and the facts about it; this
+// module is what turns an arbitrary `DatatypeSpec` into the pieces those
+// facts are stated about -- the label type, the tag injections, the junk
+// subtree, the `REP` predicate, and the type itself.
+//
+// A constructor's *label* carries only its non-recursive fields, tagged by
+// which constructor it is; its recursive fields become the node's children.
+// So the label type is exactly the sum-of-products `datatype_gen.rhm` already
+// builds for non-recursive datatypes, taken over the non-recursive fields --
+// which is why that machinery is shared rather than repeated.
+//
+// The tags are introduced as *constants*, not as lambdas.  A lambda label
+// would make every `label a` a redex, and the pieces that get beta-reduced
+// along the way would stop matching the ones that do not; that is the trap
+// `WFREC` documents and the one `EXISTS` was silently falling into.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/names open
+  rhombus/hol/kernel open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "algebra.rhm" open
+  "datatype.rhm" open
+  "datatype_gen.rhm" open
+  "infinity.rhm" open
+  "treerep.rhm" open
+
+export:
+  is_selfrecursive_spec
+  RecCarving
+  carve_recursive_datatype
+
+def unitty :: HType = mk_tyapp(ty_unit, [])
+
+// Directly self-recursive, which is the class `check_spec` already admits:
+// at least one field somewhere is the type itself, and no field is anything
+// *containing* the type (nesting is refused before this point).
+fun is_selfrecursive_spec(spec :: DatatypeSpec) :: Boolean:
+  for any (c in spec.ctors):
+    for any (f in (c :~ Ctor).fields): is_recursive_field(spec, f :~ Field)
+
+fun nonrec_fields(spec :: DatatypeSpec, c :: Ctor) :: List.of(Field):
+  c.fields.filter(~keep: fun (f :: Field): !is_recursive_field(spec, f))
+
+fun rec_count(spec :: DatatypeSpec, c :: Ctor) :: Int:
+  c.fields.filter(~keep: fun (f :: Field): is_recursive_field(spec, f)).length()
+
+// Everything the carving produced, in one place.  `ctors` is what
+// `treerep.rhm`'s theorems are stated against, and `label_defs` are the
+// defining equations of the tag constants, which the layer above needs in
+// order to restate those theorems about the datatype's own constructors.
+class RecCarving(carved :: Carved,
+                 ctors :: List.of(CtorRep),
+                 label_types :: List.of(HType),
+                 label_defs :: List.of(Thm),
+                 junk :: Term,
+                 node_inl :: Term,
+                 rep_def :: Thm)
+
+// `<Type>_lab<i>`, `<Type>_bot`, `<Type>_REP`: names derived from the type's
+// own, so two datatypes in one module cannot collide.
+fun suffixed(spec :: DatatypeSpec, s :: String) :: Symbol:
+  Symbol.from_string(to_string(spec.name) ++ s)
+
+fun carve_recursive_datatype(thy0 :: Theory, spec :: DatatypeSpec,
+                             alg :: AlgebraThms) :: values(Theory, RecCarving):
+  unless is_selfrecursive_spec(spec)
+  | error(~who: #'carve_recursive_datatype,
+          "specification has no recursive field",
+          error.val(~label: "name", spec.name))
+
+  let ptys = for List (c in spec.ctors):
+               payload_type_of_fields(nonrec_fields(spec, c :~ Ctor))
+  let lab_ty = repr_type_from(ptys)
+  let opt_ty = sum_ty(lab_ty, unitty)
+  let tree_ty = rep_ty(opt_ty)
+  let node_inl = mk_const(c_inl, mk_fun(lab_ty, opt_ty))
+
+  // -- the tag constants ----------------------------------------------------
+  let (thy1, label_terms, label_defs):
+    for values(t :~ Theory = thy0, ls :~ List = [], ds :~ List = []) (i in List.iota(spec.ctors.length())):
+      let pty = ptys[i]
+      let a = mk_var(#'a, pty)
+      let name = suffixed(spec, "_lab" ++ to_string(i))
+      let (t2, d):
+        new_basic_definition(t, mk_eq(mk_var(name, mk_fun(pty, lab_ty)),
+                                      mk_abs(a, inject_from(ptys, i, a :~ Term))))
+      values(t2, ls ++ [mk_const(name, mk_fun(pty, lab_ty))], ds ++ [d])
+
+  // -- the junk subtree ------------------------------------------------------
+  //
+  // Any term of the representation type will do: it fills child slots past a
+  // constructor's arity, and nothing ever reads them.  The empty tree is the
+  // readable choice.
+  let (thy2, _junk_def):
+    new_basic_definition(thy1,
+                         mk_eq(mk_var(suffixed(spec, "_bot"), tree_ty),
+                               mk_abs(mk_var(#'p, path_ty()),
+                                      mk_comb(mk_const(c_inr,
+                                                       mk_fun(unitty, opt_ty)),
+                                              mk_const(c_one, unitty)))))
+  let junk = mk_const(suffixed(spec, "_bot"), tree_ty)
+
+  let ctors = for List (c in spec.ctors, lab in label_terms):
+                CtorRep(lab :~ Term, rec_count(spec, c :~ Ctor))
+
+  // -- the least set closed under the constructors --------------------------
+  let rep_name = suffixed(spec, "_REP")
+  let (thy3, rep_def):
+    new_basic_definition(thy2,
+                         mk_eq(mk_var(rep_name, mk_fun(tree_ty, bool)),
+                               mk_rep_pred(node_inl :~ Term, junk, ctors)))
+  let rep_const = mk_const(rep_name, mk_fun(tree_ty, bool))
+  fun rep_at(t :: Term) :: Thm: unfold_def(thy3, rep_def, [t])
+
+  // -- and the type ----------------------------------------------------------
+  //
+  // The witness is any constructor with no recursive fields, at an arbitrary
+  // payload.  `@x. true` is a well-formed term at every type, and no
+  // inhabitation theorem is needed: the closure theorem is already universally
+  // quantified over the payload, so specialising it is enough.
+  let base_i:
+    recur loop (i = 0):
+      cond
+      | i >= spec.ctors.length():
+          error(~who: #'carve_recursive_datatype,
+                "every constructor recurses, so the type would be empty",
+                error.val(~label: "name", spec.name))
+      | rec_count(spec, (spec.ctors[i] :~ Ctor)) == 0: i
+      | ~else: loop(i + 1)
+  let arb = mk_select(mk_var(#'w, ptys[base_i]), tm_true)
+  let witness = SPEC(thy3, arb,
+                     prove_rep_closed(thy3, node_inl :~ Term, junk, ctors,
+                                      rep_const, rep_at, base_i))
+  let (thy4, abs_rep, rep_pred):
+    new_basic_type_definition(thy3, spec.name,
+                              abstraction_name(spec.name),
+                              representation_name(spec.name), witness)
+  let self = mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol): mk_tyvar(p)))
+  let carved:
+    Carved(self,
+           mk_const(abstraction_name(spec.name), mk_fun(tree_ty, self)),
+           mk_const(representation_name(spec.name), mk_fun(self, tree_ty)),
+           rep_const, abs_rep, rep_pred)
+  values(thy4,
+         RecCarving(carved, ctors, ptys, label_defs, junk, node_inl :~ Term,
+                    rep_def))
+
+fun abstraction_name(n :: Symbol) :: Symbol:
+  Symbol.from_string("abs_" ++ to_string(n))
+fun representation_name(n :: Symbol) :: Symbol:
+  Symbol.from_string("rep_" ++ to_string(n))

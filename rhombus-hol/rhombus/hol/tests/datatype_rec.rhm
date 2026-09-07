@@ -1,0 +1,109 @@
+#lang rhombus/static
+
+// Carving an *arbitrary* self-recursive `DatatypeSpec` (PLAN.md 9.2 phase 3).
+//
+// `treerep.rhm` proved the facts about the representation on one hand-built
+// example.  This is the step that stops it being an example: any spec in the
+// class `check_spec` admits -- directly self-recursive, not nested, not
+// mutual -- gets its label type, tag constants, junk subtree, `REP` predicate
+// and type from the spec alone.
+//
+// The label carries only a constructor's *non-recursive* fields, tagged by
+// which constructor it is, so it is exactly the sum-of-products
+// `datatype_gen.rhm` already builds for non-recursive datatypes. The
+// recursive fields become the node's children instead.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  rhombus/hol/bool open
+  rhombus/hol/algebra open
+  rhombus/hol/datatype open
+  rhombus/hol/infinity open
+  rhombus/hol/treerep open
+  rhombus/hol/datatype_rec open
+
+def base = algebra_base_theory()
+def (thy0, ind) = build_ind(base)
+def alg :~ AlgebraThms = algebra_base_thms()
+
+fun tyvar_a() :: HType: mk_tyvar(#'a)
+
+// one type parameter, one recursive field, one ordinary field
+def list_spec:
+  DatatypeSpec(#'MyList, [#'a],
+               [Ctor(#'MyNil, []),
+                Ctor(#'MyCons, [Field(#'hd, tyvar_a()),
+                                Field(#'tl, mk_tyapp(#'MyList, [tyvar_a()]))])])
+// *two* recursive fields in one constructor
+def tree_spec:
+  DatatypeSpec(#'MyTree, [#'a],
+               [Ctor(#'MyLeaf, [Field(#'v, tyvar_a())]),
+                Ctor(#'MyNode, [Field(#'l, mk_tyapp(#'MyTree, [tyvar_a()])),
+                                Field(#'r, mk_tyapp(#'MyTree, [tyvar_a()]))])])
+// three constructors, no type parameters, mixed arities
+def exp_spec:
+  DatatypeSpec(#'MyExp, [],
+               [Ctor(#'Lit, [Field(#'n, mk_tyapp(#'num, []))]),
+                Ctor(#'Neg, [Field(#'e, mk_tyapp(#'MyExp, []))]),
+                Ctor(#'Add, [Field(#'l, mk_tyapp(#'MyExp, [])),
+                             Field(#'r, mk_tyapp(#'MyExp, []))])])
+
+fun carve(spec :: DatatypeSpec) :~ List:
+  let (thy, rc) = carve_recursive_datatype(thy0, spec, alg)
+  [thy, rc]
+
+// -- the class this admits ---------------------------------------------------
+check is_selfrecursive_spec(list_spec) ~is #true
+check is_selfrecursive_spec(tree_spec) ~is #true
+check:
+  is_selfrecursive_spec(DatatypeSpec(#'Flat, [],
+                                     [Ctor(#'A, []), Ctor(#'B, [])]))
+  ~is #false
+
+// a type every constructor of which recurses would be empty, and is refused
+// rather than carved into something unusable
+check:
+  carve_recursive_datatype(thy0,
+                           DatatypeSpec(#'Bad, [],
+                                        [Ctor(#'W, [Field(#'x, mk_tyapp(#'Bad, []))])]),
+                           alg)
+  ~throws "every constructor recurses"
+
+// -- and each spec really is carved ------------------------------------------
+//
+// The type arrives with the right arity, its two coercion theorems hold
+// outright, and the only axiom in the theory is still infinity's -- one, not
+// one per datatype.
+check:
+  for List (spec in [list_spec, tree_spec, exp_spec]):
+    let [thy, rc] = carve(spec :~ DatatypeSpec)
+    let rc :~ RecCarving = rc
+    let cv :~ Carved = rc.carved
+    [type_arity(thy :~ Theory, (spec :~ DatatypeSpec).name),
+     hyps_of(cv.abs_rep).length(),
+     hyps_of(cv.rep_pred).length(),
+     axioms_of((thy :~ Theory)).length() - axioms_of(base).length()]
+  ~is [[1, 0, 0, 1], [1, 0, 0, 1], [0, 0, 0, 1]]
+
+// one tag constant per constructor, each with a defining equation
+check:
+  for List (spec in [list_spec, tree_spec, exp_spec]):
+    let [_, rc] = carve(spec :~ DatatypeSpec)
+    let rc :~ RecCarving = rc
+    [rc.ctors.length(), rc.label_defs.length()]
+  ~is [[2, 2], [2, 2], [3, 3]]
+
+// the children counts come from the recursive fields, not the field count
+check:
+  let [_, rc] = carve(tree_spec)
+  let rc :~ RecCarving = rc
+  rc.ctors.map(fun (c :: CtorRep): c.arity)
+  ~is [0, 2]
+check:
+  let [_, rc] = carve(exp_spec)
+  let rc :~ RecCarving = rc
+  rc.ctors.map(fun (c :: CtorRep): c.arity)
+  ~is [0, 1, 2]

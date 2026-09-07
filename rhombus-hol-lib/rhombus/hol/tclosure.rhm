@@ -1,0 +1,208 @@
+#lang rhombus/static
+
+// The transitive closure of a relation, and the four facts about it that a
+// derived subterm relation needs (PLAN.md section 9.29).
+//
+// A datatype's subterm relation used to arrive as a clausal *definition* whose
+// equations `install_function` postulated with `new_axiom` -- the last
+// postulation left on the `type` declaration path.  It does not have to be a
+// recursive definition at all: "proper subterm" is the transitive closure of
+// "direct child", and "direct child" is a *non-recursive* predicate, spelled
+// with the discriminators and selectors the datatype already proves.  That
+// turns two axioms per datatype into two definitions and a proof.
+//
+// The closure is the standard impredicative one:
+//
+//   TC R x y  <=>  !P. (!u v. R u v ==> P u v)
+//                      /\ (!u v w. P u v /\ P v w ==> P u w)
+//                      ==> P x y
+//
+// "in every relation that contains `R` and is transitive".  Being a plain
+// definition, it costs no axiom, and the induction principle falls out of it
+// by specialising `P` -- there is nothing to postulate.
+//
+// `unfold` is the one that takes work.  Read right to left it says a chain
+// from `x` to `y` has a *last* step: some `z` with `R z y`, reached either
+// because `x` is `z` or by a shorter chain.  That is what turns
+// `TC child x (C a1 ... ak)` into a statement about the children of `C`, and
+// so it is what makes the constructor equations provable rather than assumed.
+// It is proved by TC induction on the strengthened predicate
+// `Q u v := TC R u v /\ (?z. R z v /\ (u = z \/ TC R u z))`: the closure
+// itself has to be carried along, because the transitivity case needs the
+// chain from `x` to `y` and not merely the unfolding of it.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "algebra.rhm" open
+
+export:
+  TCThms
+  build_tc
+  tc_base_theory
+  tc_base_thms
+  tc_at_type
+
+class TCThms(
+  // `TC`, as a term: `('a -> 'a -> bool) -> 'a -> 'a -> bool`
+  tc :: Term,
+  // |- !R x y. R x y ==> TC R x y
+  inc :: Thm,
+  // |- !R x y z. TC R x y /\ TC R y z ==> TC R x z
+  trans :: Thm,
+  // |- !R P. (!u v. R u v ==> P u v) /\ (!u v w. P u v /\ P v w ==> P u w)
+  //          ==> !x y. TC R x y ==> P x y
+  induct :: Thm,
+  // |- !R x y. TC R x y ==> ?z. R z y /\ (x = z \/ TC R x z)
+  unfold :: Thm)
+
+// `TC` specialised to one type: what a caller writes to build `TC rel`.
+fun tc_at_type(thms :: TCThms, ty :: HType) :: Term:
+  match thms.tc
+  | Const(n, _): mk_const(n, mk_fun(mk_fun(ty, mk_fun(ty, bool)),
+                                    mk_fun(ty, mk_fun(ty, bool))))
+  | ~else: error(~who: #'tc_at_type, "TC is not a constant")
+
+fun build_tc(thy0 :: Theory) :: values(Theory, TCThms):
+  let av = mk_tyvar(#'a)
+  let rty = mk_fun(av, mk_fun(av, bool))
+  let tc_ty = mk_fun(rty, rty)
+  let rv = mk_var(#'R, rty)
+  let xv = mk_var(#'x, av)
+  let yv = mk_var(#'y, av)
+  let zv = mk_var(#'z, av)
+  let pv = mk_var(#'P, rty)
+  let uv = mk_var(#'u, av)
+  let vv = mk_var(#'v, av)
+  let wv = mk_var(#'w, av)
+  fun ap2(f :: Term, a :: Term, b :: Term) :: Term: list_mk_comb(f, [a, b])
+  let inc_hyp = mk_forall(uv, mk_forall(vv, mk_imp(ap2(rv, uv, vv),
+                                                   ap2(pv, uv, vv))))
+  let trans_inner = mk_imp(mk_conj(ap2(pv, uv, vv), ap2(pv, vv, wv)),
+                           ap2(pv, uv, wv))
+  let trans_hyp = mk_forall(uv, mk_forall(vv, mk_forall(wv, trans_inner)))
+  let closed = mk_conj(inc_hyp, trans_hyp)
+  let tc_inner = mk_forall(pv, mk_imp(closed, ap2(pv, xv, yv)))
+  let tc_body = mk_abs(rv, mk_abs(xv, mk_abs(yv, tc_inner)))
+  let (thy, tc_def) = new_basic_definition(thy0,
+                                           mk_eq(mk_var(#'TC, tc_ty), tc_body))
+  let tc = mk_const(#'TC, tc_ty)
+  fun tc_ap(r :: Term, a :: Term, b :: Term) :: Term: list_mk_comb(tc, [r, a, b])
+  let tc_at = unfold_def(thy, tc_def, [rv :~ Term, xv, yv])
+  // `TC R a b <=> ...`, for any `a` and `b`
+  fun inst_tc(a :: Term, b :: Term) :: Thm:
+    INST(thy, [[a, xv], [b, yv]], tc_at)
+  let hyp_conj = ASSUME(thy, closed)
+
+  // -- inclusion ------------------------------------------------------------
+  let r_asm = ASSUME(thy, ap2(rv, xv, yv))
+  let p_x_y = MP(thy, SPECL(thy, [xv :~ Term, yv], CONJUNCT1(thy, hyp_conj)),
+                 r_asm)
+  let inc0 = EQ_MP(SYM(thy, inst_tc(xv, yv)),
+                   GEN(thy, pv, DISCH(thy, closed, p_x_y)))
+  let tc_inc = GENL(thy, [rv, xv, yv], DISCH(thy, ap2(rv, xv, yv), inc0))
+
+  // -- induction: `P` is just the bound variable, specialised ---------------
+  let tc_asm = ASSUME(thy, tc_ap(rv, xv, yv))
+  let p_from_tc = MP(thy, SPEC(thy, pv, EQ_MP(inst_tc(xv, yv), tc_asm)),
+                     hyp_conj)
+  let tc_induct = GENL(thy, [rv, pv],
+                       DISCH(thy, closed,
+                             GENL(thy, [xv, yv],
+                                  DISCH(thy, tc_ap(rv, xv, yv), p_from_tc))))
+
+  // -- transitivity ---------------------------------------------------------
+  let a1 = ASSUME(thy, tc_ap(rv, xv, yv))
+  let a2 = ASSUME(thy, tc_ap(rv, yv, zv))
+  let p_xy = MP(thy, SPEC(thy, pv, EQ_MP(inst_tc(xv, yv), a1)), hyp_conj)
+  let p_yz = MP(thy, SPEC(thy, pv, EQ_MP(inst_tc(yv, zv), a2)), hyp_conj)
+  let p_xz = MP(thy, SPECL(thy, [xv :~ Term, yv, zv], CONJUNCT2(thy, hyp_conj)),
+                CONJ(thy, p_xy, p_yz))
+  let tc_xz = EQ_MP(SYM(thy, inst_tc(xv, zv)),
+                    GEN(thy, pv, DISCH(thy, closed, p_xz)))
+  let conj_tm = mk_conj(tc_ap(rv, xv, yv), tc_ap(rv, yv, zv))
+  let conj_asm = ASSUME(thy, conj_tm)
+  let both = PROVE_HYP(thy, CONJUNCT2(thy, conj_asm),
+                       PROVE_HYP(thy, CONJUNCT1(thy, conj_asm), tc_xz))
+  let tc_trans = GENL(thy, [rv, xv, yv, zv], DISCH(thy, conj_tm, both))
+
+  // -- unfolding ------------------------------------------------------------
+  //
+  // `SPEC`ing the induction at a lambda leaves the conclusion as an unreduced
+  // application, so each case is proved in reduced form and put back.
+  fun unbeta(t :: Term, th :: Thm) :: Thm:
+    match TOP_DEPTH_CONV(BETA_CONV)(thy, t)
+    | #false: th
+    | c :~ Thm: EQ_MP(SYM(thy, c), th)
+  fun last_step(a :: Term, b :: Term) :: Term:
+    mk_exists(zv, mk_conj(ap2(rv, zv, b),
+                          mk_disj(mk_eq(a, zv), tc_ap(rv, a, zv))))
+  fun q_at(a :: Term, b :: Term) :: Term:
+    mk_conj(tc_ap(rv, a, b), last_step(a, b))
+  let qpred = mk_abs(uv, mk_abs(vv, q_at(uv, vv)))
+
+  // one step is a chain whose last step is itself
+  let r_uv = ASSUME(thy, ap2(rv, uv, vv))
+  let inc_tc = MP(thy, SPECL(thy, [rv :~ Term, uv, vv], tc_inc), r_uv)
+  let inc_wit = CONJ(thy, r_uv, DISJ1(thy, REFL(thy, uv), tc_ap(rv, uv, uv)))
+  let inc_case = GENL(thy, [uv, vv],
+                      DISCH(thy, ap2(rv, uv, vv),
+                            unbeta(ap2(qpred, uv, vv),
+                                   CONJ(thy, inc_tc,
+                                        EXISTS(thy, last_step(uv, vv), uv,
+                                               inc_wit)))))
+
+  // two chains joined keep the second one's last step
+  let h_conj = mk_conj(ap2(qpred, uv, vv), ap2(qpred, vv, wv))
+  let h_asm = ASSUME(thy, h_conj)
+  let q_uv = BETA_RULE(thy, CONJUNCT1(thy, h_asm))
+  let q_vw = BETA_RULE(thy, CONJUNCT2(thy, h_asm))
+  let tc_uv = CONJUNCT1(thy, q_uv)
+  let tc_uw = MP(thy, SPECL(thy, [rv :~ Term, uv, vv, wv], tc_trans),
+                 CONJ(thy, tc_uv, CONJUNCT1(thy, q_vw)))
+  let inner = mk_conj(ap2(rv, zv, wv),
+                      mk_disj(mk_eq(vv, zv), tc_ap(rv, vv, zv)))
+  let inner_asm = ASSUME(thy, inner)
+  // `v = z`: the chain to `v` is already a chain to `z`
+  let by_eq = EQ_MP(AP_TERM(thy, mk_comb(mk_comb(tc, rv), uv),
+                            ASSUME(thy, mk_eq(vv, zv))),
+                    tc_uv)
+  // `TC R v z`: join it on
+  let by_tc = MP(thy, SPECL(thy, [rv :~ Term, uv, vv, zv], tc_trans),
+                 CONJ(thy, tc_uv, ASSUME(thy, tc_ap(rv, vv, zv))))
+  let tc_uz = DISJ_CASES(thy, CONJUNCT2(thy, inner_asm), by_eq, by_tc)
+  let tr_wit = CONJ(thy, CONJUNCT1(thy, inner_asm),
+                    DISJ2(thy, mk_eq(uv, zv), tc_uz))
+  let tr_ex = CHOOSE(thy, zv, CONJUNCT2(thy, q_vw),
+                     EXISTS(thy, last_step(uv, wv), zv, tr_wit))
+  let trans_case = GENL(thy, [uv, vv, wv],
+                        DISCH(thy, h_conj,
+                              unbeta(ap2(qpred, uv, wv),
+                                     CONJ(thy, tc_uw, tr_ex))))
+
+  let by_induct = MP(thy, SPECL(thy, [rv :~ Term, qpred], tc_induct),
+                     CONJ(thy, inc_case, trans_case))
+  let at_xy = BETA_RULE(thy, SPECL(thy, [xv :~ Term, yv], by_induct))
+  let tc_unfold = GENL(thy, [rv, xv, yv],
+                       DISCH(thy, tc_ap(rv, xv, yv),
+                             CONJUNCT2(thy, MP(thy, at_xy,
+                                               ASSUME(thy, tc_ap(rv, xv, yv))))))
+  values(thy, TCThms(tc, tc_inc, tc_trans, tc_induct, tc_unfold))
+
+// Memoized for the same reason every other base here is: `new_basic_definition`
+// mints a fresh `Stamp` per call, so building `TC` per module would give two
+// modules incomparable theories.  It sits directly on `algebra_base_theory()`
+// -- the closure needs nothing but the logical constants -- and `wfrec.rhm`
+// builds on this, so every theory downstream has `TC` available.
+class TCBase(thy :: Theory, thms :: TCThms)
+fun build_tc_base() :: TCBase:
+  let (t, thms) = build_tc(algebra_base_theory())
+  TCBase(t, thms)
+def tc_base :: TCBase = build_tc_base()
+fun tc_base_theory() :: Theory: tc_base.thy
+fun tc_base_thms() :: TCThms: tc_base.thms

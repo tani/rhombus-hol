@@ -94,15 +94,17 @@ Every logical connective is @emph{defined} on top of the kernel's equality, not
 postulated. So are the conditional rules @tt{if true | a | b === a} and its
 dual, and the thirteen propositional simplification rules.
 
-A datatype's subterm relation @tt{T_lt} is a mixed case worth stating
-exactly, because so much rests on it. That @tt{T_lt} is @emph{well founded}
-is derived, from the datatype's own induction principle
+A datatype's subterm relation @tt{T_lt} is derived twice over, and both
+halves matter because so much rests on them. That @tt{T_lt} is @emph{well
+founded} is proved from the datatype's own induction principle
 (@tt{prove_wf_t_lt}); it is what every derived recursive function recurses
-in. But @tt{T_lt}'s own defining equations are installed the ordinary way,
-through the same seam any other function goes through, and that seam
-postulates. So "the recursion is derived" is true and "@tt{T_lt} is derived"
-is not: the relation is described by axioms, and only its well-foundedness
-is proved.
+in. That @tt{T_lt} @emph{is} the subterm relation --- its two equations per
+datatype --- is proved as well: the relation is defined as @tt{TC T_child},
+the transitive closure of a direct-child predicate spelled with the
+datatype's own discriminators and selectors, so neither the closure nor the
+child predicate is a recursive definition and neither needs a recursion
+theorem. The equations then follow from the closure's induction principle
+(@tt{rhombus/hol/tclosure}).
 
 @section{What is postulated beyond that}
 
@@ -123,14 +125,12 @@ elimination all come out as theorems with no hypotheses. Run the axiom
 schema on the same declaration and every statement agrees --- the same
 theory, reached by proof.
 
-What a self-recursive declaration still costs is two things. One is the
-@tech{axiom of infinity}, which the base theory carries once however many
-datatypes a module declares, because the trees are indexed by paths over
-@tt{num}. The other is the two equations of that type's subterm relation,
-which @tt{add_subterm_relation} still posits: deriving those needs a
-recursion theorem for an arbitrary datatype, and this version does not have
-one. So a module declaring two recursive datatypes assumes eight things: the
-base logic's three, infinity, and two subterm equations apiece.
+What a self-recursive declaration still costs is one thing: the @tech{axiom
+of infinity}, which the base theory carries once however many datatypes a
+module declares, because the trees are indexed by paths over @tt{num}. So a
+module declaring two recursive datatypes assumes four things --- the base
+logic's three and infinity --- and declaring a third would not move that
+number.
 
 There is no third case and no fallback: a field either is the type itself or
 it is not, so the axiom schema is no longer on the declaration path at all.

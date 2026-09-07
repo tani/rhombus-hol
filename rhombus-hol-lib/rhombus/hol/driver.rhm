@@ -158,11 +158,15 @@ fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
     spec, at)
 
 // Every recursive datatype brings its structural subterm relation with it, so
-// that a `~measure` into it has an order to decrease in.  It is an ordinary
-// definition installed through the ordinary seam -- see `subterm.rhm` for why
-// that is the whole soundness argument -- and its equations join the rule
-// database under their own name, so `disable_rules [Nat_lt]` reaches them
-// without touching the datatype's own rules.
+// that a `~measure` into it has an order to decrease in.  It is *derived*:
+// `T_child` is a non-recursive predicate over the discriminators and
+// selectors, `T_lt` is its transitive closure, and the constructor equations
+// are proved from those two definitions (`subterm.rhm`, PLAN.md 9.29).  It
+// used to be a clausal definition whose equations `install_function`
+// postulated -- the last `new_axiom` a `type` declaration reached.  The
+// equations join the rule database under their own name, so
+// `disable_rules [Nat_lt]` reaches them without touching the datatype's own
+// rules.
 fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
                          at :: Syntax) :: HolState:
   match subterm_spec(spec)
@@ -175,13 +179,16 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
                     ++ to_string(fs.name)
                     ++ ", is already taken",
                   at)
-      let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.dts):
-                       m ++ {n: (thms :~ DatatypeThms).spec}
-      let (thy2, info0) = try:
-                            install_function(st.thy, fs, dt_specs)
-                            ~catch e :: Exn.Fail: hol_reraise(e, at)
-      let info :~ FunInfo = info0
-      let db2 = add_thms(thy2, st.db, fs.name, info.equations)
+      let dt :~ DatatypeThms = st.dts[spec.name]
+      let (thy2, equations) = try:
+                                derive_subterm_relation(st.thy, spec, dt)
+                                ~catch e :: Exn.Fail: hol_reraise(e, at)
+      let self = mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol):
+                                                       mk_tyvar(p) :~ HType))
+      // Not defined by recursion any more, so there is no descent to record.
+      let info = FunInfo(fs, mk_const(fs.name, mk_fun(self, mk_fun(self, bool))),
+                         equations, RecursionInfo([], #'none, [], []))
+      let db2 = add_thms(thy2, st.db, fs.name, equations)
       HolState(thy2, db2, st.dts, st.funs ++ {fs.name: info}, st.thms,
                st.names ++ [fs.name], st.wfrec_def)
 

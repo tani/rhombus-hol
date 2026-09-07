@@ -12,11 +12,11 @@
 //
 // Two things make this the right order to use:
 //
-//  * It is *derived, not postulated.*  `subterm_spec` builds an ordinary
-//    clausal definition and hands it to `install_function`, so the relation
-//    arrives through the same seam as any user function -- structurally
-//    terminating, exhaustive, non-overlapping -- and adds no axiom of its own
-//    beyond the definitional ones every function adds.
+//  * It is *derived, not postulated.*  `derive_subterm_relation` below builds
+//    it as `TC T_child` -- the transitive closure of a non-recursive child
+//    predicate -- and proves the equations `subterm_clause` describes.  It
+//    adds no axiom at all.  `subterm_spec` survives as the statement of what
+//    those equations say, and as the `FunSpec` the declaration registers.
 //
 //  * It is *well-founded by the datatype's own induction principle.*  A
 //    descending chain would be an infinitely deep term, and the induction
@@ -36,11 +36,16 @@ import:
   "wellfounded.rhm" open
   "datatype.rhm" open
   "recdef.rhm" open
+  "ruledb.rhm" open
+  "taut.rhm" open
+  "tclosure.rhm" open
+  "search_limits.rhm" open
 
 export:
   subterm_name
   subterm_spec
   prove_wf_t_lt
+  derive_subterm_relation
 
 fun subterm_name(spec :: DatatypeSpec) :: Symbol:
   subterm_relation_name(spec.name)
@@ -259,3 +264,212 @@ fun prove_wf_t_lt(thy :: Theory, spec :: DatatypeSpec,
   let p_at_x = MP(thy, q_at_x, DISJ2(thy, list_mk_comb(rel, [x :~ Term, x]), REFL(thy, x)))
   let ind_scheme = GEN(thy, big_p, DISCH(thy, strong_hyp_term, GEN(thy, x, p_at_x)))
   prove_wf_from_induction(thy, rel, ind_scheme)
+
+// -- the relation itself, derived rather than postulated --------------------
+//
+// PLAN.md section 9.29.  `subterm_spec` above builds a *clausal definition*,
+// and `install_function` postulates its equations with `new_axiom` -- the
+// last postulation left on the `type` declaration path.  It does not need to
+// be a recursive definition at all.  "Proper subterm" is the transitive
+// closure of "direct child", and "direct child" is a non-recursive predicate
+// spelled with the discriminators and selectors the datatype already proves:
+//
+//   T_child x y  <=>  (is_C1 y /\ (x = C1_f1 y \/ ...)) \/ ...
+//   T_lt         =   TC T_child
+//
+// Two definitions and a proof, in place of two axioms per datatype.  The
+// equations that come out are the same ones `subterm_clause` describes, so
+// every consumer -- `prove_wf_t_lt`, the rule database, `stepfn.rhm` -- is
+// unchanged.
+
+fun child_name(spec :: DatatypeSpec) :: Symbol:
+  Symbol.from_string(to_string(spec.name) ++ "_child")
+
+fun recursive_fields(spec :: DatatypeSpec, c :: Ctor) :: List.of(Field):
+  for values(acc :~ List = []) (f in c.fields):
+    if is_recursive_field(spec, f :~ Field) | acc ++ [f] | acc
+
+fun ctor_arg_vars(c :: Ctor) :: List.of(FVar):
+  for List (f in c.fields, i in List.iota(c.fields.length())):
+    mk_var(Symbol.from_string("a" ++ to_string(i)), (f :~ Field).ty)
+
+// Prove the whole right-nested disjunction from its `i`-th disjunct.
+fun disj_intro(thy :: Theory, ds :: List.of(Term), i :: Int, th :: Thm) :: Thm:
+  cond
+  | ds.length() == 1: th
+  | i == 0: DISJ1(thy, th, disjoin(ds.drop(1)))
+  | ~else: DISJ2(thy, ds[0], disj_intro(thy, ds.drop(1), i - 1, th))
+
+// Case-split a right-nested disjunction; `f(i, th)` proves the goal from a
+// proof `th` of the `i`-th disjunct.  The single-disjunct case uses the
+// caller's theorem rather than assuming it: there is no `DISJ_CASES` to
+// discharge an assumption, and a stray one would follow the result out.
+fun disj_elim(thy :: Theory, ds :: List.of(Term), dth :: Thm, i :: Int,
+              f :: Function.of_arity(2)) :: Thm:
+  cond
+  | ds.length() == 1: f(i, dth)
+  | ~else:
+      let rest = ds.drop(1)
+      DISJ_CASES(thy, dth, f(i, ASSUME(thy, ds[0])),
+                 disj_elim(thy, rest, ASSUME(thy, disjoin(rest)), i + 1, f))
+
+// `T_child`, and one equation per constructor:
+// `|- !x a1..ak. T_child x (C a1..ak) <=> (x = aj1 \/ ... )` over the
+// recursive fields, `<=> false` for a constructor that has none.
+fun define_child(thy0 :: Theory, spec :: DatatypeSpec,
+                 dt :: DatatypeThms) :: values(Theory, Term, List.of(Thm)):
+  let self = self_type(spec)
+  let x = mk_var(#'x, self)
+  let y = mk_var(#'y, self)
+  let ty = mk_fun(self, mk_fun(self, bool))
+  let disjuncts = for values(acc :~ List = []) (c in spec.ctors):
+                    let c :~ Ctor = c
+                    let rf = recursive_fields(spec, c)
+                    cond
+                    | rf.length() == 0: acc
+                    | ~else:
+                        let is_c = mk_const(discriminator_name(c),
+                                            mk_fun(self, bool))
+                        let eqs = for List (f in rf):
+                                    child_field_eq(self, x, y, c, f :~ Field)
+                        acc ++ [mk_conj(mk_comb(is_c, y :~ Term), disjoin(eqs))]
+  let body = mk_abs(x, mk_abs(y, disjoin(disjuncts)))
+  let (thy, def_th) = new_basic_definition(thy0,
+                                           mk_eq(mk_var(child_name(spec), ty),
+                                                 body))
+  let child = mk_const(child_name(spec), ty)
+  // Reducing the unfolded body is exactly what the discriminator and selector
+  // equations are for: at `C(a1..ak)` every other constructor's guard is
+  // `false` and this one's is `true`, and each selector picks out its field.
+  let db0 = for values(d :~ RuleDB = empty_db) (th in tautologies(thy)):
+              add_thm(thy, d, #'propositional, th :~ Thm)
+  let db = for values(d :~ RuleDB = db0) (th in dt.discriminators ++ dt.selectors):
+             add_thm(thy, d, #'observer, th :~ Thm)
+  let eqs = for List (c in spec.ctors):
+              child_ctor_eq(thy, spec, def_th, db, x, c :~ Ctor)
+  values(thy, child, eqs)
+
+fun child_field_eq(self :: HType, x :: FVar, y :: FVar,
+                   c :: Ctor, f :: Field) :: Term:
+  mk_eq(x :~ Term, mk_comb(mk_const(selector_name(c, f), mk_fun(self, f.ty)),
+                           y :~ Term))
+
+fun child_ctor_eq(thy :: Theory, spec :: DatatypeSpec, def_th :: Thm,
+                  db :: RuleDB, x :: FVar, c :: Ctor) :: Thm:
+  let vs = ctor_arg_vars(c)
+  let applied = list_mk_comb(mk_const(c.name, ctor_type(spec, c)),
+                             vs.map(fun (v :: FVar): v :~ Term))
+  let unf = unfold_def(thy, def_th, [x :~ Term, applied])
+  let reduced:
+    with_search_limits(fun ():
+                         match simp_conv(db)(thy, rhs_of(unf))
+                         | #false: unf
+                         | s :~ Thm: TRANS(unf, s))
+  GENL(thy, [x] ++ vs, reduced)
+
+// `T_lt = TC T_child`, and the constructor equations `subterm_clause`
+// describes, proved rather than asserted.
+fun derive_subterm_relation(thy0 :: Theory, spec :: DatatypeSpec,
+                            dt :: DatatypeThms)
+     :: values(Theory, List.of(Thm)):
+  let self = self_type(spec)
+  let (thy1, child, child_eqs) = define_child(thy0, spec, dt)
+  let tcb :~ TCThms = tc_base_thms()
+  let tc = tc_at_type(tcb, self)
+  let ty = mk_fun(self, mk_fun(self, bool))
+  let (thy, lt_def) = new_basic_definition(thy1,
+                                           mk_eq(mk_var(subterm_name(spec), ty),
+                                                 mk_comb(tc, child)))
+  let rel = mk_const(subterm_name(spec), ty)
+  let eqs = for List (c in spec.ctors, ceq in child_eqs, i in List.iota(spec.ctors.length())):
+              prove_lt_ctor_eq(thy, spec, dt, tcb, tc, child, rel, lt_def,
+                               c :~ Ctor, ceq :~ Thm)
+  values(thy, eqs)
+
+fun prove_lt_ctor_eq(thy :: Theory, spec :: DatatypeSpec, dt :: DatatypeThms,
+                     tcb :: TCThms, tc :: Term, child :: Term, rel :: Term,
+                     lt_def :: Thm, c :: Ctor, ceq :: Thm) :: Thm:
+  let self = self_type(spec)
+  let x = mk_var(#'x, self)
+  let vs = ctor_arg_vars(c)
+  let applied = list_mk_comb(mk_const(c.name, ctor_type(spec, c)),
+                             vs.map(fun (v :: FVar): v :~ Term))
+  let rvs = for values(acc :~ List = []) (v in vs, f in c.fields):
+              if is_recursive_field(spec, f :~ Field) | acc ++ [v] | acc
+  // the statement `subterm_clause` describes: "equal to a child, or below one"
+  let ds = for values(acc :~ List = []) (v in rvs):
+             acc ++ [mk_eq(x :~ Term, v :~ Term),
+                     list_mk_comb(rel, [x :~ Term, v :~ Term])]
+  let goal = disjoin(ds)
+  let lt_applied = list_mk_comb(rel, [x :~ Term, applied])
+  fun at_self(th :: Thm) :: Thm: INST_TYPE(thy, {#'a: self}, th)
+  let tc_inc = at_self(tcb.inc)
+  let tc_trans = at_self(tcb.trans)
+  let tc_unfold = at_self(tcb.unfold)
+  fun lt_is_tc(a :: Term, b :: Term) :: Thm: unfold_def(thy, lt_def, [a, b])
+  fun tc_ap(a :: Term, b :: Term) :: Term: list_mk_comb(tc, [child, a, b])
+  // `T_child z (C as) <=> (z = a_{j1} \/ ...)`, for any `z`
+  fun child_at(z :: Term) :: Thm:
+    INST(thy, [[z, x]],
+         SPECL(thy, [x :~ Term] ++ vs.map(fun (v :: FVar): v :~ Term), ceq))
+  // `TC T_child aj (C as)`: the j-th recursive field really is a child
+  fun tc_kid(j :: Int) :: Thm:
+    let aj = rvs[j] :~ Term
+    let kid_eqs = rvs.map(fun (v :: FVar): mk_eq(aj, v :~ Term))
+    let is_kid = EQ_MP(SYM(thy, child_at(aj)),
+                       disj_intro(thy, kid_eqs, j, REFL(thy, aj)))
+    MP(thy, SPECL(thy, [child, aj, applied], tc_inc), is_kid)
+  // <== equal to a child is a one-step chain; below a child extends one
+  let back:
+    cond
+    | rvs.length() == 0: CONTR(thy, lt_applied, ASSUME(thy, tm_false))
+    | ~else:
+        fun from_disjunct(i :: Int, asm :: Thm) :: Thm:
+          let j = i div 2
+          let tc:
+            cond
+            | i mod 2 == 0:
+                // `x = aj`, so the chain from `aj` is the chain from `x`
+                let moved = AP_THM(thy, AP_TERM(thy, mk_comb(tc, child), asm),
+                                   applied)
+                EQ_MP(SYM(thy, moved), tc_kid(j))
+            | ~else:
+                MP(thy, SPECL(thy, [child, x :~ Term, rvs[j] :~ Term, applied],
+                              tc_trans),
+                   CONJ(thy, EQ_MP(lt_is_tc(x :~ Term, rvs[j] :~ Term), asm),
+                        tc_kid(j)))
+          EQ_MP(SYM(thy, lt_is_tc(x :~ Term, applied)), tc)
+        disj_elim(thy, ds, ASSUME(thy, goal), 0, from_disjunct)
+  // ==> a chain into `C as` has a last step, and that step lands on a child
+  let fwd:
+    let z = mk_var(#'z0, self)
+    let step = mk_conj(list_mk_comb(child, [z :~ Term, applied]),
+                       mk_disj(mk_eq(x :~ Term, z :~ Term),
+                               tc_ap(x :~ Term, z :~ Term)))
+    let chain = MP(thy, SPECL(thy, [child, x :~ Term, applied], tc_unfold),
+                   EQ_MP(lt_is_tc(x :~ Term, applied),
+                         ASSUME(thy, lt_applied)))
+    let inner = ASSUME(thy, step)
+    let kid_disj = EQ_MP(child_at(z :~ Term), CONJUNCT1(thy, inner))
+    let body:
+      cond
+      // no children at all: the last step cannot exist
+      | rvs.length() == 0: CONTR(thy, goal, kid_disj)
+      | ~else:
+          fun at_kid(j :: Int, keq :: Thm) :: Thm:
+            let by_eq = disj_intro(thy, ds, 2 * j,
+                                   TRANS(ASSUME(thy, mk_eq(x :~ Term,
+                                                           z :~ Term)),
+                                         keq))
+            let below = EQ_MP(SYM(thy, lt_is_tc(x :~ Term, z :~ Term)),
+                              ASSUME(thy, tc_ap(x :~ Term, z :~ Term)))
+            let moved = EQ_MP(AP_TERM(thy, mk_comb(rel, x :~ Term), keq),
+                              below)
+            DISJ_CASES(thy, CONJUNCT2(thy, inner), by_eq,
+                       disj_intro(thy, ds, 2 * j + 1, moved))
+          let kid_eqs = rvs.map(fun (v :: FVar): mk_eq(z :~ Term, v :~ Term))
+          disj_elim(thy, kid_eqs, kid_disj, 0, at_kid)
+    CHOOSE(thy, z, chain, body)
+  GENL(thy, [x] ++ vs,
+       IMP_ANTISYM_RULE(thy, DISCH(thy, lt_applied, fwd),
+                        DISCH(thy, goal, back)))

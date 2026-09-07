@@ -1,0 +1,220 @@
+#lang rhombus/static
+
+// The lexicographic product of two well-founded relations
+// (PLAN.md section 9.31).
+//
+//   LEX R S q p  <=>  R (fst q) (fst p)
+//                     or (fst q = fst p and S (snd q) (snd p))
+//
+// This is the order Ackermann's function recurses in, and the one thing
+// missing before a `function` whose descent is genuinely lexicographic --
+// no single argument column shrinks at every call -- could be derived
+// instead of postulated.
+//
+// `LEX` is a *constant*, not a lambda, and that is load-bearing rather than
+// cosmetic: `prove_wf_from_induction` beta-reduces the scheme it is handed,
+// so a relation that was itself a beta-redex would reduce on one side of an
+// `MP` and not the other.
+//
+// Well-foundedness is the nested induction the definition suggests: to prove
+// `P` everywhere, prove `!a. !b. P (a,b)` by `R`-induction on `a` with an
+// `S`-induction on `b` inside.  A predecessor of `(a,b)` either has a
+// smaller first component -- covered by the outer hypothesis, at every
+// second component -- or the same first component and a smaller second one,
+// covered by the inner.  That case split is exactly the disjunction in the
+// definition, which is why nothing deeper is needed.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  "bool.rhm" open
+  "conv.rhm" open
+  "drule.rhm" open
+  "ruledb.rhm" open
+  "taut.rhm" open
+  "search_limits.rhm" open
+  "algebra.rhm" open
+  "tclosure.rhm" open
+  "wellfounded.rhm" open
+
+export:
+  lex_base_theory
+  lex_const
+  mk_lex
+  prove_wf_lex
+
+def c_lex :: Symbol = #'LEX
+
+fun lex_type(tyA :: HType, tyB :: HType) :: HType:
+  let pty = prod_ty(tyA, tyB)
+  mk_fun(mk_fun(tyA, mk_fun(tyA, bool)),
+         mk_fun(mk_fun(tyB, mk_fun(tyB, bool)),
+                mk_fun(pty, mk_fun(pty, bool))))
+
+fun lex_const(tyA :: HType, tyB :: HType) :: Term:
+  mk_const(c_lex, lex_type(tyA, tyB))
+
+// `LEX R S`, the relation itself.
+fun mk_lex(r :: Term, s :: Term) :: Term:
+  let (tyA, _) = dest_fun(type_of(r))
+  let (tyB, _) = dest_fun(type_of(s))
+  mk_comb(mk_comb(lex_const(tyA, tyB), r), s)
+
+fun build_lex(thy0 :: Theory) :: values(Theory, Thm):
+  let tyA = mk_tyvar(#'a)
+  let tyB = mk_tyvar(#'b)
+  let pty = prod_ty(tyA, tyB)
+  let bigR = mk_var(#'R, mk_fun(tyA, mk_fun(tyA, bool)))
+  let bigS = mk_var(#'S, mk_fun(tyB, mk_fun(tyB, bool)))
+  let q = mk_var(#'q, pty)
+  let p = mk_var(#'p, pty)
+  let qa = mk_fst(q :~ Term)
+  let pa = mk_fst(p :~ Term)
+  let body = mk_disj(list_mk_comb(bigR, [qa, pa]),
+                     mk_conj(mk_eq(qa, pa),
+                             list_mk_comb(bigS, [mk_snd(q :~ Term),
+                                                 mk_snd(p :~ Term)])))
+  let lam = mk_abs(bigR, mk_abs(bigS, mk_abs(q, mk_abs(p, body))))
+  new_basic_definition(thy0, mk_eq(mk_var(c_lex, lex_type(tyA, tyB)), lam))
+
+// Memoized like every other base here: `new_basic_definition` mints a fresh
+// `Stamp` per call, so building `LEX` per module would give two modules
+// incomparable theories.
+class LexBase(thy :: Theory, def_th :: Thm)
+fun build_lex_base() :: LexBase:
+  let (t, d) = build_lex(tc_base_theory())
+  LexBase(t, d)
+def lex_base :: LexBase = build_lex_base()
+fun lex_base_theory() :: Theory: lex_base.thy
+fun lex_base_def() :: Thm: lex_base.def_th
+
+// From `|- wf R` and `|- wf S`, conclude `|- wf (LEX R S)`, carrying over
+// whatever hypotheses the two arguments had.
+fun prove_wf_lex(thy :: Theory, alg :: AlgebraThms,
+                 wf_r :: Thm, wf_s :: Thm) :: Thm:
+  let prod :~ ProdThms = alg.prod
+  let (_, bigR) = dest_comb(concl_of(wf_r))
+  let (_, bigS) = dest_comb(concl_of(wf_s))
+  let (tyA, _) = dest_fun(type_of(bigR))
+  let (tyB, _) = dest_fun(type_of(bigS))
+  let pty = prod_ty(tyA, tyB)
+  let rel = mk_lex(bigR, bigS)
+  let pair_c = mk_const(c_pair, mk_fun(tyA, mk_fun(tyB, pty)))
+
+  // `prod`'s facts are stated at `'a`/`'b`; every use here is at `tyA`/`tyB`
+  fun at_types(th :: Thm) :: Thm: INST_TYPE(thy, {#'a: tyA, #'b: tyB}, th)
+  let surjective = at_types(prod.surjective)
+  let fst_pair = at_types(prod.fst_pair)
+  let snd_pair = at_types(prod.snd_pair)
+
+  let bigP = mk_var(#'lxP, mk_fun(pty, bool))
+  let pv = mk_var(#'lxp, pty)
+  let qv = mk_var(#'lxq, pty)
+  let av = mk_var(#'lxa, tyA)
+  let bv = mk_var(#'lxb, tyB)
+  let qav = mk_var(#'lxqa, tyA)
+  let qbv = mk_var(#'lxqb, tyB)
+  fun at2(f :: Term, x :: Term, y :: Term) :: Term: list_mk_comb(f, [x, y])
+  fun pair_of(x :: Term, y :: Term) :: Term: mk_pair_term(x, y)
+
+  // `!p. (!q. LEX R S q p ==> P q) ==> P p`, the scheme's hypothesis
+  let strong_term:
+    let inner = mk_forall(qv, mk_imp(at2(rel, qv :~ Term, pv :~ Term),
+                                     mk_comb(bigP, qv :~ Term)))
+    mk_forall(pv, mk_imp(inner, mk_comb(bigP, pv :~ Term)))
+  let strong = ASSUME(thy, strong_term)
+
+  // `LEX R S (pair qa qb) (pair a b)` as the disjunction it unfolds to
+  let pair_ab = pair_of(av :~ Term, bv :~ Term)
+  let pair_q = pair_of(qav :~ Term, qbv :~ Term)
+  let lex_eq:
+    let inst = INST_TYPE(thy, {#'a: tyA, #'b: tyB}, lex_base_def())
+    let unf = unfold_def(thy, inst, [bigR, bigS, pair_q, pair_ab])
+    let db = for values(d :~ RuleDB = empty_db) (t in tautologies(thy)
+                                                   ++ [fst_pair, snd_pair]):
+               add_thm(thy, d, #'scaffold, t :~ Thm)
+    with_search_limits(fun ():
+                         match simp_conv(db)(thy, rhs_of(unf))
+                         | #false: unf
+                         | s :~ Thm: TRANS(unf, s))
+
+  let wf_ind_a = MP(thy, SPEC(thy, bigR,
+                              INST_TYPE(thy, {#'a: tyA}, prove_wf_induction(thy))),
+                    wf_r)
+  let wf_ind_b = MP(thy, SPEC(thy, bigS,
+                              INST_TYPE(thy, {#'a: tyB}, prove_wf_induction(thy))),
+                    wf_s)
+  let qpred_a = mk_abs(av, mk_forall(bv, mk_comb(bigP, pair_ab)))
+  let qpred_b = mk_abs(bv, mk_comb(bigP, pair_ab))
+  fun unbeta(t :: Term, th :: Thm) :: Thm:
+    match TOP_DEPTH_CONV(BETA_CONV)(thy, t)
+    | #false: th
+    | c :~ Thm: EQ_MP(SYM(thy, c), th)
+
+  let ih_a_term = mk_forall(qav, mk_imp(at2(bigR, qav :~ Term, av :~ Term),
+                                        mk_comb(qpred_a, qav :~ Term)))
+  let ih_b_term = mk_forall(qbv, mk_imp(at2(bigS, qbv :~ Term, bv :~ Term),
+                                        mk_comb(qpred_b, qbv :~ Term)))
+  let ih_a = ASSUME(thy, ih_a_term)
+  let ih_b = ASSUME(thy, ih_b_term)
+
+  // Every `LEX`-predecessor of `(a,b)` satisfies `P`
+  let sub_lemma:
+    let q_eq = ASSUME(thy, mk_eq(qv :~ Term, pair_q))
+    let lex_q_ab = at2(rel, qv :~ Term, pair_ab)
+    let as_pair = EQ_MP(AP_THM(thy, AP_TERM(thy, rel, q_eq), pair_ab),
+                        ASSUME(thy, lex_q_ab))
+    let disj = EQ_MP(lex_eq, as_pair)
+    fun to_q(th :: Thm) :: Thm:
+      EQ_MP(SYM(thy, AP_TERM(thy, bigP :~ Term, q_eq)), th)
+    // smaller first component: the outer hypothesis, at every second one
+    let case_r:
+      let at_qav = BETA_RULE(thy,
+                             MP(thy, SPEC(thy, qav :~ Term, ih_a),
+                                ASSUME(thy, at2(bigR, qav :~ Term,
+                                                av :~ Term))))
+      to_q(SPEC(thy, qbv :~ Term, at_qav))
+    // same first component, smaller second: the inner hypothesis
+    let case_s:
+      let conj_asm = ASSUME(thy, mk_conj(mk_eq(qav :~ Term, av :~ Term),
+                                         at2(bigS, qbv :~ Term, bv :~ Term)))
+      let at_qbv = BETA_RULE(thy, MP(thy, SPEC(thy, qbv :~ Term, ih_b),
+                                     CONJUNCT2(thy, conj_asm)))
+      let pair_eq = AP_THM(thy, AP_TERM(thy, pair_c, CONJUNCT1(thy, conj_asm)),
+                           qbv :~ Term)
+      to_q(EQ_MP(SYM(thy, AP_TERM(thy, bigP :~ Term, pair_eq)), at_qbv))
+    let p_of_q = DISJ_CASES(thy, disj, case_r, case_s)
+    let surj_q = SPEC(thy, qv :~ Term, surjective)
+    let inner_ex = mk_exists(qbv, mk_eq(qv :~ Term, pair_q))
+    let chosen = CHOOSE(thy, qav, surj_q,
+                        CHOOSE(thy, qbv, ASSUME(thy, inner_ex), p_of_q))
+    GEN(thy, qv, DISCH(thy, lex_q_ab, chosen))
+
+  let p_at_ab = MP(thy, SPEC(thy, pair_ab, strong), sub_lemma)
+  let s_case = GEN(thy, bv, DISCH(thy, ih_b_term,
+                                  unbeta(mk_comb(qpred_b, bv :~ Term), p_at_ab)))
+  let all_b = GEN(thy, bv,
+                  BETA_RULE(thy, SPEC(thy, bv :~ Term,
+                                      MP(thy, SPEC(thy, qpred_b, wf_ind_b),
+                                         s_case))))
+  let r_case = GEN(thy, av, DISCH(thy, ih_a_term,
+                                  unbeta(mk_comb(qpred_a, av :~ Term), all_b)))
+  let lemma = GEN(thy, av,
+                  BETA_RULE(thy, SPEC(thy, av :~ Term,
+                                      MP(thy, SPEC(thy, qpred_a, wf_ind_a),
+                                         r_case))))
+
+  // and every value is a pair
+  let all_p:
+    let p_eq = ASSUME(thy, mk_eq(pv :~ Term, pair_q))
+    let at_pair = SPECL(thy, [qav :~ Term, qbv :~ Term], lemma)
+    let back = EQ_MP(SYM(thy, AP_TERM(thy, bigP :~ Term, p_eq)), at_pair)
+    let inner_ex = mk_exists(qbv, mk_eq(pv :~ Term, pair_q))
+    GEN(thy, pv,
+        CHOOSE(thy, qav, SPEC(thy, pv :~ Term, surjective),
+               CHOOSE(thy, qbv, ASSUME(thy, inner_ex), back)))
+
+  let ind_scheme = GEN(thy, bigP, DISCH(thy, strong_term, all_p))
+  prove_wf_from_induction(thy, rel, ind_scheme)

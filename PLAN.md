@@ -1729,6 +1729,40 @@ after:  merge, ack
 catch-all 付き入れ子節の 3 形状について、方程式が宣言どおりでかつ
 モジュールの公理が基礎の 4 本だけであることを固定する。
 
+### 9.31 進捗（本セッション）: 辞書式順序の well-foundedness
+
+第三次レビュー項目 8。残る唯一の postulate 経路は辞書式再帰
+（`ack`・`merge`）で、これには**二つの整礎関係の辞書式積**が要る。
+
+```text
+LEX R S q p <=> R (fst q) (fst p)
+                or (fst q = fst p and S (snd q) (snd p))
+```
+
+`lexorder.rhm`。`LEX` は**定数**であってラムダではない。これは体裁の
+問題ではない: `prove_wf_from_induction` は渡された scheme を
+`BETA_RULE` で簡約するので、関係自体が beta-redex だと `MP` の片側だけが
+簡約されて一致しなくなる（実際に最初そう書いて踏んだ）。
+
+整礎性の証明は定義が示唆する入れ子帰納法そのもの: `!a. !b. P(a,b)` を
+`a` についての `R`-帰納法で示し、その内側で `b` についての `S`-帰納法を
+回す。`(a,b)` の前者は第一成分が小さい（外側の仮定が*あらゆる*第二成分
+について効く）か、第一成分が等しくて第二成分が小さい（内側の仮定）かの
+どちらか -- これは定義の選言そのものなので、これ以上の道具は要らない。
+
+`|- wf(RA), wf(SB) |- wf(LEX(RA, SB))`、公理 0。
+
+連鎖に差し込んだので、メモ化された基礎理論はこうなった:
+
+```text
+base_theory() -> algebra_base_theory() -> tc_base_theory()
+  -> lex_base_theory() -> wfrec_base_theory() -> infinity_base_theory()
+```
+
+回帰は `tests/lexorder.rhm`。**まだ配線していない** -- `stepfn.rhm` の
+WFREC 導出が各呼び出し位置の降下義務を `LEX` の選言として組み立てる
+必要があり、それは別の作業。現時点で `ack`・`merge` は依然 postulate する。
+
 ## 10. 外部レビュー（2026-09-07）への対応状況
 
 レビューは `rhombus-hol-kernel` を標準 HOL Light 型カーネルへ寄せ、

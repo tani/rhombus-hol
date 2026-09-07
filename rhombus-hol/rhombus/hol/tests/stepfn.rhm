@@ -229,6 +229,83 @@ check:
        "forall (x :: 'a, y :: List('a), z :: List('a)): "
          ++ "app(Cons(x, y), z) === Cons(x, app(y, z))"]
 
+// -- drop: descending in one argument, matching on another's type ------------
+//
+// The recursion descends in `Nat`, but the second clause splits a `List`.
+// The reduction database therefore needs *both* datatypes' discriminators
+// and selectors; with only the descending column's, `is_Nil(Nil)` never
+// resolves and `H` is left with a stuck `cond`.
+
+def n_var = mk_var(#'n, nat_ty)
+def drop_ph = mk_const(#'drop, mk_fun(nat_ty, mk_fun(list_ty, list_ty)))
+def drop_spec:
+  FunSpec(#'drop, [nat_ty, list_ty], list_ty,
+          [DefClause([zero_ctor, ys_var], ys_var),
+           DefClause([mk_comb(succ_ctor, k_var), nil_ctor], nil_ctor),
+           DefClause([mk_comb(succ_ctor, k_var),
+                      list_mk_comb(cons_ctor, [x_var, rest_var])],
+                     list_mk_comb(drop_ph, [k_var, rest_var]))])
+def drop_recinfo:
+  check_termination(#'function, #'drop, 2,
+                    drop_spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
+                    drop_ph)
+def drop_tree:
+  function_decision_tree(#'function, drop_spec, all_specs)
+// `thy_l` has `List_lt` but not `Nat_lt`, and `drop` descends in `Nat`.
+def (thy_nl, nat_tlt_info):
+  install_function(thy_l, subterm_spec(nat_spec) :~ FunSpec, {#'Nat: nat_spec})
+def nat_tlt_eqs_for_drop = (nat_tlt_info :~ FunInfo).equations
+
+check descent_column(drop_spec, drop_ph) ~is 0
+def axioms_before_drop = axioms_of(thy_nl).length()
+def (thy_drop, drop_info):
+  install_structural_function(thy_nl, list_wr_def, drop_spec, nat_base_thms,
+                              all_thms, drop_tree,
+                              nat_tlt_eqs_for_drop, drop_recinfo, alg)
+
+check axioms_of(thy_drop).length() ~is axioms_before_drop
+check:
+  (drop_info :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
+  ~is ["forall (x :: List('a)): drop(zero, x) === x",
+       "forall (x :: Nat): drop(succ(x), Nil) === Nil",
+       "forall (x :: Nat, y :: 'a, z :: List('a)): "
+         ++ "drop(succ(x), Cons(y, z)) === drop(x, z)"]
+
+// -- a definition that does not recurse at all -------------------------------
+//
+// `RecursionInfo.method` is `#'none`, not `#'structural`.  Nothing about
+// the derivation cares: `WFREC` still wants a well-founded relation, but
+// the congruence proof has no call to bridge.  Excluding these was costing
+// every non-recursive `function` one postulated equation.
+
+def head_or_ph = mk_const(#'head_or, mk_fun(list_ty, nat_ty))
+def head_or_spec:
+  FunSpec(#'head_or, [list_ty], nat_ty,
+          [DefClause([nil_ctor], zero_ctor),
+           DefClause([list_mk_comb(cons_ctor, [x_var, rest_var])],
+                     mk_comb(succ_ctor, zero_ctor))])
+def head_or_recinfo:
+  check_termination(#'function, #'head_or, 1,
+                    head_or_spec.clauses.map(fun (cl :: DefClause): [cl.pats, cl.rhs]),
+                    head_or_ph)
+
+check head_or_recinfo.method ~is #'none
+check:
+  can_derive_structurally(head_or_spec, head_or_recinfo,
+                          tree_of(head_or_spec), all_thms)
+  ~is #true
+
+def axioms_before_head_or = axioms_of(thy_l).length()
+def (thy_head_or, head_or_info):
+  install_structural_function(thy_l, list_wr_def, head_or_spec, list_thms,
+                              all_thms, tree_of(head_or_spec),
+                              list_tlt_eqs, head_or_recinfo, alg)
+check axioms_of(thy_head_or).length() ~is axioms_before_head_or
+check:
+  (head_or_info :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
+  ~is ["head_or(Nil) === zero",
+       "forall (x :: 'a, y :: List('a)): head_or(Cons(x, y)) === succ(zero)"]
+
 // -- what is still out of this module's scope --------------------------------
 
 // Lexicographic descent: no single column shrinks at every call, so there

@@ -1381,6 +1381,30 @@ Ackermann のような真の辞書式降下はここで `#false` になり、従
 公理数は 30 -> 30。Ackermann 形の辞書式降下と `~measure` は
 `can_derive_structurally` が `#false` を返すことを回帰テストで固定した。
 
+**続報 -- 配線して初めて出た 2 つの穴**。
+
+1. **簡約データベースが降下列の datatype しか持っていなかった**。
+   `drop(n :: Nat, xs :: List(~a))` のように「降下するのは `Nat`、
+   場合分けするのは `List` も」という定義で、`is_Nil(Nil)` を解決する
+   規則が無く `cond` が詰まって `TRANS` が合わない。`base_reduction_db`
+   を宣言済み datatype **全部**の discriminator/selector を積むように
+   変更した。§9.7 の入れ子パターン（別 datatype のフィールドへ潜る場合）
+   にも同じ穴があったので、そちらも同時に塞がっている。
+   回帰テスト: `tests/stepfn.rhm` の `drop`。
+2. **非再帰関数が `#'none` というだけで公理化されていた**。
+   `can_derive_structurally` が `method == #'structural` だけを通していた
+   ため。再帰呼び出しが 0 個なら降下条件はどの列でも空虚に成立し、
+   congruence 証明も橋渡しすべき呼び出しが無いだけで、導出は素直に通る。
+   `#'none` も通すようにし、`descent_column` に `~usable` 述語を足して
+   「T_lt を持つ列」を選ばせるようにした。回帰テスト: `head_or`。
+
+**現在の公理の出どころ**（`tests/fixtures/funs_ok.rhm` で計測: 関数 6 本、
+公理 30 個）: 30 個は 2 つの再帰 datatype の公理スキーマと、その
+`List_lt`/`Nat_lt` 自身の方程式だけである。`app`（2 引数）・`plus`
+（2 引数）・`rev`・`length` はいずれも 0 個。残っているフォールバックは
+`~measure`・真の辞書式降下・再帰 datatype の公理スキーマ・非再帰
+datatype 上の関数（`T_lt` が無いので整礎関係が無い）である。
+
 ---
 
 ## 10. 外部レビュー（2026-09-07）への対応状況

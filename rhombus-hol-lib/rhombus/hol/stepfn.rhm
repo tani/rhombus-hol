@@ -68,8 +68,8 @@ fun self_type(spec :: DatatypeSpec) :: HType:
 
 // -- applicability ---------------------------------------------------------
 
-// The one argument column every recursive call strictly descends in, or
-// `#false` if there is none.
+// The one argument column every recursive call strictly descends in and
+// whose type `usable` accepts, or `#false` if there is none.
 //
 // Not `RecursionInfo.positions`: that is the *lexicographic* order, whose
 // leading column is only required to shrink at some call sites and stay
@@ -78,11 +78,18 @@ fun self_type(spec :: DatatypeSpec) :: HType:
 // recursion runs in does not relate the call to its caller.  The tree is
 // not consulted here: descent is a property of the clauses as written, and
 // `descends_at` is the same check `check_termination` used.
-fun descent_column(spec :: FunSpec, fn_ph :: Term) :: maybe(Int):
+//
+// A definition with no recursive calls satisfies the descent condition at
+// *every* column vacuously, which is right: it needs a well-founded
+// relation to hand `WFREC`, but nothing has to be below anything in it.
+// `usable` is what then picks a column whose type actually has one.
+fun descent_column(spec :: FunSpec, fn_ph :: Term,
+                   ~usable: usable = fun (ty :: HType): #true) :: maybe(Int):
   let arity = spec.arg_types.length()
   recur loop (k = 0):
     cond
     | k >= arity: #false
+    | !usable(spec.arg_types[k]): loop(k + 1)
     | ~else:
         let ok = for all (cl in spec.clauses):
                    let cl :~ DefClause = cl
@@ -90,11 +97,18 @@ fun descent_column(spec :: FunSpec, fn_ph :: Term) :: maybe(Int):
                      descends_at(cl.pats[k], (call :~ List)[k])
         (if ok | k | loop(k + 1))
 
-// Whether this module's derivation applies: termination settled by plain
-// structural descent (no measure), one column descending at every call,
-// that column landing in a declared datatype, and every position the
-// pattern matrix splits on carrying a datatype whose *schematic* self type
-// is exactly the type at that position.
+// Whether this module's derivation applies: termination settled without a
+// measure -- either plain structural descent or no recursion at all -- one
+// column descending at every call and landing in a declared datatype, and
+// every position the pattern matrix splits on carrying a datatype whose
+// *schematic* self type is exactly the type at that position.
+//
+// `#'none` is admitted alongside `#'structural` because a non-recursive
+// definition has nothing that could fail: `WFREC` still needs a
+// well-founded relation, but the congruence proof has no recursive call to
+// bridge, so it goes through exactly as the recursive case does with an
+// empty set of call sites.  Leaving it out was costing every non-recursive
+// `function` one postulated equation for no reason.
 //
 // Pattern depth is not a condition.  `H` is built from the decision tree
 // (`dtree.rhm`), which records a selector *path* to every variable, so a
@@ -111,15 +125,12 @@ fun can_derive_structurally(spec :: FunSpec, recinfo :: RecursionInfo,
                             tree :: DecisionTree,
                             dts :: Map.of(Symbol, DatatypeThms)) :: Boolean:
   cond
-  | recinfo.method != #'structural: #false
+  | recinfo.method != #'structural && recinfo.method != #'none: #false
   | spec.arg_types.length() == 0: #false
-  | ~else:
-      match descent_column(spec, mk_const(spec.name, fun_type(spec)))
-      | #false: #false
-      | k:
-          cond
-          | !schematic_datatype(dts, spec.arg_types[k :~ Int]): #false
-          | ~else: switch_types_ok(tree, dts)
+  | descent_column(spec, mk_const(spec.name, fun_type(spec)),
+                   ~usable: fun (ty :: HType): schematic_datatype(dts, ty))
+      == #false: #false
+  | ~else: switch_types_ok(tree, dts)
 
 fun schematic_datatype(dts :: Map.of(Symbol, DatatypeThms),
                        ty :: HType) :: Boolean:
@@ -359,23 +370,33 @@ fun build_step_body(spec :: FunSpec, tree :: DecisionTree,
 
 // Everything the reduction from `H(f)(C(vars))` down to the matching
 // clause's body needs, once `H`'s own application has already been peeled
-// off by `unfold_def` (below): the datatype's own discriminators and
-// selectors (to resolve `is_Ci`/selector applications once `x` is a
-// literal constructor application), `T_lt`'s own defining equations
-// (needed by `prove_congruence` to see `T_lt(v, C(vars)) = true` for a
-// field `v`), `fst`/`snd` on a literal pair (so a tupled definition's
-// projections resolve the same way), `cond`'s two reduction rules (once a
+// off by `unfold_def` (below).
+//
+// The discriminators and selectors are those of *every* declared datatype,
+// not just the recursion's own: a definition may match on one argument's
+// type while descending in another's (`drop(n :: Nat, xs :: List(~a))`), or
+// nest into a field of a different type, and `H` cannot reduce past an
+// `is_Ci` it has no rule for.  Narrowing this to the descending column's
+// datatype leaves such a definition with a stuck `cond` and a `TRANS` that
+// fails to line up -- a loud failure, but a needless one.
+//
+// The rest: `T_lt`'s own defining equations (so `prove_congruence` can see
+// `T_lt(v, C(vars)) = true` for a field `v`), whatever `extra` the carrier
+// asked for (`fst`/`snd` on a literal pair, and the tupled relation's and
+// projection's own equations), `cond`'s two reduction rules (once a
 // discriminator has resolved to a literal `true`/`false`), and
 // propositional cleanup (`refl_conv`, folded into `simp_conv` itself,
 // handles `v = v -> true`; the `or`/`true` tautologies then collapse the
 // disjunction `T_lt`'s equations expand a query into).
-fun base_reduction_db(thy :: Theory, dt :: DatatypeThms,
+fun base_reduction_db(thy :: Theory, dts :: Map.of(Symbol, DatatypeThms),
                       t_lt_equations :: List.of(Thm),
                       extra :: List.of(Thm)) :: RuleDB:
-  let db = for values(d :~ RuleDB = empty_db) (th in dt.discriminators):
-             add_thm(thy, d, #'disc, th)
-  let db = for values(d :~ RuleDB = db) (th in dt.selectors):
-             add_thm(thy, d, #'sel, th)
+  let db = for values(d :~ RuleDB = empty_db) ((_, dt) in dts):
+             let dt :~ DatatypeThms = dt
+             let d2 = for values(e :~ RuleDB = d) (th in dt.discriminators):
+                        add_thm(thy, e, #'disc, th)
+             for values(e :~ RuleDB = d2) (th in dt.selectors):
+               add_thm(thy, e, #'sel, th)
   let db = for values(d :~ RuleDB = db) (th in t_lt_equations):
              add_thm(thy, d, #'tlt, th)
   let db = for values(d :~ RuleDB = db) (th in extra):
@@ -652,7 +673,8 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
   let fty = fun_type(spec)
   let fn_ph = mk_const(spec.name, fty)
   let self = self_type(dt.spec)
-  let k = (match descent_column(spec, fn_ph)
+  let k = (match descent_column(spec, fn_ph,
+                                ~usable: fun (ty :: HType): schematic_datatype(dts, ty))
            | #false:
                error(~who: #'install_structural_function,
                      "no argument column descends at every recursive call",
@@ -678,7 +700,7 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
   let hfty = mk_fun(hdom, hdom)
   let (thy1, def_h) = new_basic_definition(thy0, mk_eq(mk_var(h_name, hfty), h_term))
   let h_const = mk_const(h_name, hfty)
-  let db = base_reduction_db(thy1, dt, t_lt_equations, proj_rules)
+  let db = base_reduction_db(thy1, dts, t_lt_equations, proj_rules)
   let congr = prove_congruence(thy1, spec, dts, tree, carrier, fn_ph, h_const,
                                def_h, db)
   let (soln, final_thm) = WFREC(thy1, wr_def, carrier.rel, h_const, carrier.wf, congr)

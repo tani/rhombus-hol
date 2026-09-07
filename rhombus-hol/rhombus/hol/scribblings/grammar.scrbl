@@ -79,12 +79,13 @@ There are no wildcard clauses and no clause ordering: every clause in a matched
 column names a constructor, and each constructor of that type appears exactly
 once.
 
-A pattern is one constructor deep. @tt{succ(succ(k))} is not a pattern in this
-version, because the induction schemes it derives follow one constructor at a
-time and could not reason about a definition that matched deeper. A nested
-@rhombus(match) may not re-match a column that has already been refined ---
-which matters because a pattern variable can shadow a parameter of the same
-name.
+A pattern may nest to any depth: @tt{Cons(x, Cons(y, rest))} is a pattern,
+written directly in a clause head, or built the same way one level at a time
+via a nested @rhombus(match) on an already-bound variable --- @tt{match xs |
+Cons(x, rest): match rest | Nil(): ...} refines the tail @tt{Cons(x, rest)}
+already bound. A nested @rhombus(match) may not re-match a position that has
+already been refined --- which matters because a pattern variable can shadow
+a parameter of the same name.
 
 @section(~tag: "propositions"){Propositions}
 

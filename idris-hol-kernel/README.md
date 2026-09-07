@@ -1,7 +1,7 @@
 # idris-hol-kernel
 
 An Idris2 port of the LCF kernel's term algebra
-(`rhombus-hol-lib/rhombus/hol/private/{htype,term,kernel}.rhm`), compiled
+(`rhombus-hol-lib/rhombus/hol/{htype,term,kernel}.rhm`), compiled
 through Idris2's Racket backend. It is an independent, machine-checked
 verification tool, not a runtime dependency: `rhombus-hol-kernel`'s own
 `kernel.rhm` is 100% native Rhombus and is the trust boundary Rhombus/HOL

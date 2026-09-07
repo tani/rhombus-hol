@@ -53,7 +53,7 @@ rhombus-hol/
 ├── PLAN.md                       ← このファイル
 ├── rhombus-hol-kernel/            LCF カーネル（信頼境界①）。deps: base, rhombus-lib 1.1
 │   ├── info.rkt
-│   └── rhombus/hol/private/
+│   └── rhombus/hol/
 │       ├── names.rhm             論理定数の正準名（eq/imp/conj/…）
 │       ├── htype.rhm             型：TyVar / TyApp、subst・match・unify・order
 │       ├── term.rhm              項：locally nameless（下記 §2）
@@ -64,7 +64,7 @@ rhombus-hol/
 │   └── rhombus/
 │       ├── hol.rkt               #lang rhombus。言語本体 + reader サブモジュール
 │       ├── hol.rhm               #lang rhombus/lang_bridge → "hol.rkt"
-│       └── hol/private/
+│       └── hol/
 │           ├── bool.rhm          論理定数の定義 + 3 公理 + base_theory()
 │           ├── conv.rhm          変換（equal.ml 相当）
 │           ├── drule.rhm         派生規則（bool.ml + drule.ml 相当）
@@ -83,11 +83,14 @@ rhombus-hol/
         └── tests/                各モジュールに 1 対 1 対応するテスト一式
 ```
 
-`rhombus-hol-kernel/` のファイルは他パッケージの `private/` 内ファイルから、
-相対パスの文字列 (`"kernel.rhm"`) ではなく `rhombus/hol/private/kernel open`
+各パッケージの `rhombus/hol/` 直下ファイルは、他パッケージのファイルから
+相対パスの文字列 (`"kernel.rhm"`) ではなく `rhombus/hol/kernel open`
 のようなコレクション相対のむき出しパスで参照する。同じコレクション
-`rhombus/hol/private/` に複数パッケージが合流する（`collection 'multi`）ため、
-ファイル名が衝突しない限り問題なく解決される。
+`rhombus/hol/` に 3 パッケージ全部が合流する（`collection 'multi`）ため、
+ファイル名が衝突しない限り問題なく解決される -- `private/` のような
+専用のサブディレクトリを切っても Racket のモジュール解決には何の
+効果もない（visibility を強制する仕組みではなく、単なるフォルダ名の
+慣習でしかなかった）ので、3 パッケージとも `rhombus/hol/` 直下に統一した。
 
 境界に何を入れるかは「信頼境界そのもの」と「ビルド上の依存」の 2 つの基準がある。
 `printer.rhm` は trust.scrbl の「十の基本推論規則」ではないが、`kernel.rhm` が
@@ -100,7 +103,7 @@ rhombus-hol/
 証明は**展開時**に走るのでカーネルは phase 1 で動く。しかしカーネル自体は
 `meta:` ブロックを一切含まない**通常の `#lang rhombus/static` モジュール**である。
 言語層（`hol.rkt` と `decl_*.rhm` 相当のコード）だけが
-`import: meta: rhombus/hol/private/kernel open` で位相を 1 ずらして取り込む。
+`import: meta: rhombus/hol/kernel open` で位相を 1 ずらして取り込む。
 
 このおかげで:
 1. カーネルのテストが素の phase 0 の `.rhm` で書ける（`raco test` がそのまま効く）
@@ -414,7 +417,7 @@ review が示唆する「`new_basic_type_definition` に置き換えれば済む
 
 9.1 の 3 段のうち、段 1（`WF` の定義）は既に完了していた
 （`bool.rhm` の `mk_wf`/`c_wf`、"Add WF as a base logical constant" コミット）。
-本セッションで `rhombus-hol-lib/rhombus/hol/private/wellfounded.rhm` を追加し、
+本セッションで `rhombus-hol-lib/rhombus/hol/wellfounded.rhm` を追加し、
 段 2 が必要とする双方向の補題を両方とも**導出**（`new_axiom` なし、
 `drule.rhm` の `CCONTR`/`EXISTS`/`CHOOSE`/`GEN`/`SPEC`/`MP`/`DISCH` だけで）した:
 
@@ -475,7 +478,7 @@ prove_wf_from_induction    : ind_scheme(R) の証明を受け取り |- WF(R) を
 作る**単一の**最小不動点関係を、高階論理の全称量化を使って一つの
 閉じた `new_basic_definition` として直接書き下せる（`prove_inductive_relations_exist`
 を経由せず、その特殊化・単一インスタンス分だけを直接構成する）。
-`rhombus-hol-lib/rhombus/hol/private/wfrec.rhm` に実装し、`tests/wfrec.rhm`
+`rhombus-hol-lib/rhombus/hol/wfrec.rhm` に実装し、`tests/wfrec.rhm`
 で実カーネルに対して確認済み（1106 → 1112 テスト）。
 
 ```text
@@ -831,7 +834,7 @@ cases/induction/discriminators/selectors はすべて sum と prod のその性�
 ### 9.2.1 進捗（本セッション）: `unit`/`prod`/`sum` を導出し、enum の全数列を配線して差分テスト
 
 フェーズ 1 が要求する 3 つの型構成子（`unit`/`prod`/`sum`）をすべて
-`rhombus-hol-lib/rhombus/hol/private/algebra.rhm` に実装し、
+`rhombus-hol-lib/rhombus/hol/algebra.rhm` に実装し、
 `new_basic_type_definition` 経由で（公理を一切追加せず）導出した。
 `tests/algebra.rhm` で実カーネルに対して確認済み（980 → 1005 テスト）。
 
@@ -876,7 +879,7 @@ t and x===a`、`mk_inr_rep(b) := \x y t. (not t) and y===b` という 2 つの
 踏まなかった。
 
 **残作業**: `unit`/`prod`/`sum` に加え、それらを実際に `DatatypeSpec` へ
-配線する第一例を `rhombus-hol-lib/rhombus/hol/private/datatype_derived.rhm`
+配線する第一例を `rhombus-hol-lib/rhombus/hol/datatype_derived.rhm`
 に実装した -- **全コンストラクタが 0 引数（enum）の場合限定**で、
 `build_enum_thms(thy, spec)` が `DatatypeThms` を丸ごと導出する:
 
@@ -912,7 +915,7 @@ PLAN.md §9.3 が要求する差分テストそのものであり、enum とい�
 
 **まだ残っているもの（更新: フィールド付きコンストラクタへの一般化が完了）**:
 
-`rhombus-hol-lib/rhombus/hol/private/datatype_gen.rhm`
+`rhombus-hol-lib/rhombus/hol/datatype_gen.rhm`
 (`build_nonrecursive_datatype_thms`) が上記の項目 1・2 を実装し、
 `DatatypeThms` の 7 フィールドすべて（injectivity/distinctness/induction/
 cases/discriminators/selectors/elim_rules）を、フィールド付き・0 引数

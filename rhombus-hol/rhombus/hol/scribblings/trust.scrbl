@@ -134,12 +134,13 @@ such a boundary, forgeable by hand-writing the description.
 
 Three honest caveats.
 
-@bold{The kernel is reachable.} Its module lives under @tt{private/}, which is
-a convention and not a barrier. A module that imports it directly can call
-@tt{new_axiom} and manufacture any theorem it likes. "It compiled, so it was
-proved" therefore holds for modules that do not do that, which is not the same
-as holding unconditionally. Sealing this properly needs the private modules to
-be protected at the module-system level; that is not done.
+@bold{The kernel is reachable.} Its module lives at @tt{rhombus/hol/kernel.rhm},
+an ordinary file with no module-system enforcement behind it. A module that
+imports it directly can call @tt{new_axiom} and manufacture any theorem it
+likes. "It compiled, so it was proved" therefore holds for modules that do not
+do that, which is not the same as holding unconditionally. Sealing this
+properly needs the kernel module to be protected at the module-system level;
+that is not done.
 
 @bold{The implementation is not verified.} The kernel is a few hundred lines of
 ordinary Rhombus. It is small enough to read, and it is structured so that
@@ -161,8 +162,13 @@ Beyond the termination restrictions in @secref("termination"):
   @rhombus(block), not inside a macro expansion. @rhombus(check_property, ~datum)
   is the one exception; see @secref("declarations").}
 
- @item{Patterns are one constructor deep, clauses are unordered, and there are
-  no wildcards.}
+ @item{Patterns may nest to any depth (a constructor pattern's own
+  arguments may themselves be further constructor patterns, and a
+  @rhombus(match) may refine a variable an enclosing pattern already bound),
+  but clauses are unordered and there are no wildcards: a variable pattern
+  may sit beside constructor patterns at the same position, but more than
+  one clause reaching the same fully-refined case is an overlap error, not a
+  fallback.}
 
  @item{An import of a theory must precede the module's own declarations, and
   several must be given in dependency order. Two theories neither of which
@@ -178,8 +184,8 @@ Beyond the termination restrictions in @secref("termination"):
   error surfaces at run time, when the property is actually checked, rather
   than at compile time.}
 
- @item{The function body grammar has no arithmetic, no literals other than the
-  Booleans, no @rhombus(let) and no lambda.}
+ @item{The function body grammar has @rhombus(if), @rhombus(cond), local
+  @rhombus(let), no arithmetic, and no literals other than the Booleans.}
 
  @item{There is no fuel or timeout on rewriting, deliberately --- see
   @secref("prover"). A rewrite rule that is not permutative and does not

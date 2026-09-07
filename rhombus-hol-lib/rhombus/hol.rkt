@@ -8,7 +8,7 @@
 
 import:
   rhombus/meta open
-  "hol/private/module_block.rhm" as mb
+  "hol/module_block.rhm" as mb
 
 module reader ~lang rhombus/reader:
   ~lang: "hol.rhm"

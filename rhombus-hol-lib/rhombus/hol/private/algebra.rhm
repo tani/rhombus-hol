@@ -47,6 +47,10 @@ export:
   mk_inr_term
   SumThms
   build_sum
+  tuple_ty
+  mk_tuple
+  tuple_proj
+  prove_tuple_proj
 
 // -- unit --------------------------------------------------------------
 //
@@ -565,3 +569,72 @@ fun build_sum(thy :: Theory) :: values(Theory, SumThms):
     GEN(thy, sv, DISJ_CASES(thy, disj_th, left_case, right_case))
 
   values(thy, SumThms(inl_inj, inr_inj, distinct, cases))
+
+// -- N-ary tupling -----------------------------------------------------
+//
+// Nested right-associated `prod`, used to encode a multi-argument
+// function's parameter list as a single argument for `WFREC` (PLAN.md
+// section 9.1.2, wiring item 4: `WFREC` takes a single `Rwf :: A -> A ->
+// bool`, so a function of several arguments needs them tupled into one
+// `A`).  Reuses `prod`'s own theorems (`fst_pair`/`snd_pair`) rather than
+// re-deriving projection facts from scratch.
+
+fun tuple_ty(tys :: List.of(HType)) :: HType:
+  match tys
+  | [t]: t
+  | List.cons(t, rest): prod_ty(t, tuple_ty(rest))
+  | []: error(~who: #'tuple_ty, "empty tuple has no type")
+
+fun mk_tuple(args :: List.of(Term)) :: Term:
+  match args
+  | [a]: a
+  | List.cons(a, rest): mk_pair_term(a, mk_tuple(rest))
+  | []: error(~who: #'mk_tuple, "empty tuple")
+
+// The `i`-th projection (0-indexed) out of an `n`-ary tuple, as a term
+// ready to apply to any tuple of the shape `tys` describes.
+fun tuple_proj(tys :: List.of(HType), i :: Int, t :: Term) :: Term:
+  match tys
+  | [_]: t
+  | List.cons(_, rest):
+      (if i == 0 | mk_fst(t) | tuple_proj(rest, i - 1, mk_snd(t)))
+  | []: error(~who: #'tuple_proj, "empty tuple")
+
+fun fst_const_for(p :: Term) :: Term:
+  let (f, _) = dest_comb(mk_fst(p))
+  f
+
+fun snd_const_for(p :: Term) :: Term:
+  let (f, _) = dest_comb(mk_snd(p))
+  f
+
+// `|- s1 = s2  ==>  |- tuple_proj(tys, i, s1) = tuple_proj(tys, i, s2)`,
+// congruence along whatever chain of `fst`/`snd` position `i` needs.
+fun tuple_proj_cong(thy :: Theory, tys :: List.of(HType), i :: Int, eq :: Thm) :: Thm:
+  match tys
+  | [_]: eq
+  | List.cons(_, rest):
+      cond
+      | i == 0: AP_TERM(thy, fst_const_for(lhs_of(eq)), eq)
+      | ~else: tuple_proj_cong(thy, rest, i - 1, AP_TERM(thy, snd_const_for(lhs_of(eq)), eq))
+
+// `|- tuple_proj(tys, i, mk_tuple(args)) = args[i]`, for `args` matching
+// `tys` position for position -- unfolds `fst_pair`/`snd_pair` (`prod_thms`)
+// one nesting level at a time, instantiated at the concrete types.
+fun prove_tuple_proj(thy :: Theory, prod_thms :: ProdThms, tys :: List.of(HType),
+                     i :: Int, args :: List.of(Term)) :: Thm:
+  match args
+  | [a]: REFL(thy, a)
+  | List.cons(a, rest):
+      let rest_tys = (match tys | List.cons(_, rt): rt)
+      let rest_tuple = mk_tuple(rest)
+      cond
+      | i == 0:
+          let inst = INST_TYPE(thy, {#'a: type_of(a), #'b: tuple_ty(rest_tys)}, prod_thms.fst_pair)
+          SPECL(thy, [a, rest_tuple], inst)
+      | ~else:
+          let inst = INST_TYPE(thy, {#'a: type_of(a), #'b: tuple_ty(rest_tys)}, prod_thms.snd_pair)
+          let snd_at = SPECL(thy, [a, rest_tuple], inst)
+          let cong = tuple_proj_cong(thy, rest_tys, i - 1, snd_at)
+          let rec_thm = prove_tuple_proj(thy, prod_thms, rest_tys, i - 1, rest)
+          TRANS(cong, rec_thm)

@@ -1530,7 +1530,8 @@ measure 適用判定テストを追加。フルスイート 1193 -> 1206。
 | 1 | `Theory`/`Stamp` を forge 不能にする (P0) | **完了**（本セッション以前）。`constructor ~none` + `reconstructor ~none` + `internal`、raw field は非公開、`type_arity`/`const_type`/`axioms_of`/`definition_of`/`descends` だけを公開。`tests/kernel.rhm` に回帰テストあり。 |
 | 2 | `datatype` の `new_axiom` を `new_basic_type_definition` に置換 (P0) | **非再帰は完了、自己再帰は未着手**。`unit`/`prod`/`sum` を導出し、**任意の非再帰 `DatatypeSpec`**（フィールド付き・0引数混在・複数型変数、自己再帰のみ拒否）について `DatatypeSpec -> DatatypeThms` の配線（7 フィールド全部、仮説 0 個）を実装し `datatype_axioms` と完全一致することを差分テストで確認済み（`datatype_gen.rhm`、§9.2.1）。**`driver.rhm` の `add_type` から実接続済み** -- 非再帰 `type` 宣言は実際にこの導出を使う（テストスイート内で該当するのは `Colour` 一件のみ、1098 テスト全通過（専用の回帰テストtests/datatype_gen_wired.rhm追加込み）、速度に有意な変化なし）。自己再帰 datatype（フェーズ 2・3、無限公理が必要）は未着手 -- なお複数セッション規模。 |
 | 3 | `recdef` の `new_axiom` を導出に置換 (P0) | **完了**（§9.1.2、§9.7〜9.10）。`WFREC` 存在定理は完全導出（`wfrec.rhm`）。`driver.rhm` の `add_function` から実接続済みで、**通常の `function` 宣言はもう `new_axiom` を使わない**: 単一引数・構造的降下（§9.1.2）、任意深さの入れ子パターン（§9.7）、多引数（§9.8、タプル上で射影に沿った引き戻し）、非再帰関数（§9.8 続報）、そして **`~measure`（§9.10、measure に沿った引き戻し＋条件付き congruence bridge、ガード付き再帰も含む）**。残るフォールバックは真の辞書式降下（Ackermann、整礎関係の辞書式積が要る）と、関係する型が宣言済み datatype でない場合の 2 つだけ。なお datatype の `T_lt` 自身の方程式は `add_subterm_relation` が従来通り公理として入れる（`WF(T_lt)` は導出、`trust.scrbl` にその区別を明記した）。 |
-| 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**、**`HType` 側は意図的に見送り**。下記参照。 |
+| 3(raw Term) | raw `Term`/`HType` construction を隠す (P1) | **`Term`側は完了**（`unsafe` 名前空間、§10.x）、**`HType` 側は意図的に見送り**。下記参照。 |
+| 3(facade) | `rhombus/hol/kernel` を教育用 public facade にする | **完了**（§9.13）。`hyps`/`trace` を名前空間へ移し、`htype`/`term` を再 export。一 import で学生向け API が揃い、`hyp_union`/`trace_start`/`raw_comb` は裸では unbound。 |
 | 4 | 内部は locally nameless、外部 API は標準 HOL にする | **`mk_abs`/`dest_abs` により実質的に達成済みと判断**。詳細下記。 |
 | 5 | kernel から unification/printer/tracing を追い出す (P1) | **`type_unify` は完了**（本セッション以前、`rhombus-hol-lib/elab` へ移動済み）。printer は `kernel.rhm` 自身がエラー整形に使っており、追い出すと循環になるため据え置き（PLAN.md §1 が既にこの理由を記録済み）。tracing は独立した書き込み専用ログで健全性に無関係と説明済み。`hyp_insert`/`hyp_union`/`hyp_remove`/`rehash_hyps` の非公開化は**調査済み、現状維持と判断**: `rhombus-hol-lib` のどこからも実際には呼ばれておらず（`Thm` は raw hyps リストではなく既に不可侵なので、これらは項リスト上の純粋なユーティリティであり公開してもソウンドネスに影響しない）、唯一の外部利用者は `rhombus-hol-kernel` に対応するテストパッケージが無いために `tests/kernel.rhm`/`tests/drule.rhm`（外側の `rhombus-hol` パッケージ）に置かれている kernel 自身の単体テスト。非公開化には kernel 専用のテストパッケージ新設が要り、得られる利益（API 美観）に見合わないと判断した。 |
 | 6 | 公開 kernel API を HOL Light `fusion.ml` に揃える | 大枠は既に一致（十規則、同じ命名）。**`BETA` の trivial-redex 化は検討し、見送りと判断**（詳細下記）。残る未着手部分は printer/tracing 分離のみ（§5 で対応済みと説明）。 |
@@ -1719,6 +1720,32 @@ time   3.19  3.07  3.06  3.05  3.08    5.75   終わらない
 なお、以前のセッションで induction pool を試して撤回したときの記録
 （`decl_theorem` が 29 秒 -> 108 秒）は当時の状態のものである。現在は
 fertilization/irrelevance も入り、同ファイルは 3 秒で終わる。
+
+### 9.13 進捗（本セッション）: `rhombus/hol/kernel` を教育用 facade にした
+
+レビュー §3 の要望。`private/` を平坦化した結果 `rhombus/hol/kernel.rhm`
+は既に実装本体そのものだったが、export 一覧に `hyp_insert`/`hyp_union`/
+`hyp_remove`/`rehash_hyps` と `trace_start`/`trace_stop`/`TraceStep` が
+裸で並び、しかも項・型を作るには `htype`/`term` を別途 import する必要が
+あった。つまり「このファイルが学生が読む HOL kernel API」とは言えない。
+
+* 論理に属さない 2 つを名前付きにした -- `hyps.hyp_union(...)`,
+  `trace.start()`/`trace.stop()`/`trace.TraceStep`。§3 の `unsafe`
+  名前空間（`term.rhm` の raw 構築子）と同じ扱いで、export 一覧が
+  「信頼境界の公開 API そのもの」として読めるようになる。
+  `rhombus-hol-lib` はどちらも一度も呼んでいない（唯一の利用者は
+  kernel 自身のテストで、このパッケージにテストパッケージが無いため
+  外側の `rhombus-hol` に置かれている）。
+* `htype.rhm`/`term.rhm` を再 export した。`import: rhombus/hol/kernel open`
+  だけで、型・項の表現とその smart constructor/destructor、`Thm`、
+  `Theory`、十規則、定義原理が揃う。
+
+**検証**（使い捨てスクリプト）: `import: rhombus/hol/kernel open` だけの
+モジュールで `TyApp`/`new_type`/`mk_var`/`REFL`/`mk_abs`/`type_of`/
+`concl_of`/`hyps.hyp_union`/`trace.stop` が全て使え、`hyp_union`・
+`trace_start`・`raw_comb` はいずれも `unbound identifier` になることを
+確認した。`rhombus-hol-lib` は再 export を入れても無変更で再コンパイル
+できる（重複 import にならない）。フルスイート 1206 全通過。
 
 ### 書き換えループ検出は再現フィクスチャを書いてから
 

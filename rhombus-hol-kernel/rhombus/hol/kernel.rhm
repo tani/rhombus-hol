@@ -77,15 +77,32 @@ export:
   const_type
   axioms_of
   definition_of
-  // derivation recording, for offline replay by an independent checker
-  TraceStep
-  trace_start
-  trace_stop
-  // hypothesis-set operations, exported because the derived layer needs them
-  hyp_union
-  hyp_insert
-  hyp_remove
-  rehash_hyps
+  // -- the two things that are not part of the logic ----------------------
+  //
+  // Both are named rather than loose, so that the list above reads as the
+  // whole public API of the trust boundary and nothing in it is machinery.
+  //
+  // `hyps`      set operations on a sequent's hypothesis list.  Not
+  //             soundness-relevant -- a `Thm` is already unforgeable, so
+  //             these are ordinary operations on lists of terms -- and not
+  //             called from `rhombus-hol-lib` at all; they are here for the
+  //             kernel's own tests, which live in the outer package because
+  //             this one has no test package of its own.
+  // `trace`     the write-only derivation log the independent Idris checker
+  //             replays.  It cannot affect a proof; see the note on
+  //             `TraceStep`.
+  hyps
+  trace
+  // -- everything the derived layer builds terms and types out of ----------
+  //
+  // Re-exported so that `import: rhombus/hol/kernel open` is the whole
+  // student-facing API in one place: the type and term representations with
+  // their smart constructors and destructors, then `Thm`, `Theory`, the ten
+  // rules and the definitional principles above.  Building an ill-formed
+  // term still needs `unsafe` (`term.rhm`), which this does not re-export
+  // under a bare name any more than it does `hyp_union`.
+  all_from("htype.rhm")
+  all_from("term.rhm")
 
 def hol_version :: String = "0.1"
 
@@ -180,32 +197,46 @@ fun stamp_of(th :: Thm) :: Stamp: th.stamp
 // `Set.of(Term)` here: hypothesis sets are tiny and hashing terms is
 // expensive.
 
-fun hyp_insert(t :: Term, hs :: List.of(Term)) :: List.of(Term):
-  match hs
-  | []: [t]
-  | List.cons(h, rest):
-      let c = term_ord(t, h)
-      cond
-      | c == 0: hs
-      | c < 0: List.cons(t, hs)
-      | ~else: List.cons(h, hyp_insert(t, rest))
+namespace hyps:
+  export:
+    hyp_insert
+    hyp_union
+    hyp_remove
+    rehash_hyps
 
-fun hyp_union(a :: List.of(Term), b :: List.of(Term)) :: List.of(Term):
-  cond
-  | a.length() == 0: b
-  | b.length() == 0: a
-  | ~else: for values(acc :~ List = b) (t in a): hyp_insert(t, acc)
+  fun hyp_insert(t :: Term, hs :: List.of(Term)) :: List.of(Term):
+    match hs
+    | []: [t]
+    | List.cons(h, rest):
+        let c = term_ord(t, h)
+        cond
+        | c == 0: hs
+        | c < 0: List.cons(t, hs)
+        | ~else: List.cons(h, hyp_insert(t, rest))
 
-fun hyp_remove(t :: Term, hs :: List.of(Term)) :: List.of(Term):
-  hs.filter(~skip: fun (h :: Term): h == t)
+  fun hyp_union(a :: List.of(Term), b :: List.of(Term)) :: List.of(Term):
+    cond
+    | a.length() == 0: b
+    | b.length() == 0: a
+    | ~else: for values(acc :~ List = b) (t in a): hyp_insert(t, acc)
 
-// Rebuild the canonical form of a hypothesis list.  Instantiation maps over
-// the hypotheses pointwise, which can both reorder them and make two of them
-// equal, so the result has to be re-sorted and deduplicated -- otherwise the
-// invariant that hypothesis lists are canonical quietly breaks, and `==` on
-// theorems starts reporting differences that are not there.
-fun rehash_hyps(hs :: List.of(Term)) :: List.of(Term):
-  for values(acc :~ List = []) (h in hs): hyp_insert(h, acc)
+  fun hyp_remove(t :: Term, hs :: List.of(Term)) :: List.of(Term):
+    hs.filter(~skip: fun (h :: Term): h == t)
+
+  // Rebuild the canonical form of a hypothesis list.  Instantiation maps over
+  // the hypotheses pointwise, which can both reorder them and make two of them
+  // equal, so the result has to be re-sorted and deduplicated -- otherwise the
+  // invariant that hypothesis lists are canonical quietly breaks, and `==` on
+  // theorems starts reporting differences that are not there.
+  fun rehash_hyps(hs :: List.of(Term)) :: List.of(Term):
+    for values(acc :~ List = []) (h in hs): hyp_insert(h, acc)
+
+// The rules below use these constantly; the namespace is about what leaves
+// this module, not about how it reads inside.
+def hyp_insert = hyps.hyp_insert
+def hyp_union = hyps.hyp_union
+def hyp_remove = hyps.hyp_remove
+def rehash_hyps = hyps.rehash_hyps
 
 // -- theories --------------------------------------------------------------
 
@@ -417,12 +448,28 @@ fun need_eq(who :: Symbol, th :: Thm) :: List.of(Term):
 // keyed by its stamp's identity together with its sequent: two theorems
 // agreeing on all three are interchangeable for replay, since every rule
 // depends on exactly those.
-class TraceStep(rule :: Symbol,
-                thy :: maybe(Symbol),
-                thms :: List,
-                data :: List,
-                out_thy :: maybe(Symbol),
-                out_thms :: List)
+namespace trace:
+  export:
+    TraceStep
+    start
+    stop
+
+  class TraceStep(rule :: Symbol,
+                  thy :: maybe(Symbol),
+                  thms :: List,
+                  data :: List,
+                  out_thy :: maybe(Symbol),
+                  out_thms :: List)
+
+  fun start() :: Void:
+    trace_log.value := []
+    tracing.value := #true
+
+  fun stop() :: List:
+    tracing.value := #false
+    let steps = (trace_log.value :~ List).reverse()
+    trace_log.value := []
+    steps
 
 fun thm_key(th :: Thm) :: List: [th.stamp.id, th.hyps, th.concl]
 
@@ -433,18 +480,9 @@ def trace_log :: Box = Box([])
 // recording quadratic in the length of the derivation.
 fun note(rule :: Symbol, thy, thms :: List, data :: List,
          out_thy, out_thms :: List) :: Void:
-  trace_log.value := List.cons(TraceStep(rule, thy, thms, data, out_thy, out_thms),
+  trace_log.value := List.cons(trace.TraceStep(rule, thy, thms, data,
+                                               out_thy, out_thms),
                                trace_log.value :~ List)
-
-fun trace_start() :: Void:
-  trace_log.value := []
-  tracing.value := #true
-
-fun trace_stop() :: List:
-  tracing.value := #false
-  let steps = (trace_log.value :~ List).reverse()
-  trace_log.value := []
-  steps
 
 // |- t = t
 fun REFL(thy :: Theory, t :: Term) :: Thm:

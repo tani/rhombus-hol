@@ -2018,7 +2018,24 @@ distinctness（順序対ごと）・induction・cases を得る。
 残るのは `abs(node(...))` 形を `C_i(f1..fk)` 形へ述べ直す層（payload の
 pack/unpack を挟む）と `driver.rhm` への配線。
 
-フルスイート 1309/1309。
+**コンストラクタに名前を付け、injectivity と distinctness を宣言の形で
+述べ直した**（`define_recursive_ctors`／`restate_injectivity`／
+`restate_distinctness`）。
+
+    |- !x y z u. MyCons(x, y) = MyCons(z, u) <=> x = z and y = u
+    |- !x y. not (MyNil = MyCons(x, y))
+
+`datatype_axioms` が置く公理と同じ形（連言は左結合）で、仮説 0。
+表現側は payload を**1 つに詰めて**束縛するのに宣言側はフィールドを
+**1 つずつ**束縛するので、両者の橋渡しは名前替えではなく pack/unpack の
+全単射である（`collect_field_eqs` = `prod` の単射性を 1 フィールドずつ
+剥がす）。逆向きは合同性だけで済む。
+
+残るのは induction/cases の同じ述べ直し（こちらは束縛構造が変わるので
+`unpack_payload_exists` を挟む）と、判別子・選択子・destructor elimination・
+`T_lt`、そして `driver.rhm` への配線。
+
+フルスイート 1312/1312。
 
 ### 9.20 進捗（本セッション）: `num` を `DatatypeThms` に梱包し、公理版と差分一致を取った
 

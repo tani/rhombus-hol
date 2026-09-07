@@ -39,6 +39,10 @@ export:
   carve_recursive_datatype
   RecTreeThms
   derive_tree_theorems
+  RecCtors
+  define_recursive_ctors
+  restate_injectivity
+  restate_distinctness
 
 def unitty :: HType = mk_tyapp(ty_unit, [])
 
@@ -263,3 +267,131 @@ fun derive_tree_theorems(thy :: Theory, rc :: RecCarving, alg :: AlgebraThms,
   RecTreeThms(injectivity, distinctness, induction,
               prove_datatype_cases(thy, rc.node_inl, rc.junk, rc.ctors, cv,
                                    induction))
+
+// -- naming the constructors --------------------------------------------------
+//
+// So far the theorems talk about `abs(node(label_i a, kids [rep x, ...]))`.
+// A user talks about `Cons(h, t)`.  The two differ in more than a name: the
+// representation binds one *packed* payload where the declaration binds the
+// non-recursive fields one at a time, so converting between them is the
+// pack/unpack bijection, not a rewrite.
+class RecCtors(terms :: List.of(Term), defs :: List.of(Thm))
+
+fun ctor_field_vars(spec :: DatatypeSpec, c :: Ctor,
+                    prefix :: String) :: List.of(FVar):
+  mk_field_vars(c.fields, prefix)
+
+fun split_fields(spec :: DatatypeSpec, c :: Ctor,
+                 vs :: List.of(FVar)) :: values(List.of(Term), List.of(Term)):
+  let pairs = for List (f in c.fields, v in vs): [f, v]
+  values(for values(acc :~ List = []) ([f, v] in pairs):
+           (if is_recursive_field(spec, f :~ Field) | acc | acc ++ [(v :~ FVar) :~ Term]),
+         for values(acc :~ List = []) ([f, v] in pairs):
+           (if is_recursive_field(spec, f :~ Field) | acc ++ [(v :~ FVar) :~ Term] | acc))
+
+fun define_recursive_ctors(thy0 :: Theory, spec :: DatatypeSpec,
+                           rc :: RecCarving) :: values(Theory, RecCtors):
+  let cv :~ Carved = rc.carved
+  let (thy, terms, defs):
+    for values(t :~ Theory = thy0, ts :~ List = [], ds :~ List = []) (c in spec.ctors, i in List.iota(spec.ctors.length())):
+      let c :~ Ctor = c
+      let vs = ctor_field_vars(spec, c, "f")
+      let (nonrec, rec) = split_fields(spec, c, vs)
+      let body:
+        mk_comb(cv.abs,
+                mk_ctor_term(rc.node_inl, rc.junk, (rc.ctors[i] :~ CtorRep),
+                             pack_fields(nonrec),
+                             rec.map(fun (x :: Term): mk_comb(cv.rep, x))))
+      let cty = ctor_type(spec, c)
+      let (t2, d):
+        new_basic_definition(t, mk_eq(mk_var(c.name, cty),
+                                      list_mk_abs(vs, body)))
+      values(t2, ts ++ [mk_const(c.name, cty)], ds ++ [d])
+  values(thy, RecCtors(terms, defs))
+
+// `|- !xs ys. C_i(xs) = C_i(ys) <=> x0 = y0 and ...`, in the left-nested
+// shape `datatype_axioms` states it.
+fun restate_injectivity(thy :: Theory, spec :: DatatypeSpec, alg :: AlgebraThms,
+                        rc :: RecCarving, cs :: RecCtors,
+                        tree_inj :: Thm, i :: Int) :: Thm:
+  let c :~ Ctor = spec.ctors[i]
+  let ci = cs.terms[i]
+  let xs = ctor_field_vars(spec, c, "x")
+  let ys = ctor_field_vars(spec, c, "y")
+  let (xn, xr) = split_fields(spec, c, xs)
+  let (yn, yr) = split_fields(spec, c, ys)
+  let nf = nonrec_fields(spec, c)
+  fun unf(vs :: List.of(FVar)) :: Thm:
+    unfold_def(thy, (cs.defs[i] :~ Thm), vs.map(fun (v :: FVar): v :~ Term))
+  let lhs = mk_eq(list_mk_comb(ci, xs.map(fun (v :: FVar): v :~ Term)),
+                  list_mk_comb(ci, ys.map(fun (v :: FVar): v :~ Term)))
+  let rhs = left_fold_term(for List (x in xs, y in ys):
+                             mk_eq((x :~ FVar) :~ Term, (y :~ FVar) :~ Term))
+  let fwd:
+    let node_eq = TRANS(SYM(thy, unf(xs)), TRANS(ASSUME(thy, lhs), unf(ys)))
+    let parts = MP(thy,
+                   SPECL(thy, [pack_fields(xn)] ++ xr
+                                ++ [pack_fields(yn)] ++ yr, tree_inj),
+                   node_eq)
+    // `payload_eq and child0 and child1 and ...`, nested to the right
+    let split :~ List:
+      recur loop (k = 0, acc :~ Thm = parts, out :~ List = []):
+        cond
+        | k == xr.length(): out ++ [acc]
+        | ~else: loop(k + 1, CONJUNCT2(thy, acc), out ++ [CONJUNCT1(thy, acc)])
+    let payload_eq :~ Thm = split[0]
+    let child_eqs = for List (k in List.iota(xr.length())): (split[k + 1] :~ Thm)
+    let nonrec_eqs :~ List:
+      cond
+      | nf.length() == 0: []
+      | ~else: collect_field_eqs(thy, alg.prod, nf, xn, yn, payload_eq)
+    // put them back in declaration order
+    let ordered :~ List:
+      recur loop (k = 0, ni = 0, ri = 0, out :~ List = []):
+        cond
+        | k == c.fields.length(): out
+        | is_recursive_field(spec, (c.fields[k] :~ Field)):
+            loop(k + 1, ni, ri + 1, out ++ [(child_eqs[ri] :~ Thm)])
+        | ~else: loop(k + 1, ni + 1, ri, out ++ [(nonrec_eqs[ni] :~ Thm)])
+    DISCH(thy, lhs, left_fold_conj(thy, ordered))
+  let bwd:
+    let asm = ASSUME(thy, rhs)
+    let eqs = split_left_conj_local(thy, asm, xs.length())
+    // the converse is plain congruence on the constructor -- no unfolding
+    DISCH(thy, rhs, congruence_chain(thy, ci, eqs))
+  GENL(thy, xs ++ ys, IMP_ANTISYM_RULE(thy, fwd, bwd))
+
+fun left_fold_term(ts :: List.of(Term)) :: Term:
+  match ts
+  | List.cons(t0, rest): for values(acc :~ Term = t0) (t in rest): mk_conj(acc, t)
+
+fun split_left_conj_local(thy :: Theory, th :: Thm, k :: Int) :: List.of(Thm):
+  cond
+  | k == 1: [th]
+  | ~else: split_left_conj_local(thy, CONJUNCT1(thy, th), k - 1)
+             ++ [CONJUNCT2(thy, th)]
+
+// `|- !xs ys. not (C_i(xs) = C_j(ys))`
+fun restate_distinctness(thy :: Theory, spec :: DatatypeSpec, rc :: RecCarving,
+                         cs :: RecCtors, tree_dist :: Thm,
+                         i :: Int, j :: Int) :: Thm:
+  let ci :~ Ctor = spec.ctors[i]
+  let cj :~ Ctor = spec.ctors[j]
+  let xs = ctor_field_vars(spec, ci, "x")
+  let ys = ctor_field_vars(spec, cj, "y")
+  let (xn, xr) = split_fields(spec, ci, xs)
+  let (yn, yr) = split_fields(spec, cj, ys)
+  let stmt = mk_eq(list_mk_comb(cs.terms[i], xs.map(fun (v :: FVar): v :~ Term)),
+                   list_mk_comb(cs.terms[j], ys.map(fun (v :: FVar): v :~ Term)))
+  let node_eq:
+    TRANS(SYM(thy, unfold_def(thy, (cs.defs[i] :~ Thm),
+                              xs.map(fun (v :: FVar): v :~ Term))),
+          TRANS(ASSUME(thy, stmt),
+                unfold_def(thy, (cs.defs[j] :~ Thm),
+                           ys.map(fun (v :: FVar): v :~ Term))))
+  let contra:
+    MP(thy,
+       NOT_ELIM(thy, SPECL(thy, [pack_fields(xn)] ++ xr
+                                  ++ [pack_fields(yn)] ++ yr, tree_dist)),
+       node_eq)
+  GENL(thy, xs ++ ys, NOT_INTRO(thy, DISCH(thy, stmt, contra)))

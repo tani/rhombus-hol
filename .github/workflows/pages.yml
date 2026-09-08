@@ -1,9 +1,9 @@
 name: Documentation
 
-# `raco setup --pkgs rhombus-hol` writes the manual under
-# rhombus-hol/rhombus/hol/doc/. Its pages link to the shared Scribble CSS and
-# JS one directory up, so the whole doc/ tree is the site, and the redirect
-# written at its root points at rhombus-hol/index.html.
+# `raco setup` writes the manual under rhombus-hol/rhombus/hol/doc/. Its pages
+# link to the shared Scribble CSS and JS one directory up, so the whole doc/
+# tree is the site, and the redirect written at its root points at
+# rhombus-hol/index.html.
 #
 # CI builds the documentation on every branch; this workflow exists to publish
 # what main builds.
@@ -25,34 +25,73 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+env:
+  # Pinned rather than `current`: Racket bytecode is version-specific, so a
+  # moving version would invalidate both caches below on every run. 9.3 is
+  # what the packages are developed against.
+  RACKET_VERSION: '9.3'
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: Bogdanp/setup-racket@v1.11
         with:
-          version: current
+          version: ${{ env.RACKET_VERSION }}
           variant: CS
 
-      # As in ci.yml: one install for all three, so the dependencies among
-      # them resolve as links to this checkout rather than as catalog lookups.
-      # Documentation is left to the next step, which is the point here.
-      - name: Install the packages
+      # `rhombus-lib` and `rhombus-scribble-lib` are the only things `--auto`
+      # can reach for, and building them from the catalog dominates a cold
+      # run. Whether an installer already ships them differs between the
+      # Racket and Rhombus distributions, so rather than assume: cache the
+      # package tree, and the catalog build happens at most once.
+      - name: Cache the installed packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/racket
+            ~/.cache/racket
+          key: racket-pkgs-${{ env.RACKET_VERSION }}-${{ hashFiles('*/info.rkt') }}
+          restore-keys: racket-pkgs-${{ env.RACKET_VERSION }}-
+
+      # The three packages install as links to this checkout, so `raco setup`
+      # writes their bytecode into compiled/ directories here. Reusing those
+      # is safe: a .dep file records the Racket version and the source hash,
+      # so raco recompiles whatever moved and the pin above keeps the rest
+      # valid.
+      - name: Cache the compiled bytecode
+        uses: actions/cache@v4
+        with:
+          path: |
+            rhombus-hol-kernel/**/compiled
+            rhombus-hol-lib/**/compiled
+            rhombus-hol/**/compiled
+          key: racket-zo-${{ env.RACKET_VERSION }}-${{ hashFiles('**/*.rhm', '**/*.rkt', '**/*.scrbl') }}
+          restore-keys: racket-zo-${{ env.RACKET_VERSION }}-
+
+      # One install for all three, so the dependencies among them resolve as
+      # links to this checkout rather than as catalog lookups. `--no-setup`
+      # leaves every compile to the single parallel `raco setup` below instead
+      # of compiling once here and again there; `--skip-installed` is what
+      # makes the run idempotent when the cache above restored the links.
+      - name: Link the packages
         run: |
-          raco pkg install --auto --batch --no-docs \
+          raco pkg install --auto --batch --no-setup --skip-installed \
             rhombus-hol-kernel/ rhombus-hol-lib/ rhombus-hol/
 
-      # `raco setup` reports a document it could not build and still exits 0,
-      # so the log is what has to be read -- otherwise a broken manual gets
-      # published as though it were fine.
+      # All three at once, so bytecode and manual are built in one parallel
+      # pass. `raco setup` reports a document it could not build and still
+      # exits 0, so the log is what has to be read -- otherwise a broken
+      # manual gets published as though it were fine.
       - name: Build the manual
         run: |
           set -o pipefail
-          raco setup --pkgs rhombus-hol 2>&1 | tee setup.log
+          raco setup --jobs "$(nproc)" \
+            --pkgs rhombus-hol-kernel rhombus-hol-lib rhombus-hol 2>&1 | tee setup.log
           if grep -q '^raco setup: error' setup.log; then
             echo "::error::raco setup reported errors"
             grep -A 3 '^raco setup: error' setup.log

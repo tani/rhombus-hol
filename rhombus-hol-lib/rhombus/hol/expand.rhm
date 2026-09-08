@@ -21,7 +21,7 @@ import:
 
 export:
   Decl
-  plan_body
+  plan_next
   declaration_heads
 
 // `kind` selects the template `module_block.rhm` will use; `parts` carries
@@ -49,46 +49,44 @@ fun head_of(form :: Syntax) :: maybe(Symbol):
       (if declaration_heads.contains(n) | n | #false)
   | ~else: #false
 
-// `theorem` and its `proof:` are two separate groups -- shrubbery ends the
-// group at the newline -- so the walk has to look ahead by one.  `proof:` is
-// optional: without it the proof is `auto`, which is what most of the
-// specification's theorems need now that the induction variable is chosen
-// automatically.
-fun plan_body(forms :: List.of(Syntax)) :: List.of(Decl):
-  recur loop (fs :~ List = forms, acc :~ List = []):
-    match fs
-    | []: acc
-    | List.cons(form, rest):
-        match theorem_parts(form)
-        | #false: loop(rest, acc ++ [plan_one(form)])
-        | [name, attrs, stmt]:
-            let (tactic, rest2):
-              match rest
-              | List.cons(nxt, more) when proof_tactic(nxt) != #false:
-                  values(proof_tactic(nxt), more)
-              | ~else: values(#false, rest)
-            loop(rest2, acc ++ [Decl(#'theorem, form, [name, attrs, stmt, tactic])])
+// Return exactly one declaration and the still-unexpanded tail. A caller can
+// emit the first declaration and let the Rhombus expander install any bindings
+// before asking for the next one.
+fun plan_next(forms :: List.of(Syntax))
+     :: values(maybe(Decl), List.of(Syntax)):
+  match forms
+  | []: values(#false, [])
+  | List.cons(form, rest):
+      match theorem_parts(form)
+      | #false: values(plan_one(form), rest)
+      | [name, attrs, stmt]:
+          match rest
+          | List.cons(nxt, more) when proof_tactic(nxt) != #false:
+              values(Decl(#'theorem, form,
+                          [name, attrs, stmt, proof_tactic(nxt)]),
+                     more)
+          | ~else:
+              values(Decl(#'theorem, form, [name, attrs, stmt, #false]),
+                     rest)
+
 
 // `theorem ~rewrite_rule name: <prop>`, or `#false` if this is not one.
 fun theorem_parts(form :: Syntax) :: maybe(List):
   match form
   | 'theorem $(attr :: Keyword) ... $(name :: Identifier): $g; ...':
-      [name, [attr, ...], '$g; ...']
+      [name, [attr, ...], [g, ...]]
   | ~else: #false
 
-fun proof_tactic(form :: Syntax) :: maybe(Syntax):
+fun proof_tactic(form :: Syntax) :: maybe(List.of(Syntax)):
   match form
-  | 'proof: $g; ...': '$g; ...'
+  | 'proof: $g; ...': [g, ...]
   | ~else: #false
 
 fun plan_one(form :: Syntax) :: Decl:
   match head_of(form)
   | #'type:
-      // The pieces emission needs are the user's own identifiers; the logical
-      // side re-parses the whole form at phase 1.
-      // Three views of the same declaration, all from one parse: the
-      // identifiers the classes need, the field types the generators need, and
-      // the parameter list.
+      // Runtime identifiers and the logical DatatypeSpec below are derived
+      // from this one traversal of the user's declaration.
       let [name, ctors] = elab.type_decl_shape(form)
       let spec = elab.parse_type_decl(form)
       let self = mk_tyapp(spec.name, spec.params.map(fun (q :: Symbol): mk_tyvar(q)))

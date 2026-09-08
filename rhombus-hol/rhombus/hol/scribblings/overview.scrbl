@@ -18,13 +18,15 @@ twice, from the same source text.
 
 )
 
-The two readings go through the same parser on the same syntax, so they cannot
-disagree about what a definition says. This is the reason the surface syntax
-uses Rhombus's own spellings wherever a construct exists on both sides ---
+Both readings originate in the same declaration expansion. The HOL
+enforestation pass produces a theory-independent Core tree; the executable
+emitter uses the same source declaration. Built-ins therefore use Rhombus's
+own spellings wherever a construct exists on both sides ---
 @rhombus(#true), @rhombus(!), @rhombus(&&), @rhombus(||), @rhombus(==) and
-@rhombus(if) --- while constructs that exist only in the logic get their own
-spellings, such as @rhombus(===, ~datum), @rhombus(and, ~datum) and
-@rhombus(forall, ~datum).
+@rhombus(if) --- while logic-only constructs use spellings such as
+@rhombus(===, ~datum), @rhombus(and, ~datum) and @rhombus(forall, ~datum).
+User-defined operators make the same choice explicitly with
+@rhombus(logical_operator, ~datum) or @rhombus(reflected_operator, ~datum).
 
 @section{When things happen}
 

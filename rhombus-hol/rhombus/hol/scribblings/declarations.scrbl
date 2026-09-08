@@ -5,16 +5,16 @@
 These are the forms that @rhombuslangname(rhombus/hol) gives a logical reading.
 Anything else in a module body is ordinary Rhombus.
 
-Most of these are recognised by scanning the module body, not by binding their
-first word, so such a declaration must appear directly in the module body. It
-cannot appear inside a @rhombus(block), inside a @rhombus(fun) body, or in the
-expansion of a user-written macro. This is a limitation of this version.
+The declarations that change the current theory are recognised by the
+language's module-block expander and must appear directly in the module body.
+They cannot appear inside a @rhombus(block), inside a @rhombus(fun) body, or
+in the expansion of a user-written macro.
 
-@rhombus(check_property, ~datum) is the exception: it touches none of the
-state the others thread through the module (see its own section below), and
-that is what let it become a genuine, independently bound macro. It can
-appear as the expansion of a user's own macro, the same as @rhombus(fun) or
-@rhombus(class) could.
+@rhombus(logical_operator, ~datum),
+@rhombus(reflected_operator, ~datum), and
+@rhombus(check_property, ~datum) are genuine bound macros. Operator
+definitions are expanded one declaration at a time, so a binding established
+by one is visible while the following logical declaration is enforested.
 
 @section{@rhombus(type, ~datum)}
 
@@ -100,6 +100,82 @@ run-time meaning.
 @rhombus(~measure) supplies a termination argument for a definition that does
 not descend structurally. It is checked only when no structural descent can be
 found, so a measure on a definition that already descends is not examined.
+
+@section(~tag: "surface-operators"){HOL expression operators}
+
+@verbatim{
+logical_operator (left op right):
+  ~logic: Constant(left, right)
+  ~order: order
+
+reflected_operator (left op right):
+  ~runtime: expression
+  ~logic: Constant(left, right)
+  ~order: order
+}
+
+A @deftech{logical-only operator} adds an infix operator only to theorem
+statements and proof @rhombus(~cases) propositions. Its @rhombus(~logic)
+clause names the previously declared logical constant to apply. It has no
+ordinary Rhombus binding, so using it in a @rhombus(function) body reports
+that a logical-only operator cannot appear there.
+
+@rhombusblock(
+  logical_operator (x <&> y):
+    ~logic: conj(x, y)
+    ~order: hol_conjunction
+
+  theorem conjunction_example:
+    true <&> true
+)
+
+A @deftech{reflected operator} defines both an ordinary Rhombus operator from
+@rhombus(~runtime) and an operator in the HOL expression space from
+@rhombus(~logic). It is therefore admissible in both a @rhombus(function)
+body and a theorem statement. The author is responsible for making the two
+clauses denote the same operation; the definition and proof machinery then
+use the corresponding side.
+
+@rhombusblock(
+  reflected_operator (x <+> y):
+    ~runtime: x && y
+    ~logic: conj(x, y)
+    ~order: hol_conjunction
+)
+
+The available named orders, strongest to weakest, are
+@rhombus(hol_application), @rhombus(hol_equality),
+@rhombus(hol_negation), @rhombus(hol_conjunction),
+@rhombus(hol_disjunction), @rhombus(hol_implication), and
+@rhombus(hol_equivalence). See @secref("propositions") for the built-in
+operators at each order.
+
+Operator declarations take effect before the following declaration is
+enforested. Exporting and importing a reflected operator brings both its
+ordinary and HOL-space bindings:
+
+@rhombusblock(
+  export: <+>
+)
+
+@subsection{Migrating operator extensions}
+
+An ordinary @rhombus(operator) remains runtime-only. Code that previously
+expected the proposition parser to recognize an operator by spelling must
+choose explicitly:
+
+@itemlist(
+  @item{Use @rhombus(logical_operator, ~datum) when the operator is notation
+        for proofs only.}
+  @item{Use @rhombus(reflected_operator, ~datum) when the same spelling must
+        run in function bodies and elaborate in the logic.}
+)
+
+There is no numeric precedence hook and no parser table to modify. Select a
+named @tt{hol_*} order, and write @rhombus(~logic) as a binary
+logical constant applied to the two operand names in order. Existing ordinary
+operators intentionally remain rejected by logical declarations instead of
+being assigned a default meaning.
 
 @section{@rhombus(theorem, ~datum) and @rhombus(proof, ~datum)}
 

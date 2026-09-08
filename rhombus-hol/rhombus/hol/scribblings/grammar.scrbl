@@ -22,9 +22,9 @@ is.
 
 @section(~tag: "expressions"){Expressions}
 
-This is the grammar of a @rhombus(function, ~datum) body. It is small on
-purpose: everything in it is total and pure, which is what lets a definition be
-read as a set of equations.
+This is the grammar of a @rhombus(function, ~datum) body. HOL expressions use
+a dedicated, extensible enforestation space; function bodies admit only the
+pure, total forms below.
 
 @verbatim{
 body = expr                        the value of the body
@@ -40,6 +40,7 @@ expr = Id                          a parameter, pattern variable or local
      | expr || expr
      | expr == expr
      | if expr | expr | expr
+     | expr reflected-op expr
      | (expr)
 
 clause = CtorId(Id, ...): body
@@ -54,20 +55,22 @@ expression: a @rhombus(let) is a statement followed by the rest of the body,
 and there is no @rhombus(let) inside the operand of a @rhombus(&&). That is
 not a notational choice --- it is what the elaborator accepts.
 
-The operators are Rhombus's own, and they mean in the logic what they mean in
-Rhombus: @rhombus(#true) and @rhombus(#false) are the truth values,
-@rhombus(!) is negation, @rhombus(&&) and @rhombus(||) are conjunction and
-disjunction, @rhombus(==) is equality at any type. They have to be Rhombus's
-spellings because the body is emitted verbatim as the executable half; a
-different spelling would give the two readings different meanings.
+The built-in operators mean in the logic what they mean in Rhombus:
+@rhombus(#true) and @rhombus(#false) are the truth values, @rhombus(!) is
+negation, @rhombus(&&) and @rhombus(||) are conjunction and disjunction, and
+@rhombus(==) is equality at any type. A @tech{reflected operator} adds another
+operator with both executable and logical meanings. An ordinary Rhombus
+operator has no logical meaning and is rejected in a @rhombus(function);
+a @tech{logical-only operator} is rejected there because no executable
+operator exists.
 
 @rhombus(&&) and @rhombus(||) short-circuit when the module runs, while the
 logical @tt{and} and @tt{or} are strict. Nothing can tell the difference,
 because every function in this grammar is total.
 
 Anything outside the grammar is a compile error that names the offending
-expression. Arithmetic, string literals and @rhombus(block) are all outside
-it in this version.
+expression. Arithmetic, string literals, @rhombus(block), ordinary runtime-only
+operators, and logical-only operators are all outside it in this version.
 
 @subsection{Local definitions}
 
@@ -163,9 +166,9 @@ a parameter of the same name.
 
 @section(~tag: "propositions"){Propositions}
 
-This is the grammar of a @rhombus(theorem, ~datum) statement. It is read by the
-same precedence parser as an expression, in a different mode, so the two agree
-about how a term groups.
+This is the grammar of a @rhombus(theorem, ~datum) statement. It is enforested
+in the same dedicated HOL expression space as function expressions, with a
+different admissibility policy.
 
 @verbatim{
 prop = expr
@@ -178,6 +181,8 @@ prop = expr
      | forall (Id :: Type, ...): prop
      | exists (Id :: Type, ...): prop
      | if prop | prop | prop
+     | prop logical-op prop
+     | prop reflected-op prop
      | (prop)
 }
 
@@ -189,20 +194,21 @@ equations reads without parentheses.)
 
 @subsection{Precedence}
 
-Tightest first. Only @tt{==>} is right-associative.
+Strongest first. Only @tt{==>} is right-associative. User-defined operators
+select one of these named orders with @rhombus(~order).
 
 @tabular(
   ~sep: @hspace(2),
   ~column_properties: [#'left, #'left, #'left],
   ~row_properties: [#'bottom_border],
-  [[@bold{level}, @bold{proposition}, @bold{expression}],
-   ["70", @tt{===}, @tt{==}],
-   ["60", @tt{not}, @tt{!}],
-   ["50", @tt{and}, @tt{&&}],
-   ["40", @tt{or}, @tt{||}],
-   ["30", @elem{@tt{==>} (right)}, ""],
-   ["20", @tt{<=>}, ""],
-   ["10", @elem{@tt{forall}, @tt{exists}}, ""]])
+  [[@bold{order}, @bold{proposition}, @bold{expression}],
+   [@tt{hol_application}, "named application", "named application"],
+   [@tt{hol_equality}, @tt{===}, @tt{==}],
+   [@tt{hol_negation}, @tt{not}, @tt{!}],
+   [@tt{hol_conjunction}, @tt{and}, @tt{&&}],
+   [@tt{hol_disjunction}, @tt{or}, @tt{||}],
+   [@tt{hol_implication}, @elem{@tt{==>} (right)}, ""],
+   [@tt{hol_equivalence}, @tt{<=>}, ""]])
 
 A quantifier extends as far to the right as it can, so
 

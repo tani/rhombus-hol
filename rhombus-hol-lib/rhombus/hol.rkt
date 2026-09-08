@@ -9,9 +9,11 @@
 import:
   rhombus/meta open
   "hol/module_block.rhm" as mb
+  "hol/surface_space.rhm" open
+  "hol/surface_operator.rhm" open
 
 module reader ~lang rhombus/reader:
-  ~lang: "hol.rhm"
+  ~lang: "hol.rkt"
 
 export:
   all_from(rhombus):
@@ -19,4 +21,20 @@ export:
       #%module_block
   rename:
     mb.module_block as #%module_block
+  hol_expr
+  hol_equivalence
+  hol_implication
+  hol_disjunction
+  hol_conjunction
+  hol_negation
+  hol_equality
+  hol_application
+  logical_operator
+  reflected_operator
+  only_space hol_expr:
+    names:
+      #%literal
+      #%parens
+      #%call
+    === <=> ==> and or not == && || ! if cond forall exists
   mb.check_property

@@ -1,0 +1,275 @@
+#lang rhombus/and_meta
+
+// Enforestation for HOL surface expressions. Macros produce a source-located
+// syntax encoding of `surface_core.rhm` nodes; they never inspect a `Theory`
+// and never construct a kernel `Term`.
+
+import:
+  rhombus/meta open
+
+operator_order.def hol_application:
+  ~associativity: ~left
+
+operator_order.def hol_equality:
+  ~associativity: ~left
+  ~weaker_than: hol_application
+
+operator_order.def hol_negation:
+  ~weaker_than:
+    hol_equality
+    hol_application
+
+operator_order.def hol_conjunction:
+  ~associativity: ~left
+  ~weaker_than:
+    hol_negation
+    hol_equality
+    hol_application
+
+operator_order.def hol_disjunction:
+  ~associativity: ~left
+  ~weaker_than:
+    hol_conjunction
+    hol_negation
+    hol_equality
+    hol_application
+
+operator_order.def hol_implication:
+  ~associativity: ~right
+  ~weaker_than:
+    hol_disjunction
+    hol_conjunction
+    hol_negation
+    hol_equality
+    hol_application
+
+operator_order.def hol_equivalence:
+  ~associativity: ~left
+  ~weaker_than:
+    hol_implication
+    hol_disjunction
+    hol_conjunction
+    hol_negation
+    hol_equality
+    hol_application
+
+space.enforest hol_expr:
+  space_path rhombus/hol/expr
+  macro_definer macro
+  meta_namespace hol_expr_meta:
+    description "HOL expression"
+    operator_description "HOL expression operator"
+    parse_syntax_class Parsed
+    reflection space
+
+    export:
+      pack
+      unpack
+      wrap_allowed
+      make_ref
+      make_call
+
+    private parsed_packer do_pack
+    private parsed_unpacker do_unpack
+
+    fun pack(s :: Syntax, ~track: track = []) :: Syntax:
+      syntax_meta.track_origin(do_pack(s), track)
+
+    fun unpack(stx :: Syntax) :: Syntax:
+      do_unpack(stx, #false)
+
+    fun wrap_allowed(policy :: Syntax, node :: Syntax,
+                     ~track: track = []) :: Syntax:
+      pack('(core_allowed $policy $node)', ~track: track)
+
+    fun make_ref(name :: Syntax, policy :: Syntax,
+                 ~track: track = name) :: Syntax:
+      wrap_allowed(policy, '(core_ref $name)', ~track: track)
+
+    fun make_call(func :: Syntax, args :: List.of(Syntax), policy :: Syntax,
+                  ~track: track = []) :: Syntax:
+      let f = unpack(func)
+      let [a, ...] = args.map(unpack)
+      wrap_allowed(policy, '(core_call $f [$a, ...])', ~track: track)
+
+    identifier_parser:
+      fun (id): make_ref(id, 'both', ~track: id)
+
+export:
+  hol_expr
+  meta:
+    hol_expr_meta
+  hol_equivalence
+  hol_implication
+  hol_disjunction
+  hol_conjunction
+  hol_negation
+  hol_equality
+  hol_application
+  only_space hol_expr:
+    names:
+      #%literal
+      #%parens
+      #%call
+    ===
+    <=>
+    ==>
+    and
+    or
+    not
+    ==
+    &&
+    ||
+    !
+    if
+    cond
+    forall
+    exists
+
+module meta:
+  export:
+    meta:
+      hol_expr_meta
+
+meta:
+  fun binary(name :: Syntax, left :: Syntax, right :: Syntax,
+             policy :: Syntax) :: Syntax:
+    let f = hol_expr_meta.make_ref(name, 'both', ~track: [left, right])
+    hol_expr_meta.make_call(f, [left, right], policy, ~track: [left, right])
+
+  fun unary(name :: Syntax, right :: Syntax,
+            policy :: Syntax) :: Syntax:
+    let f = hol_expr_meta.make_ref(name, 'both', ~track: right)
+    hol_expr_meta.make_call(f, [right], policy, ~track: right)
+
+  fun encode_binder(b :: Syntax) :: Syntax:
+    match b
+    | '$(name :: Identifier) :: $ty ...':
+        '(core_binder $name ($ty ...))'.relocate_span([b])
+    | ~else: syntax_meta.error("a binder needs a name and a type", b)
+
+  fun parse_group(g :: Syntax) :: Syntax:
+    let '$(parsed :: hol_expr_meta.Parsed)' = g
+    hol_expr_meta.unpack(parsed)
+
+  fun encode_cond_clause(c :: Syntax) :: List:
+    match c
+    | '~else: $body; ...': [#'else, parse_group('$body; ...'), c]
+    | '$guard ...: $body; ...':
+        [#'guard, parse_group('$guard ...'), parse_group('$body; ...'), c]
+    | ~else: syntax_meta.error("malformed `cond` clause", c)
+
+  fun encode_cond(cs :: List.of(Syntax), whole :: Syntax) :: Syntax:
+    match cs
+    | []: syntax_meta.error("a `cond` needs a final `~else` clause", whole)
+    | List.cons(c, rest):
+        match encode_cond_clause(c)
+        | [#'else, body, at]:
+            unless rest.length() == 0
+            | syntax_meta.error("`~else` must be the last `cond` clause", at)
+            body :~ Syntax
+        | [#'guard, guard, body, at]:
+            let tail = encode_cond(rest, whole)
+            '(core_allowed both (core_if $(guard :~ Syntax) $(body :~ Syntax) $tail))'.relocate_span([at :~ Syntax])
+
+hol_expr.macro '#%literal $(value :: Term)':
+  match Syntax.unwrap(value)
+  | #true: hol_expr_meta.make_ref('true', 'both', ~track: value)
+  | #false: hol_expr_meta.make_ref('false', 'both', ~track: value)
+  | ~else:
+      hol_expr_meta.wrap_allowed('both', '(core_rejected $value)',
+                                 ~track: value)
+
+hol_expr.macro '#%parens ($(inner :: hol_expr_meta.Parsed))':
+  inner
+
+hol_expr.macro '$left #%call ($(arg :: hol_expr_meta.Parsed), ...)':
+  ~order: hol_application
+  ~all_stx: stx
+  hol_expr_meta.make_call(left, [arg, ...], 'both', ~track: [left, arg, ...])
+
+hol_expr.macro '$left === $right':
+  ~order: hol_equality
+  ~all_stx: stx
+  binary('eq', left, right, 'prop')
+
+hol_expr.macro '$left <=> $right':
+  ~order: hol_equivalence
+  ~all_stx: stx
+  binary('eq', left, right, 'prop')
+
+hol_expr.macro '$left ==> $right':
+  ~order: hol_implication
+  ~all_stx: stx
+  binary('imp', left, right, 'prop')
+
+hol_expr.macro '$left and $right':
+  ~order: hol_conjunction
+  ~all_stx: stx
+  binary('conj', left, right, 'prop')
+
+hol_expr.macro '$left or $right':
+  ~order: hol_disjunction
+  ~all_stx: stx
+  binary('disj', left, right, 'prop')
+
+hol_expr.macro 'not $right':
+  ~order: hol_negation
+  ~all_stx: stx
+  unary('neg', right, 'prop')
+
+hol_expr.macro '$left == $right':
+  ~order: hol_equality
+  ~all_stx: stx
+  binary('eq', left, right, 'function')
+
+hol_expr.macro '$left && $right':
+  ~order: hol_conjunction
+  ~all_stx: stx
+  binary('conj', left, right, 'function')
+
+hol_expr.macro '$left || $right':
+  ~order: hol_disjunction
+  ~all_stx: stx
+  binary('disj', left, right, 'function')
+
+hol_expr.macro '! $right':
+  ~order: hol_negation
+  ~all_stx: stx
+  unary('neg', right, 'function')
+
+hol_expr.macro 'if $(cond_expr :: hol_expr_meta.Parsed) | $(then_expr :: hol_expr_meta.Parsed) | $(else_expr :: hol_expr_meta.Parsed)':
+  ~all_stx: stx
+  let c = hol_expr_meta.unpack(cond_expr)
+  let t = hol_expr_meta.unpack(then_expr)
+  let e = hol_expr_meta.unpack(else_expr)
+  hol_expr_meta.wrap_allowed('both', '(core_if $c $t $e)',
+                             ~track: [cond_expr, then_expr, else_expr])
+
+hol_expr.macro 'cond | $clause | ...':
+  ~all_stx: stx
+  hol_expr_meta.pack(encode_cond([clause, ...], stx))
+
+hol_expr.macro
+| 'forall ($(binder :: Group), ...): $(body :: hol_expr_meta.Parsed)':
+    ~all_stx: stx
+    let [b, ...] = [binder, ...].map(encode_binder)
+    let e = hol_expr_meta.unpack(body)
+    hol_expr_meta.wrap_allowed('prop', '(core_forall [$b, ...] $e)', ~track: body)
+| 'forall ($(binder :: Group), ...) $body ...':
+    ~all_stx: stx
+    let [b, ...] = [binder, ...].map(encode_binder)
+    let e = parse_group('$body ...')
+    hol_expr_meta.wrap_allowed('prop', '(core_forall [$b, ...] $e)', ~track: e)
+
+hol_expr.macro
+| 'exists ($(binder :: Group), ...): $(body :: hol_expr_meta.Parsed)':
+    ~all_stx: stx
+    let [b, ...] = [binder, ...].map(encode_binder)
+    let e = hol_expr_meta.unpack(body)
+    hol_expr_meta.wrap_allowed('prop', '(core_exists [$b, ...] $e)', ~track: body)
+| 'exists ($(binder :: Group), ...) $body ...':
+    ~all_stx: stx
+    let [b, ...] = [binder, ...].map(encode_binder)
+    let e = parse_group('$body ...')
+    hol_expr_meta.wrap_allowed('prop', '(core_exists [$b, ...] $e)', ~track: e)

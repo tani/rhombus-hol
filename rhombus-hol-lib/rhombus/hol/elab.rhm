@@ -21,6 +21,7 @@ import:
   "datatype.rhm" open
   "recdef.rhm" open
   "core.rhm" open
+  "surface_core.rhm" open
   "bool.rhm" open
   "tyunify.rhm" open
 
@@ -161,6 +162,7 @@ fun type_decl_shape(stx :: Syntax) :: List:
 
 export:
   function_decl_shape
+  function_parts
   body_clauses
   row_parts
   parse_function_decl
@@ -236,25 +238,6 @@ fun param_name(p :: Syntax) :: Syntax:
       syntax_error(#'function,
                    "a parameter needs a name and a type", p)
 
-// -- the logical meaning -----------------------------------------------------
-
-// Signature pieces: `[name, [[param_id, HType], ...], HType]`.
-fun fun_signature(parts :: List, params :: List.of(Symbol)) :: List:
-  let [name, ps, rty, _, _] = parts
-  [Syntax.unwrap(name :~ Syntax),
-   (ps :~ List).map(fun (p :: Syntax): param_binding(p, params)),
-   parse_type(rty :~ Syntax, params)]
-
-fun param_binding(p :: Syntax, params :: List.of(Symbol)) :: List:
-  match p
-  | '$(n :: Identifier) :: $ty ...': [Syntax.unwrap(n), parse_type('$ty ...', params)]
-  | ~else: syntax_error(#'function, "a parameter needs a name and a type", p)
-
-// The type variables a declaration mentions, so that `~a` resolves.  A
-// function is implicitly polymorphic in every type variable it uses.
-//
-// Scanning the unwrapped datum rather than the syntax keeps this to one short
-// walk: `~a` is a keyword wherever it appears.
 fun collect_type_vars(stx :: Syntax) :: List.of(Symbol):
   fun walk(d, acc :~ List) :~ List:
     cond
@@ -267,99 +250,8 @@ fun collect_type_vars(stx :: Syntax) :: List.of(Symbol):
     | ~else: acc
   walk(Syntax.unwrap_all(stx), [])
 
-// -- expressions -------------------------------------------------------------
-
-// The instance of a constant's generic type at which it is being applied.
-fun const_instance(thy :: Theory, name :: Symbol,
-                   args :: List.of(Term), at :: Syntax) :: HType:
-  let gty = (match const_type(thy, name)
-             | #false: syntax_error(#'function, "unknown constant", at)
-             | t: t)
-  let res = mk_tyvar(#'_result)
-  let want = for values(ty :~ HType = res) (a in args.reverse()):
-               mk_fun(type_of(a), ty)
-  match type_unify(gty, want, {})
-  | #false:
-      syntax_error(#'function, "constant is applied at a type it does not have", at)
-  | sub: type_subst(sub, gty)
-
-// A function body is read by the same precedence parser as a proposition,
-// in `#'expr` mode.  One parser, because the alternative -- a second,
-// simpler walker for bodies -- is what let `if` be a special case here and
-// not there.
-//
-// The spellings differ between the modes and that is deliberate.  A body is
-// emitted as Rhombus *verbatim*, so every operator a body may use has to
-// already mean the right thing in Rhombus: `&&`, `||`, `!`, `==`, `#true`,
-// `#false`, `if`.  A proposition is never emitted, so it uses the logical
-// spellings `and`, `or`, `not`, `===`.
-fun elab_expr(thy :: Theory, self_name :: Symbol, self :: Term,
-              env :: Map.of(Symbol, Term), e :: Syntax) :: Term:
-  parse_group(PEnv(thy, [], env, #'expr, self_name, self), e)
-
-// -- clauses -----------------------------------------------------------------
-
-// `C(v, ...)` as a pattern term, plus the variables it binds, at the type
-// the scrutinee actually has.  Each `v` is a bare identifier (a fresh
-// variable, as ever) or itself `SubC(...)` -- a nested constructor
-// pattern written directly in the clause head (`Cons(x, Nil())`), parsed
-// the same recursive way, at that field's own type.  This is a second,
-// independent route to a nested pattern beside a separate nested `match`
-// statement in the body (`parse_body`'s `matched_var`/`refine_pats`) --
-// both build the same kind of nested `Term`, and neither the coverage
-// checker nor the termination checker cares which surface form produced
-// it.
-fun ctor_pattern(thy :: Theory, cname :: Symbol, vids :: List.of(Syntax),
-                 scrut_ty :: HType, at :: Syntax) :: values(Term, List.of(FVar)):
-  let gty = (match const_type(thy, cname)
-             | #false: syntax_error(#'function, "unknown constructor", at)
-             | t: t)
-  let (doms, res) = peel_fun(gty, vids.length())
-  let tyin = (match type_match(res, scrut_ty, {})
-              | #false:
-                  syntax_error(#'function,
-                               "constructor does not build the matched type", at)
-              | m: m)
-  let field_tys = doms.map(fun (d :: HType): type_subst(tyin, d))
-  let parsed = for List (v in vids, ty in field_tys):
-                 parse_sub_pattern(thy, v, ty :~ HType)
-  let subpats = parsed.map(fun (pr :: List): pr[0] :~ Term)
-  let bound = for values(acc :~ List = []) (pr in parsed):
-                acc ++ (pr :~ List)[1]
-  values(list_mk_comb(mk_const(cname, type_subst(tyin, gty)), subpats),
-         bound)
-
-// One constructor-argument position: `_` (a position the clause does not
-// name), a bare identifier (a fresh variable), or `SubC(sv, ...)` -- a
-// further nested pattern, recursing into `ctor_pattern` at `SubC`'s own
-// matched type.
-//
-// `_` is a fresh variable under a name nothing can write, so every layer
-// below -- coverage, termination, the step-function compiler -- goes on
-// seeing exactly the variable pattern it already understands.  Two `_`s in
-// one row must be distinct variables (patterns bind distinct names), which
-// `genvar` gives for free.
-// A pattern variable nothing can refer to, because its symbol is generative
-// rather than merely spelled unusually: `_` binds an identity no source text
-// holds, instead of a name no source text is expected to write.
 fun fresh_wildcard(ty :: HType) :: FVar:
   mk_var(Symbol.gen("_wild"), ty)
-
-fun parse_sub_pattern(thy :: Theory, v :: Syntax,
-                      ty :: HType) :: List:
-  match v
-  | '_':
-      let fv = fresh_wildcard(ty)
-      [fv :~ Term, [fv]]
-  | '$(n :: Identifier)($sv, ...)':
-      let (pat, bound) = ctor_pattern(thy, Syntax.unwrap(n), [sv, ...], ty, v)
-      [pat, bound]
-  | '$(n :: Identifier)':
-      let fv = mk_var(Syntax.unwrap(n), ty)
-      [fv :~ Term, [fv]]
-  | ~else:
-      syntax_error(#'function, "malformed pattern", v)
-
 fun peel_fun(ty :: HType, n :: Int) :: values(List.of(HType), HType):
   recur loop (ty :~ HType = ty, k = n, acc :~ List = []):
     cond
@@ -368,144 +260,21 @@ fun peel_fun(ty :: HType, n :: Int) :: values(List.of(HType), HType):
         let (d, r) = dest_fun(ty)
         loop(r, k - 1, acc ++ [d])
 
-fun parse_function_decl(thy :: Theory, stx :: Syntax) :: FunSpec:
-  let tyvars = collect_type_vars(stx)
-  let parts = function_parts(stx)
-  let [_, _, _, measure_stx, body] = parts
-  let [name0, bindings0, rty0] = fun_signature(parts, tyvars)
-  let name :~ Symbol = name0
-  let bindings :~ List = bindings0
-  let rty :~ HType = rty0
-  let arg_tys :~ List = bindings.map(fun (b :: List): b[1] :~ HType)
-  let fty = for values(t :~ HType = rty) (a in arg_tys.reverse()): mk_fun(a, t)
-  let self = mk_const(name, fty)
-  let pvars = for List (b in bindings): mk_var((b :~ List)[0], (b :~ List)[1])
-  let env0 = for values(m :~ Map = {}) (v in pvars): m ++ {(v :~ FVar).name: v}
-  // The measure sees the parameters and nothing else, and it must not mention
-  // the function being defined: it is what justifies the definition, so it
-  // cannot depend on it.
-  let measure:
-    match measure_stx
-    | #false: #false
-    | ms:
-        let e = parse_group(PEnv(thy, tyvars, env0, #'expr, #false, #false),
-                            ms :~ Syntax)
-        list_mk_abs(pvars, e)
-  let clauses = parse_body(thy, name, self,
-                           pvars.map(fun (v :: FVar): v :~ Term),
-                           env0, body :~ Syntax, stx)
-  FunSpec(name, arg_tys, rty, clauses, measure)
+// Compatibility name for clients that used the old entry point. Surface
+// parsing is complete before this function runs.
+fun parse_function_decl(thy :: Theory, spec :: CoreFunctionSpec) :: FunSpec:
+  elaborate_function_decl(thy, spec)
 
-// A body, as the clauses it stands for.
-//
-// `match` may be nested to any depth, on any parameter or on a variable a
-// prior pattern in the same clause already bound, and the nesting is
-// flattened into a pattern matrix: `match m | zero(): ... | succ(p): match n
-// | ...` becomes `[zero(), n]`, `[succ(p), zero()]`, `[succ(p), succ(q)]`;
-// `match xs | Cons(x, rest): match rest | Nil(): ... | Cons(y, ys): ...`
-// refines the *tail* of `Cons(x, rest)` in place, becoming `[Cons(x, Nil())]`,
-// `[Cons(x, Cons(y, ys))]`.  That is what lets a definition descend on more
-// than one argument, and into more than one level of a single argument --
-// `check_coverage` (`recdef.rhm`) checks the whole tree for exhaustiveness
-// and non-overlap, and the termination checker looks for a descending
-// position anywhere in it.
-//
-// `pats` is the row built so far: initially the bare parameters, refined one
-// position at a time -- possibly nested inside an earlier refinement -- as
-// the matching descends.
-fun parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
-               pats :: List.of(Term), env :: Map.of(Symbol, Term),
-               body :: Syntax, at :: Syntax) :: List.of(DefClause):
-  match body
-  | '#%hol_clauses: $c; ...':
-      clause_rows(thy, self_name, self, pats, env, [c, ...], at)
-  | 'match $(sv :: Identifier)
-     | $c
-     | ...':
-      let v = matched_var(env, pats, Syntax.unwrap(sv), body)
-      let cs = [c, ...]
-      for values(acc :~ List = []) (c in cs):
-        acc ++ parse_clause(thy, self_name, self, pats, v, env, c, at)
-  | 'let $(n :: Identifier) = $rhs ...
-     $more; ...':
-      // A multi-statement body's first statement must be `let name = expr`;
-      // anything else there falls through to the generic `not_admitted`
-      // error below, the same as any other unrecognised body shape.
-      //
-      // A `let` is substituted in the *logical* reading -- the equation is
-      // about the value, and mentions the initializer only where the
-      // variable is read.  The compiled program evaluates it either way, so
-      // the two readings come apart exactly when a clause does not read it.
-      // Each clause therefore carries the initializer as an evaluation
-      // obligation (`core.rhm`'s `CoreLet`), and the termination checker
-      // reads those alongside the right-hand side.  A recursive call in an
-      // initializer nothing reads is then *checked*, where it used to be
-      // either invisible or -- after the interim guard -- refused.
-      let v = elab_expr(thy, self_name, self, env, '$rhs ...')
-      let env2 = env ++ {Syntax.unwrap(n): v}
-      let clauses = parse_body(thy, self_name, self, pats, env2,
-                               '$more; ...', at)
-      for List (c in clauses):
-        let c :~ DefClause = c
-        let core = CoreLet(Syntax.unwrap(n), CoreLeaf(v),
-                           clause_core(c))
-        DefClause(c.pats, core_term(core), core_obligations(core))
-  | ~else:
-      let core = CoreLeaf(elab_expr(thy, self_name, self, env, body))
-      [DefClause(pats, core_term(core), core_obligations(core))]
 
-// The clause's body as a core expression again.  A clause reaching a `let`
-// from outside was built by an inner `parse_body`, so its own obligations
-// are already settled; wrapping them back up keeps `CoreLet`'s rule -- the
-// union of initializer and body -- in one place instead of spelling the
-// append out at the use site.
-fun clause_core(c :: DefClause) :: CoreExpr:
+// Rebuild a clause's evaluation core so an enclosing `let` can prepend its
+// initializer obligation without duplicating obligation logic.
+fun clause_core(c :: DefClause) :: EvalCoreExpr:
   recur loop (obs :~ List = c.obligations):
     match obs
-    | []: CoreLeaf(c.rhs)
-    | [_]: CoreLeaf(c.rhs)
-    | List.cons(o, rest): CoreLet(#'_inner, CoreLeaf(o :~ Term), loop(rest))
+    | []: EvalCoreLeaf(c.rhs)
+    | [_]: EvalCoreLeaf(c.rhs)
+    | List.cons(o, rest): EvalCoreLet(#'_inner, EvalCoreLeaf(o :~ Term), loop(rest))
 
-// The declaration-level clause matrix (review item 9): a row of patterns
-// covering *every* argument at once, the way Rhombus's own multi-case `fun`
-// is written, instead of a `match` on one argument with the rest destructured
-// by nesting.
-//
-//   function app(xs :: List(~a), ys :: List(~a)) :: List(~a)
-//   | (Nil(), ys): ys
-//   | (Cons(x, rest), ys): Cons(x, app(rest, ys))
-//
-// This is sugar in the strict sense: a row refines the same `pats` vector the
-// nested form refines, one column at a time, and produces the same
-// `DefClause` rows.  Everything downstream -- the decision tree, the coverage
-// and termination checks, the `WFREC` derivation -- sees no difference, which
-// is why ordering, `_` and nested patterns work here for free.
-fun clause_rows(thy :: Theory, self_name :: Symbol, self :: Term,
-                pats :: List.of(Term), env :: Map.of(Symbol, Term),
-                cs :: List.of(Syntax), at :: Syntax) :: List.of(DefClause):
-  for values(acc :~ List = []) (c in cs):
-    acc ++ clause_row(thy, self_name, self, pats, env, c, at)
-
-fun clause_row(thy :: Theory, self_name :: Symbol, self :: Term,
-               pats :: List.of(Term), env :: Map.of(Symbol, Term),
-               c :: Syntax, at :: Syntax) :: List.of(DefClause):
-  let (row, body) = row_parts(c, pats.length())
-  // Left to right, so a later column's pattern sees the variables an earlier
-  // one bound -- the same order the nested form reads in.
-  let (pats2, env2):
-    for values(ps :~ List = pats, e :~ Map = env) (col in List.iota(row.length())):
-      let v :~ FVar:
-        match ps[col]
-        | FVar(_, _): ps[col]
-        | ~else:
-            syntax_error(#'function,
-                         "this argument has already been matched",
-                         (row :~ List)[col])
-      let [pat, bound] = parse_sub_pattern(thy, (row :~ List)[col], v.ty)
-      values(refine_pats(ps, v, pat :~ Term),
-             for values(m :~ Map = e) (bv in bound :~ List):
-               m ++ {(bv :~ FVar).name: bv :~ Term})
-  parse_body(thy, self_name, self, pats2, env2, body, at)
 
 // `(pat, ...): body`, or `pat: body` when there is exactly one argument.
 fun row_parts(c :: Syntax, arity :: Int) :: values(List.of(Syntax), Syntax):
@@ -588,85 +357,26 @@ fun refine_pats(pats :: List.of(Term), v :: FVar,
         | ~else: t
   pats.map(walk)
 
-// One `match` clause.  `_: body` is the catch-all: it refines nothing, so
-// the row keeps `v` as it stood and the decision tree treats it exactly as
-// the variable pattern it is -- earlier clauses win wherever they match,
-// and this one covers whatever is left.  That is the same reading the
-// emitted Rhombus `match` gives the same text.
-fun parse_clause(thy :: Theory, self_name :: Symbol, self :: Term,
-                 pats :: List.of(Term), v :: FVar,
-                 env0 :: Map.of(Symbol, Term), c :: Syntax,
-                 at :: Syntax) :: List.of(DefClause):
-  match c
-  | '_: $body; ...':
-      parse_body(thy, self_name, self, pats, env0, '$body; ...', at)
-  | ~else:
-      let (cname, vids, body) = clause_parts(c)
-      let (pat, bound) = ctor_pattern(thy, cname, vids, v.ty, c)
-      let env = for values(m :~ Map = env0) (bv in bound):
-                  m ++ {(bv :~ FVar).name: bv :~ Term}
-      let pats2 = refine_pats(pats, v, pat)
-      parse_body(thy, self_name, self, pats2, env, body, at)
-
-fun clause_parts(c :: Syntax) :: values(Symbol, List.of(Syntax), Syntax):
-  match c
-  | '$(cname :: Identifier)($v, ...): $body; ...':
-      values(Syntax.unwrap(cname), [v, ...], '$body; ...')
-  | '$(cname :: Identifier): $body; ...':
-      values(Syntax.unwrap(cname), [], '$body; ...')
-  | ~else: syntax_error(#'function, "malformed match clause", c)
 
 // ============================================================================
-// Propositions
+// Core elaboration
 // ============================================================================
 //
-// A hand-written precedence parser rather than a `space.enforest` space.
-// Shrubbery does not know precedence -- it hands back a flat sequence of terms
-// in a group -- so something has to climb precedences either way, and the
-// proposition grammar is fixed and small.  What `space.enforest` would buy is
-// user extensibility, which v0.1 does not need.
-//
-// The levels must match `printer.rhm`'s, or a residue printed for the user
-// would not read back as the same proposition.
+// Surface enforestation has already resolved precedence, associativity, and
+// extension bindings. This module resolves names and types against a Theory.
 
 export:
+  PEnv
+  elaborate
+  parse_core_prop
+  elaborate_theorem_statement
+  elaborate_function_decl
+  core_type_vars
   parse_prop
   parse_theorem_statement
   parse_tactic
   collect_type_vars
 
-def prec_iff = 20
-def prec_imp = 30
-def prec_or = 40
-def prec_and = 50
-def prec_not = 60
-def prec_eq = 70
-
-// An infix connective: `[precedence, right_associative, build]`.
-//
-// Matched by literal pattern rather than by unwrapping: `Syntax.unwrap` on an
-// operator term gives the tagged datum, not the operator's name.
-//
-// The two tables share their levels, so `a == b && c` and `a === b and c`
-// group the same way.  The expression levels also agree with Rhombus's own,
-// which they must: the body is emitted verbatim, so a disagreement would make
-// the logical and the executable readings of one source differ.
-fun infix_info(mode :: Symbol, t :: Syntax) :: maybe(List):
-  cond
-  | mode == #'prop:
-      match t
-      | '===': [prec_eq, #false, mk_eq]
-      | '<=>': [prec_iff, #false, mk_eq]
-      | '==>': [prec_imp, #true, mk_imp]
-      | 'and': [prec_and, #false, mk_conj]
-      | 'or': [prec_or, #false, mk_disj]
-      | ~else: #false
-  | ~else:
-      match t
-      | '==': [prec_eq, #false, mk_eq]
-      | '&&': [prec_and, #false, mk_conj]
-      | '||': [prec_or, #false, mk_disj]
-      | ~else: #false
 
 // `self_name` and `self` are the definition being elaborated, so that a
 // recursive call resolves before the constant exists in the theory.  In
@@ -679,242 +389,293 @@ class PEnv(thy :: Theory,
            self :: maybe(Term)):
   property who :: Symbol: (if mode == #'prop | #'theorem | #'function)
 
-fun parse_prop(thy :: Theory, tyvars :: List.of(Symbol),
-               vars :: Map.of(Symbol, Term), stx :: Syntax) :: Term:
-  parse_group(PEnv(thy, tyvars, vars, #'prop, #false, #false), stx)
+// -- CoreExpr elaboration ----------------------------------------------------
 
-fun parse_group(env :: PEnv, stx :: Syntax) :: Term:
-  let ts = group_terms(env, stx)
-  let (t, rest) = parse_at(env, ts, 0)
-  unless rest.length() == 0
-  | syntax_error(env.who, "unexpected text after an expression", stx)
-  t
+fun core_const_instance(env :: PEnv, name :: Symbol,
+                        args :: List.of(Term), at :: Syntax) :: HType:
+  let generic = (match const_type(env.thy, name)
+                 | #false: syntax_error(env.who, "unknown constant", at)
+                 | t: t)
+  // A constant's type variables are schematic. Freshen them before
+  // unification so a surrounding theorem variable with the same printed name
+  // cannot fail the occurs check (for example, equality on `List(~a)`).
+  let renaming:
+    for values(m :~ Map = {}) (v in type_vars(generic)):
+      m ++ {v: mk_tyvar(Symbol.gen(to_string(v))) :~ HType}
+  let gty = (if args.length() == 0 | generic | type_subst(renaming, generic))
+  let res = mk_tyvar(Symbol.gen("_result"))
+  let want = for values(ty :~ HType = res) (a in args.reverse()):
+               mk_fun(type_of(a), ty)
+  match type_unify(gty, want, {})
+  | #false:
+      syntax_error(env.who,
+                   "constant is applied at a type it does not have",
+                   at)
+  | sub: type_subst(sub, gty)
 
-fun sub_env(env :: PEnv, vars :: Map.of(Symbol, Term)) :: PEnv:
-  PEnv(env.thy, env.tyvars, vars, env.mode, env.self_name, env.self)
-
-fun group_terms(env :: PEnv, stx :: Syntax) :: List.of(Syntax):
-  match stx
-  | '$t ...': [t, ...]
-  | ~else: syntax_error(env.who, not_admitted(env), stx)
-
-fun parse_at(env :: PEnv, ts :: List.of(Syntax), min_prec :: Int)
-     :: values(Term, List.of(Syntax)):
-  let (left, rest) = parse_prefix(env, ts)
-  climb(env, left, rest, min_prec)
-
-fun climb(env :: PEnv, left :: Term, ts :: List.of(Syntax), min_prec :: Int)
-     :: values(Term, List.of(Syntax)):
-  match ts
-  | []: values(left, ts)
-  | List.cons(op, rest):
-      match infix_info(env.mode, op)
-      | #false: values(left, ts)
-      | [prec, right_assoc, build]:
-          let prec :~ Int = prec
-          cond
-          | prec < min_prec: values(left, ts)
-          | ~else:
-              let next_min = (if right_assoc | prec | prec + 1)
-              let (right, rest2) = parse_at(env, rest, next_min)
-              climb(env, build(left, right), rest2, min_prec)
-
-fun parse_prefix(env :: PEnv, ts :: List.of(Syntax))
-     :: values(Term, List.of(Syntax)):
-  match ts
-  | []: error(~who: env.who, "expression ended early")
-  | List.cons(t, rest):
-      match t
-      | '#true': values(tm_true, rest)
-      | '#false': values(tm_false, rest)
-      | '!' when env.mode == #'expr:
-          let (inner, rest2) = parse_at(env, rest, prec_not + 1)
-          values(mk_neg(inner), rest2)
-      | '$(id :: Identifier)':
-          match Syntax.unwrap(id)
-          | #'not when env.mode == #'prop:
-              let (inner, rest2) = parse_at(env, rest, prec_not + 1)
-              values(mk_neg(inner), rest2)
-          | #'if: parse_conditional(env, ts)
-          | #'cond: parse_cond(env, ts)
-          | #'forall when env.mode == #'prop: parse_quantifier(env, #'forall, ts)
-          | #'exists when env.mode == #'prop: parse_quantifier(env, #'exists, ts)
-          | ~else: parse_application(env, t, rest)
-      | ~else: parse_application(env, t, rest)
-
-// `if c | a | b`.  The alternatives close the group, so like a quantifier this
-// consumes everything that is left.
-//
-// Both branches are elaborated even though only one will run: `cond` is a
-// total function of three arguments, and the termination checker reads the
-// recursive calls out of both.
-fun parse_conditional(env :: PEnv, ts :: List.of(Syntax))
-     :: values(Term, List.of(Syntax)):
-  let [t, ...] = ts
-  let whole = '$t ...'
-  match whole
-  | 'if $c ...
-     | $a; ...
-     | $b; ...':
-      let ct = parse_group(env, '$c ...')
-      unless type_of(ct) == bool
-      | syntax_error(env.who, "the condition of an `if` must be a Boolean",
-                     '$c ...')
-      let at = parse_group(env, '$a; ...')
-      let bt = parse_group(env, '$b; ...')
-      unless type_of(at) == type_of(bt)
-      | syntax_error(env.who, "the two branches of an `if` have different types",
-                     whole)
-      values(mk_cond(ct, at, bt), [])
-  | ~else:
-      syntax_error(env.who, "an `if` needs a condition and two branches", whole)
-
-// `cond | c1: e1 | c2: e2 | ... | ~else: en`.  Desugars to nested `if`;
-// requires an explicit `~else` clause -- this reflected subset does not do
-// exhaustiveness analysis over arbitrary Boolean guards the way `match`
-// does over constructors, so unlike `match` there is no way to check a
-// `cond` without a catch-all is total.
-fun parse_cond(env :: PEnv, ts :: List.of(Syntax))
-     :: values(Term, List.of(Syntax)):
-  let [t, ...] = ts
-  let whole = '$t ...'
-  match whole
-  | 'cond | $clause | ...':
-      values(build_cond(env, [clause, ...], whole), [])
-  | ~else:
-      syntax_error(env.who, "a `cond` needs at least one clause", whole)
-
-fun build_cond(env :: PEnv, cs :: List.of(Syntax), at :: Syntax) :: Term:
-  match cs
-  | []:
-      syntax_error(env.who, "a `cond` needs a final `~else` clause", at)
-  | List.cons(c, rest):
-      match c
-      | '~else: $b; ...':
-          unless rest.length() == 0
-          | syntax_error(env.who, "`~else` must be the last `cond` clause", c)
-          parse_group(env, '$b; ...')
-      | '$g ...: $b; ...':
-          let ct = parse_group(env, '$g ...')
-          unless type_of(ct) == bool
-          | syntax_error(env.who, "a `cond` condition must be a Boolean",
-                         '$g ...')
-          let at_t = parse_group(env, '$b; ...')
-          let bt = build_cond(env, rest, at)
-          unless type_of(at_t) == type_of(bt)
-          | syntax_error(env.who,
-                         "the branches of a `cond` have different types", c)
-          mk_cond(ct, at_t, bt)
-      | ~else: syntax_error(env.who, "malformed `cond` clause", c)
-
-// `forall (x :: T, ...): body`.  The body extends as far right as it can, so a
-// quantifier always swallows the rest of the sequence -- which is why this
-// matches the reassembled group rather than picking terms off one at a time.
-fun parse_quantifier(env :: PEnv, which :: Symbol, ts :: List.of(Syntax))
-     :: values(Term, List.of(Syntax)):
-  let [t, ...] = ts
-  let whole = '$t ...'
-  let (binders, body_stx):
-    match whole
-    | 'forall ($b, ...): $g; ...': values([b, ...], '$g; ...')
-    | 'exists ($b, ...): $g; ...': values([b, ...], '$g; ...')
-    | 'forall ($b, ...) $more ...': values([b, ...], '$more ...')
-    | 'exists ($b, ...) $more ...': values([b, ...], '$more ...')
-    | ~else:
-        syntax_error(env.who,
-                     "a quantifier needs a parenthesised binder list and a body",
-                     whole)
-  let bs :~ List = binders
-  let vs = for List (b in bs): binder_var(env, b)
-  let vars2 = for values(m :~ Map = env.vars) (v in vs):
-                m ++ {(v :~ FVar).name: v :~ Term}
-  let body = parse_group(sub_env(env, vars2), body_stx)
-  let build = (if which == #'forall | mk_forall | mk_exists)
-  values(for values(acc :~ Term = body) (v in vs.reverse()): build(v, acc), [])
-
-fun binder_var(env :: PEnv, b :: Syntax) :: FVar:
-  match b
-  | '$(n :: Identifier) :: $ty ...':
-      mk_var(Syntax.unwrap(n), parse_type('$ty ...', env.tyvars))
-  | ~else: syntax_error(env.who, "a binder needs a name and a type", b)
-
-fun parse_application(env :: PEnv, t :: Syntax, rest :: List.of(Syntax))
-     :: values(Term, List.of(Syntax)):
-  match t
-  | '($g)':
-      values(parse_group(env, g), rest)
-  | '$(id :: Identifier)':
-      let n = Syntax.unwrap(id)
-      match rest
-      | List.cons(args, more) when is_parens(args):
-          let as_ = for List (a in paren_groups(args)): parse_group(env, a)
-          values(apply_named(env, n, as_, t), more)
-      | ~else: values(lookup_atom(env, n, t), rest)
-  | ~else: syntax_error(env.who, not_admitted(env), t)
-
-// What the grammar admits, said in the terms of whichever mode is running.
-// A body that falls outside it is a compile error, so the message is the only
-// guidance the author gets.
-fun not_admitted(env :: PEnv) :: String:
-  cond
-  | env.mode == #'prop:
-      "a proposition admits variables, named applications, `not`, `and`, "
-        ++ "`or`, `===`, `<=>`, `==>`, `forall`, `exists` and `if`"
-  | ~else:
-      "this version admits only variables, named applications, `if`, "
-        ++ "`cond`, and the Boolean operators `!`, `&&`, `||` and `==` in "
-        ++ "a function body"
-
-fun is_parens(t :: Syntax) :: Boolean:
-  match t
-  | '($_, ...)': #true
-  | ~else: #false
-
-fun paren_groups(t :: Syntax) :: List.of(Syntax):
-  match t
-  | '($g, ...)': [g, ...]
-  | ~else: []
-
-fun lookup_atom(env :: PEnv, n :: Symbol, at :: Syntax) :: Term:
+fun core_lookup(env :: PEnv, n :: Symbol, at :: Syntax) :: Term:
   match env.vars.get(n, #false)
   | #false:
       cond
       | n == env.self_name: env.self :~ Term
-      | ~else: mk_const(n, const_instance(env.thy, n, [], at))
+      | ~else: mk_const(n, core_const_instance(env, n, [], at))
   | v: v
 
-fun apply_named(env :: PEnv, n :: Symbol, args :: List.of(Term),
-                at :: Syntax) :: Term:
-  match env.vars.get(n, #false)
-  | #false:
-      cond
-      | n == env.self_name: list_mk_comb(env.self :~ Term, args)
-      | ~else:
-          list_mk_comb(mk_const(n, const_instance(env.thy, n, args, at)), args)
-  | v: list_mk_comb(v, args)
+fun core_apply(env :: PEnv, func :: CoreExpr,
+               args :: List.of(CoreExpr), at :: Syntax) :: Term:
+  let terms = args.map(fun (a :: CoreExpr): elaborate(env, a))
+  match func
+  | CoreRef(n, ref_at):
+      match env.vars.get(n, #false)
+      | #false:
+          cond
+          | n == env.self_name: list_mk_comb(env.self :~ Term, terms)
+          | ~else:
+              list_mk_comb(mk_const(n,
+                                    core_const_instance(env, n, terms,
+                                                        ref_at)),
+                           terms)
+      | v: list_mk_comb(v, terms)
+  | ~else: list_mk_comb(elaborate(env, func), terms)
 
-// The statement, plus the names of its leading universal binders -- the prover
-// needs them for `~induct:` and for readable residues, because a locally
-// nameless term does not carry them.
-fun parse_theorem_statement(thy :: Theory, stx :: Syntax)
-     :: values(Term, List.of(Symbol)):
-  let tyvars = collect_type_vars(stx)
-  values(parse_prop(thy, tyvars, {}, stx), leading_binder_names(stx))
+fun elaborate_binders(env :: PEnv, binders :: List.of(CoreBinder),
+                      body :: CoreExpr, is_forall :: Boolean) :: Term:
+  let vars = for List (b in binders):
+               let b :~ CoreBinder = b
+               mk_var(b.name, parse_type(b.type_stx, env.tyvars))
+  let vars2 = for values(m :~ Map = env.vars) (v in vars):
+                m ++ {(v :~ FVar).name: v :~ Term}
+  let inner = elaborate(sub_env(env, vars2), body)
+  let build = (if is_forall | mk_forall | mk_exists)
+  for values(acc :~ Term = inner) (v in vars.reverse()): build(v, acc)
 
-fun leading_binder_names(stx :: Syntax) :: List.of(Symbol):
-  match stx
-  | 'forall ($b, ...): $g; ...':
-      let here = for List (bb in [b, ...]): binder_name(bb)
-      here ++ leading_binder_names('$g; ...')
-  | 'forall ($b, ...) $rest ...':
-      let here = for List (bb in [b, ...]): binder_name(bb)
-      here ++ leading_binder_names('$rest ...')
+fun elaborate(env :: PEnv, expr :: CoreExpr) :: Term:
+  match expr
+  | CoreRef(name, at): core_lookup(env, name, at)
+  | CoreCall(func, args, at): core_apply(env, func, args, at)
+  | CoreIf(cond_expr, then_expr, else_expr, at):
+      let cond_term = elaborate(env, cond_expr)
+      unless type_of(cond_term) == bool
+      | syntax_error(env.who,
+                     "the condition of an `if` must be a Boolean",
+                     at)
+      let then_term = elaborate(env, then_expr)
+      let else_term = elaborate(env, else_expr)
+      unless type_of(then_term) == type_of(else_term)
+      | syntax_error(env.who,
+                     "the two branches of an `if` have different types",
+                     at)
+      mk_cond(cond_term, then_term, else_term)
+  | CoreForall(binders, body, _):
+      elaborate_binders(env, binders, body, #true)
+  | CoreExists(binders, body, _):
+      elaborate_binders(env, binders, body, #false)
+  | ~else: error(~who: #'elaborate, "unknown CoreExpr variant")
+
+fun parse_core_prop(thy :: Theory, tyvars :: List.of(Symbol),
+                    vars :: Map.of(Symbol, Term),
+                    expr :: CoreExpr) :: Term:
+  elaborate(PEnv(thy, tyvars, vars, #'prop, #false, #false), expr)
+
+fun append_unique(base :: List.of(Symbol),
+                  more :: List.of(Symbol)) :: List.of(Symbol):
+  for values(acc :~ List = base) (n in more):
+    (if acc.contains(n) | acc | acc ++ [n])
+
+fun core_type_vars(expr :: CoreExpr) :: List.of(Symbol):
+  fun binders_vars(bs :: List.of(CoreBinder)) :: List.of(Symbol):
+    for values(acc :~ List = []) (b in bs):
+      append_unique(acc, collect_type_vars((b :~ CoreBinder).type_stx))
+  match expr
+  | CoreRef(_, _): []
+  | CoreCall(func, args, _):
+      for values(acc :~ List = core_type_vars(func)) (a in args):
+        append_unique(acc, core_type_vars(a))
+  | CoreIf(c, t, e, _):
+      append_unique(core_type_vars(c),
+                    append_unique(core_type_vars(t), core_type_vars(e)))
+  | CoreForall(bs, body, _):
+      append_unique(binders_vars(bs), core_type_vars(body))
+  | CoreExists(bs, body, _):
+      append_unique(binders_vars(bs), core_type_vars(body))
   | ~else: []
 
-fun binder_name(b :: Syntax) :: Symbol:
-  match b
-  | '$(n :: Identifier) :: $_ ...': Syntax.unwrap(n)
-  | ~else: #'unknown
+fun leading_core_binder_names(expr :: CoreExpr) :: List.of(Symbol):
+  match expr
+  | CoreForall(bs, body, _):
+      bs.map(fun (b :: CoreBinder): b.name)
+        ++ leading_core_binder_names(body)
+  | ~else: []
+
+fun elaborate_theorem_statement(thy :: Theory, expr :: CoreExpr)
+     :: values(Term, List.of(Symbol)):
+  let tyvars = core_type_vars(expr)
+  values(parse_core_prop(thy, tyvars, {}, expr),
+         leading_core_binder_names(expr))
+
+// -- CoreFunctionSpec elaboration -------------------------------------------
+
+fun spec_type_vars(spec :: CoreFunctionSpec) :: List.of(Symbol):
+  let from_params:
+    for values(acc :~ List = []) (b in spec.params):
+      append_unique(acc, collect_type_vars((b :~ CoreBinder).type_stx))
+  append_unique(from_params, collect_type_vars(spec.result_type))
+
+fun core_ctor_pattern(thy :: Theory, cname :: Symbol,
+                      args :: List.of(CorePattern), scrut_ty :: HType,
+                      at :: Syntax) :: values(Term, List.of(FVar)):
+  let gty = (match const_type(thy, cname)
+             | #false: syntax_error(#'function, "unknown constructor", at)
+             | t: t)
+  let (doms, res) = peel_fun(gty, args.length())
+  let tyin = (match type_match(res, scrut_ty, {})
+              | #false:
+                  syntax_error(#'function,
+                               "constructor does not build the matched type",
+                               at)
+              | m: m)
+  let field_tys = doms.map(fun (d :: HType): type_subst(tyin, d))
+  let parsed = for List (arg in args, ty in field_tys):
+                 core_sub_pattern(thy, arg, ty :~ HType)
+  let subpats = parsed.map(fun (pair :: List): pair[0] :~ Term)
+  let bound = for values(acc :~ List = []) (pair in parsed):
+                acc ++ (pair :~ List)[1]
+  values(list_mk_comb(mk_const(cname, type_subst(tyin, gty)), subpats),
+         bound)
+
+fun core_sub_pattern(thy :: Theory, pat :: CorePattern,
+                     ty :: HType) :: List:
+  match pat
+  | CorePatWildcard(_):
+      let fv = fresh_wildcard(ty)
+      [fv :~ Term, [fv]]
+  | CorePatVar(name, _):
+      let fv = mk_var(name, ty)
+      [fv :~ Term, [fv]]
+  | CorePatCtor(name, args, at):
+      let (term, bound) = core_ctor_pattern(thy, name, args, ty, at)
+      [term, bound]
+  | ~else: error(~who: #'function, "unknown CorePattern variant")
+
+fun core_parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
+                    pats :: List.of(Term), env :: Map.of(Symbol, Term),
+                    body :: CoreFunBody, at :: Syntax) :: List.of(DefClause):
+  match body
+  | CoreBodyRows(rows, _):
+      core_clause_rows(thy, self_name, self, pats, env, rows, at)
+  | CoreBodyMatch(scrutinee, clauses, body_at):
+      let v = matched_var(env, pats, scrutinee, body_at)
+      for values(acc :~ List = []) (clause in clauses):
+        acc ++ core_parse_clause(thy, self_name, self, pats, v, env,
+                                 clause, at)
+  | CoreBodyLet(name, init, tail, _):
+      let value = elaborate(PEnv(thy, [], env, #'function,
+                                 self_name, self),
+                            init)
+      let env2 = env ++ {name: value}
+      let clauses = core_parse_body(thy, self_name, self, pats, env2,
+                                    tail, at)
+      for List (clause in clauses):
+        let clause :~ DefClause = clause
+        let core = EvalCoreLet(name, EvalCoreLeaf(value), clause_core(clause))
+        DefClause(clause.pats, eval_core_term(core),
+                  eval_core_obligations(core))
+  | CoreBodyExpr(expr, _):
+      let value = elaborate(PEnv(thy, [], env, #'function,
+                                 self_name, self),
+                            expr)
+      [DefClause(pats, value, [value])]
+  | ~else: error(~who: #'function, "unknown CoreFunBody variant")
+
+fun core_parse_clause(thy :: Theory, self_name :: Symbol, self :: Term,
+                      pats :: List.of(Term), v :: FVar,
+                      env :: Map.of(Symbol, Term),
+                      clause :: CoreMatchClause,
+                      at :: Syntax) :: List.of(DefClause):
+  match clause.pattern
+  | CorePatWildcard(_):
+      core_parse_body(thy, self_name, self, pats, env, clause.body, at)
+  | CorePatCtor(name, args, pat_at):
+      let (pat, bound) = core_ctor_pattern(thy, name, args, v.ty, pat_at)
+      let env2 = for values(m :~ Map = env) (bv in bound):
+                   m ++ {(bv :~ FVar).name: bv :~ Term}
+      core_parse_body(thy, self_name, self, refine_pats(pats, v, pat),
+                      env2, clause.body, at)
+  | ~else:
+      syntax_error(#'function, "malformed match clause", clause.at)
+
+fun core_clause_rows(thy :: Theory, self_name :: Symbol, self :: Term,
+                     pats :: List.of(Term), env :: Map.of(Symbol, Term),
+                     rows :: List.of(CoreRow),
+                     at :: Syntax) :: List.of(DefClause):
+  for values(acc :~ List = []) (row in rows):
+    acc ++ core_clause_row(thy, self_name, self, pats, env, row, at)
+
+fun core_clause_row(thy :: Theory, self_name :: Symbol, self :: Term,
+                    pats :: List.of(Term), env :: Map.of(Symbol, Term),
+                    row :: CoreRow, at :: Syntax) :: List.of(DefClause):
+  unless row.patterns.length() == pats.length()
+  | syntax_error(#'function,
+                 "this clause has " ++ to_string(row.patterns.length())
+                   ++ " patterns but the function takes "
+                   ++ to_string(pats.length()),
+                 row.at)
+  let (pats2, env2):
+    for values(ps :~ List = pats, e :~ Map = env) (col in List.iota(row.patterns.length())):
+      let v :~ FVar:
+        match ps[col]
+        | FVar(_, _): ps[col]
+        | ~else:
+            syntax_error(#'function, "this argument has already been matched",
+                         row.at)
+      let [pat, bound] = core_sub_pattern(
+                           thy, row.patterns[col] :~ CorePattern, v.ty)
+      values(refine_pats(ps, v, pat :~ Term),
+             for values(m :~ Map = e) (bv in bound :~ List):
+               m ++ {(bv :~ FVar).name: bv :~ Term})
+  core_parse_body(thy, self_name, self, pats2, env2, row.body, at)
+
+fun elaborate_function_decl(thy :: Theory,
+                            spec :: CoreFunctionSpec) :: FunSpec:
+  let tyvars = spec_type_vars(spec)
+  let bindings:
+    for List (b in spec.params):
+      let b :~ CoreBinder = b
+      [b.name, parse_type(b.type_stx, tyvars)]
+  let arg_tys :~ List = bindings.map(fun (b :: List): b[1] :~ HType)
+  let result_ty = parse_type(spec.result_type, tyvars)
+  let fty = for values(t :~ HType = result_ty) (a in arg_tys.reverse()):
+              mk_fun(a, t)
+  let self = mk_const(spec.name, fty)
+  let pvars = for List (b in bindings):
+                mk_var((b :~ List)[0], (b :~ List)[1])
+  let env0 = for values(m :~ Map = {}) (v in pvars):
+               m ++ {(v :~ FVar).name: v :~ Term}
+  let measure:
+    match spec.measure
+    | #false: #false
+    | expr:
+        let value = elaborate(PEnv(thy, tyvars, env0, #'function,
+                                   #false, #false),
+                              expr :~ CoreExpr)
+        list_mk_abs(pvars, value)
+  let clauses = core_parse_body(thy, spec.name, self,
+                                pvars.map(fun (v :: FVar): v :~ Term),
+                                env0, spec.body, spec.at)
+  FunSpec(spec.name, arg_tys, result_ty, clauses, measure)
+
+fun sub_env(env :: PEnv, vars :: Map.of(Symbol, Term)) :: PEnv:
+  PEnv(env.thy, env.tyvars, vars, env.mode, env.self_name, env.self)
+
+// Compatibility names retain the former public entry points while requiring
+// the already-enforested Core values used by every internal caller.
+fun parse_prop(thy :: Theory, tyvars :: List.of(Symbol),
+               vars :: Map.of(Symbol, Term), expr :: CoreExpr) :: Term:
+  parse_core_prop(thy, tyvars, vars, expr)
+
+fun parse_theorem_statement(thy :: Theory, expr :: CoreExpr)
+     :: values(Term, List.of(Symbol)):
+  elaborate_theorem_statement(thy, expr)
 
 // ============================================================================
 // Tactics
@@ -948,12 +709,12 @@ fun binder_name(b :: Syntax) :: Symbol:
 // true branch and a false branch (so `n` terms give `2^n` subgoals, one per
 // combination), justified by `taut.rhm`'s `excluded_middle`, never
 // postulated: a bad choice of terms just produces more, or less useful,
-// residues to read.  The terms are returned here as unparsed syntax,
-// because parsing them needs the theorem's own bound variables in scope,
-// which only `driver.rhm` has assembled by the time it calls `parse_tactic`.
+// residues to read. The terms are returned to `module_block.rhm`, which
+// enforests them under the declaration's current operator bindings. The driver
+// later elaborates those CoreExpr values against the theorem's bound variables.
 //
 // Returns `[induct_name_or_false, [using_name, ...], [do_not_name, ...],
-// [in_theory_name, ...], [case_term_stx, ...]]`.
+// [in_theory_name, ...], [case_term_stx, ...], search_steps_or_false]`.
 fun parse_tactic(stx :: maybe(Syntax)) :: List:
   match stx
   | #false: [#false, [], [], [], [], #false]

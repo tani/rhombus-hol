@@ -9,10 +9,9 @@
 // compile-time state belonging to the macro, which is what keeps two modules
 // compiled in one `raco make` from sharing it.
 //
-// Each step re-parses the user's own syntax rather than receiving a
-// pre-digested value: the same `elab` functions run at expansion time, to
-// generate the runtime code, and again here, to make the logical
-// declaration.  One parser, so the two views cannot drift.
+// Surface syntax is enforested by the module-block expander into Core values.
+// Driver steps receive those Core values and perform only theory-dependent
+// name resolution, type elaboration, checking, and installation.
 
 import:
   lib("racket/base.rkt") as rb
@@ -36,6 +35,7 @@ import:
   "wfrec.rhm" open
   "terminate.rhm" open
   "stepfn.rhm" open
+  "surface_core.rhm" open
   "elab.rhm" as elab
 
 export:
@@ -203,21 +203,23 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
 // naming what about the recursion the deriver could not handle, so that
 // "this module compiled" and "this module assumed nothing new" are the same
 // statement for the ordinary declaration form.
-fun add_function(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
-  install_declared_function(st, form, at, ~postulate: #false)
+fun add_function(st :: HolState, core :: CoreFunctionSpec,
+                 at :: Syntax) :: HolState:
+  install_declared_function(st, core, at, ~postulate: #false)
 
 // `axiomatic_function` is the escape hatch, and it is a different word on
 // purpose: a reader scanning a module can see which declarations extended
 // the theory by assumption without knowing which recursion schemes this
 // version happens to derive.
-fun add_axiomatic_function(st :: HolState, form :: Syntax,
+fun add_axiomatic_function(st :: HolState, core :: CoreFunctionSpec,
                            at :: Syntax) :: HolState:
-  install_declared_function(st, form, at, ~postulate: #true)
+  install_declared_function(st, core, at, ~postulate: #true)
 
-fun install_declared_function(st :: HolState, form :: Syntax, at :: Syntax,
+fun install_declared_function(st :: HolState, core :: CoreFunctionSpec,
+                              at :: Syntax,
                               ~postulate: postulate :: Boolean) :: HolState:
   let spec :~ FunSpec = try:
-                          elab.parse_function_decl(st.thy, form)
+                          elab.elaborate_function_decl(st.thy, core)
                           ~catch e :: Exn.Fail: hol_reraise(e, at)
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
@@ -510,14 +512,18 @@ fun discharger(st :: HolState) :: Function:
 // `attrs` arrive as keywords -- `~rewrite_rule` reads as `#:rewrite_rule` --
 // so they are normalised to symbols here rather than at every use.
 fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
-                stmt :: Syntax, tactic :: maybe(Syntax),
+                stmt :: CoreExpr, tactic :: CoreTactic,
                 at :: Syntax) :: HolState:
   let attrs = attr_kws.map(fun (k): Symbol.from_string(to_string(k)))
   let (statement, names) = try:
-                             elab.parse_theorem_statement(st.thy, stmt)
+                             elab.elaborate_theorem_statement(st.thy, stmt)
                              ~catch e :: Exn.Fail: hol_reraise(e, at)
-  let [induct, using_names, do_not_names, in_theory_names, case_stxs,
-       search_steps] = elab.parse_tactic(tactic)
+  let induct = tactic.induct
+  let using_names = tactic.using_names
+  let do_not_names = tactic.do_not_names
+  let in_theory_names = tactic.in_theory_names
+  let case_exprs = tactic.cases
+  let search_steps = tactic.search_steps
   // `~using:` adds named theorems for this proof only, and overrides
   // `disable_rules`: an explicit request beats a blanket one.
   let db0 = for values(d :~ RuleDB = st.db) (u in (using_names :~ List)):
@@ -544,16 +550,16 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
   // variables, the same ones the statement itself was parsed with -- so a
   // case term can name `xs` when the theorem reads `forall (xs :: ...): ...`.
   let cases:
-    match case_stxs :~ List
+    match case_exprs
     | []: []
     | _:
         let (vars, _) = strip_forall_all(statement, names)
-        let tyvars = elab.collect_type_vars(stmt)
+        let tyvars = elab.core_type_vars(stmt)
         let env = for values(m :~ Map = {}) (v in vars):
                     m ++ {(v :~ FVar).name: v :~ Term}
-        for List (c in case_stxs :~ List):
+        for List (c in case_exprs):
           try:
-            elab.parse_prop(st.thy, tyvars, env, c :~ Syntax)
+            elab.parse_core_prop(st.thy, tyvars, env, c)
             ~catch e :: Exn.Fail: hol_reraise(e, at)
   // A budget the proof asked for, or the default.  Nested searches still
   // join it rather than opening one of their own -- that is what makes the

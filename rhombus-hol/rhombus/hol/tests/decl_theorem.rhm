@@ -10,6 +10,7 @@ import:
   rhombus/hol/printer open
   rhombus/hol/bool open
   rhombus/hol/elab open
+  rhombus/hol/surface_core open
   "fixtures/theorem_ok.rhm" as t
 
 fun load(mp :: ModulePath):
@@ -48,35 +49,76 @@ def thy:
   let x = new_constant(x, #'p, mk_fun(n, bool))
   new_constant(x, #'q, mk_fun(n, bool))
 
-// Round trip: what the parser reads, the printer writes back the same way.
-// The two share their precedence table, and this is what pins them together --
-// a residue the user cannot read back is a residue they cannot act on.
-fun rt(s :: Syntax) :~ String: show(parse_prop(thy, [], {}, s))
+// Core elaboration and structural printing stay inverse at every precedence
+// boundary. Surface grouping itself is golden-tested by `surface_props.rhm`.
+def at = 'core_expression'
+fun cref(n :: Symbol): CoreRef(n, at)
+fun ccall(n :: Symbol, args :: List.of(CoreExpr)):
+  CoreCall(cref(n), args, at)
+fun rt(e :: CoreExpr) :~ String: show(parse_prop(thy, [], {}, e))
 
-check rt('p(zero) and q(zero)') ~is "p(zero) and q(zero)"
-check rt('p(zero) and q(zero) or p(zero)') ~is "p(zero) and q(zero) or p(zero)"
-check rt('p(zero) or q(zero) and p(zero)') ~is "p(zero) or q(zero) and p(zero)"
-check rt('not p(zero) and q(zero)') ~is "not p(zero) and q(zero)"
-check rt('not (p(zero) and q(zero))') ~is "not (p(zero) and q(zero))"
-check rt('zero === succ(zero)') ~is "zero === succ(zero)"
-check rt('zero === succ(zero) and p(zero)') ~is "zero === succ(zero) and p(zero)"
-// `==>` is right associative and looser than `and`
-check rt('p(zero) ==> q(zero) ==> p(zero)') ~is "p(zero) ==> q(zero) ==> p(zero)"
-check rt('(p(zero) ==> q(zero)) ==> p(zero)') ~is "(p(zero) ==> q(zero)) ==> p(zero)"
-check rt('p(zero) and q(zero) ==> p(zero)') ~is "p(zero) and q(zero) ==> p(zero)"
-// `<=>` is the loosest
-check rt('p(zero) <=> q(zero) ==> p(zero)') ~is "p(zero) <=> q(zero) ==> p(zero)"
-// quantifiers extend as far right as they can
-check rt('forall (n :: Nat): p(n)') ~is "forall (x :: Nat): p(x)"
+def zero_c = cref(#'zero)
+def pz = ccall(#'p, [zero_c])
+def qz = ccall(#'q, [zero_c])
+fun binary(n :: Symbol, left :: CoreExpr, right :: CoreExpr):
+  ccall(n, [left, right])
+fun binder(n :: Symbol): CoreBinder(n, 'Nat', at)
+
+check rt(binary(#'conj, pz, qz)) ~is "p(zero) and q(zero)"
 check:
-  rt('forall (n :: Nat, m :: Nat): p(n) ==> q(m)')
+  rt(binary(#'disj, binary(#'conj, pz, qz), pz))
+  ~is "p(zero) and q(zero) or p(zero)"
+check:
+  rt(binary(#'disj, pz, binary(#'conj, qz, pz)))
+  ~is "p(zero) or q(zero) and p(zero)"
+check:
+  rt(binary(#'conj, ccall(#'neg, [pz]), qz))
+  ~is "not p(zero) and q(zero)"
+check:
+  rt(ccall(#'neg, [binary(#'conj, pz, qz)]))
+  ~is "not (p(zero) and q(zero))"
+check:
+  rt(binary(#'eq, zero_c, ccall(#'succ, [zero_c])))
+  ~is "zero === succ(zero)"
+check:
+  rt(binary(#'conj,
+            binary(#'eq, zero_c, ccall(#'succ, [zero_c])),
+            pz))
+  ~is "zero === succ(zero) and p(zero)"
+check:
+  rt(binary(#'imp, pz, binary(#'imp, qz, pz)))
+  ~is "p(zero) ==> q(zero) ==> p(zero)"
+check:
+  rt(binary(#'imp, binary(#'imp, pz, qz), pz))
+  ~is "(p(zero) ==> q(zero)) ==> p(zero)"
+check:
+  rt(binary(#'imp, binary(#'conj, pz, qz), pz))
+  ~is "p(zero) and q(zero) ==> p(zero)"
+check:
+  rt(binary(#'eq, pz, binary(#'imp, qz, pz)))
+  ~is "p(zero) <=> q(zero) ==> p(zero)"
+
+def nref = cref(#'n)
+def mref = cref(#'m)
+check:
+  rt(CoreForall([binder(#'n)], ccall(#'p, [nref]), at))
+  ~is "forall (x :: Nat): p(x)"
+check:
+  rt(CoreForall([binder(#'n), binder(#'m)],
+                binary(#'imp, ccall(#'p, [nref]), ccall(#'q, [mref])),
+                at))
   ~is "forall (x :: Nat, y :: Nat): p(x) ==> q(y)"
-check rt('exists (n :: Nat): p(n) and q(n)') ~is "exists (x :: Nat): p(x) and q(x)"
-
-// the leading binder names are recovered from the source, since a locally
-// nameless term does not carry them
 check:
-  let (_, names) = parse_theorem_statement(thy, 'forall (xs :: Nat, ys :: Nat): xs === ys')
+  rt(CoreExists([binder(#'n)],
+                binary(#'conj, ccall(#'p, [nref]), ccall(#'q, [nref])),
+                at))
+  ~is "exists (x :: Nat): p(x) and q(x)"
+
+check:
+  let statement = CoreForall([binder(#'xs), binder(#'ys)],
+                             binary(#'eq, cref(#'xs), cref(#'ys)),
+                             at)
+  let (_, names) = parse_theorem_statement(thy, statement)
   names
   ~is [#'xs, #'ys]
 

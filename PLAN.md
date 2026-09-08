@@ -1,7 +1,8 @@
 # Rhombus/HOL — 実装リファレンス
 
-R1〜R5 完了。`raco test rhombus-hol/rhombus/hol/tests` → 1149 tests passed。
-§10 に外部レビュー対応の状況をまとめてある。
+R1〜R5 完了。HOL 表層構文は `rhombus/hol/expr` の enforest space と
+CoreExpr/CoreFunctionSpec 経由へ移行済み。`raco test rhombus-hol/rhombus/hol/tests`
+→ 1408 tests passed。
 
 ---
 
@@ -205,7 +206,7 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 | 書き換え | `tmatch` `ruledb` `simp`：一階マッチ、規則 DB（rewrite ルール + type-prescription 事実の二重分類）、順序付き書き換え | `ruledb` |
 | 証明探索 | `goal` `induct` `waterfall`（簡約・デストラクタ除去・フェルティライズ・一般化・irrelevance 除去・帰納法の固定パイプライン、ACL2 準拠） | `spec_4_1` |
 | 一般化・デストラクタ除去・フェルティライズ・irrelevance 除去 | `general`（type-prescription 事実を一般化に反映）`destruct` `fertilize` `irrelevance` | `spec_4_2` `destruct` `fertilize` `irrelevance` |
-| 表層構文 | `expand` `elab` `driver` `taut` `module_block` | `lang_state` `decl_type` `decl_fun` `decl_theorem` |
+| 表層構文 | `surface_space` `surface_operator` `surface_core` `expand` `elab` `driver` `taut` `module_block` | `lang_state` `decl_type` `decl_fun` `decl_theorem` `surface_operators` |
 | モジュール間の理論伝播 | 通常の `import` が理論を採用する（`Evaluator.module_is_declared` で検出） | `import_theory` |
 | プロパティテスト | `check_property`（実マクロ）+ `qc.rhm` の実行時レジストリ + 型ごとの生成器・縮小器 | `qc` |
 
@@ -247,13 +248,14 @@ De Bruijn 表現では**束縛子の下での書き換え**に注意が要る。
 
 - `type` / `function` / `theorem` / `disable_rules` / `enable_rules` / `declare` /
   `expect` は `#%module_block` が本体を走査して認識する形式で、束縛ではない。
-  ユーザー定義マクロの中や `block:` の中には書けない。`check_property` だけが
-  実マクロとして再実装済みで、この制限を受けない。
+  ユーザー定義マクロの中や `block:` の中には書けない。`check_property` と
+  `logical_operator` / `reflected_operator` は実マクロで、この制限を受けない。
 - `@doc` ブロックが使えていない（`check_property` 以外）。上記の理由で
   for-label 束縛を要求する `@doc` に載らないため、`@verbatim` の文法表示 +
   `@section` で代用している。
 - `function` の本体は `match` / `if` / `cond` / 局所 `let` / 変数 / 名前付き適用 /
-  Boolean 演算子と `#true` / `#false` のみ。算術・リテラルは文法外でコンパイル
+  Boolean 演算子、宣言済み reflected operator、`#true` / `#false` のみ。
+  算術・その他のリテラル・通常の runtime-only operator は文法外でコンパイル
   エラーになる。
 - `match` は任意深さの入れ子コンストラクタパターンに対応済み（節の頭に直接
   書く入れ子・本体中の別 `match` によるさらなる精緻化のどちらも可、§9.4.1）。

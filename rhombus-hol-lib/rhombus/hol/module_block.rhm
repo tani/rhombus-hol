@@ -20,6 +20,10 @@
 
 import:
   rhombus/meta open
+  rhombus/hol/qc as _hol_qc
+  "surface_space.rhm"!meta:
+    expose:
+      hol_expr_meta
   meta:
     rhombus/hol/htype open
     "expand.rhm" as expand
@@ -240,11 +244,180 @@ meta:
     let ns :~ List = names
     let [nm, ...] = ns
     let flag = (if on | '#true' | '#false')
-    values([],
-           ['def $nxt
-               = _hol_driver.set_rules($cur, $flag,
-                                       [Syntax.unwrap('$nm'), ...])'],
-           n + 1)
+    values([], ['(~rules $cur $nxt [$flag] [$nm, ...])'], n + 1)
+
+  // -- HOL surface parsing ---------------------------------------------------
+
+  fun parse_core_encoding(stx :: Syntax) :: Syntax:
+    try:
+      let '$(parsed :: hol_expr_meta.Parsed)' = stx
+      hol_expr_meta.unpack(parsed)
+      ~catch e :: Exn.Fail:
+        (if e.message.contains("unbound HOL expression operator")
+         | syntax_meta.error("unexpected text after an expression", stx)
+         | throw e)
+
+  fun parse_function_expression(stx :: Syntax) :: Syntax:
+    try:
+      parse_core_encoding(stx)
+      ~catch e :: Exn.Fail:
+        (if e.message.contains("hol_expr_meta.Parsed")
+             && e.message.contains("annotation")
+         | syntax_meta.error(
+             "this version admits only variables, named applications, `if`, "
+               ++ "`cond`, and reflected operators in a function body",
+             stx)
+         | throw e)
+
+  fun symbol_id(n :: Symbol) :: Syntax:
+    Syntax.make_id(to_string(n), id_ctx)
+
+
+  fun binder_encoding(param :: Syntax) :: Syntax:
+    match param
+    | '$(name :: Identifier) :: $ty ...':
+        '(core_binder $name ($ty ...))'.relocate_span([param])
+    | ~else: syntax_meta.error("a parameter needs a name and a type", param)
+
+  fun pattern_encoding(pat :: Syntax) :: Syntax:
+    match pat
+    | '_': '(core_pat_wildcard)'.relocate(pat)
+    | '$(name :: Identifier)($arg, ...)':
+        let [a, ...] = [arg, ...].map(pattern_encoding)
+        '(core_pat_ctor $name [$a, ...])'.relocate_span([pat])
+    | '$(name :: Identifier)':
+        '(core_pat_var $name)'.relocate(pat)
+    | ~else: syntax_meta.error("malformed pattern", pat)
+
+  fun match_clause_encoding(clause :: Syntax) :: Syntax:
+    match clause
+    | '$pat ...: $body; ...':
+        let p = pattern_encoding('$pat ...')
+        let b = function_body_encoding('$body; ...')
+        '(core_match_clause $p $b)'.relocate_span([clause])
+    | ~else: syntax_meta.error("malformed match clause", clause)
+
+  fun row_encoding(row :: Syntax, arity :: Int) :: Syntax:
+    let (patterns, body) = elab.row_parts(row, arity)
+    let [p, ...] = patterns.map(pattern_encoding)
+    let b = function_body_encoding(body)
+    '(core_row [$p, ...] $b)'.relocate_span([row])
+
+  fun function_body_encoding(body :: Syntax) :: Syntax:
+    match body
+    | '#%hol_clauses: $row; ...':
+        syntax_meta.error("internal function row needs an arity", body)
+    | 'match $(name :: Identifier)
+       | $clause
+       | ...':
+        let [c, ...] = [clause, ...].map(match_clause_encoding)
+        '(core_body_match $name [$c, ...])'.relocate_span([body])
+    | 'let $(name :: Identifier) = $rhs ...
+       $more; ...':
+        let init = parse_function_expression('$rhs ...')
+        let tail = function_body_encoding('$more; ...')
+        '(core_body_let $name $init $tail)'.relocate_span([body])
+    | ~else:
+        let expr = parse_function_expression(body)
+        '(core_body_expr $expr)'.relocate_span([body])
+
+  fun function_encoding(form :: Syntax) :: Syntax:
+    let [name, params, result_type, measure_stx, body] = elab.function_parts(form)
+    let ps :~ List = params
+    let [param, ...] = ps.map(fun (p :: Syntax): binder_encoding(p))
+    let measure:
+      match measure_stx
+      | #false: Syntax.make(#false, id_ctx)
+      | m: parse_function_expression(m :~ Syntax)
+    let body_core:
+      match elab.body_clauses(body :~ Syntax)
+      | #false: function_body_encoding(body :~ Syntax)
+      | rows:
+          let [row, ...] = (rows :~ List).map(
+                             fun (r :: Syntax): row_encoding(r, ps.length()))
+          '(core_body_rows [$row, ...])'.relocate_span([body :~ Syntax])
+    '(core_function $name [$param, ...] ($(result_type :~ Syntax)) $measure $body_core)'.relocate_span([form])
+  fun option_symbol_stx(v) :: Syntax:
+    match v
+    | #false: Syntax.make(#false, id_ctx)
+    | n: symbol_id(n :~ Symbol)
+
+  fun option_int_stx(v) :: Syntax:
+    match v
+    | #false: Syntax.make(#false, id_ctx)
+    | n: Syntax.make(n, id_ctx)
+
+  fun tactic_encoding(tactic :: maybe(List.of(Syntax)), at :: Syntax) :: Syntax:
+    let tactic_stx:
+      match tactic
+      | #false: #false
+      | groups:
+          let [g, ...] = groups :~ List
+          '$g; ...'
+    let [induct, using_names, do_not_names, in_theory_names, case_stxs,
+         search_steps] = elab.parse_tactic(tactic_stx)
+    let induct_stx = option_symbol_stx(induct)
+    let [u, ...] = (using_names :~ List).map(fun (n): symbol_id(n :~ Symbol))
+    let [d, ...] = (do_not_names :~ List).map(fun (n): symbol_id(n :~ Symbol))
+    let [r, ...] = (in_theory_names :~ List).map(fun (n): symbol_id(n :~ Symbol))
+    let [c, ...] = (case_stxs :~ List).map(
+                      fun (s): parse_core_encoding(s :~ Syntax))
+    let steps_stx = option_int_stx(search_steps)
+    '(core_tactic $induct_stx [$u, ...] [$d, ...] [$r, ...] [$c, ...] $steps_stx)'.relocate_span([at])
+
+  fun box_group(g :: Syntax) :: Syntax:
+    '(hol_group: $g)'
+
+  fun unbox_group(box :: Syntax) :: Syntax:
+    match box
+    | '(hol_group: $g; ...)': '$g; ...'
+    | ~else: syntax_meta.error("internal malformed expansion group", box)
+
+  fun render_step(step :: Syntax) :: List.of(Syntax):
+    let step = step.replace_scopes(id_ctx)
+    match step
+    | '(~import $alias [$term, ...])':
+        let [t, ...] = [term, ...]
+        let path = '$t ...'
+        ['import: $path!hol_theory as $alias']
+    | '(~adopt $cur $nxt $alias [$at])':
+        ['def $nxt = _hol_driver.adopt($cur, $(alias).theory, '$at')']
+    | '(~type $cur $nxt [$form] [$at])':
+        ['def $nxt = _hol_driver.add_type($cur, '$form', '$at')']
+    | '(~function $cur $nxt [$core] [$at])':
+        ['def $nxt:
+           let spec = try:
+                        _hol_surface.decode_function('$core')
+                        ~catch e :: Exn.Fail:
+                          _hol_driver.hol_reraise(e, '$at')
+           _hol_driver.add_function($cur, spec, '$at')']
+    | '(~axiomatic $cur $nxt [$core] [$at])':
+        ['def $nxt:
+           let spec = try:
+                        _hol_surface.decode_function('$core')
+                        ~catch e :: Exn.Fail:
+                          _hol_driver.hol_reraise(e, '$at')
+           _hol_driver.add_axiomatic_function($cur, spec, '$at')']
+    | '(~theorem $cur $nxt [$name] [$attr, ...] [$core] [$tactic] [$at])':
+        ['def $nxt:
+           let statement = try:
+                             _hol_surface.decode_prop('$core')
+                             ~catch e :: Exn.Fail:
+                               _hol_driver.hol_reraise(e, '$at')
+           let proof = try:
+                         _hol_surface.decode_tactic('$tactic')
+                         ~catch e :: Exn.Fail:
+                           _hol_driver.hol_reraise(e, '$at')
+           _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
+                                   [Syntax.unwrap('$attr'), ...],
+                                   statement, proof, '$at')']
+    | '(~rules $cur $nxt [$flag] [$name, ...])':
+        ['def $nxt = _hol_driver.set_rules($cur, $flag, [Syntax.unwrap('$name'), ...])']
+    | '(~declare $cur $nxt [$name])':
+        ['def $nxt = _hol_driver.note_decl($cur, Syntax.unwrap('$name'))']
+    | '(~expect $cur $nxt [$name, ...] [$at])':
+        ['def $nxt = _hol_driver.expect_declared($cur, [Syntax.unwrap('$name'), ...], ~at: '$at')']
+    | ~else: syntax_meta.error("internal malformed logical step", step)
 
   // -- diagnostics -----------------------------------------------------------
 
@@ -285,11 +458,8 @@ meta:
             // there -- a string path fails on `#%literal`.  The datum is all
             // that matters for a module path.
             let [t, ...] = (terms :~ List).map(recontext)
-            let p = '$t ...'
-            values(acc ++ ['import: $p!hol_theory as $alias',
-                           'def $(st(k + 1))
-                              = _hol_driver.adopt($(st(k)), $(alias).theory,
-                                                  '$at')'],
+            values(acc ++ ['(~import $alias [$t, ...])',
+                           '(~adopt $(st(k)) $(st(k + 1)) $alias [$at])'],
                    k + 1)
         values([d.form], chain, n2)
     | #'type:
@@ -299,78 +469,54 @@ meta:
         values([emit_type(name, ctors :~ List),
                 emit_generator(name, params :~ List, gen :~ List),
                 emit_shrinker(name, gen :~ List)],
-               ['def $nxt = _hol_driver.add_type($cur, '$form', '$at')'],
+               ['(~type $cur $nxt [$form] [$at])'],
                n + 1)
     | #'function:
         let [name, params, body] = d.parts
         let at = head_term(d.form)
         let form = d.form
+        let core = function_encoding(form)
         values([emit_function(name, params :~ List, body)],
-               ['def $nxt = _hol_driver.add_function($cur, '$form', '$at')'],
+               ['(~function $cur $nxt [$core] [$at])'],
                n + 1)
     | #'axiomatic_function:
         // Identical runtime code; the logical step is the one that differs.
         let [name, params, body] = d.parts
         let at = head_term(d.form)
         let form = d.form
+        let core = function_encoding(form)
         values([emit_function(name, params :~ List, body)],
-               ['def $nxt
-                   = _hol_driver.add_axiomatic_function($cur, '$form', '$at')'],
+               ['(~axiomatic $cur $nxt [$core] [$at])'],
                n + 1)
     | #'theorem:
-        // A theorem emits no runtime code: it is a claim about the logic, and
-        // the proof runs while the module is compiled.
-        //
-        // The `proof:` clause is optional, and the two cases need separate
-        // templates: a nested syntax literal can only be written inside one,
-        // not built up as a value beforehand.
+        // Enforestation happens now, while preceding declaration/import
+        // bindings are in scope. The generated theory step receives decoded
+        // CoreExpr/CoreTactic values, never the proposition's raw syntax.
         let [name, attrs, stmt, tactic] = d.parts
         let at = head_term(d.form)
+        let gs :~ List = stmt
+        let [g, ...] = gs
+        let core = parse_core_encoding('$g; ...')
+        let tactic_core = tactic_encoding(tactic, at)
         let as_ :~ List = attrs
         let [a, ...] = as_
-        match tactic
-        | #false:
-            values([],
-                   ['def $nxt
-                       = _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
-                                                 [Syntax.unwrap('$a'), ...],
-                                                 '$stmt', #false, '$at')'],
-                   n + 1)
-        | tac:
-            values([],
-                   ['def $nxt
-                       = _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
-                                                 [Syntax.unwrap('$a'), ...],
-                                                 '$stmt', '$tac', '$at')'],
-                   n + 1)
+        values([],
+               ['(~theorem $cur $nxt [$name] [$a, ...] [$core] [$tactic_core] [$at])'],
+               n + 1)
     | #'disable_rules: rule_step(d, n, cur, nxt, #false)
     | #'enable_rules: rule_step(d, n, cur, nxt, #true)
     | #'declare:
         let [name] = d.parts
-        values([],
-               ['def $nxt = _hol_driver.note_decl($cur, Syntax.unwrap('$name'))'],
-               n + 1)
+        values([], ['(~declare $cur $nxt [$name])'], n + 1)
     | #'expect:
         let [names] = d.parts
         let ns :~ List = names
         let [nm, ...] = ns
         let at = head_term(d.form)
         values([],
-               ['def $nxt
-                   = _hol_driver.expect_declared($cur,
-                                                 [Syntax.unwrap('$nm'), ...],
-                                                 ~at: '$at')'],
+               ['(~expect $cur $nxt [$nm, ...] [$at])'],
                n + 1)
 
-  // -- the whole body --------------------------------------------------------
-
-  fun emit_all(decls :: List.of(expand.Decl))
-       :: values(List.of(Syntax), List.of(Syntax)):
-    let (rt, ch, n):
-      for values(rt :~ List = [], ch :~ List = [], n = 0) (d in decls):
-        let (r, c, n2) = emit_one(d, n)
-        values(rt ++ r, ch ++ c, n2)
-    values(rt, ch ++ ['def theory = $(st(n))'])
 
 // `check_property` is a genuine, independently bound macro, not a form
 // `#%module_block` recognises by scanning -- see the note by
@@ -385,34 +531,86 @@ defn.macro 'check_property $rest ...':
   emit_property_from(name :~ Syntax, samples, binders :~ List,
                      body :~ Syntax, size, whole)
 
-// Every `#lang rhombus/hol` module carries its theory in a `hol_theory`
-// submodule: the whole logical chain, at the submodule's phase 0.
-//
-// A submodule rather than an exported value, because the name is the same in
-// every theory and `open`ing two of them would collide on it.  Submodules are
-// reached by path, so an ordinary `import` of a theory needs no adjusting --
-// which is what lets `import` do this job at all.
-//
-// `~lang rhombus` is what makes it a separate module rather than part of this
-// one: were it to inherit `rhombus/hol`, this very `#%module_block` would
-// process its body.  It is declared before the rest of the module is expanded,
-// so the module can import it from `self` -- which is how the proofs come to
-// run while the module is compiled rather than when it is used.
-//
-// The price is that an importer's compilation visits this submodule, which
-// re-runs its proofs.  That is paid once per importing compilation.
+// One declaration per expansion. Emitting the current declaration before the
+// recursive macro call lets imports and operator definitions establish their
+// bindings before the next HOL expression is enforested. Logical steps remain
+// boxed syntax until the source tail is empty.
+meta:
+  fun continue_theorem(n :: Syntax, step_boxes :: List, name :: Syntax,
+                       attrs :: List, core :: Syntax,
+                       tactic :: maybe(List.of(Syntax)),
+                       rest :: List.of(Syntax)) :: Syntax:
+    let step_n = Syntax.unwrap(n)
+    let cur = st(step_n)
+    let nxt = st(step_n + 1)
+    let tactic_core = tactic_encoding(tactic, name)
+    let [a, ...] = attrs
+    let chain = '(~theorem $cur $nxt [$name] [$a, ...] [$core] [$tactic_core] [$name])'
+    let prior = step_boxes.map(unbox_group)
+    let [sb, ...] = (prior ++ [chain]).map(box_group)
+    let [f, ...] = rest
+    let next_n = Syntax.make(step_n + 1, id_ctx)
+    'hol_expand($next_n, [$sb, ...]):
+       $f
+       ...'
+
+decl.macro
+| 'hol_expand($(n :: Int), [$step_box, ...]):
+     theorem $(attr :: Keyword) ... $(name :: Identifier):
+       $(stmt :: hol_expr_meta.Parsed)
+     proof:
+       $tactic; ...
+     $rest; ...':
+    continue_theorem(n, [step_box, ...], name, [attr, ...],
+                     hol_expr_meta.unpack(stmt), [tactic, ...], [rest, ...])
+| 'hol_expand($(n :: Int), [$step_box, ...]):
+     theorem $(attr :: Keyword) ... $(name :: Identifier):
+       $(stmt :: hol_expr_meta.Parsed)
+     $rest; ...':
+    continue_theorem(n, [step_box, ...], name, [attr, ...],
+                     hol_expr_meta.unpack(stmt), #false, [rest, ...])
+| 'hol_expand($(n :: Int), [$step_box, ...]): $form; ...':
+    let steps = [step_box, ...].map(unbox_group)
+    let forms = [form, ...]
+    let (next, rest) = expand.plan_next(forms)
+    match next
+    | #false:
+        let final = st(Syntax.unwrap(n))
+        let rendered:
+          for values(acc :~ List = []) (encoded in steps):
+            acc ++ render_step(encoded)
+        let [step, ...] = rendered
+        '«
+           module hol_theory ~lang rhombus:
+             import: rhombus/hol/driver as _hol_driver
+             import: rhombus/hol/surface_core as _hol_surface
+             export: theory
+             def $(st(0)) = _hol_driver.initial_state()
+             $step
+             ...
+             def theory = $final
+           import: meta: self!hol_theory as _hol_self
+         »'
+    | d:
+        let (runtime, chain, n2) = emit_one(d :~ expand.Decl,
+                                            Syntax.unwrap(n))
+        let [r, ...] = runtime
+        let [sb, ...] = (steps ++ chain).map(box_group)
+        let [f, ...] = rest
+        let next_n = Syntax.make(n2, id_ctx)
+        '«
+           $r
+           ...
+           hol_expand($next_n, [$sb, ...]):
+             $f
+             ...
+         »'
+
+// Every `#lang rhombus/hol` module carries its final logical state in a
+// `hol_theory` submodule. The trampoline emits that submodule only after every
+// source declaration has been expanded in order.
 decl.macro 'module_block: $form; ...':
-  let (rt, ch) = emit_all(expand.plan_body([form, ...]))
-  let [r, ...] = rt
-  let [c, ...] = ch
   '#%module_block:
-     module hol_theory ~lang rhombus:
-       import: rhombus/hol/driver as _hol_driver
-       export: theory
-       def $(st(0)) = _hol_driver.initial_state()
-       $c
-       ...
-     import: rhombus/hol/qc as _hol_qc
-     import: meta: self!hol_theory as _hol_self
-     $r
-     ...'
+     hol_expand(0, []):
+       $form
+       ...'

@@ -4,7 +4,7 @@ begin
 
 section \<open>Executable theory extensions\<close>
 
-text \<open>Rocq correspondence: Kernel.v and kernel.rhm theory extension operations.
+text \<open>Rhombus correspondence: kernel.rhm theory extension operations.
 The explicit natural supplies the fresh stamp identifier.\<close>
 
 definition extend_theory ::

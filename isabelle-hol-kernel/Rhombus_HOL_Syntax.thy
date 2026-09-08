@@ -6,7 +6,7 @@ text \<open>Trust boundary: Isabelle/HOL, HOLZF's axiomatized ZFC universe, and 
 
 section \<open>Deep syntax and provenance\<close>
 
-text \<open>Rocq correspondence: Kernel.v's Name, HType, Term, Stamp, Thm, and Theory. The final name constructor records both generative identity and display text.\<close>
+text \<open>Rhombus correspondence: kernel.rhm's names, types, terms, stamps, theorems, and theories. The final name constructor records both generative identity and display text.\<close>
 
 datatype hname = NFun | NBool | NEq | NAlpha | NRepVar | NUser nat string
 
@@ -112,7 +112,7 @@ lemma type_match_sound:
 
 section \<open>Executable term inspection\<close>
 
-text \<open>Rocq correspondence: Kernel.v's typeOf, freeVars, and termTypeVars; failures that raise Rhombus exceptions are represented by option or bool.\<close>
+text \<open>Rhombus correspondence: typeOf, freeVars, and termTypeVars; failures that raise source exceptions are represented by option or bool.\<close>
 
 fun type_of :: "hterm \<Rightarrow> htype option" where
   "type_of (FVar _ ty) = Some ty"
@@ -151,7 +151,7 @@ fun vfree_in :: "hname \<Rightarrow> htype \<Rightarrow> hterm \<Rightarrow> boo
 
 section \<open>Theory provenance\<close>
 
-text \<open>Rocq correspondence: Kernel.v's freshStamp, nextStamp, descends, combineStamps, and initialTheory. Callers provide fresh natural identities; generation is diagnostic only.\<close>
+text \<open>Rhombus correspondence: freshStamp, nextStamp, descends, combineStamps, and initialTheory. Callers provide fresh natural identities; generation is diagnostic only.\<close>
 
 definition wf_stamp :: "stamp \<Rightarrow> bool" where
   "wf_stamp st \<longleftrightarrow> sid st \<in> ancestors st"
@@ -196,7 +196,7 @@ lemma combine_stamps_siblings:
 
 section \<open>Executable checks and sequents\<close>
 
-text \<open>Rocq correspondence: Kernel.v's checkType, checkOpenTerm, checkTerm, isBool, mkEq, destEq, and duplicate-free hypothesis operations.\<close>
+text \<open>Rhombus correspondence: checkType, checkOpenTerm, checkTerm, isBool, mkEq, destEq, and duplicate-free hypothesis operations.\<close>
 
 fun check_type :: "htheory \<Rightarrow> htype \<Rightarrow> bool" where
   "check_type thy (TyVar _) = True"

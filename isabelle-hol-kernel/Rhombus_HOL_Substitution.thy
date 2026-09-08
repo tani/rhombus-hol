@@ -4,7 +4,7 @@ begin
 
 section \<open>Locally nameless operations\<close>
 
-text \<open>Rocq correspondence: Kernel.v and term.rhm shift, substAt, substBVar, abstractAt, abstractFVar, instFVar, and instType.\<close>
+text \<open>Rhombus correspondence: term.rhm's shift, substAt, substBVar, abstractAt, abstractFVar, instFVar, and instType operations.\<close>
 
 fun shift :: "int \<Rightarrow> nat \<Rightarrow> hterm \<Rightarrow> hterm" where
   "shift d cutoff (BVar i ty) =

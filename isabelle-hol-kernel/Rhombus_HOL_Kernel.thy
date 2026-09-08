@@ -4,7 +4,7 @@ begin
 
 section \<open>Executable primitive rules\<close>
 
-text \<open>Rocq correspondence: Kernel.v's ten primitive inference rules. Each branch mirrors kernel.rhm; option replaces source exceptions.\<close>
+text \<open>Rhombus correspondence: kernel.rhm's ten primitive inference rules. Each branch mirrors the source; option replaces source exceptions.\<close>
 
 definition checked_thm :: "htheory \<Rightarrow> hterm list \<Rightarrow> hterm \<Rightarrow> stamp \<Rightarrow> hthm option" where
   "checked_thm thy hs c st =

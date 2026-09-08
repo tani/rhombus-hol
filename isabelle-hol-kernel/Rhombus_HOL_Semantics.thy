@@ -4,7 +4,7 @@ begin
 
 section \<open>Set-theoretic frames\<close>
 
-text \<open>Rocq correspondence: Semantics.v's Frame, with semantic carrier arguments replacing syntax- and valuation-dependent interpretation fields.\<close>
+text \<open>The semantic frame uses carrier arguments rather than syntax- or valuation-dependent interpretation fields.\<close>
 
 record frame =
   tyop_denote :: "hname \<Rightarrow> ZF list \<Rightarrow> ZF"

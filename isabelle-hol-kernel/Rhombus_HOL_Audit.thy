@@ -1,0 +1,39 @@
+theory Rhombus_HOL_Audit
+  imports Rhombus_HOL_Adequacy Rhombus_HOL_Countermodels
+begin
+
+text \<open>Session-level audit: the executable/declarative kernel correspondence,
+semantic soundness, extension principles, replay adequacy, relative
+consistency, and concrete guard countermodels coexist in one context.\<close>
+
+thm run_rule_sound
+thm run_rule_complete
+thm primitive_rules_sound
+thm new_type_conservative_from_obligations
+thm new_constant_conservative
+thm new_basic_definition_conservative_from_obligations
+thm new_basic_type_definition_conservative_from_obligations
+thm new_axiom_model_extension_from_obligations
+thm replay_sound
+thm replay_complete
+thm keyed_replay_sound
+thm keyed_replay_complete
+thm keyed_primitive_replay_semantic_sound
+thm keyed_extension_step_semantic_sound
+thm three_runtime_base_axioms_valid
+thm standard_frame_models_base
+thm base_consistent
+thm binder_type_guard_countermodel
+thm lineage_sibling_countermodel
+thm stale_stamp_countermodel
+thm inst_target_guard_countermodel
+thm definition_closedness_guard_countermodel
+thm definition_scope_guard_countermodel
+thm type_definition_guard_countermodel
+thm same_printing_symbol_countermodel
+thm ill_typed_binder_rejected
+thm well_typed_beta_succeeds
+thm sibling_extensions_do_not_combine
+thm same_printing_symbols_remain_distinct
+
+end

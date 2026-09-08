@@ -20,7 +20,15 @@
         in
         {
           default = pkgs.mkShell {
-            packages = [ pkgs.racket pkgs.idris2 ];
+            packages = [
+              pkgs.racket
+              pkgs.idris2
+              pkgs.coq
+              pkgs.coqPackages.stdlib
+              pkgs.coqPackages.mathcomp-ssreflect
+              pkgs.coqPackages.mathcomp-finmap
+              pkgs.isabelle
+            ];
           };
         });
     };

@@ -1,0 +1,90 @@
+#lang rhombus/and_meta
+
+import:
+  rhombus/meta open
+  "surface_space.rhm" open
+  "surface_space.rhm"!meta:
+    expose:
+      hol_expr_meta
+
+export:
+  notation
+
+meta:
+  fun logic_head(logic :: Syntax, left_name :: Symbol,
+                 right_name :: Symbol) :: Syntax:
+    match logic
+    | '$(head :: Identifier)($(left :: Identifier), $(right :: Identifier))':
+        unless Syntax.unwrap(left) == left_name
+                 && Syntax.unwrap(right) == right_name
+        | syntax_meta.error(
+            "`~logic` arguments must be the operator operand names in order",
+            logic)
+        head
+    | ~else:
+        syntax_meta.error("`~logic` must be `Constant(left, right)`", logic)
+
+  fun hol_operator(op :: Syntax, order :: Syntax, logic :: Syntax,
+                   source_left :: Symbol, source_right :: Symbol,
+                   policy_name :: String) :: Syntax:
+    let head = logic_head(logic, source_left, source_right)
+    let logic_name = to_string(Syntax.unwrap(head))
+    '«
+       hol_expr.macro '$('$')left $op $('$')right':
+         ~order: $order
+         let function_ref = hol_expr_meta.make_ref(
+                              Syntax.make_id($logic_name, left),
+                              Syntax.make_id("both", left),
+                              ~track: [left, right])
+         hol_expr_meta.make_call(
+           function_ref,
+           [left, right],
+           Syntax.make_id($policy_name, left),
+           ~track: [left, right])
+     »'
+
+  fun runtime_operator(left :: Syntax, op :: Syntax, right :: Syntax,
+                       order :: Syntax, runtime :: Syntax) :: Syntax:
+    '«
+       operator ($left $op $right):
+         ~order: $order
+         $runtime
+     »'
+
+defn.macro 'notation $rest ...':
+  let whole = '$rest ...'
+  match whole
+  | '($(left :: Identifier) $(op :: Operator) $(right :: Identifier)):
+       ~runtime: $runtime; ...
+       ~logic: $logic; ...
+       ~order: $(order :: Identifier)':
+      let logic_group = '$logic; ...'
+      let runtime_group = '$runtime; ...'
+      let runtime_def = runtime_operator(left, op, right, order, runtime_group)
+      let hol_def = hol_operator(op, order, logic_group,
+                                 Syntax.unwrap(left), Syntax.unwrap(right),
+                                 "both")
+      '«
+         $runtime_def
+         $hol_def
+       »'
+  | '($(left :: Identifier) $(op :: Operator) $(right :: Identifier)):
+       ~runtime: $runtime; ...
+       ~order: $(order :: Identifier)':
+      let runtime_group = '$runtime; ...'
+      runtime_operator(left, op, right, order, runtime_group)
+  | '($(left :: Identifier) $(op :: Operator) $(right :: Identifier)):
+       ~logic: $logic; ...
+       ~order: $(order :: Identifier)':
+      let logic_group = '$logic; ...'
+      hol_operator(op, order, logic_group,
+                   Syntax.unwrap(left), Syntax.unwrap(right), "logical")
+  | '($(left :: Identifier) $(op :: Operator) $(right :: Identifier)):
+       ~order: $(order :: Identifier)':
+      syntax_meta.error(
+        "`notation` requires at least one of `~logic` or `~runtime`",
+        whole)
+  | ~else:
+      syntax_meta.error(
+        "expected `(left operator right)` with optional `~runtime:` and `~logic:` clauses, followed by `~order:`",
+        whole)

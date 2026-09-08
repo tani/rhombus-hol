@@ -58,10 +58,11 @@ not a notational choice --- it is what the elaborator accepts.
 The built-in operators mean in the logic what they mean in Rhombus:
 @rhombus(#true) and @rhombus(#false) are the truth values, @rhombus(!) is
 negation, @rhombus(&&) and @rhombus(||) are conjunction and disjunction, and
-@rhombus(==) is equality at any type. A @tech{reflected operator} adds another
-operator with both executable and logical meanings. An ordinary Rhombus
-operator has no logical meaning and is rejected in a @rhombus(function);
-a @tech{logical-only operator} is rejected there because no executable
+@rhombus(==) is equality at any type. A @rhombus(notation, ~datum)
+declaration with both @rhombus(~runtime) and @rhombus(~logic) adds another
+operator with both meanings. An ordinary Rhombus operator and runtime-only
+notation have no logical meaning and are rejected in a
+@rhombus(function); logic-only notation is rejected because no executable
 operator exists.
 
 @rhombus(&&) and @rhombus(||) short-circuit when the module runs, while the
@@ -69,8 +70,9 @@ logical @tt{and} and @tt{or} are strict. Nothing can tell the difference,
 because every function in this grammar is total.
 
 Anything outside the grammar is a compile error that names the offending
-expression. Arithmetic, string literals, @rhombus(block), ordinary runtime-only
-operators, and logical-only operators are all outside it in this version.
+expression. Arithmetic, string literals, @rhombus(block), ordinary
+runtime-only operators, runtime-only notation, and logic-only notation are all
+outside it in this version.
 
 @subsection{Local definitions}
 

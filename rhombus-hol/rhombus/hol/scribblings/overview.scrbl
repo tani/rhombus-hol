@@ -25,8 +25,9 @@ own spellings wherever a construct exists on both sides ---
 @rhombus(#true), @rhombus(!), @rhombus(&&), @rhombus(||), @rhombus(==) and
 @rhombus(if) --- while logic-only constructs use spellings such as
 @rhombus(===, ~datum), @rhombus(and, ~datum) and @rhombus(forall, ~datum).
-User-defined operators make the same choice explicitly with
-@rhombus(logical_operator, ~datum) or @rhombus(reflected_operator, ~datum).
+User-defined notation makes the same choice through optional
+@rhombus(~runtime) and @rhombus(~logic) clauses on
+@rhombus(notation, ~datum).
 
 @section{When things happen}
 

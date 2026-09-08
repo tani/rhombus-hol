@@ -10,7 +10,7 @@ import:
   rhombus/meta open
   "hol/module_block.rhm" as mb
   "hol/surface_space.rhm" open
-  "hol/surface_operator.rhm" open
+  "hol/surface_notation.rhm" open
 
 module reader ~lang rhombus/reader:
   ~lang: "hol.rkt"
@@ -29,8 +29,7 @@ export:
   hol_negation
   hol_equality
   hol_application
-  logical_operator
-  reflected_operator
+  notation
   only_space hol_expr:
     names:
       #%literal

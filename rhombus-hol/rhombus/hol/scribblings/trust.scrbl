@@ -64,11 +64,10 @@ never by a proof step), pretty printing, and the compile-time trace log used
 by the independent Idris differential checker are not part of this
 comparison: none of the three exists in @tt{fusion.ml} either, and none of
 the three is one of the ten rules or a definitional principle --- printing
-lives beside the kernel only because @tt{check_term}'s error messages need
-it (see @tt{PLAN.md} section 1 for why that one dependency cannot be cut
-without a circular import), and type unification was already moved out to
-the elaborator (@tt{rhombus-hol-lib/.../elab.rhm}) before this section was
-written.
+lives beside the kernel only because @tt{check_term}'s error messages need it;
+moving it would create a circular import. Type unification was already moved
+out to the elaborator (@tt{rhombus-hol-lib/.../elab.rhm}) before this section
+was written.
 
 @section{The axioms}
 

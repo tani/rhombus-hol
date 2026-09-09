@@ -1,12 +1,12 @@
 name: Documentation
 
-# `raco setup` writes the manual under rhombus-hol/rhombus/hol/doc/. Its pages
-# link to the shared Scribble CSS and JS one directory up, so the whole doc/
-# tree is copied into the site. Isabelle's `-P` output is published alongside
-# it under isabelle/, including HOL and HOL-ZF pages needed by cross-links.
+# The installed packages are compiled without rendering their locally installed
+# manuals. A separate `raco scribble` invocation renders the public manual with
+# version-pinned HTTPS cross-reference redirects, so runner-local `file://`
+# scripts and paths cannot leak into the Pages artifact.
 #
 # CI builds the documentation on every branch; this workflow publishes the
-# manual and checked Isabelle theory presentation produced from main.
+# public manual and checked Isabelle theory presentation produced from main.
 
 on:
   push:
@@ -84,14 +84,13 @@ jobs:
           raco pkg install --auto --batch --no-setup --skip-installed \
             rhombus-hol-kernel/ rhombus-hol-lib/ rhombus-hol/
 
-      # All three at once, so bytecode and manual are built in one parallel
-      # pass. `raco setup` reports a document it could not build and still
-      # exits 0, so the log is what has to be read -- otherwise a broken
-      # manual gets published as though it were fine.
-      - name: Build the manual
+      # Compile package code without rendering the locally installed manual.
+      # That form of the manual contains local documentation redirect scripts
+      # whose file:// URLs are correct only on the build machine.
+      - name: Compile the documentation dependencies
         run: |
           set -o pipefail
-          raco setup --jobs "$(nproc)" \
+          raco setup --jobs "$(nproc)" --no-docs \
             --pkgs rhombus-hol-kernel rhombus-hol-lib rhombus-hol 2>&1 | tee setup.log
           if grep -q '^raco setup: error' setup.log; then
             echo "::error::raco setup reported errors"
@@ -99,10 +98,23 @@ jobs:
             exit 1
           fi
 
+      # Render a self-contained public tree. `+m` supplies installed
+      # cross-references; the two redirects turn references outside this
+      # package into stable Racket 9.3 HTTPS links instead of local files.
+      - name: Build the public manual
+        run: |
+          raco scribble --htmls --dest _site --make \
+            --redirect-main https://download.racket-lang.org/releases/9.3/doc/ \
+            --redirect https://download.racket-lang.org/releases/9.3/doc/local-redirect/index.html \
+            +m --lib rhombus/hol/scribblings/rhombus-hol.scrbl
+          if grep -R -n 'file://' _site/rhombus-hol --include='*.html'; then
+            echo "::error::public manual contains a local file URL"
+            exit 1
+          fi
+
       - name: Assemble the site
         run: |
           site=_site
-          cp -R rhombus-hol/rhombus/hol/doc "$site"
           cat > "$site/index.html" <<'HTML'
           <!doctype html>
           <meta charset="utf-8">

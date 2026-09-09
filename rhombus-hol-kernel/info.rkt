@@ -4,6 +4,6 @@
 (define deps '("base"
                ["rhombus-lib" #:version "1.1"]))
 (define pkg-desc "the LCF kernel of \"rhombus-hol\": the trust boundary, and nothing else")
-(define license '0BSD)
+(define license '(0BSD AND BSD-2-Clause))
 (define version "0.1")
 (define language-families '("Rhombus"))

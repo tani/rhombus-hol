@@ -50,6 +50,17 @@ builds the manual at `rhombus-hol/rhombus/hol/doc/rhombus-hol/index.html`,
 which covers the declaration forms, the surface grammar, termination
 checking, the prover, and what the system does and does not trust.
 
+The published documentation includes both the user manual and the
+machine-checked Isabelle development:
+
+- [Rhombus/HOL manual](https://tani.github.io/rhombus-hol/rhombus-hol/index.html)
+- [Isabelle/HOL kernel verification](https://tani.github.io/rhombus-hol/isabelle/Unsorted/Rhombus_HOL_Kernel/index.html)
+- [Verification audit theory](https://tani.github.io/rhombus-hol/isabelle/Unsorted/Rhombus_HOL_Kernel/Rhombus_HOL_Audit.html)
+
+GitHub Actions regenerates these pages from `main`; the Isabelle presentation
+contains the checked source, definitions, theorem statements, proof text, and
+links into the imported HOL and HOL-ZF sessions.
+
 ## Status
 
 Version 0.1. `PLAN.md` tracks what is implemented, what is deliberately out

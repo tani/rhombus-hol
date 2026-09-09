@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Published the checked Isabelle/HOL theory presentation with the GitHub Pages manual and linked it from the README and corresponding Rhombus kernel sources.
 - Replaced the fixed, numeric-precedence HOL proposition parser with the dedicated `rhombus/hol/expr` enforestation space.
 - Added the unified `notation` definer; optional `~runtime` and `~logic` clauses create runtime-only, logic-only, or reflected notation, with at least one meaning required.
 - Made HOL expression expansion declaration-ordered, so same-module and imported operator bindings are visible to later functions, theorem statements, and proof cases.

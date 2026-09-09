@@ -68,10 +68,7 @@ of scope, and open design questions.
 
 ## License
 
-Original Rhombus/HOL material is [0BSD](LICENSE). Because the implementation
-was produced with coding-agent assistance and closely follows established
-provers, potentially derivative portions are conservatively distributed with
-the retained HOL Light, HOL4, ACL2, and QuickCheck notices. Generated
-documentation also carries the applicable Scribble/Racket, Isabelle, and font
-notices. See [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) and
-[LICENSES/](LICENSES/).
+`LICENSE` contains the 0BSD terms for original Rhombus/HOL material.
+[`THIRD_PARTY_NOTICES`](THIRD_PARTY_NOTICES) maps components to retained
+third-party notices; [`LICENSES/`](LICENSES/) contains those complete terms.
+Package-local copies keep independently distributable archives self-contained.

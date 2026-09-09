@@ -42,11 +42,8 @@ unless @rhombus(app_nil_r) is proved.
 
 @section{License and Third-Party Notices}
 
-Original Rhombus/HOL material is distributed under 0BSD. Because the
-implementation closely follows established theorem provers, potentially
-derivative portions are conservatively distributed with the retained HOL
-Light, HOL4, ACL2, and QuickCheck notices. Generated versions of this manual
-also carry the applicable Scribble/Racket and embedded-font notices. The
-source distribution includes the complete terms in @tt{LICENSE},
-@tt{THIRD_PARTY_NOTICES}, and @tt{LICENSES/}; the public site links the same
-files from its front page.
+@tt{LICENSE} contains the 0BSD terms for original Rhombus/HOL material.
+@tt{THIRD_PARTY_NOTICES} maps components to retained third-party notices, and
+@tt{LICENSES/} contains those complete terms. Package-local copies keep
+independently distributable archives self-contained. The public site links the
+repository-level documents from its front page.

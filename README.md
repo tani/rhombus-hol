@@ -61,11 +61,6 @@ GitHub Actions regenerates these pages from `main`; the Isabelle presentation
 contains the checked source, definitions, theorem statements, proof text, and
 links into the imported HOL and HOL-ZF sessions.
 
-## Status
-
-Version 0.1. `PLAN.md` tracks what is implemented, what is deliberately out
-of scope, and open design questions.
-
 ## License
 
 `LICENSE` contains the 0BSD terms for original Rhombus/HOL material.

@@ -78,6 +78,89 @@ export: «
   new_basic_type_definition
   »
 
+
+class RhombusMemoValue(value)
+
+def rhombus_binary_memos = WeakMutableMap.by(===)()
+def rhombus_ternary_memos = WeakMutableMap.by(===)()
+
+fun rhombus_memoized_binary(run):
+  fun (first):
+    fun (second):
+      let firsts:
+        match rhombus_binary_memos.maybe[run]
+        | #false:
+            let table = WeakMutableMap.by(===)()
+            rhombus_binary_memos[run] := table
+            table
+        | table: table
+      let seconds:
+        match firsts.maybe[first]
+        | #false:
+            let table = WeakMutableMap.by(===)()
+            firsts[first] := table
+            table
+        | table: table
+      match seconds.maybe[second]
+      | #false:
+          let result = ((run)(first))(second)
+          seconds[second] := RhombusMemoValue(result)
+          result
+      | RhombusMemoValue(result): result
+
+fun rhombus_memoized_ternary(run):
+  fun (first):
+    fun (second):
+      fun (third):
+        let firsts:
+          match rhombus_ternary_memos.maybe[run]
+          | #false:
+              let table = WeakMutableMap.by(===)()
+              rhombus_ternary_memos[run] := table
+              table
+          | table: table
+        let seconds:
+          match firsts.maybe[first]
+          | #false:
+              let table = WeakMutableMap.by(===)()
+              firsts[first] := table
+              table
+          | table: table
+        let thirds:
+          match seconds.maybe[second]
+          | #false:
+              let table = MutableMap()
+              seconds[second] := table
+              table
+          | table: table
+        match thirds.maybe[third]
+        | #false:
+            let result = (((run)(first))(second))(third)
+            thirds[third] := RhombusMemoValue(result)
+            result
+        | RhombusMemoValue(result): result
+
+
+
+class RhombusFunUpdateValue(value)
+class RhombusFunUpdateState(entries, fallback)
+
+def rhombus_fun_update_states = WeakMutableMap.by(===)()
+
+fun rhombus_fun_upd(base):
+  fun (key):
+    fun (value):
+      let state = rhombus_fun_update_states.maybe[base]
+                    || RhombusFunUpdateState({}, base)
+      let entries = state.entries ++ {key: RhombusFunUpdateValue(value)}
+      fun updated(query):
+        match entries.get(query, #false)
+        | #false: state.fallback(query)
+        | RhombusFunUpdateValue(found): found
+      rhombus_fun_update_states[updated] := RhombusFunUpdateState(entries, state.fallback)
+      updated
+
+
 class Nat(): «
   nonfinal
   »
@@ -870,21 +953,6 @@ fun member(dict_a_0): «
     »
   »
 
-fun fun_upd(dict_a_0): «
-  fun (arg): «
-    fun (arh): «
-      fun (ari): «
-        match [arg, arh, ari]
-        | [f, a, b] : «
-          (fun (x) : «
-             (if ((((eq)(dict_a_0))(x))(a)) | (b) | ((f)(x)))
-             »)
-          »
-        »
-      »
-    »
-  »
-
 fun append(arg): «
   fun (arh): «
     match [arg, arh]
@@ -1184,6 +1252,13 @@ fun const_tab(arg): «
     »
   »
 
+fun empty_type_subst(arg): «
+  match [arg]
+  | [uu] : «
+    None()
+    »
+  »
+
 fun size_htype(arg): «
   match [arg]
   | [TyVar(x1)] : «
@@ -1216,7 +1291,7 @@ fun type_match_fuel(arg): «
                             (block: «
                                match (acc)(n)
                                | None() : «
-                                 Some(((((fun_upd)(equal_hname()))(acc))(n))(Some(ty)))
+                                 Some((((rhombus_fun_upd)(acc))(n))(Some(ty)))
                                  »
                                | Some(old) : «
                                  (if (((equal_htypea)(old))(ty)) | (Some(acc)) | (None()))
@@ -1277,7 +1352,7 @@ fun type_subst(arg): «
     »
   »
 
-fun type_match(arg): «
+fun type_match_uncached(arg): «
   fun (arh): «
     fun (ari): «
       match [arg, arh, ari]
@@ -1291,6 +1366,17 @@ fun type_match(arg): «
              (if (((equal_htypea)(((type_subst)(theta))(pat)))(ty)) | (Some(theta)) | (None()))
              »
            »)
+        »
+      »
+    »
+  »
+
+fun type_match(arg): «
+  fun (arh): «
+    fun (ari): «
+      match [arg, arh, ari]
+      | [pat, ty, acc] : «
+        ((((rhombus_memoized_ternary)(type_match_uncached))(pat))(ty))(acc)
         »
       »
     »
@@ -1433,34 +1519,54 @@ fun check_open_term(arg): «
   fun (arh): «
     fun (ari): «
       match [arg, arh, ari]
-      | [thy, env, FVar(uu, ty)] : «
-        ((check_type)(thy))(ty)
+      | [thy, env, t] : «
+        ((((rhombus_memoized_ternary)(check_open_term_uncached))(thy))(t))(env)
         »
-      | [thy, env, BVar(i, ty)] : «
-        (((less_nat)(i))((size_lista)(env)) && (((equal_htypea)(((nth)(env))(i)))(ty) && ((check_type)(thy))(ty)))
+      »
+    »
+  »
+
+fun check_open_term_uncached(arg): «
+  fun (arh): «
+    fun (ari): «
+      match [arg, arh, ari]
+      | [thy, t, env] : «
+        (block: «
+           match t
+           | FVar(_, a) : «
+             ((check_type)(thy))(a)
+             »
+           | BVar(i, ty) : «
+             (((less_nat)(i))((size_lista)(env)) && (((equal_htypea)(((nth)(env))(i)))(ty) && ((check_type)(thy))(ty)))
+             »
+           | Const(n, ty) : «
+             (((check_type)(thy))(ty) && (block: «
+    match ((const_tab)(thy))(n)
+    | None() : «
+      #false
+      »
+    | Some(generic) : «
+      (!(is_none)((((type_match)(generic))(ty))(empty_type_subst)))
+      »
+    »))
+             »
+           | Comb(f, x) : «
+             ((((check_open_term)(thy))(env))(f) && ((((check_open_term)(thy))(env))(x) && (!(is_none)((type_of)(Comb(f, x))))))
+             »
+           | Abs(aty, body) : «
+             (((check_type)(thy))(aty) && (((check_open_term)(thy))(Cons(aty, env)))(body))
+             »
+           »)
         »
-      | [thy, env, Const(n, ty)] : «
-        (((check_type)(thy))(ty) && (block: «
-                                       match ((const_tab)(thy))(n)
-                                       | None() : «
- #false
- »
-                                       | Some(generic) : «
- (!(is_none)((((type_match)(generic))(ty))((fun (_) : «
-      None()
-      »))))
- »
-                                       »))
-        »
-      | [thy, env, Comb(f, x)] : «
-        ((((check_open_term)(thy))(env))(f) && ((((check_open_term)(thy))(env))(x) && (!(is_none)((type_of)(Comb(f, x))))))
-        »
-      | [thy, env, Abs(aty, body)] : «
-        (((check_type)(thy))(aty) && (((check_open_term)(thy))(Cons(aty, env)))(body))
-        »
-      | ~else: «
-        error ("non-exhaustive match in Rhombus_HOL_Syntax.check_open_term")
-        »
+      »
+    »
+  »
+
+fun check_term_uncached(arg): «
+  fun (arh): «
+    match [arg, arh]
+    | [thy, t] : «
+      (((check_open_term)(thy))(Nil()))(t)
       »
     »
   »
@@ -1469,7 +1575,7 @@ fun check_term(arg): «
   fun (arh): «
     match [arg, arh]
     | [thy, t] : «
-      (((check_open_term)(thy))(Nil()))(t)
+      (((rhombus_memoized_binary)(check_term_uncached))(thy))(t)
       »
     »
   »
@@ -2367,7 +2473,7 @@ fun new_type(arg): «
       fun (arj): «
         match [arg, arh, ari, arj]
         | [fresh, thy, n, arity] : «
-          (if ((!(is_none)(((tyops)(thy))(n)))) | (None()) | (Some(((((((extend_theory)(fresh))(thy))(((((fun_upd)(equal_hname()))((tyops)(thy)))(n))(Some(arity))))((const_tab)(thy)))((axiom_list)(thy)))((def_tab)(thy)))))
+          (if ((!(is_none)(((tyops)(thy))(n)))) | (None()) | (Some(((((((extend_theory)(fresh))(thy))((((rhombus_fun_upd)((tyops)(thy)))(n))(Some(arity))))((const_tab)(thy)))((axiom_list)(thy)))((def_tab)(thy)))))
           »
         »
       »
@@ -2403,13 +2509,13 @@ fun new_axiom(arg): «
 fun initial_theory(arg): «
   match [arg]
   | [fresh] : «
-    Htheory_ext(((((fun_upd)(equal_hname()))(((((fun_upd)(equal_hname()))((fun (_) : «
-                                     None()
-                                     »)))(NFun()))(Some((nat_of_integer)(2)))))(NBool()))(Some(zero_nat())), ((((fun_upd)(equal_hname()))((fun (_) : «
-                      None()
-                      »)))(NEq()))(Some(((mk_fun)(TyVar(NAlpha())))(((mk_fun)(TyVar(NAlpha())))(bool_ty())))), Nil(), (fun (_) : «
-  None()
-  »), (fresh_stamp)(fresh), Unity())
+    Htheory_ext((((rhombus_fun_upd)((((rhombus_fun_upd)((fun (_) : «
+                   None()
+                   »)))(NFun()))(Some((nat_of_integer)(2)))))(NBool()))(Some(zero_nat())), (((rhombus_fun_upd)((fun (_) : «
+                                   None()
+                                   »)))(NEq()))(Some(((mk_fun)(TyVar(NAlpha())))(((mk_fun)(TyVar(NAlpha())))(bool_ty())))), Nil(), (fun (_) : «
+               None()
+               »), (fresh_stamp)(fresh), Unity())
     »
   »
 
@@ -2465,7 +2571,7 @@ fun new_constant(arg): «
       fun (arj): «
         match [arg, arh, ari, arj]
         | [fresh, thy, n, ty] : «
-          (if (((!(is_none)(((const_tab)(thy))(n))) || (!((check_type)(thy))(ty)))) | (None()) | (Some(((((((extend_theory)(fresh))(thy))((tyops)(thy)))(((((fun_upd)(equal_hname()))((const_tab)(thy)))(n))(Some(ty))))((axiom_list)(thy)))((def_tab)(thy)))))
+          (if (((!(is_none)(((const_tab)(thy))(n))) || (!((check_type)(thy))(ty)))) | (None()) | (Some(((((((extend_theory)(fresh))(thy))((tyops)(thy)))((((rhombus_fun_upd)((const_tab)(thy)))(n))(Some(ty))))((axiom_list)(thy)))((def_tab)(thy)))))
           »
         »
       »
@@ -2545,7 +2651,7 @@ fun new_basic_definition(arg): «
               match Hthm_ext(Nil(), (((eq_term)(ty))(c))(rhs), st, Unity())
               | dth : «
                 (block: «
-                   match Htheory_ext((tyops)(thy), ((((fun_upd)(equal_hname()))((const_tab)(thy)))(n))(Some(ty)), (axiom_list)(thy), ((((fun_upd)(equal_hname()))((def_tab)(thy)))(n))(Some(dth)), st, Unity())
+                   match Htheory_ext((tyops)(thy), (((rhombus_fun_upd)((const_tab)(thy)))(n))(Some(ty)), (axiom_list)(thy), (((rhombus_fun_upd)((def_tab)(thy)))(n))(Some(dth)), st, Unity())
                    | thya : «
                      (if (((wf_thm)(thya))(dth)) | (Some(PairValue(thya, dth))) | (None()))
                      »
@@ -2632,7 +2738,7 @@ fun new_basic_type_definition(arg): «
     match Hthm_ext(Nil(), (((eq_term)(bool_ty()))(Comb(pred, r)))((((eq_term)(rty))(Comb(rept, Comb(abst, r))))(r)), st, Unity())
     | th2 : «
       (block: «
-         match Htheory_ext(((((fun_upd)(equal_hname()))((tyops)(thy)))(tyname))(Some((size_lista)(tvs))), ((((fun_upd)(equal_hname()))(((((fun_upd)(equal_hname()))((const_tab)(thy)))(absname))(Some(((mk_fun)(rty))(aty)))))(repname))(Some(((mk_fun)(aty))(rty))), (axiom_list)(thy), (def_tab)(thy), st, Unity())
+         match Htheory_ext((((rhombus_fun_upd)((tyops)(thy)))(tyname))(Some((size_lista)(tvs))), (((rhombus_fun_upd)((((rhombus_fun_upd)((const_tab)(thy)))(absname))(Some(((mk_fun)(rty))(aty)))))(repname))(Some(((mk_fun)(aty))(rty))), (axiom_list)(thy), (def_tab)(thy), st, Unity())
          | thya : «
            (if ((((wf_thm)(thya))(th1) && ((wf_thm)(thya))(th2))) | (Some(PairValue(thya, PairValue(th1, th2)))) | (None()))
            »

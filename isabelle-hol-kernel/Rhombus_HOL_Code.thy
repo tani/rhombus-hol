@@ -420,6 +420,70 @@ lemma run_code_rule_preserves_wf:
 
 section \<open>Executable natural-fuel matcher\<close>
 
+definition empty_type_subst :: "hname \<Rightarrow> htype option" where
+  "empty_type_subst _ = None"
+
+lemma empty_type_subst_eq [simp]: "empty_type_subst = (\<lambda>_. None)"
+  by (rule ext) (simp add: empty_type_subst_def)
+
+definition check_open_term_uncached :: "htheory \<Rightarrow> hterm \<Rightarrow> htype list \<Rightarrow> bool" where
+  "check_open_term_uncached thy t env \<longleftrightarrow>
+    (case t of
+       FVar _ ty \<Rightarrow> check_type thy ty
+     | BVar i ty \<Rightarrow> i < length env \<and> env ! i = ty \<and> check_type thy ty
+     | Const n ty \<Rightarrow> check_type thy ty \<and>
+         (case const_tab thy n of None \<Rightarrow> False
+          | Some generic \<Rightarrow> type_match generic ty empty_type_subst \<noteq> None)
+     | Comb f x \<Rightarrow> check_open_term thy env f \<and> check_open_term thy env x \<and>
+         type_of (Comb f x) \<noteq> None
+     | Abs aty body \<Rightarrow> check_type thy aty \<and> check_open_term thy (aty # env) body)"
+
+lemma check_open_term_uncached_eq:
+  "check_open_term_uncached thy t env \<longleftrightarrow> check_open_term thy env t"
+  unfolding check_open_term_uncached_def empty_type_subst_eq
+  by (cases t) simp_all
+
+definition type_match_uncached ::
+  "htype \<Rightarrow> htype \<Rightarrow> (hname \<Rightarrow> htype option) \<Rightarrow> (hname \<Rightarrow> htype option) option" where
+  "type_match_uncached pat ty acc =
+    (case type_match_fuel (size pat + 1) pat ty acc of
+       None \<Rightarrow> None
+     | Some \<theta> \<Rightarrow> if type_subst \<theta> pat = ty then Some \<theta> else None)"
+
+lemma type_match_uncached_eq: "type_match_uncached = type_match"
+  by (simp add: fun_eq_iff type_match_uncached_def type_match_def)
+
+definition check_term_uncached :: "htheory \<Rightarrow> hterm \<Rightarrow> bool" where
+  "check_term_uncached thy t \<longleftrightarrow> check_open_term thy [] t"
+
+lemma check_term_uncached_eq: "check_term_uncached = check_term"
+  by (simp add: fun_eq_iff check_term_uncached_def check_term_def)
+
+definition memoize_binary :: "('a \<Rightarrow> 'b \<Rightarrow> 'c) \<Rightarrow> 'a \<Rightarrow> 'b \<Rightarrow> 'c" where
+  "memoize_binary f a b = f a b"
+
+definition memoize_ternary ::
+  "('a \<Rightarrow> 'b \<Rightarrow> 'c \<Rightarrow> 'd) \<Rightarrow> 'a \<Rightarrow> 'b \<Rightarrow> 'c \<Rightarrow> 'd" where
+  "memoize_ternary f a b c = f a b c"
+
+declare [[code drop: check_open_term]]
+declare [[code drop: type_match]]
+declare [[code drop: check_term]]
+
+lemma check_open_term_memo_code [code]:
+  "check_open_term thy env t =
+    memoize_ternary check_open_term_uncached thy t env"
+  by (simp add: memoize_ternary_def check_open_term_uncached_eq)
+
+lemma type_match_memo_code [code]:
+  "type_match pat ty acc =
+    memoize_ternary type_match_uncached pat ty acc"
+  by (simp add: memoize_ternary_def type_match_uncached_def type_match_def)
+
+lemma check_term_memo_code [code]:
+  "check_term thy t = memoize_binary check_term_uncached thy t"
+  by (simp add: memoize_binary_def check_term_uncached_def check_term_def)
+
 declare [[code drop: type_match_fuel]]
 
 lemma type_match_fuel_code [code]:
@@ -466,6 +530,106 @@ setup \<open>
     Code_Printer.literal_numeral "Rhombus"
 \<close>
 
+section \<open>Persistent Rhombus function tables\<close>
+
+text \<open>The extracted program uses function update only for immutable generated
+  names. Rhombus maps use the same structural equality for those values. Retaining
+  the base function and a persistent map flattens update chains without changing the
+  observable lookup result of @{const fun_upd}.\<close>
+
+code_printing
+  code_module Rhombus_Function_Update \<rightharpoonup> (Rhombus) \<open>
+class RhombusFunUpdateValue(value)
+class RhombusFunUpdateState(entries, fallback)
+
+def rhombus_fun_update_states = WeakMutableMap.by(===)()
+
+fun rhombus_fun_upd(base):
+  fun (key):
+    fun (value):
+      let state = rhombus_fun_update_states.maybe[base]
+                    || RhombusFunUpdateState({}, base)
+      let entries = state.entries ++ {key: RhombusFunUpdateValue(value)}
+      fun updated(query):
+        match entries.get(query, #false)
+        | #false: state.fallback(query)
+        | RhombusFunUpdateValue(found): found
+      rhombus_fun_update_states[updated] := RhombusFunUpdateState(entries, state.fallback)
+      updated
+\<close> for constant fun_upd
+| constant fun_upd \<rightharpoonup> (Rhombus) "rhombus'_fun'_upd"
+
+text \<open>The theorem checker revisits immutable terms and type instances across
+  inference results. Weak identity tables partition caches by computation and live
+  syntax roots; structural innermost keys share equivalent small environments. A
+  cache hit is observationally equal to recomputation.\<close>
+
+code_printing
+  code_module Rhombus_Memo \<rightharpoonup> (Rhombus) \<open>
+class RhombusMemoValue(value)
+
+def rhombus_binary_memos = WeakMutableMap.by(===)()
+def rhombus_ternary_memos = WeakMutableMap.by(===)()
+
+fun rhombus_memoized_binary(run):
+  fun (first):
+    fun (second):
+      let firsts:
+        match rhombus_binary_memos.maybe[run]
+        | #false:
+            let table = WeakMutableMap.by(===)()
+            rhombus_binary_memos[run] := table
+            table
+        | table: table
+      let seconds:
+        match firsts.maybe[first]
+        | #false:
+            let table = WeakMutableMap.by(===)()
+            firsts[first] := table
+            table
+        | table: table
+      match seconds.maybe[second]
+      | #false:
+          let result = ((run)(first))(second)
+          seconds[second] := RhombusMemoValue(result)
+          result
+      | RhombusMemoValue(result): result
+
+fun rhombus_memoized_ternary(run):
+  fun (first):
+    fun (second):
+      fun (third):
+        let firsts:
+          match rhombus_ternary_memos.maybe[run]
+          | #false:
+              let table = WeakMutableMap.by(===)()
+              rhombus_ternary_memos[run] := table
+              table
+          | table: table
+        let seconds:
+          match firsts.maybe[first]
+          | #false:
+              let table = WeakMutableMap.by(===)()
+              firsts[first] := table
+              table
+          | table: table
+        let thirds:
+          match seconds.maybe[second]
+          | #false:
+              let table = MutableMap()
+              seconds[second] := table
+              table
+          | table: table
+        match thirds.maybe[third]
+        | #false:
+            let result = (((run)(first))(second))(third)
+            thirds[third] := RhombusMemoValue(result)
+            result
+        | RhombusMemoValue(result): result
+\<close> for constant memoize_binary memoize_ternary
+| constant memoize_binary \<rightharpoonup> (Rhombus) "rhombus'_memoized'_binary"
+| constant memoize_ternary \<rightharpoonup> (Rhombus) "rhombus'_memoized'_ternary"
+
 section \<open>Stable Rhombus API names\<close>
 
 code_identifier
@@ -476,6 +640,9 @@ code_identifier
 | type_constructor hthm_ext \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.HThm"
 | type_constructor htheory_ext \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.HTheory"
 | type_constructor code_rule_request \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.CodeRuleRequest"
+| constant check_open_term_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.check_open_term_uncached"
+| constant type_match_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.type_match_uncached"
+| constant check_term_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.check_term_uncached"
 | constant NFun \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.NFun"
 | constant NBool \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.NBool"
 | constant NEq \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.NEq"

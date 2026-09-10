@@ -19,6 +19,7 @@
 // depends on this.
 
 import:
+  rhombus/hol/htype open
   rhombus/hol/term open
   rhombus/hol/names open
   rhombus/hol/kernel open
@@ -58,6 +59,8 @@ fun simplify_asms(thy :: Theory, db :: RuleDB,
         | eq :~ Thm:
             loop(i + 1, seen ++ [a], acc ++ [eq], changed || rhs_of(eq) != a)
 
+// Keep binders and antecedents intact at simplification time. The induction
+// and generalization stages need that structure for termination obligations.
 fun simplify_goal(thy :: Theory, db :: RuleDB, g :: Goal) :: maybe(Step):
   match simplify_asms(thy, db, g.asms)
   | #false: simplify_concl(thy, db, g)
@@ -87,19 +90,40 @@ fun rebuild_asms(thy :: Theory, db :: RuleDB, g :: Goal,
         Step([], fun (_ :: List.of(Thm)): CONTR(thy, g.concl, contra))
     | ~else: find(i + 1)
 
-fun simplify_concl(thy :: Theory, db :: RuleDB, g :: Goal) :: maybe(Step):
-  let db2 = with_assumptions(thy, db, g.asms)
-  match simp_conv(db2)(thy, g.concl)
-  | #false: #false
-  | eqth :~ Thm:
-      let simplified = rhs_of(eqth)
+// Turn equality between functions into pointwise equality only after ordinary
+// simplification has failed. This keeps reflexive function goals cheap while
+// making the HOL eta axiom usable through the surface `auto` tactic.
+fun extensionalize_concl(thy :: Theory, g :: Goal) :: maybe(Step):
+  match dest_eq(g.concl)
+  | [f, h]:
+      let fty = type_of(f)
       cond
-      | simplified == g.concl: #false
-      | simplified == tm_true:
-          // `|- concl === true`, so the goal is closed outright.
-          Step([], fun (_ :: List.of(Thm)): EQT_ELIM(thy, eqth))
+      | !is_fun(fty): #false
       | ~else:
-          let sub = note(Goal(g.asms, simplified, g.trail), "simplification")
-          Step([sub],
-               fun (ths :: List.of(Thm)):
-                 EQ_MP(SYM(thy, eqth), ths[0]))
+          let (domain, _) = dest_fun(fty)
+          let x = variant(g.asms ++ [g.concl], mk_var(#'x, domain))
+          let pointwise = mk_eq(mk_comb(f, x), mk_comb(h, x))
+          let sub = note(Goal(g.asms, pointwise, g.trail), "function extensionality")
+          Step([sub], fun (ths :: List.of(Thm)): EXT(thy, x, ths[0]))
+  | ~else: #false
+
+fun simplify_concl(thy :: Theory, db :: RuleDB, g :: Goal) :: maybe(Step):
+  cond
+  | g.concl == tm_true:
+      Step([], fun (_ :: List.of(Thm)): TRUTH(thy))
+  | ~else:
+      let db2 = with_assumptions(thy, db, g.asms)
+      match simp_conv(db2)(thy, g.concl)
+      | #false: extensionalize_concl(thy, g)
+      | eqth :~ Thm:
+          let simplified = rhs_of(eqth)
+          cond
+          | simplified == g.concl: extensionalize_concl(thy, g)
+          | simplified == tm_true:
+              // `|- concl === true`, so the goal is closed outright.
+              Step([], fun (_ :: List.of(Thm)): EQT_ELIM(thy, eqth))
+          | ~else:
+              let sub = note(Goal(g.asms, simplified, g.trail), "simplification")
+              Step([sub],
+                   fun (ths :: List.of(Thm)):
+                     EQ_MP(SYM(thy, eqth), ths[0]))

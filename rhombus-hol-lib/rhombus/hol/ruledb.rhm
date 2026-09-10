@@ -75,11 +75,14 @@ def empty_db :: RuleDB = RuleDB({}, Set(), {})
 
 // -- building a rule from a theorem ----------------------------------------
 
-// The head constant of an application spine, or `#false`.
+// Constant-headed rules are global. An unquantified free-variable head is
+// also safe for a goal assumption: with no pattern variables it matches only
+// that exact term, never arbitrary expressions.
 fun head_symbol(t :: Term) :: maybe(Symbol):
   let (h, _) = strip_comb(t)
   match h
   | Const(n, _): n
+  | FVar(n, _): n
   | ~else: #false
 
 // Orient a proved statement into an equation:
@@ -152,9 +155,9 @@ fun mk_rule(thy :: Theory, name :: Symbol, th :: Thm)
                     for values(a :~ List = acc) (v in pvars):
                       (if vfree_in(v, c) && !a.contains(v) | a ++ [v] | a)
       cond
-      // A variable left-hand side matches everything, so the rule would
-      // rewrite the whole world.
-      | lhs is_a FVar: #false
+      // A quantified variable left-hand side would match the whole world.
+      // An unquantified assumption variable is an exact-match local rule.
+      | lhs is_a FVar && vars.length() > 0: #false
       // A pattern variable on the right that the left side does not determine
       // would be left uninstantiated by matching.
       | !(for all (v in rvars): vars.contains(v)): #false
@@ -381,13 +384,69 @@ fun db_conv(db :: RuleDB):
               | th: th
 
 
-// `a === a` is `true`.  Without this the simplifier can normalise both sides
-// of a goal to the same term and still not know it has finished.
+// Close the tiny equality/implication tautologies that arise before the
+// waterfall's induction stage. Keeping these local avoids a general
+// implication-introduction pass, which would consume guarded measure goals
+// before induction can analyze them.
+fun implication_fallback(thy :: Theory, p :: Term, q :: Term) :: maybe(Thm):
+  match dest_disj(q)
+  | [left, right] when right == p:
+      EQT_INTRO(thy, DISCH(thy, p, DISJ2(thy, left, ASSUME(thy, p))))
+  | [left, right] when left == p:
+      EQT_INTRO(thy, DISCH(thy, p, DISJ1(thy, ASSUME(thy, p), right)))
+  | ~else:
+      match [dest_forall(p), dest_eq(q)]
+      | [[x, body1], [f, g]]:
+          match dest_forall(body1)
+          | [y, body]:
+              match dest_eq(body)
+              | [Comb(Comb(f2, x2), y2), Comb(Comb(g2, x3), y3)] when f == f2 && g == g2 && x == x2 && x == x3 && y == y2 && y == y3:
+                  let asm = ASSUME(thy, p)
+                  let pointwise = SPEC(thy, y, SPEC(thy, x, asm))
+                  EQT_INTRO(thy, DISCH(thy, p, EXT(thy, x, EXT(thy, y, pointwise))))
+              | ~else: #false
+          | ~else:
+              match dest_eq(body1)
+              | [Comb(f2, x2), Comb(g2, y2)] when f == f2 && g == g2 && x == x2 && x == y2:
+                  EQT_INTRO(thy, DISCH(thy, p, EXT(thy, x, SPEC(thy, x, ASSUME(thy, p)))))
+              | ~else: #false
+      | ~else:
+          match dest_imp(q)
+          | [p2, q2]:
+              match [dest_eq(p), dest_eq(p2), dest_eq(q2)]
+              | [[a, b], [b2, c], [a2, c2]] when a == a2 && b == b2 && c == c2:
+                  EQT_INTRO(
+                    thy,
+                    DISCH(thy, p,
+                          DISCH(thy, p2, TRANS(ASSUME(thy, p), ASSUME(thy, p2)))))
+              | ~else: #false
+          | ~else: #false
+
 fun refl_conv(thy :: Theory, t :: Term) :: maybe(Thm):
   match dest_eq(t)
   | [a, b] when a == b: EQT_INTRO(thy, REFL(thy, a))
-  | ~else: #false
-
+  | ~else:
+      match dest_imp(t)
+      | [p, q] when p == q:
+          EQT_INTRO(thy, DISCH(thy, p, ASSUME(thy, p)))
+      | [p, q]:
+          match [dest_eq(p), dest_eq(q)]
+          | [[a, b], [b2, a2]] when a == a2 && b == b2:
+              EQT_INTRO(thy, DISCH(thy, p, SYM(thy, ASSUME(thy, p))))
+          | [[f, g], [Comb(f2, x), Comb(g2, y)]] when f == f2 && g == g2 && x == y:
+              EQT_INTRO(thy, DISCH(thy, p, MK_COMB(ASSUME(thy, p), REFL(thy, x))))
+          | [[x, y], [Comb(f, x2), Comb(g, y2)]] when f == g && x == x2 && y == y2:
+              EQT_INTRO(thy, DISCH(thy, p, MK_COMB(REFL(thy, f), ASSUME(thy, p))))
+          | ~else:
+              match dest_forall(p)
+              | [v, body]:
+                  match term_match([v :~ FVar], body, q)
+                  | #false: implication_fallback(thy, p, q)
+                  | mr :~ MatchResult:
+                      let witness = (mr.theta[0] :~ List)[0] :~ Term
+                      EQT_INTRO(thy, DISCH(thy, p, SPEC(thy, witness, ASSUME(thy, p))))
+              | #false: implication_fallback(thy, p, q)
+      | ~else: #false
 // The simplifier's conversion: rewrite top-down, revisiting after each change,
 // so that a rule which collapses a whole subterm saves the work of
 // normalising it first.

@@ -443,6 +443,8 @@ lemma type_match_fuel_code [code]:
 definition nat_value :: "integer \<Rightarrow> nat" where
   "nat_value k = nat_of_integer k"
 
+definition integer_value :: "nat \<Rightarrow> integer" where
+  "integer_value n = integer_of_nat n"
 section \<open>Rhombus integer primitives\<close>
 
 code_printing
@@ -507,7 +509,7 @@ code_identifier
 section \<open>Generated Rhombus module\<close>
 
 export_code NFun NBool NEq NAlpha NRepVar NUser
-  nat_value Nil Cons None Some Pair
+  nat_value integer_value Nil Cons None Some Pair
   TyVar TyApp FVar BVar Const Comb Rhombus_HOL_Syntax.Abs
   CodeRefl CodeTrans CodeMkComb CodeAbs CodeBeta CodeAssume CodeEqMp
   CodeDeductAntisym CodeInst CodeInstType
@@ -523,7 +525,7 @@ export_code NFun NBool NEq NAlpha NRepVar NUser
   in Rhombus module_name Rhombus_HOL_Generated file_prefix rhombus_hol_kernel
 
 export_code NFun NBool NEq NAlpha NRepVar NUser
-  nat_value Nil Cons None Some Pair
+  nat_value integer_value Nil Cons None Some Pair
   TyVar TyApp FVar BVar Const Comb Rhombus_HOL_Syntax.Abs
   CodeRefl CodeTrans CodeMkComb CodeAbs CodeBeta CodeAssume CodeEqMp
   CodeDeductAntisym CodeInst CodeInstType

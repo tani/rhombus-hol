@@ -526,6 +526,7 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
   let do_not_names = tactic.do_not_names
   let in_theory_names = tactic.in_theory_names
   let case_exprs = tactic.cases
+  let witness_exprs = tactic.witnesses
   let search_steps = tactic.search_steps
   // `~using:` adds named theorems for this proof only, and overrides
   // `disable_rules`: an explicit request beats a blanket one.
@@ -549,21 +550,22 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
                        ~functions: st.funs)
   let do_not = for values(acc :~ Set = Set()) (d in (do_not_names :~ List)):
                  acc ++ {d :~ Symbol}
-  // `~cases:` terms are parsed against the theorem's own leading-binder
-  // variables, the same ones the statement itself was parsed with -- so a
-  // case term can name `xs` when the theorem reads `forall (xs :: ...): ...`.
+  // Case terms and existential witnesses are elaborated against the theorem's
+  // own leading binders.
+  let (vars, _) = strip_forall_all(statement, names)
+  let tyvars = elab.core_type_vars(stmt)
+  let env = for values(m :~ Map = {}) (v in vars):
+              m ++ {(v :~ FVar).name: v :~ Term}
   let cases:
-    match case_exprs
-    | []: []
-    | _:
-        let (vars, _) = strip_forall_all(statement, names)
-        let tyvars = elab.core_type_vars(stmt)
-        let env = for values(m :~ Map = {}) (v in vars):
-                    m ++ {(v :~ FVar).name: v :~ Term}
-        for List (c in case_exprs):
-          try:
-            elab.parse_core_prop(st.thy, tyvars, env, c)
-            ~catch e :: Exn.Fail: hol_reraise(e, at)
+    for List (c in case_exprs):
+      try:
+        elab.parse_core_prop(st.thy, tyvars, env, c)
+        ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let witnesses:
+    for List (w in witness_exprs):
+      try:
+        elab.parse_core_prop(st.thy, tyvars, env, w)
+        ~catch e :: Exn.Fail: hol_reraise(e, at)
   // A budget the proof asked for, or the default.  Nested searches still
   // join it rather than opening one of their own -- that is what makes the
   // number mean anything -- so this raises the ceiling for the whole proof,
@@ -580,6 +582,7 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
                            ~induct: (induct :~ maybe(Symbol)),
                            ~do_not: do_not,
                            ~cases: cases,
+                           ~witnesses: witnesses,
                            ~limits: limits)
                      ~catch e :: Exn.Fail: hol_reraise(e, at)
   match th

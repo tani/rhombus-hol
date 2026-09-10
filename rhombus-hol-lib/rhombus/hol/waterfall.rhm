@@ -227,19 +227,21 @@ fun prove(ctx :: Context, statement :: Term,
           ~induct: hint :: maybe(Symbol) = #false,
           ~do_not: do_not :: Set.of(Symbol) = Set(),
           ~cases: cases :: List.of(Term) = [],
+          ~witnesses: witnesses :: List.of(Term) = [],
           ~limits: limits :: SearchLimits = SearchLimits())
      :: values(maybe(Thm), ProofNode):
   with_search_limits(fun ():
                        prove_impl(ctx, statement, ~names: names,
                                   ~induct: hint, ~do_not: do_not,
-                                  ~cases: cases),
+                                  ~cases: cases, ~witnesses: witnesses),
                      ~limits: limits)
 
 fun prove_impl(ctx :: Context, statement :: Term,
                ~names: names :: List.of(Symbol) = [],
                ~induct: hint :: maybe(Symbol) = #false,
                ~do_not: do_not :: Set.of(Symbol) = Set(),
-               ~cases: cases :: List.of(Term) = [])
+               ~cases: cases :: List.of(Term) = [],
+               ~witnesses: witnesses :: List.of(Term) = [])
      :: values(maybe(Thm), ProofNode):
   let thy = ctx.thy
   let (vars, matrix) = strip_forall_all(statement, names)
@@ -262,7 +264,7 @@ fun prove_impl(ctx :: Context, statement :: Term,
                         | List.cons(v, rest):
                             (if (v :~ FVar).name == hint | v | loop(rest))
                   | ~else: #false)
-  let node = apply_cases(ctx, cases, mk_goal([], matrix), hint_var, do_not)
+  let node = apply_witnesses(ctx, witnesses, cases, mk_goal([], matrix), hint_var, do_not)
   match run(node)
   | #false: values(#false, node)
   | th :~ Thm:
@@ -277,6 +279,44 @@ fun prove_impl(ctx :: Context, statement :: Term,
                 error.val(~label: "asked", show(statement)),
                 error.val(~label: "got", show(concl_of(closed))))
       | ~else: values(closed, node)
+
+// Apply explicit existential witnesses before Boolean case splits. Each step
+// is justified by the derived EXISTS rule, and mismatched hints fail loudly
+// rather than being ignored.
+fun apply_witnesses(ctx :: Context, witnesses :: List.of(Term),
+                    cases :: List.of(Term), g :: Goal,
+                    hint :: maybe(FVar), do_not :: Set.of(Symbol)) :: ProofNode:
+  match witnesses
+  | []: apply_cases(ctx, cases, g, hint, do_not)
+  | List.cons(witness, rest):
+      match dest_imp(g.concl)
+      | [antecedent, consequent]:
+          let sub = note(Goal(g.asms ++ [antecedent], consequent, g.trail),
+                         "assuming " ++ show(antecedent))
+          let step = Step([sub],
+                          fun (ths :: List.of(Thm)):
+                            DISCH(ctx.thy, antecedent, ths[0]))
+          Derived(step,
+                  [apply_witnesses(ctx, witnesses, cases, sub, hint, do_not)])
+      | ~else:
+          match dest_exists(g.concl)
+          | #false:
+              error(~who: #'proof,
+                    "an explicit witness was supplied for a non-existential goal",
+                    error.val(~label: "goal", show(g.concl)))
+          | [v, body]:
+              unless type_of(witness) == (v :~ FVar).ty
+              | error(~who: #'proof, "existential witness has the wrong type",
+                      error.val(~label: "witness", show_typed(witness)),
+                      error.val(~label: "binder", type_to_string((v :~ FVar).ty)))
+              let instantiated = inst_fvar([[witness, v :~ FVar]], body)
+              let sub = note(Goal(g.asms, instantiated, g.trail),
+                             "existential witness " ++ show(witness))
+              let step = Step([sub],
+                              fun (ths :: List.of(Thm)):
+                                EXISTS(ctx.thy, g.concl, witness, ths[0]))
+              Derived(step,
+                      [apply_witnesses(ctx, rest :~ List, cases, sub, hint, do_not)])
 
 // `~cases:`, applied before the waterfall runs: split the goal on each term
 // in turn, true branch and false branch, so `n` terms give `2^n` subgoals.

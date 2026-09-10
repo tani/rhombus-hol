@@ -55,6 +55,8 @@ fun parse_type(stx :: Syntax, params :: List.of(Symbol)) :: HType:
       unless params.contains(n)
       | syntax_error(#'type, "unbound type variable", stx)
       mk_tyvar(n)
+  | 'Function($domain, $range)':
+      mk_fun(parse_type(domain, params), parse_type(range, params))
   | '$(id :: Identifier)($arg, ...)':
       mk_tyapp(Syntax.unwrap(id),
                [parse_type(arg, params), ...])
@@ -424,6 +426,26 @@ fun core_lookup(env :: PEnv, n :: Symbol, at :: Syntax) :: Term:
       | ~else: mk_const(n, core_const_instance(env, n, [], at))
   | v: v
 
+// Specialize phantom type variables in already-elaborated arguments from the
+// function domains selected by unification. This is needed for expressions
+// such as `left(x) === left(y)`: each `left` initially has an independent
+// unconstrained right-hand sum parameter.
+fun specialize_call_args(fty :: HType, args :: List.of(Term)) :: List.of(Term):
+  recur loop (ty :~ HType = fty, rest :~ List.of(Term) = args,
+              acc :~ List.of(Term) = []):
+    match rest
+    | []: acc
+    | List.cons(arg, more):
+        let (domain, range) = dest_fun(ty)
+        let arg2:
+          cond
+          | type_of(arg) == domain: arg
+          | ~else:
+              match type_match(type_of(arg), domain, {})
+              | #false: arg
+              | theta: inst_type(theta :~ Map, arg)
+        loop(range, more, acc ++ [arg2])
+
 fun core_apply(env :: PEnv, func :: CoreExpr,
                args :: List.of(CoreExpr), at :: Syntax) :: Term:
   let terms = args.map(fun (a :: CoreExpr): elaborate(env, a))
@@ -432,14 +454,18 @@ fun core_apply(env :: PEnv, func :: CoreExpr,
       match env.vars.get(n, #false)
       | #false:
           cond
-          | n == env.self_name: list_mk_comb(env.self :~ Term, terms)
+          | n == env.self_name:
+              list_mk_comb(env.self :~ Term,
+                           specialize_call_args(type_of(env.self :~ Term), terms))
           | ~else:
-              list_mk_comb(mk_const(n,
-                                    core_const_instance(env, n, terms,
-                                                        ref_at)),
-                           terms)
-      | v: list_mk_comb(v, terms)
-  | ~else: list_mk_comb(elaborate(env, func), terms)
+              let cty = core_const_instance(env, n, terms, ref_at)
+              list_mk_comb(mk_const(n, cty),
+                           specialize_call_args(cty, terms))
+      | v:
+          list_mk_comb(v, specialize_call_args(type_of(v), terms))
+  | ~else:
+      let f = elaborate(env, func)
+      list_mk_comb(f, specialize_call_args(type_of(f), terms))
 
 fun elaborate_binders(env :: PEnv, binders :: List.of(CoreBinder),
                       body :: CoreExpr, is_forall :: Boolean) :: Term:
@@ -662,9 +688,21 @@ fun elaborate_function_decl(thy :: Theory,
                                    #false, #false),
                               expr :~ CoreExpr)
         list_mk_abs(pvars, value)
-  let clauses = core_parse_body(thy, spec.name, self,
-                                pvars.map(fun (v :: FVar): v :~ Term),
-                                env0, spec.body, spec.at)
+  let clauses0 = core_parse_body(thy, spec.name, self,
+                                 pvars.map(fun (v :: FVar): v :~ Term),
+                                 env0, spec.body, spec.at)
+  // A polymorphic constructor can leave phantom result parameters fresh
+  // (`left(x)` does not mention the right-hand sum type). Specialize those
+  // parameters from the declared function result before validating clauses.
+  let clauses = for List (cl in clauses0):
+                  let cl :~ DefClause = cl
+                  match type_match(type_of(cl.rhs), result_ty, {})
+                  | #false: cl
+                  | theta:
+                      DefClause(cl.pats,
+                                inst_type(theta :~ Map, cl.rhs),
+                                cl.obligations.map(
+                                  fun (o :: Term): inst_type(theta :~ Map, o)))
   FunSpec(spec.name, arg_tys, result_ty, clauses, measure)
 
 fun sub_env(env :: PEnv, vars :: Map.of(Symbol, Term)) :: PEnv:

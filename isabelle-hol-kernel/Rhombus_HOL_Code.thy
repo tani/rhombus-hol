@@ -346,78 +346,425 @@ lemma inst_type_entries_agrees:
   by (simp add: inst_type_entries_def inst_type_rule_def)
 
 
-section \<open>Code-generation rule requests\<close>
+section \<open>Direct code-generation rule façade\<close>
 
-datatype code_rule_request =
-    CodeRefl htheory hterm
-  | CodeTrans htheory hthm hthm
-  | CodeMkComb htheory hthm hthm
-  | CodeAbs htheory hname htype hthm
-  | CodeBeta htheory hterm
-  | CodeAssume htheory hterm
-  | CodeEqMp htheory hthm hthm
-  | CodeDeductAntisym htheory hthm hthm
-  | CodeInst htheory "(hterm \<times> hterm) list" hthm
-  | CodeInstType htheory type_subst_entries hthm
+datatype code_failure =
+    CodeRuleRejected
+  | CodeInvalidTypeSubstitution
+  | CodeExtensionRejected
 
-fun valid_code_rule_request :: "code_rule_request \<Rightarrow> bool" where
-  "valid_code_rule_request (CodeRefl _ _) = True"
-| "valid_code_rule_request (CodeTrans _ _ _) = True"
-| "valid_code_rule_request (CodeMkComb _ _ _) = True"
-| "valid_code_rule_request (CodeAbs _ _ _ _) = True"
-| "valid_code_rule_request (CodeBeta _ _) = True"
-| "valid_code_rule_request (CodeAssume _ _) = True"
-| "valid_code_rule_request (CodeEqMp _ _ _) = True"
-| "valid_code_rule_request (CodeDeductAntisym _ _ _) = True"
-| "valid_code_rule_request (CodeInst _ _ _) = True"
-| "valid_code_rule_request (CodeInstType thy entries _) =
-    valid_type_subst_entries thy entries"
+datatype 'a code_result =
+    CodeSuccess 'a
+  | CodeFailure code_failure
 
-fun inference_of_code_rule :: "code_rule_request \<Rightarrow> inference" where
-  "inference_of_code_rule (CodeRefl thy t) = IRefl thy t"
-| "inference_of_code_rule (CodeTrans thy a b) = ITrans thy a b"
-| "inference_of_code_rule (CodeMkComb thy a b) = IMkComb thy a b"
-| "inference_of_code_rule (CodeAbs thy n ty th) = IAbs thy n ty th"
-| "inference_of_code_rule (CodeBeta thy t) = IBeta thy t"
-| "inference_of_code_rule (CodeAssume thy p) = IAssume thy p"
-| "inference_of_code_rule (CodeEqMp thy a b) = IEqMp thy a b"
-| "inference_of_code_rule (CodeDeductAntisym thy a b) = IDeductAntisym thy a b"
-| "inference_of_code_rule (CodeInst thy entries th) = IInst thy entries th"
-| "inference_of_code_rule (CodeInstType thy entries th) =
-    IInstType thy (entries_subst entries) th"
+fun erase_code_result :: "'a code_result \<Rightarrow> 'a option" where
+  "erase_code_result (CodeSuccess value) = Some value"
+| "erase_code_result (CodeFailure _) = None"
 
-fun run_code_rule :: "code_rule_request \<Rightarrow> hthm option" where
-  "run_code_rule (CodeRefl thy t) = refl thy t"
-| "run_code_rule (CodeTrans thy a b) = trans thy a b"
-| "run_code_rule (CodeMkComb thy a b) = mk_comb_rule thy a b"
-| "run_code_rule (CodeAbs thy n ty th) = abs_rule thy n ty th"
-| "run_code_rule (CodeBeta thy t) = beta thy t"
-| "run_code_rule (CodeAssume thy p) = assume_rule thy p"
-| "run_code_rule (CodeEqMp thy a b) = eq_mp thy a b"
-| "run_code_rule (CodeDeductAntisym thy a b) = deduct_antisym_rule thy a b"
-| "run_code_rule (CodeInst thy entries th) = inst thy entries th"
-| "run_code_rule (CodeInstType thy entries th) = inst_type_entries thy entries th"
+fun result_of_option :: "code_failure \<Rightarrow> 'a option \<Rightarrow> 'a code_result" where
+  "result_of_option _ (Some value) = CodeSuccess value"
+| "result_of_option failure None = CodeFailure failure"
 
-lemma run_code_rule_correspondence:
-  assumes "valid_code_rule_request request"
-  shows "run_code_rule request = run_rule (inference_of_code_rule request)"
-  using assms by (cases request) (simp_all add: inst_type_entries_agrees)
+lemma erase_result_of_option [simp]:
+  "erase_code_result (result_of_option failure result) = result"
+  by (cases result) simp_all
 
-lemma run_code_rule_sound:
-  assumes valid: "valid_code_rule_request request"
-    and run: "run_code_rule request = Some th"
-  shows "rule_spec (inference_of_code_rule request) th"
-  using run_rule_sound run run_code_rule_correspondence[OF valid] by metis
+lemma result_of_option_success_iff [simp]:
+  "result_of_option failure result = CodeSuccess value \<longleftrightarrow> result = Some value"
+  by (cases result) simp_all
 
-lemma run_code_rule_preserves_wf:
-  assumes valid: "valid_code_rule_request request"
-    and run: "run_code_rule request = Some th"
-    and inputs: "wf_inputs (inference_of_code_rule request)"
-  shows "wf_thm (ambient_theory (inference_of_code_rule request)) th"
-  using run_rule_preserves_wf run inputs run_code_rule_correspondence[OF valid] by metis
+lemma result_of_option_failure_iff [simp]:
+  "result_of_option failure result = CodeFailure failure \<longleftrightarrow> result = None"
+  by (cases result) simp_all
+
+definition code_refl :: "htheory \<Rightarrow> hterm \<Rightarrow> hthm code_result" where
+  "code_refl thy t = result_of_option CodeRuleRejected (refl thy t)"
+
+definition code_trans :: "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
+  "code_trans thy a b = result_of_option CodeRuleRejected (trans thy a b)"
+
+definition code_mk_comb :: "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
+  "code_mk_comb thy fth xth =
+    result_of_option CodeRuleRejected (mk_comb_rule thy fth xth)"
+
+definition code_abs ::
+  "htheory \<Rightarrow> hname \<Rightarrow> htype \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
+  "code_abs thy n ty th = result_of_option CodeRuleRejected (abs_rule thy n ty th)"
+
+definition code_beta :: "htheory \<Rightarrow> hterm \<Rightarrow> hthm code_result" where
+  "code_beta thy t = result_of_option CodeRuleRejected (beta thy t)"
+
+definition code_assume :: "htheory \<Rightarrow> hterm \<Rightarrow> hthm code_result" where
+  "code_assume thy p = result_of_option CodeRuleRejected (assume_rule thy p)"
+
+definition code_eq_mp :: "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
+  "code_eq_mp thy eqth th = result_of_option CodeRuleRejected (eq_mp thy eqth th)"
+
+definition code_deduct_antisym ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
+  "code_deduct_antisym thy a b =
+    result_of_option CodeRuleRejected (deduct_antisym_rule thy a b)"
+
+definition code_inst ::
+  "htheory \<Rightarrow> (hterm \<times> hterm) list \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
+  "code_inst thy entries th = result_of_option CodeRuleRejected (inst thy entries th)"
+
+definition code_inst_type ::
+  "htheory \<Rightarrow> type_subst_entries \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
+  "code_inst_type thy entries th =
+    (if valid_type_subst_entries thy entries then
+       result_of_option CodeRuleRejected (inst_type_entries thy entries th)
+     else CodeFailure CodeInvalidTypeSubstitution)"
+
+lemma code_refl_erasure [simp]:
+  "erase_code_result (code_refl thy t) = refl thy t"
+  by (simp add: code_refl_def)
+
+lemma code_trans_erasure [simp]:
+  "erase_code_result (code_trans thy a b) = trans thy a b"
+  by (simp add: code_trans_def)
+
+lemma code_mk_comb_erasure [simp]:
+  "erase_code_result (code_mk_comb thy fth xth) = mk_comb_rule thy fth xth"
+  by (simp add: code_mk_comb_def)
+
+lemma code_abs_erasure [simp]:
+  "erase_code_result (code_abs thy n ty th) = abs_rule thy n ty th"
+  by (simp add: code_abs_def)
+
+lemma code_beta_erasure [simp]:
+  "erase_code_result (code_beta thy t) = beta thy t"
+  by (simp add: code_beta_def)
+
+lemma code_assume_erasure [simp]:
+  "erase_code_result (code_assume thy p) = assume_rule thy p"
+  by (simp add: code_assume_def)
+
+lemma code_eq_mp_erasure [simp]:
+  "erase_code_result (code_eq_mp thy eqth th) = eq_mp thy eqth th"
+  by (simp add: code_eq_mp_def)
+
+lemma code_deduct_antisym_erasure [simp]:
+  "erase_code_result (code_deduct_antisym thy a b) = deduct_antisym_rule thy a b"
+  by (simp add: code_deduct_antisym_def)
+
+lemma code_inst_erasure [simp]:
+  "erase_code_result (code_inst thy entries th) = inst thy entries th"
+  by (simp add: code_inst_def)
+
+lemma code_inst_type_erasure [simp]:
+  "erase_code_result (code_inst_type thy entries th) = inst_type_entries thy entries th"
+  by (cases "valid_type_subst_entries thy entries")
+     (simp_all add: code_inst_type_def inst_type_entries_def)
 
 
+lemma code_result_success_iff [simp]:
+  "result = CodeSuccess value \<longleftrightarrow> erase_code_result result = Some value"
+  by (cases result) simp_all
 
+lemma code_result_failure_iff [simp]:
+  "(\<exists>failure. result = CodeFailure failure) \<longleftrightarrow> erase_code_result result = None"
+  by (cases result) auto
+
+lemma code_refl_success_iff:
+  "code_refl thy t = CodeSuccess result \<longleftrightarrow> refl thy t = Some result"
+  by simp
+
+lemma code_refl_failure_iff:
+  "(\<exists>failure. code_refl thy t = CodeFailure failure) \<longleftrightarrow> refl thy t = None"
+  by simp
+
+lemma code_refl_sound:
+  assumes "code_refl thy t = CodeSuccess result"
+  shows "rule_spec (IRefl thy t) result"
+  using run_rule_sound[of "IRefl thy t" result] assms by simp
+
+lemma code_refl_preserves_wf:
+  assumes "code_refl thy t = CodeSuccess result"
+    and "wf_inputs (IRefl thy t)"
+  shows "wf_thm thy result"
+  using run_rule_preserves_wf[of "IRefl thy t" result] assms by simp
+
+lemma code_trans_success_iff:
+  "code_trans thy a b = CodeSuccess result \<longleftrightarrow> trans thy a b = Some result"
+  by simp
+
+lemma code_trans_failure_iff:
+  "(\<exists>failure. code_trans thy a b = CodeFailure failure) \<longleftrightarrow> trans thy a b = None"
+  by simp
+
+lemma code_trans_sound:
+  assumes "code_trans thy a b = CodeSuccess result"
+  shows "rule_spec (ITrans thy a b) result"
+  using run_rule_sound[of "ITrans thy a b" result] assms by simp
+
+lemma code_trans_preserves_wf:
+  assumes "code_trans thy a b = CodeSuccess result"
+    and "wf_inputs (ITrans thy a b)"
+  shows "wf_thm thy result"
+  using run_rule_preserves_wf[of "ITrans thy a b" result] assms by simp
+
+lemma code_mk_comb_success_iff:
+  "code_mk_comb thy fth xth = CodeSuccess result \<longleftrightarrow> mk_comb_rule thy fth xth = Some result"
+  by simp
+
+lemma code_mk_comb_failure_iff:
+  "(\<exists>failure. code_mk_comb thy fth xth = CodeFailure failure) \<longleftrightarrow> mk_comb_rule thy fth xth = None"
+  by simp
+
+lemma code_mk_comb_sound:
+  assumes "code_mk_comb thy fth xth = CodeSuccess result"
+  shows "rule_spec (IMkComb thy fth xth) result"
+  using run_rule_sound[of "IMkComb thy fth xth" result] assms by simp
+
+lemma code_mk_comb_preserves_wf:
+  assumes "code_mk_comb thy fth xth = CodeSuccess result"
+    and "wf_inputs (IMkComb thy fth xth)"
+  shows "wf_thm thy result"
+  using run_rule_preserves_wf[of "IMkComb thy fth xth" result] assms by simp
+
+lemma code_abs_success_iff:
+  "code_abs thy n ty input = CodeSuccess result \<longleftrightarrow> abs_rule thy n ty input = Some result"
+  by simp
+
+lemma code_abs_failure_iff:
+  "(\<exists>failure. code_abs thy n ty input = CodeFailure failure) \<longleftrightarrow> abs_rule thy n ty input = None"
+  by simp
+
+lemma code_abs_sound:
+  assumes "code_abs thy n ty input = CodeSuccess result"
+  shows "rule_spec (IAbs thy n ty input) result"
+  using run_rule_sound[of "IAbs thy n ty input" result] assms by simp
+
+lemma code_abs_preserves_wf:
+  assumes "code_abs thy n ty input = CodeSuccess result"
+    and "wf_inputs (IAbs thy n ty input)"
+  shows "wf_thm thy result"
+  using run_rule_preserves_wf[of "IAbs thy n ty input" result] assms by simp
+
+lemma code_beta_success_iff:
+  "code_beta thy t = CodeSuccess result \<longleftrightarrow> beta thy t = Some result"
+  by simp
+
+lemma code_beta_failure_iff:
+  "(\<exists>failure. code_beta thy t = CodeFailure failure) \<longleftrightarrow> beta thy t = None"
+  by simp
+
+lemma code_beta_sound:
+  assumes "code_beta thy t = CodeSuccess result"
+  shows "rule_spec (IBeta thy t) result"
+  using run_rule_sound[of "IBeta thy t" result] assms by simp
+
+lemma code_beta_preserves_wf:
+  assumes "code_beta thy t = CodeSuccess result"
+    and "wf_inputs (IBeta thy t)"
+  shows "wf_thm thy result"
+  using run_rule_preserves_wf[of "IBeta thy t" result] assms by simp
+
+lemma code_assume_success_iff:
+  "code_assume thy p = CodeSuccess result \<longleftrightarrow> assume_rule thy p = Some result"
+  by simp
+
+lemma code_assume_failure_iff:
+  "(\<exists>failure. code_assume thy p = CodeFailure failure) \<longleftrightarrow> assume_rule thy p = None"
+  by simp
+
+lemma code_assume_sound:
+  assumes "code_assume thy p = CodeSuccess result"
+  shows "rule_spec (IAssume thy p) result"
+  using run_rule_sound[of "IAssume thy p" result] assms by simp
+
+lemma code_assume_preserves_wf:
+  assumes "code_assume thy p = CodeSuccess result"
+    and "wf_inputs (IAssume thy p)"
+  shows "wf_thm thy result"
+  using run_rule_preserves_wf[of "IAssume thy p" result] assms by simp
+
+lemma code_eq_mp_success_iff:
+  "code_eq_mp thy eqth input = CodeSuccess result \<longleftrightarrow> eq_mp thy eqth input = Some result"
+  by simp
+
+lemma code_eq_mp_failure_iff:
+  "(\<exists>failure. code_eq_mp thy eqth input = CodeFailure failure) \<longleftrightarrow> eq_mp thy eqth input = None"
+  by simp
+
+lemma code_eq_mp_sound:
+  assumes "code_eq_mp thy eqth input = CodeSuccess result"
+  shows "rule_spec (IEqMp thy eqth input) result"
+  using run_rule_sound[of "IEqMp thy eqth input" result] assms by simp
+
+lemma code_eq_mp_preserves_wf:
+  assumes "code_eq_mp thy eqth input = CodeSuccess result"
+    and "wf_inputs (IEqMp thy eqth input)"
+  shows "wf_thm thy result"
+  using run_rule_preserves_wf[of "IEqMp thy eqth input" result] assms by simp
+
+lemma code_deduct_antisym_success_iff:
+  "code_deduct_antisym thy a b = CodeSuccess result \<longleftrightarrow> deduct_antisym_rule thy a b = Some result"
+  by simp
+
+lemma code_deduct_antisym_failure_iff:
+  "(\<exists>failure. code_deduct_antisym thy a b = CodeFailure failure) \<longleftrightarrow> deduct_antisym_rule thy a b = None"
+  by simp
+
+lemma code_deduct_antisym_sound:
+  assumes "code_deduct_antisym thy a b = CodeSuccess result"
+  shows "rule_spec (IDeductAntisym thy a b) result"
+  using run_rule_sound[of "IDeductAntisym thy a b" result] assms by simp
+
+lemma code_deduct_antisym_preserves_wf:
+  assumes "code_deduct_antisym thy a b = CodeSuccess result"
+    and "wf_inputs (IDeductAntisym thy a b)"
+  shows "wf_thm thy result"
+  using run_rule_preserves_wf[of "IDeductAntisym thy a b" result] assms by simp
+
+lemma code_inst_success_iff:
+  "code_inst thy entries input = CodeSuccess result \<longleftrightarrow> inst thy entries input = Some result"
+  by simp
+
+lemma code_inst_failure_iff:
+  "(\<exists>failure. code_inst thy entries input = CodeFailure failure) \<longleftrightarrow> inst thy entries input = None"
+  by simp
+
+lemma code_inst_sound:
+  assumes "code_inst thy entries input = CodeSuccess result"
+  shows "rule_spec (IInst thy entries input) result"
+  using run_rule_sound[of "IInst thy entries input" result] assms by simp
+
+lemma code_inst_preserves_wf:
+  assumes "code_inst thy entries input = CodeSuccess result"
+    and "wf_inputs (IInst thy entries input)"
+  shows "wf_thm thy result"
+  using run_rule_preserves_wf[of "IInst thy entries input" result] assms by simp
+
+lemma code_inst_type_success_iff:
+  "code_inst_type thy entries input = CodeSuccess result \<longleftrightarrow>
+    inst_type_entries thy entries input = Some result"
+  using code_result_success_iff[of "code_inst_type thy entries input" result]
+  by simp
+
+lemma code_inst_type_failure_iff:
+  "(\<exists>failure. code_inst_type thy entries input = CodeFailure failure) \<longleftrightarrow>
+    inst_type_entries thy entries input = None"
+  using code_result_failure_iff[of "code_inst_type thy entries input"]
+  by simp
+
+lemma code_inst_type_sound:
+  assumes "code_inst_type thy entries input = CodeSuccess result"
+  shows "rule_spec (IInstType thy (entries_subst entries) input) result"
+  using run_rule_sound[of "IInstType thy (entries_subst entries) input" result]
+    assms valid_type_subst_entries_type_subst_ok
+  by (auto simp: code_inst_type_def inst_type_entries_agrees split: if_splits)
+
+lemma code_inst_type_preserves_wf:
+  assumes "code_inst_type thy entries input = CodeSuccess result"
+    and "wf_inputs (IInstType thy (entries_subst entries) input)"
+  shows "wf_thm thy result"
+  using run_rule_preserves_wf[of "IInstType thy (entries_subst entries) input" result]
+    assms valid_type_subst_entries_type_subst_ok
+  by (auto simp: code_inst_type_def inst_type_entries_agrees split: if_splits)
+
+section \<open>Direct code-generation extension façade\<close>
+
+definition code_new_type ::
+  "nat \<Rightarrow> htheory \<Rightarrow> hname \<Rightarrow> nat \<Rightarrow> htheory code_result" where
+  "code_new_type fresh thy n arity =
+    result_of_option CodeExtensionRejected (new_type fresh thy n arity)"
+
+definition code_new_constant ::
+  "nat \<Rightarrow> htheory \<Rightarrow> hname \<Rightarrow> htype \<Rightarrow> htheory code_result" where
+  "code_new_constant fresh thy n ty =
+    result_of_option CodeExtensionRejected (new_constant fresh thy n ty)"
+
+definition code_new_axiom ::
+  "nat \<Rightarrow> htheory \<Rightarrow> hterm \<Rightarrow> (htheory \<times> hthm) code_result" where
+  "code_new_axiom fresh thy p =
+    result_of_option CodeExtensionRejected (new_axiom fresh thy p)"
+
+definition code_new_basic_definition ::
+  "nat \<Rightarrow> htheory \<Rightarrow> hterm \<Rightarrow> (htheory \<times> hthm) code_result" where
+  "code_new_basic_definition fresh thy tm =
+    result_of_option CodeExtensionRejected (new_basic_definition fresh thy tm)"
+
+definition code_new_basic_type_definition ::
+  "nat \<Rightarrow> htheory \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hthm \<Rightarrow>
+    (htheory \<times> hthm \<times> hthm) code_result" where
+  "code_new_basic_type_definition fresh thy tyname absname repname witness =
+    result_of_option CodeExtensionRejected
+      (new_basic_type_definition fresh thy tyname absname repname witness)"
+
+lemma code_new_type_erasure [simp]:
+  "erase_code_result (code_new_type fresh thy n arity) =
+    new_type fresh thy n arity"
+  by (simp add: code_new_type_def)
+
+lemma code_new_constant_erasure [simp]:
+  "erase_code_result (code_new_constant fresh thy n ty) =
+    new_constant fresh thy n ty"
+  by (simp add: code_new_constant_def)
+
+lemma code_new_axiom_erasure [simp]:
+  "erase_code_result (code_new_axiom fresh thy p) = new_axiom fresh thy p"
+  by (simp add: code_new_axiom_def)
+
+lemma code_new_basic_definition_erasure [simp]:
+  "erase_code_result (code_new_basic_definition fresh thy tm) =
+    new_basic_definition fresh thy tm"
+  by (simp add: code_new_basic_definition_def)
+
+lemma code_new_basic_type_definition_erasure [simp]:
+  "erase_code_result
+      (code_new_basic_type_definition fresh thy tn an rn witness) =
+    new_basic_type_definition fresh thy tn an rn witness"
+  by (simp add: code_new_basic_type_definition_def)
+
+lemma code_new_type_one_generation:
+  "code_new_type fresh thy n arity = CodeSuccess thy' \<Longrightarrow>
+    gen (thy_stamp thy') = Suc (gen (thy_stamp thy))"
+  using new_type_one_generation by simp
+
+lemma code_new_constant_one_generation:
+  "code_new_constant fresh thy n ty = CodeSuccess thy' \<Longrightarrow>
+    gen (thy_stamp thy') = Suc (gen (thy_stamp thy))"
+  using new_constant_one_generation by simp
+
+lemma code_new_axiom_result:
+  assumes "code_new_axiom fresh thy p = CodeSuccess (thy', th)"
+  shows "hyps th = [] \<and> concl th = p \<and> thm_stamp th = thy_stamp thy' \<and>
+    gen (thy_stamp thy') = Suc (gen (thy_stamp thy))"
+  using new_axiom_extract[of fresh thy p thy' th]
+    new_axiom_one_generation[of fresh thy p thy' th] assms
+  by simp
+
+lemma code_new_basic_definition_result:
+  assumes "code_new_basic_definition fresh thy tm = CodeSuccess (thy', th)"
+  shows "wf_thm thy' th \<and> thm_stamp th = thy_stamp thy' \<and>
+    gen (thy_stamp thy') = Suc (gen (thy_stamp thy))"
+proof -
+  have run: "new_basic_definition fresh thy tm = Some (thy', th)"
+    using assms by simp
+  have result: "wf_thm thy' th \<and> thm_stamp th = thy_stamp thy'"
+    using run by (elim new_basic_definition_extract) simp
+  show ?thesis
+    using result new_basic_definition_one_generation[OF run] by blast
+qed
+
+lemma code_new_basic_type_definition_result:
+  assumes "code_new_basic_type_definition fresh thy tn an rn witness =
+    CodeSuccess (thy', th1, th2)"
+  shows "wf_thm thy' th1 \<and> wf_thm thy' th2 \<and>
+    thm_stamp th1 = thy_stamp thy' \<and> thm_stamp th2 = thy_stamp thy' \<and>
+    gen (thy_stamp thy') = Suc (gen (thy_stamp thy))"
+proof -
+  have run: "new_basic_type_definition fresh thy tn an rn witness =
+      Some (thy', th1, th2)"
+    using assms by simp
+  have stamps: "thm_stamp th1 = thy_stamp thy' \<and>
+      thm_stamp th2 = thy_stamp thy'"
+    using run by (elim new_basic_type_definition_obtain) simp
+  show ?thesis
+    using stamps new_basic_type_definition_extract[OF run] by blast
+qed
 section \<open>Executable natural-fuel matcher\<close>
 
 definition empty_type_subst :: "hname \<Rightarrow> htype option" where
@@ -530,6 +877,14 @@ setup \<open>
     Code_Printer.literal_numeral "Rhombus"
 \<close>
 
+section \<open>Native mapped equality\<close>
+
+code_printing
+  constant "HOL.equal :: hname \<Rightarrow> hname \<Rightarrow> bool" \<rightharpoonup> (Rhombus) "abi.structural'_equal"
+| constant "HOL.equal :: htype \<Rightarrow> htype \<Rightarrow> bool" \<rightharpoonup> (Rhombus) "abi.structural'_equal"
+| constant "HOL.equal :: hterm \<Rightarrow> hterm \<Rightarrow> bool" \<rightharpoonup> (Rhombus) "abi.structural'_equal"
+| constant "HOL.equal :: nat \<Rightarrow> nat \<Rightarrow> bool" \<rightharpoonup> (Rhombus) "abi.structural'_equal"
+
 section \<open>Persistent Rhombus function tables\<close>
 
 text \<open>The extracted program uses function update only for immutable generated
@@ -633,77 +988,55 @@ fun rhombus_memoized_ternary(run):
 section \<open>Stable Rhombus API names\<close>
 
 code_identifier
-  type_constructor hname \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.HName"
-| type_constructor htype \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.HType"
-| type_constructor hterm \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.HTerm"
-| type_constructor stamp_ext \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Stamp"
+  type_constructor stamp_ext \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Stamp"
 | type_constructor hthm_ext \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.HThm"
 | type_constructor htheory_ext \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.HTheory"
-| type_constructor code_rule_request \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.CodeRuleRequest"
+| type_constructor code_failure \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.FailureCode"
+| type_constructor code_result \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Result"
 | constant check_open_term_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.check_open_term_uncached"
 | constant type_match_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.type_match_uncached"
 | constant check_term_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.check_term_uncached"
-| constant NFun \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.NFun"
-| constant NBool \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.NBool"
-| constant NEq \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.NEq"
-| constant NAlpha \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.NAlpha"
-| constant NRepVar \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.NRepVar"
-| constant NUser \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.NUser"
-| constant TyVar \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.TyVar"
-| constant TyApp \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.TyApp"
-| constant FVar \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.FVar"
-| constant BVar \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.BVar"
-| constant Const \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Const"
-| constant Comb \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Comb"
-| constant Rhombus_HOL_Syntax.Abs \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Abs"
-| constant CodeRefl \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.CodeRefl"
-| constant CodeTrans \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.CodeTrans"
-| constant CodeMkComb \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.CodeMkComb"
-| constant CodeAbs \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.CodeAbs"
-| constant CodeBeta \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.CodeBeta"
-| constant CodeAssume \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.CodeAssume"
-| constant CodeEqMp \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.CodeEqMp"
-| constant CodeDeductAntisym \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.CodeDeductAntisym"
-| constant CodeInst \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.CodeInst"
-| constant CodeInstType \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.CodeInstType"
-| constant Nil \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Nil"
-| constant Cons \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Cons"
-| constant None \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.None"
-| constant Some \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Some"
+| constant CodeRuleRejected \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.RuleRejected"
+| constant CodeInvalidTypeSubstitution \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.InvalidTypeSubstitution"
+| constant CodeExtensionRejected \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.ExtensionRejected"
+| constant CodeSuccess \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Success"
+| constant CodeFailure \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Failure"
+| constant code_refl \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.REFL"
+| constant code_trans \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.TRANS"
+| constant code_mk_comb \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.MK_COMB"
+| constant code_abs \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.ABS"
+| constant code_beta \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.BETA"
+| constant code_assume \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.ASSUME"
+| constant code_eq_mp \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.EQ_MP"
+| constant code_deduct_antisym \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.DEDUCT_ANTISYM_RULE"
+| constant code_inst \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.INST"
+| constant code_inst_type \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.INST_TYPE"
+| constant code_new_type \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_type_result"
+| constant code_new_constant \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_constant_result"
+| constant code_new_axiom \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_axiom_result"
+| constant code_new_basic_definition \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_basic_definition_result"
+| constant code_new_basic_type_definition \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_basic_type_definition_result"
 | constant Pair \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.PairValue"
-
 
 section \<open>Generated Rhombus module\<close>
 
-export_code NFun NBool NEq NAlpha NRepVar NUser
-  nat_value integer_value Nil Cons None Some Pair
-  TyVar TyApp FVar BVar Const Comb Rhombus_HOL_Syntax.Abs
-  CodeRefl CodeTrans CodeMkComb CodeAbs CodeBeta CodeAssume CodeEqMp
-  CodeDeductAntisym CodeInst CodeInstType
-  bool_ty mk_fun dest_fun type_vars type_var_occurs type_operator_occurs
-  type_of free_vars term_type_vars vfree_in
-  wf_stamp fresh_stamp next_stamp descends combine_stamps initial_theory
-  check_type check_open_term check_term is_bool check_prop
-  eq_const eq_term mk_eq dest_eq
+export_code CodeRuleRejected CodeInvalidTypeSubstitution CodeExtensionRejected
+  CodeSuccess CodeFailure Pair
+  code_refl code_trans code_mk_comb code_abs code_beta code_assume code_eq_mp
+  code_deduct_antisym code_inst code_inst_type
+  code_new_type code_new_constant code_new_axiom code_new_basic_definition
+  code_new_basic_type_definition
+  initial_theory check_type check_open_term check_term is_bool mk_eq dest_eq
   sid gen ancestors hyps concl thm_stamp tyops const_tab axiom_list def_tab thy_stamp
-  wf_thm valid_code_rule_request run_code_rule
-  extend_theory new_type new_constant new_axiom new_basic_definition
-  new_basic_type_definition
   in Rhombus module_name Rhombus_HOL_Generated file_prefix rhombus_hol_kernel
 
-export_code NFun NBool NEq NAlpha NRepVar NUser
-  nat_value integer_value Nil Cons None Some Pair
-  TyVar TyApp FVar BVar Const Comb Rhombus_HOL_Syntax.Abs
-  CodeRefl CodeTrans CodeMkComb CodeAbs CodeBeta CodeAssume CodeEqMp
-  CodeDeductAntisym CodeInst CodeInstType
-  bool_ty mk_fun dest_fun type_vars type_var_occurs type_operator_occurs
-  type_of free_vars term_type_vars vfree_in
-  wf_stamp fresh_stamp next_stamp descends combine_stamps initial_theory
-  check_type check_open_term check_term is_bool check_prop
-  eq_const eq_term mk_eq dest_eq
+export_code CodeRuleRejected CodeInvalidTypeSubstitution CodeExtensionRejected
+  CodeSuccess CodeFailure Pair
+  code_refl code_trans code_mk_comb code_abs code_beta code_assume code_eq_mp
+  code_deduct_antisym code_inst code_inst_type
+  code_new_type code_new_constant code_new_axiom code_new_basic_definition
+  code_new_basic_type_definition
+  initial_theory check_type check_open_term check_term is_bool mk_eq dest_eq
   sid gen ancestors hyps concl thm_stamp tyops const_tab axiom_list def_tab thy_stamp
-  wf_thm valid_code_rule_request run_code_rule
-  extend_theory new_type new_constant new_axiom new_basic_definition
-  new_basic_type_definition checking Rhombus
-
+  checking Rhombus
 end

@@ -1,0 +1,53 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/private/kernel_abi as abi
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  lib("racket/base.rkt") as rkt
+
+fun uninterned(text :: String) :~ Symbol:
+  rkt.#{string->uninterned-symbol}(text)
+
+def a = mk_tyvar(#'a)
+def num = mk_tyapp(#'num, [])
+def raw_list_a = abi.raw.tyapp(#'list, [a])
+def public_list_a = mk_tyapp(#'list, [mk_tyvar(#'a)])
+
+// Public and generated callers observe the same class identities and fields.
+check raw_list_a is_a TyApp ~is #true
+check public_list_a is_a abi.TyApp ~is #true
+check:
+  match raw_list_a
+  | abi.TyApp(name, [arg]): [name, arg]
+  ~is [#'list, a]
+check raw_list_a.args is_a List ~is #true
+
+// Equality and hashing are structural across the public/private boundary.
+check raw_list_a ~is public_list_a
+check {raw_list_a: #'found}.get(public_list_a) ~is #'found
+
+def x = abi.raw.fvar(#'x, num)
+def bx = abi.raw.bvar(2, num)
+def app = abi.raw.comb(abi.raw.const(#'f, mk_fun(num, num)), x)
+check x is_a FVar ~is #true
+check bx.index ~is 2
+check app ~is unsafe.raw_comb(mk_const(#'f, mk_fun(num, num)), mk_var(#'x, num))
+
+// Host list and natural fields need no representation conversion.
+check abi.list_nil() ~is []
+check abi.list_cons(x, []) ~is [x]
+check abi.nat_from_integer(-3) ~is 0
+check abi.nat_add(2, 3) ~is 5
+check abi.nat_subtract(2, 3) ~is 0
+check abi.integer_from_nat(bx.index) ~is 2
+
+// Symbol identity, not display text, is the name equality contract.
+def ux1 = uninterned("same")
+def ux2 = uninterned("same")
+check to_string(ux1) ~is to_string(ux2)
+check abi.symbol_equal(ux1, ux2) ~is #false
+check abi.raw.tyvar(ux1) == abi.raw.tyvar(ux2) ~is #false
+check abi.name_fun ~is #'fun
+check abi.name_bool ~is #'bool
+check abi.name_eq ~is #'eq

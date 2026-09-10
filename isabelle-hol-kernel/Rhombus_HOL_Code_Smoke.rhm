@@ -1,66 +1,90 @@
 #lang rhombus
 
 import:
+  rhombus/hol/private/kernel_abi as abi
   "./rhombus_hol_kernel.rhm" open
 
-fun is_some(value):
+fun require_success(value):
   match value
-  | Some(_): #true
-  | None(): #false
+  | Success(result): result
+  | Failure(_): error("expected generated success")
 
-fun is_none(value):
+fun is_success(value):
   match value
-  | None(): #true
-  | Some(_): #false
+  | Success(_): #true
+  | Failure(_): #false
 
-fun require_some(value):
-  match value
-  | Some(result): result
-  | None(): error("expected Some")
+fun is_failure(value):
+  !is_success(value)
 
-def n0 = nat_value(0)
-def n1 = nat_value(1)
-def n2 = nat_value(2)
-def n3 = nat_value(3)
-def n10 = nat_value(10)
-def n11 = nat_value(11)
-check integer_value(n3) ~is 3
-def thy0 = initial_theory(n0)
-def bool_type = TyApp(NBool(), Nil())
-def proposition = FVar(NUser(n10, Nil()), bool_type)
-def ill_typed = Comb(proposition, proposition)
+fun fun_type(dom, cod):
+  abi.raw.tyapp(abi.name_fun, [dom, cod])
+
+fun eq_term(left, right):
+  let ty = left.ty
+  let eq_ty = fun_type(ty, fun_type(ty, bool_type))
+  abi.raw.comb(abi.raw.comb(abi.raw.const(abi.name_eq, eq_ty), left), right)
+
+def bool_type = abi.raw.tyapp(abi.name_bool, [])
+def bool_to_bool = fun_type(bool_type, bool_type)
+def thy0 = initial_theory(0)
+def p = abi.raw.fvar(#'p, bool_type)
+def q = abi.raw.fvar(#'q, bool_type)
+def identity = abi.raw.abs(bool_type, abi.raw.bvar(0, bool_type))
+def beta_redex = abi.raw.comb(identity, p)
+def malformed = abi.raw.bvar(0, bool_type)
 
 check check_type(thy0)(bool_type) ~is #true
-check check_term(thy0)(proposition) ~is #true
-check check_term(thy0)(ill_typed) ~is #false
-check is_none(run_code_rule(CodeRefl(thy0, ill_typed))) ~is #true
+check check_term(thy0)(p) ~is #true
+check check_term(thy0)(malformed) ~is #false
+check is_failure(refl(thy0)(malformed)) ~is #true
 
-def refl_thm = require_some(run_code_rule(CodeRefl(thy0, proposition)))
-check:
-  match concl(refl_thm)
-  | Comb(Comb(Const(NEq(), _), left), right): left == proposition && right == proposition
-  | ~else: #false
-  ~is #true
+def refl_p = require_success(refl(thy0)(p))
+check concl(refl_p) ~is eq_term(p, p)
+def assume_p = require_success(assume(thy0)(p))
+check is_success(trans(thy0)(refl_p)(refl_p)) ~is #true
+check is_success(mK_COMB(thy0)(require_success(refl(thy0)(identity)))(refl_p)) ~is #true
+check is_failure(mK_COMB(thy0)(refl_p)(refl_p)) ~is #true
+check is_success(abs(thy0)(#'q)(bool_type)(refl_p)) ~is #true
+check is_success(beta(thy0)(beta_redex)) ~is #true
+check is_success(eQ_MP(thy0)(refl_p)(assume_p)) ~is #true
+check is_success(dEDUCT_ANTISYM_RULE(thy0)(assume_p)(assume_p)) ~is #true
+check is_success(inst(thy0)([PairValue(q, p)])(refl_p)) ~is #true
+def alpha = abi.raw.tyvar(abi.name_alpha)
+def polymorphic = abi.raw.fvar(#'x, alpha)
+def refl_poly = require_success(refl(thy0)(polymorphic))
+def type_entries = [PairValue(abi.name_alpha, bool_type)]
+check is_success(iNST_TYPE(thy0)(type_entries)(refl_poly)) ~is #true
+def duplicate_type_result = iNST_TYPE(thy0)([PairValue(abi.name_alpha, bool_type), PairValue(abi.name_alpha, bool_type)])(refl_poly)
+check is_failure(duplicate_type_result) ~is #true
 
-def child_stamp = next_stamp(n1)(thy_stamp(thy0))
-def sibling_stamp = fresh_stamp(n2)
-check is_some(combine_stamps(thy_stamp(thy0))(child_stamp)) ~is #true
-check is_none(combine_stamps(child_stamp)(sibling_stamp)) ~is #true
+def same_text_1 = Symbol.uninterned_from_string("same")
+def same_text_2 = Symbol.uninterned_from_string("same")
+check same_text_1 == same_text_2 ~is #false
+def thy1 = require_success(new_type_result(1)(thy0)(same_text_1)(0))
+def thy2 = require_success(new_type_result(2)(thy1)(same_text_2)(0))
+check is_failure(new_type_result(3)(thy2)(same_text_1)(0)) ~is #true
 
-def entries = Cons(PairValue(NAlpha(), bool_type), Nil())
-def type_request = CodeInstType(thy0, entries, refl_thm)
-check valid_code_rule_request(type_request) ~is #true
-check is_some(run_code_rule(type_request)) ~is #true
+def thy3 = require_success(new_constant_result(4)(thy2)(#'c)(bool_type))
+check is_failure(new_constant_result(5)(thy3)(#'c)(bool_type)) ~is #true
+def axiom_pair = require_success(new_axiom_result(6)(thy3)(p))
+def thy4:
+  match axiom_pair
+  | PairValue(thy, _): thy
 
-def duplicate_entries = Cons(PairValue(NAlpha(), bool_type), entries)
-def invalid_type_request = CodeInstType(thy0, duplicate_entries, refl_thm)
-check valid_code_rule_request(invalid_type_request) ~is #false
-check is_none(run_code_rule(invalid_type_request)) ~is #true
+def definition = eq_term(abi.raw.fvar(#'id, bool_to_bool), identity)
+def definition_pair = require_success(new_basic_definition_result(7)(thy4)(definition))
+def thy5:
+  match definition_pair
+  | PairValue(thy, _): thy
 
-def type_name = NUser(n10, Nil())
-def thy1 = require_some(new_type(n1)(thy0)(type_name)(n0))
-check is_none(new_type(n2)(thy1)(type_name)(n0)) ~is #true
-
-def constant_name = NUser(n11, Nil())
-def thy2 = require_some(new_constant(n2)(thy1)(constant_name)(bool_type))
-check is_none(new_constant(n3)(thy2)(constant_name)(bool_type)) ~is #true
+def witness_prop = abi.raw.comb(identity, p)
+def witness_pair = require_success(new_axiom_result(8)(thy5)(witness_prop))
+def thy6:
+  match witness_pair
+  | PairValue(thy, _): thy
+def witness:
+  match witness_pair
+  | PairValue(_, th): th
+def type_definition_result = new_basic_type_definition_result(9)(thy6)(#'sub)(#'mk_sub)(#'dest_sub)(witness)
+check is_success(type_definition_result) ~is #true

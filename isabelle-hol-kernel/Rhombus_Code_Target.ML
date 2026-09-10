@@ -34,6 +34,49 @@ fun suite head body = Pretty.block
 fun vertical ps = Pretty.blk (0, Pretty.fbreaks ps);
 fun branch_suite head body = vertical [head, body];
 
+datatype mapped_constructor =
+    Mapped_Call of {expression: string, pattern: string}
+  | Mapped_Fixed of {expression: string, pattern: string}
+  | Mapped_Identity
+  | Mapped_User_Name;
+
+fun mapped_constructor_of c =
+  (case Long_Name.base_name c of
+    "NFun" =>
+      SOME (Mapped_Fixed {expression = "abi.name_fun", pattern = "#'fun"})
+  | "NBool" =>
+      SOME (Mapped_Fixed {expression = "abi.name_bool", pattern = "#'bool"})
+  | "NEq" =>
+      SOME (Mapped_Fixed {expression = "abi.name_eq", pattern = "#'eq"})
+  | "NAlpha" =>
+      SOME (Mapped_Fixed {expression = "abi.name_alpha", pattern = "#'a"})
+  | "NRepVar" =>
+      SOME (Mapped_Fixed {expression = "abi.name_rep", pattern = "#'r"})
+  | "NUser" => SOME Mapped_User_Name
+  | "TyVar" =>
+      SOME (Mapped_Call {expression = "abi.raw.tyvar", pattern = "abi.TyVar"})
+  | "TyApp" =>
+      SOME (Mapped_Call {expression = "abi.raw.tyapp", pattern = "abi.TyApp"})
+  | "FVar" =>
+      SOME (Mapped_Call {expression = "abi.raw.fvar", pattern = "abi.FVar"})
+  | "BVar" =>
+      SOME (Mapped_Call {expression = "abi.raw.bvar", pattern = "abi.BVar"})
+  | "Const" =>
+      SOME (Mapped_Call {expression = "abi.raw.const", pattern = "abi.Const"})
+  | "Comb" =>
+      SOME (Mapped_Call {expression = "abi.raw.comb", pattern = "abi.Comb"})
+  | "Abs" =>
+      SOME (Mapped_Call {expression = "abi.raw.abs", pattern = "abi.Abs"})
+  | "Nil" =>
+      SOME (Mapped_Fixed {expression = "abi.list_nil()", pattern = "[]"})
+  | "Cons" =>
+      SOME (Mapped_Call {expression = "abi.list_cons", pattern = "List.cons"})
+  | "Nat" => SOME Mapped_Identity
+  | _ => NONE);
+fun mapped_type tyco = member (op =)
+  ["Rhombus_HOL_Syntax.hname", "Rhombus_HOL_Syntax.htype",
+   "Rhombus_HOL_Syntax.hterm", "List.list", "Nat.nat"] tyco;
+
 fun rhombus_program_of_program ctxt module_name reserved identifiers exports program =
   let
     fun namify upper base nsp =
@@ -125,6 +168,26 @@ fun print_rhombus_program ctxt reserved const_syntax program deresolve =
           let
             val name = (Pretty.str o deresolve) sym;
             val dictionaries = maps (map (print_dict vars)) dictss;
+            fun regular_constructor () =
+              Pretty.block [name, Pretty.enclose "(" ")"
+                [comma (map (print_term is_pat some_thm vars NOBR) ts)]];
+            fun mapped_constructor c =
+              (case mapped_constructor_of c of
+                NONE => regular_constructor ()
+              | SOME (Mapped_Call {expression, pattern}) =>
+                  Pretty.block [Pretty.str (if is_pat then pattern else expression),
+                    Pretty.enclose "(" ")"
+                      [comma (map (print_term is_pat some_thm vars NOBR) ts)]]
+              | SOME (Mapped_Fixed {expression, pattern}) =>
+                  if null ts then Pretty.str (if is_pat then pattern else expression)
+                  else error ("Rhombus target: bad mapped nullary constructor " ^ c)
+              | SOME Mapped_Identity =>
+                  (case ts of
+                    [t] => print_term is_pat some_thm vars NOBR t
+                  | _ => error ("Rhombus target: bad mapped identity constructor " ^ c))
+              | SOME Mapped_User_Name =>
+                  if is_pat then Pretty.str "_"
+                  else error "Rhombus target: NUser construction is unreachable");
           in
             if Code_Thingol.is_constr program sym then
               let
@@ -135,8 +198,9 @@ fun print_rhombus_program ctxt reserved const_syntax program deresolve =
                   error ("Rhombus target: over-applied constructor " ^
                     Code_Symbol.quote ctxt sym)
                 else if missing = 0 then
-                  Pretty.block [name, Pretty.enclose "(" ")"
-                    [comma (map (print_term is_pat some_thm vars NOBR) ts)]]
+                  (case sym of
+                    Constant c => mapped_constructor c
+                  | _ => regular_constructor ())
                 else
                   let
                     val raw = Name.invent (snd vars) "arg" missing;
@@ -315,15 +379,24 @@ fun serialize ctxt {module_name, reserved_syms, identifiers, includes,
       else error "Rhombus target: unexpected imports in singleton module";
     val print_stmt = print_rhombus_program ctxt reserved const_syntax program
       (deresolver module);
-    fun emit sym = (case Code_Symbol.Graph.get_node gr sym of
-        (_, NONE) => NONE
-      | (_, SOME (_, stmt)) => SOME (markup_stmt sym (print_stmt (sym, stmt))));
+    fun emit (sym as Type_Constructor tyco) =
+          if mapped_type tyco then NONE
+          else (case Code_Symbol.Graph.get_node gr sym of
+            (_, NONE) => NONE
+          | (_, SOME (_, stmt)) => SOME (markup_stmt sym (print_stmt (sym, stmt))))
+      | emit sym = (case Code_Symbol.Graph.get_node gr sym of
+          (_, NONE) => NONE
+        | (_, SOME (_, stmt)) => SOME (markup_stmt sym (print_stmt (sym, stmt))));
     val body = map_filter emit ((flat o rev o Code_Symbol.Graph.strong_conn) gr);
     val export_names = distinct (op =) (map (deresolver module) exports);
     val export_block = suite (Pretty.str "export:")
       (Pretty.chunks (map Pretty.str export_names));
+    val abi_import = vertical
+      [Pretty.str "import:",
+       Pretty.str "  rhombus/hol/private/kernel_abi as abi"];
     val p = Pretty.chunks2
-      ([Pretty.str "#lang rhombus", export_block] @ map snd includes @ body);
+      ([Pretty.str "#lang rhombus", abi_import, export_block] @
+        map snd includes @ body);
   in (Code_Target.Singleton ("rhm", p), try (deresolver "")) end;
 
 val serializer : Code_Target.serializer =

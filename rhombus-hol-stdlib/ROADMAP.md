@@ -116,14 +116,14 @@ Core is the following exact, stable 100-theorem manifest. Ordering is normative.
 99. `member_cons`
 100. `member_append`
 
-## Standard-500
+## Standard-1000
 
-Standard contains Core-100 plus every theorem in the shipped modules. The current kernel-checked baseline is 400 theorems.
+Standard contains Core-100 plus every theorem in the shipped modules. The current kernel-checked baseline is 1,001 theorems.
 
-* 314 → 350 added witness-backed existential laws, canonical relation and inverse properties, pointwise subset/disjointness laws, and executable natural-order/comparison laws.
-* 350 → 400 completed constructor and observer normal forms for products, sums, options, list folds and partial observers, nonempty-list conversions, binary-tree mirror/flatten operations, and empty finite collections.
+* 400 → 1,001 adds executable Boolean, natural-order, list, relation/set, rose-tree, integer, finite-collection, rational, algebra, quotient, number-theory, and programming APIs.
+* The corresponding theorem families cover constructor equations, observer normal forms, pointwise Boolean algebra, option/list/tree transformations, arithmetic/order interfaces, and cross-domain consumer behavior.
 
-Growth to 500 next prioritizes sorting orderedness and permutation preservation, normalized rational arithmetic, finite-map extensionality, and congruence/type-prescription rules. A theorem enters Standard only after its defining module compiles and the full prover regression suite passes.
+A theorem enters Standard only after its defining module compiles and the full prover regression suite passes.
 
 ## Full
 

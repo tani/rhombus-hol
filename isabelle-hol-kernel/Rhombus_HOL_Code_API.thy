@@ -405,6 +405,12 @@ lemma result_of_option_failure_iff [simp]:
   "result_of_option failure result = CodeFailure failure \<longleftrightarrow> result = None"
   by (cases result) simp_all
 
+lemma erase_code_result_option_case [simp]:
+  "erase_code_result
+      (case result of Some value \<Rightarrow> CodeSuccess value | None \<Rightarrow> CodeFailure failure) =
+    result"
+  by (cases result) simp_all
+
 fun diagnose_type_failure :: "htheory \<Rightarrow> htype \<Rightarrow> code_failure option" where
   "diagnose_type_failure thy (TyVar _) = None"
 | "diagnose_type_failure thy (TyApp n args) =
@@ -541,30 +547,47 @@ definition code_check_term :: "htheory \<Rightarrow> hterm \<Rightarrow> unit co
        Some failure \<Rightarrow> CodeFailure failure
      | None \<Rightarrow> CodeFailure CodeRuleRejected)"
 definition code_refl :: "htheory \<Rightarrow> hterm \<Rightarrow> hthm code_result" where
-  "code_refl thy t = result_of_option (diagnose_term_failure thy t) (refl thy t)"
+  "code_refl thy t =
+    (case refl thy t of
+       Some result \<Rightarrow> CodeSuccess result
+     | None \<Rightarrow> CodeFailure (diagnose_term_failure thy t))"
 
 definition code_trans :: "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
-  "code_trans thy a b = result_of_option (diagnose_trans_failure a b) (trans thy a b)"
+  "code_trans thy a b =
+    (case trans thy a b of
+       Some result \<Rightarrow> CodeSuccess result
+     | None \<Rightarrow> CodeFailure (diagnose_trans_failure a b))"
 
 definition code_mk_comb :: "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
   "code_mk_comb thy fth xth =
-    result_of_option (diagnose_mk_comb_failure fth xth) (mk_comb_rule thy fth xth)"
+    (case mk_comb_rule thy fth xth of
+       Some result \<Rightarrow> CodeSuccess result
+     | None \<Rightarrow> CodeFailure (diagnose_mk_comb_failure fth xth))"
 
 definition code_abs ::
   "htheory \<Rightarrow> hname \<Rightarrow> htype \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
   "code_abs thy n ty th =
-    result_of_option (diagnose_abs_failure thy n ty th) (abs_rule thy n ty th)"
+    (case abs_rule thy n ty th of
+       Some result \<Rightarrow> CodeSuccess result
+     | None \<Rightarrow> CodeFailure (diagnose_abs_failure thy n ty th))"
 
 definition code_beta :: "htheory \<Rightarrow> hterm \<Rightarrow> hthm code_result" where
-  "code_beta thy t = result_of_option (diagnose_beta_failure thy t) (beta thy t)"
+  "code_beta thy t =
+    (case beta thy t of
+       Some result \<Rightarrow> CodeSuccess result
+     | None \<Rightarrow> CodeFailure (diagnose_beta_failure thy t))"
 
 definition code_assume :: "htheory \<Rightarrow> hterm \<Rightarrow> hthm code_result" where
   "code_assume thy p =
-    result_of_option (diagnose_prop_failure thy p) (assume_rule thy p)"
+    (case assume_rule thy p of
+       Some result \<Rightarrow> CodeSuccess result
+     | None \<Rightarrow> CodeFailure (diagnose_prop_failure thy p))"
 
 definition code_eq_mp :: "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
   "code_eq_mp thy eqth th =
-    result_of_option (diagnose_eq_mp_failure eqth th) (eq_mp thy eqth th)"
+    (case eq_mp thy eqth th of
+       Some result \<Rightarrow> CodeSuccess result
+     | None \<Rightarrow> CodeFailure (diagnose_eq_mp_failure eqth th))"
 
 definition code_deduct_antisym ::
   "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
@@ -574,7 +597,9 @@ definition code_deduct_antisym ::
 definition code_inst ::
   "htheory \<Rightarrow> (hterm \<times> hterm) list \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
   "code_inst thy entries th =
-    result_of_option (diagnose_inst_failure thy entries) (inst thy entries th)"
+    (case inst thy entries th of
+       Some result \<Rightarrow> CodeSuccess result
+     | None \<Rightarrow> CodeFailure (diagnose_inst_failure thy entries))"
 
 definition code_inst_type ::
   "htheory \<Rightarrow> type_subst_entries \<Rightarrow> hthm \<Rightarrow> hthm code_result" where
@@ -908,33 +933,39 @@ definition type_definition_delta_of ::
 definition code_new_type ::
   "nat \<Rightarrow> htheory \<Rightarrow> hname \<Rightarrow> nat \<Rightarrow> htheory code_result" where
   "code_new_type fresh thy n arity =
-    result_of_option (diagnose_new_type_failure thy n)
-      (new_type fresh thy n arity)"
+    (case new_type fresh thy n arity of
+       Some thy' \<Rightarrow> CodeSuccess thy'
+     | None \<Rightarrow> CodeFailure (diagnose_new_type_failure thy n))"
 
 definition code_new_constant ::
   "nat \<Rightarrow> htheory \<Rightarrow> hname \<Rightarrow> htype \<Rightarrow> htheory code_result" where
   "code_new_constant fresh thy n ty =
-    result_of_option (diagnose_new_constant_failure thy n ty)
-      (new_constant fresh thy n ty)"
+    (case new_constant fresh thy n ty of
+       Some thy' \<Rightarrow> CodeSuccess thy'
+     | None \<Rightarrow> CodeFailure (diagnose_new_constant_failure thy n ty))"
 
 definition code_new_axiom ::
   "nat \<Rightarrow> htheory \<Rightarrow> hterm \<Rightarrow> (htheory \<times> hthm) code_result" where
   "code_new_axiom fresh thy p =
-    result_of_option (diagnose_prop_failure thy p) (new_axiom fresh thy p)"
+    (case new_axiom fresh thy p of
+       Some result \<Rightarrow> CodeSuccess result
+     | None \<Rightarrow> CodeFailure (diagnose_prop_failure thy p))"
 
 definition code_new_basic_definition ::
   "nat \<Rightarrow> htheory \<Rightarrow> hterm \<Rightarrow> (htheory \<times> hthm) code_result" where
   "code_new_basic_definition fresh thy tm =
-    result_of_option (diagnose_definition_failure thy tm)
-      (new_basic_definition fresh thy tm)"
+    (case new_basic_definition fresh thy tm of
+       Some result \<Rightarrow> CodeSuccess result
+     | None \<Rightarrow> CodeFailure (diagnose_definition_failure thy tm))"
 
 definition code_new_basic_type_definition ::
   "nat \<Rightarrow> htheory \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hthm \<Rightarrow>
     (htheory \<times> hthm \<times> hthm) code_result" where
   "code_new_basic_type_definition fresh thy tyname absname repname witness =
-    result_of_option
-      (diagnose_type_definition_failure thy tyname absname repname witness)
-      (new_basic_type_definition fresh thy tyname absname repname witness)"
+    (case new_basic_type_definition fresh thy tyname absname repname witness of
+       Some result \<Rightarrow> CodeSuccess result
+     | None \<Rightarrow> CodeFailure
+         (diagnose_type_definition_failure thy tyname absname repname witness))"
 
 definition code_new_type_with_delta ::
   "nat \<Rightarrow> htheory \<Rightarrow> hname \<Rightarrow> nat \<Rightarrow> (htheory \<times> extension_delta) code_result" where

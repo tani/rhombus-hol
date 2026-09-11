@@ -59,20 +59,37 @@ jobs:
           version: current
           variant: CS
 
+      # `current` is a moving snapshot, and the Rhombus dependencies have no
+      # lock file. Rotate weekly as well as on Racket or dependency changes,
+      # so the cache cannot hide catalog updates indefinitely.
+      - name: Record the Racket cache inputs
+        run: |
+          racket --version > .racket-version
+          date -u +%G-%V > .racket-cache-week
+
+      - name: Cache Racket packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/racket
+            ~/.local/share/racket
+          key: ${{ runner.os }}-${{ runner.arch }}-racket-packages-${{ hashFiles('.racket-version', '.racket-cache-week', 'rhombus-hol-kernel/info.rkt', 'rhombus-hol-lib/info.rkt', 'rhombus-hol/info.rkt') }}
+
       # One install for all three, so the dependencies among them resolve as
       # links to this checkout rather than as catalog lookups. `--auto` pulls
       # in `rhombus-lib`; `--no-docs` leaves the documentation to the step
-      # that exists to check it.
+      # that exists to check it. A restored cache already contains these
+      # package registrations, so `--skip-installed` makes the hit path cheap.
       - name: Install the packages
         run: |
-          raco pkg install --auto --batch --no-docs \
+          raco pkg install --auto --batch --no-docs --skip-installed \
             rhombus-hol-kernel/ rhombus-hol-lib/ rhombus-hol/
 
       - name: Compile the library
         run: raco make rhombus-hol-lib/rhombus/hol.rkt
 
-      - name: Run the test suite
-        run: raco test rhombus-hol/rhombus/hol/tests
+      - name: Run the test suite in parallel
+        run: raco test --jobs "$(nproc)" rhombus-hol/rhombus/hol/tests
 
       # `raco setup` reports a document it could not build and still exits 0,
       # so the log is what has to be read. Fixtures that are *meant* not to
@@ -97,10 +114,23 @@ jobs:
 
       - uses: cachix/install-nix-action@v30
 
+      - name: Record the formal-kernel Racket cache inputs
+        run: |
+          nix develop --command racket --version > .formal-racket-version
+          date -u +%G-%V > .racket-cache-week
+
+      - name: Cache formal-kernel Racket packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/racket
+            ~/.local/share/racket
+          key: ${{ runner.os }}-${{ runner.arch }}-formal-racket-packages-${{ hashFiles('.formal-racket-version', '.racket-cache-week', 'flake.lock', 'rhombus-hol-kernel/info.rkt') }}
+
       - name: Install Rhombus compiler and kernel ABI
         run: >-
-          nix develop --command
-          raco pkg install --auto --batch --no-docs rhombus-lib rhombus-hol-kernel/
+          nix develop --command raco pkg install --auto --batch --no-docs
+          --skip-installed rhombus-lib rhombus-hol-kernel/
 
       - name: Check formal kernel and generated artifact
         run: ./isabelle-hol-kernel/export-kernel.sh --check

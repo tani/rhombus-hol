@@ -7,11 +7,11 @@
 @verbatim{
 Type = Id                 a declared datatype with no parameters
      | Id(Type, ...)      a declared datatype, applied
-     | ~a                 a type variable
+     | ?a                 a type variable
      | Boolean            the type of propositions
 }
 
-Type variables are written @rhombus(~a), @rhombus(~b) and so on. A function is
+Type variables are written @rhombus(?a), @rhombus(?b) and so on. A function is
 implicitly polymorphic in every type variable it mentions; there is no
 @tt{forall} at the type level to write.
 
@@ -129,7 +129,7 @@ per clause covering every argument, which is how Rhombus's own multi-case
 @rhombus(fun) is written:
 
 @rhombusblock(
-  function app(xs :: List(~a), ys :: List(~a)) :: List(~a)
+  function app(xs :: List(?a), ys :: List(?a)) :: List(?a)
   | (Nil(), ys): ys
   | (Cons(x, rest), ys): Cons(x, app(rest, ys))
 )
@@ -215,7 +215,7 @@ select one of these named orders with @rhombus(~order).
 A quantifier extends as far to the right as it can, so
 
 @rhombusblock(
-  forall (xs :: List(~a)): app(xs, Nil()) === xs and rev(xs) === rev(xs)
+  forall (xs :: List(?a)): app(xs, Nil()) === xs and rev(xs) === rev(xs)
 )
 
 quantifies over the whole conjunction.

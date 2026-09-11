@@ -8,24 +8,14 @@
 // rewriter wants (each clause becomes one unconditional rewrite rule) and what
 // the induction-scheme generator reads.
 //
-// This module holds the shared function specification, the well-formedness
-// checks every declaration goes through, and the one seam that installs a
-// definition by *postulating* its equations.
+// This module holds the shared function specification and the preparation
+// pass every declaration goes through. Preparation validates clause shape,
+// compiles the decision tree once, and analyzes recursion once; installers
+// consume that immutable result.
 //
-// That seam is no longer how an ordinary `function` is installed.  Those are
-// derived -- `funcases.rhm` when the definition does not recurse,
-// `stepfn.rhm`'s `WFREC` derivation when it does -- and a declaration whose
-// recursion has no order the deriver can build is refused rather than
-// postulated.  `install_function` is reached only from
-// `axiomatic_function`, which exists to say in the source that a definition
-// was assumed.
-//
-// The argument that postulating is conservative is unchanged and still the
-// reason the seam is allowed to exist: once termination, exhaustiveness and
-// non-overlap are established, the clausal equations are a conservative
-// extension.  What changed is that a reader no longer has to know which
-// recursion schemes this version handles in order to know whether a given
-// declaration relied on that argument.
+// `install_function` remains only as a low-level compatibility seam for
+// tests and generated bootstrap definitions. Surface `function` declarations
+// use the prepared path in `driver.rhm`.
 
 import:
   rhombus/hol/htype open
@@ -44,12 +34,16 @@ export:
   clause_terms
   FunSpec
   FunInfo
+  PreparedFunction
   fun_type
+  check_function_shape
+  prepare_function
+  install_axiomatic_function
   install_function
+  can_define_directly
   recursive_calls
   pattern_vars
   pattern_ctor
-  check_function_spec
   function_decision_tree
 
 // `f(pats...) === rhs`.  The variables are those bound by the patterns.
@@ -82,7 +76,14 @@ class FunSpec(name :: Symbol,
 class FunInfo(spec :: FunSpec,
               fn :: Term,                  // the declared constant
               equations :: List.of(Thm),   // one per clause, universally closed
-              recinfo :: RecursionInfo)
+              recursion :: RecursionPlan)
+
+// The single analysis product shared by every definition backend. The
+// decision tree is both coverage evidence and the executable/logical pattern
+// interpretation; `recursion` records all data later proof construction uses.
+class PreparedFunction(spec :: FunSpec,
+                       tree :: DecisionTree,
+                       recursion :: RecursionPlan)
 
 fun fun_type(spec :: FunSpec) :: HType:
   for values(ty :~ HType = spec.ret_type) (a in spec.arg_types.reverse()):
@@ -149,13 +150,10 @@ fun recursive_calls(fn :: Term, arity :: Int, t :: Term) :: List.of(List.of(Term
 
 // -- installation ----------------------------------------------------------
 
-// `dts` maps a type constructor name to its datatype declaration, so that
-// exhaustiveness can be checked against the real constructor list.
-// `discharge` proves a measure obligation, returning `#false` on success and
-// a residue message otherwise.  It is a callback because the prover is built
-// on top of this module, not below it.
-fun check_function_spec(thy :: Theory, spec :: FunSpec,
-                        dts :: Map.of(Symbol, DatatypeSpec)) :: Void:
+// Check only the properties independent of the pattern-matrix compiler.
+// Exhaustiveness and reachability are checked exactly once when
+// `prepare_function` compiles its tree.
+fun check_function_shape(thy :: Theory, spec :: FunSpec) :: Void:
   let who = #'function
   let fty = fun_type(spec)
   when const_type(thy, spec.name) != #false
@@ -166,7 +164,6 @@ fun check_function_spec(thy :: Theory, spec :: FunSpec,
           error.val(~label: "name", spec.name))
   let arity = spec.arg_types.length()
 
-  // -- shape and typing of each clause
   for (cl in spec.clauses):
     let cl :~ DefClause = cl
     unless cl.pats.length() == arity
@@ -192,87 +189,69 @@ fun check_function_spec(thy :: Theory, spec :: FunSpec,
       | error(~who: who, "clause body mentions an unbound variable",
               error.val(~label: "variable", (v :~ FVar).name))
 
-  // -- exhaustiveness and non-overlap, over the pattern matrix
-  check_coverage(who, spec, dts)
+fun prepare_function(thy :: Theory, spec :: FunSpec,
+                     dts :: Map.of(Symbol, DatatypeSpec),
+                     ~measure: measure :: maybe(Measure) = #false)
+     :: PreparedFunction:
+  check_function_shape(thy, spec)
+  let tree = function_decision_tree(#'function, spec, dts)
+  let arity = spec.arg_types.length()
+  let placeholder = mk_const(spec.name, fun_type(spec))
+  let clauses = for List (cl in spec.clauses, i in List.iota(spec.clauses.length())):
+                  let cl :~ DefClause = cl
+                  [i, cl.pats, clause_terms(cl)]
+  let recursion = check_termination(#'function, spec.name, arity, clauses,
+                                    placeholder, ~measure: measure)
+  PreparedFunction(spec, tree, recursion)
 
+// Postulate the equations represented by an already prepared specification.
+// Preparation has done all validation, tree construction, and termination
+// analysis; this phase only declares the constant and records leaf equations.
+fun install_axiomatic_function(thy :: Theory, prepared :: PreparedFunction,
+                               dts :: Map.of(Symbol, DatatypeSpec))
+     :: values(Theory, FunInfo):
+  let spec = prepared.spec
+  let tree = prepared.tree
+  let fty = fun_type(spec)
+  let arity = spec.arg_types.length()
+  let thy2 = new_constant(thy, spec.name, fty)
+  let fn = mk_const(spec.name, fty)
+  let roots = for List (ty in spec.arg_types, i in List.iota(arity)):
+                mk_var(Symbol.from_string("_eqx" ++ to_string(i)),
+                       ty :~ HType) :~ Term
+  let (thy3, eqs):
+    for values(t :~ Theory = thy2, acc :~ List = []) (ls in leaf_shapes(dts, tree, roots)):
+      let ls :~ LeafShape = ls
+      let pats :~ List = ls.patterns
+      let cl :~ DefClause = spec.clauses[ls.clause]
+      let rename = for List (b in ls.bindings):
+                     let b :~ DTBinding = b
+                     [path_subterm(pats, b.path), b.var]
+      let lhs = list_mk_comb(fn, pats)
+      let stmt = mk_forall_list(row_vars(pats),
+                                mk_eq(lhs, inst_fvar(rename, cl.rhs)))
+      let (t2, th) = new_axiom(t, stmt)
+      values(t2, acc ++ [th])
+  values(thy3, FunInfo(spec, fn, eqs, prepared.recursion))
+
+// Compatibility seam for internal callers that still supply a raw
+// specification. Surface declarations never take this route.
 fun install_function(thy :: Theory,
                      spec :: FunSpec,
                      dts :: Map.of(Symbol, DatatypeSpec),
                      ~discharge: discharge :: maybe(Function.of_arity(1)) = #false)
      :: values(Theory, FunInfo):
-  let who = #'function
-  let fty = fun_type(spec)
-  check_function_spec(thy, spec, dts)
-  let arity = spec.arg_types.length()
-  let tree = function_decision_tree(who, spec, dts)
-
-  // -- termination
-  let fn_placeholder = mk_const(spec.name, fty)
   let measure:
     match spec.measure
     | #false: #false
     | m:
         unless discharge
-        | error(~who: who,
+        | error(~who: #'function,
                 "a measure needs a prover to discharge its obligations",
                 error.val(~label: "name", spec.name))
         Measure(m :~ Term, discharge :~ Function)
-  let recinfo = check_termination(
-    who, spec.name, arity,
-    spec.clauses.map(fun (cl :: DefClause): [cl.pats, clause_terms(cl)]),
-    fn_placeholder,
-    ~measure: measure)
-
-  // -- a definition that is only a definition
-  //
-  // One clause, distinct variables for patterns, no reference to itself:
-  // there is nothing to compile and nothing to justify, and `f = \xs. rhs`
-  // is exactly what `new_basic_definition` takes.  Going through the seam
-  // below instead would postulate an equation the kernel would have handed
-  // over for free.
-  cond
-  | can_define_directly(spec):
-      let cl :~ DefClause = spec.clauses[0]
-      let vars = for List (p in cl.pats): (p :~ FVar)
-      let body = for values(b :~ Term = cl.rhs) (v in vars.reverse()):
-                   mk_abs(v :~ FVar, b)
-      let (thy2, def_th) = new_basic_definition(thy, mk_eq(mk_var(spec.name,
-                                                                  fty),
-                                                           body))
-      let eqn = GENL(thy2, vars,
-                     unfold_def(thy2, def_th,
-                                vars.map(fun (v :: FVar): v :~ Term)))
-      values(thy2, FunInfo(spec, mk_const(spec.name, fty), [eqn], recinfo))
-  | ~else:
-      // -- only now is anything added to the theory
-      let thy2 = new_constant(thy, spec.name, fty)
-      let fn = mk_const(spec.name, fty)
-      // One axiom per *leaf* of the decision tree, not per clause as written.
-      //
-      // Clauses are ordered, so a clause that an earlier one shadows at some
-      // argument shapes does not hold at those shapes, and postulating it as
-      // written would be inconsistent: `f(Nil) = a` beside `!x. f(x) = b` says
-      // `a = b`.  The leaves are exactly the shapes where each clause actually
-      // wins.  This is also what `install_structural_function` derives, so a
-      // definition means the same thing whichever seam installed it.
-      let dt_of = for values(m :~ Map = {}) ((n, d) in dts): m ++ {n: d}
-      let roots = for List (ty in spec.arg_types, i in List.iota(arity)):
-                    mk_var(Symbol.from_string("_eqx" ++ to_string(i)),
-                           ty :~ HType) :~ Term
-      let (thy3, eqs):
-        for values(t :~ Theory = thy2, acc :~ List = []) (ls in leaf_shapes(dt_of, tree, roots)):
-          let ls :~ LeafShape = ls
-          let pats :~ List = ls.patterns
-          let cl :~ DefClause = spec.clauses[ls.clause]
-          let rename = for List (b in ls.bindings):
-                         let b :~ DTBinding = b
-                         [path_subterm(pats, b.path), b.var]
-          let lhs = list_mk_comb(fn, pats)
-          let stmt = mk_forall_list(row_vars(pats),
-                                    mk_eq(lhs, inst_fvar(rename, cl.rhs)))
-          let (t2, th) = new_axiom(t, stmt)
-          values(t2, acc ++ [th])
-      values(thy3, FunInfo(spec, fn, eqs, recinfo))
+  let prepared = prepare_function(thy, spec, dts, ~measure: measure)
+  install_axiomatic_function(thy, prepared, dts)
 
 // One clause, every pattern a distinct variable, no self-reference: a plain
 // definition, not a recursion to justify or a match to compile.  A measure
@@ -298,16 +277,6 @@ fun distinct_vars(vs :: List.of(FVar)) :: List.of(FVar):
 fun clause_vars(who :: Symbol, cl :: DefClause) :: List.of(FVar):
   for values(acc :~ List = []) (p in cl.pats): acc ++ pattern_vars(who, p)
 
-// Exhaustiveness and non-overlap are exactly the well-formedness of the
-// decision tree the patterns compile to, so they are checked by compiling
-// it (`dtree.rhm`) and discarding the result.  `install_structural_function`
-// (`stepfn.rhm`) compiles the same matrix and *keeps* the tree, which is
-// what lets a nested pattern reach the `WFREC` derivation instead of
-// falling back here.
-fun check_coverage(who :: Symbol, spec :: FunSpec,
-                   dts :: Map.of(Symbol, DatatypeSpec)) :: Void:
-  function_decision_tree(who, spec, dts)
-  #void
 
 // The decision tree for `spec`'s clauses, checked on the way.
 fun function_decision_tree(who :: Symbol, spec :: FunSpec,

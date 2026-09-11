@@ -42,7 +42,7 @@ over.
 
 @rhombusblock(
   theorem rev_is_identity:
-    forall (xs :: List(~a)): rev(xs) === xs
+    forall (xs :: List(?a)): rev(xs) === xs
 )
 
 @nested(~style: #'inset){
@@ -72,29 +72,29 @@ Remaining goal,
     app
     rev
 
-  type List(~a)
+  type List(?a)
   | Nil()
-  | Cons(head :: ~a, tail :: List(~a))
+  | Cons(head :: ?a, tail :: List(?a))
 
-  function app(xs :: List(~a), ys :: List(~a)) :: List(~a):
+  function app(xs :: List(?a), ys :: List(?a)) :: List(?a):
     match xs
     | Nil(): ys
     | Cons(x, rest): Cons(x, app(rest, ys))
 
-  function rev(xs :: List(~a)) :: List(~a):
+  function rev(xs :: List(?a)) :: List(?a):
     match xs
     | Nil(): Nil()
     | Cons(x, rest): app(rev(rest), Cons(x, Nil()))
 
   theorem ~rewrite_rule app_nil_r:
-    forall (xs :: List(~a)): app(xs, Nil()) === xs
+    forall (xs :: List(?a)): app(xs, Nil()) === xs
 
   theorem ~rewrite_rule app_assoc:
-    forall (xs :: List(~a), ys :: List(~a), zs :: List(~a)):
+    forall (xs :: List(?a), ys :: List(?a), zs :: List(?a)):
       app(app(xs, ys), zs) === app(xs, app(ys, zs))
 
   theorem rev_app_distr:
-    forall (xs :: List(~a), ys :: List(~a)):
+    forall (xs :: List(?a), ys :: List(?a)):
       rev(app(xs, ys)) === app(rev(ys), rev(xs))
 )
 

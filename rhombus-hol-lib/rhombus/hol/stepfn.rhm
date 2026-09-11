@@ -31,7 +31,7 @@
 // declaration is refused (`driver.rhm`), and `axiomatic_function` is the
 // separate form for postulating.  The types the order compares in may be
 // any *instance* of a declared datatype -- `List(Nat)` as much as
-// `List(~a)` -- since a datatype's facts specialise by type substitution
+// `List(?a)` -- since a datatype's facts specialise by type substitution
 // (`datatype.rhm`'s `instantiate_datatype`).
 
 import:
@@ -56,140 +56,117 @@ import:
   "terminate.rhm" open
 
 export:
-  can_derive_structurally
-  derivation_failure
-  describe_failure
+  RecursionOrder
+  ColumnOrder
+  LexOrder
+  MeasureOrder
+  DerivationPlan
+  DerivationDecision
+  Derivable
+  NotDerivable
   DeriveFailure
   NoArguments
   SwitchNotDatatype
   MeasureNotOrdered
-  UnsupportedTermination
+  NoInstalledOrder
   NoOrder
-  lex_descent_columns
-  descent_column
-  measure_result_type
+  plan_derivation
+  describe_failure
   install_structural_function
 
-fun self_type(spec :: DatatypeSpec) :: HType:
-  mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol): mk_tyvar(p) :~ HType))
+class.together:
+  class RecursionOrder():
+    nonfinal
 
-// -- applicability ---------------------------------------------------------
+  class ColumnOrder(column :: Int, ty :: HType):
+    extends RecursionOrder
 
-// The one argument column every recursive call strictly descends in and
-// whose type `usable` accepts, or `#false` if there is none.
-//
-// Not `RecursionInfo.positions`: that is the *lexicographic* order, whose
-// leading column is only required to shrink at some call sites and stay
-// equal at the rest.  A pullback along one projection needs strictly more
-// -- every call must descend in the same column, or the relation the
-// recursion runs in does not relate the call to its caller.  The tree is
-// not consulted here: descent is a property of the clauses as written, and
-// `descends_at` is the same check `check_termination` used.
-//
-// A definition with no recursive calls satisfies the descent condition at
-// *every* column vacuously, which is right: it needs a well-founded
-// relation to hand `WFREC`, but nothing has to be below anything in it.
-// `usable` is what then picks a column whose type actually has one.
-fun descent_column(spec :: FunSpec, fn_ph :: Term,
-                   ~usable: usable = fun (ty :: HType): #true) :: maybe(Int):
-  let arity = spec.arg_types.length()
-  recur loop (k = 0):
-    cond
-    | k >= arity: #false
-    | !usable(spec.arg_types[k]): loop(k + 1)
-    | ~else:
-        let ok = for all (cl in spec.clauses):
-                   let cl :~ DefClause = cl
-                   for all (call in recursive_calls(fn_ph, arity, cl.rhs)):
-                     descends_at(cl.pats[k], (call :~ List)[k])
-        (if ok | k | loop(k + 1))
+  class LexOrder(columns :: List.of(Int), types :: List.of(HType)):
+    extends RecursionOrder
 
-// Whether this module's derivation applies, and if not, why.
-//
-// It applies when the termination checker found an order this module can
-// build -- structural descent in one column, a lexicographic product of
-// several, or a `~measure` -- and every position the pattern matrix splits
-// on carries an *instance* of a datatype declared here.
-//
-// `#'none` is admitted alongside `#'structural` because a non-recursive
-// definition has nothing that could fail: `WFREC` still needs a
-// well-founded relation, but the congruence proof has no recursive call to
-// bridge, so it goes through exactly as the recursive case does with an
-// empty set of call sites.
-//
-// Pattern depth is not a condition.  `H` is built from the decision tree
-// (`dtree.rhm`), which records a selector *path* to every variable, so a
-// nested pattern is just a `Switch` whose branch holds another `Switch`,
-// and the congruence proof case-splits at the nested position exactly as it
-// does at the top one.
-//
-// Nor is the switched position's type having to be the declaration's own.
-// The case-split needs that datatype's `cases` theorem to apply at the
-// position's type, and `instantiate_datatype` (`datatype.rhm`) specialises
-// a datatype's theorems to any instance of it by type substitution -- so
-// `List(Nat)` is as good as `List(~a)`.
-class DeriveFailure():
-  nonfinal
-class NoArguments():
-  extends DeriveFailure
-class SwitchNotDatatype(ty :: HType):
-  extends DeriveFailure
-class MeasureNotOrdered(ty :: HType):
-  extends DeriveFailure
-class UnsupportedTermination(method :: Symbol):
-  extends DeriveFailure
-class NoOrder():
-  extends DeriveFailure
+  class MeasureOrder(ty :: HType):
+    extends RecursionOrder
 
-// Why the derivation does not apply, or `#false` when it does.
-//
-// One function, not two.  A separate "explain the refusal" pass has to
-// re-derive the decision this one made, and the two drift: the diagnosis
-// then names a cause that is no longer a cause.  That happened -- nested
-// recursive calls stopped being a reason to refuse, and the message went on
-// blaming them.  Deciding and explaining are the same walk, so they are the
-// same function.
-fun derivation_failure(spec :: FunSpec, recinfo :: RecursionInfo,
-                       tree :: DecisionTree,
-                       dts :: Map.of(Symbol, DatatypeThms))
-     :: maybe(DeriveFailure):
+class DerivationPlan(
+  prepared :: PreparedFunction,
+  order :: RecursionOrder,
+  // Exactly the subterm-relation equations used by the chosen order.
+  order_equations :: List.of(Thm),
+  // Every datatype type the decision tree switches on.
+  switch_types :: List.of(HType))
+
+class.together:
+  class DeriveFailure():
+    nonfinal
+
+  class NoArguments():
+    extends DeriveFailure
+
+  class SwitchNotDatatype(ty :: HType):
+    extends DeriveFailure
+
+  class MeasureNotOrdered(ty :: HType):
+    extends DeriveFailure
+
+  class NoInstalledOrder(types :: List.of(HType)):
+    extends DeriveFailure
+
+  class NoOrder():
+    extends DeriveFailure
+
+class.together:
+  class DerivationDecision():
+    nonfinal
+
+  class Derivable(plan :: DerivationPlan):
+    extends DerivationDecision
+
+  class NotDerivable(reason :: DeriveFailure):
+    extends DerivationDecision
+
+// Resolve the only derivation decision once. The plan carries the exact
+// well-founded order and equations installation requires, so no later phase
+// searches clauses or recomputes the order.
+fun plan_derivation(prepared :: PreparedFunction,
+                    dts :: Map.of(Symbol, DatatypeThms),
+                    funs :: Map.of(Symbol, FunInfo))
+     :: DerivationDecision:
+  let spec = prepared.spec
+  let switches = switch_types(prepared.tree)
   cond
-  | spec.arg_types.length() == 0: NoArguments()
+  | spec.arg_types.length() == 0: NotDerivable(NoArguments())
   | ~else:
-      match bad_switch_type(tree, dts)
-      | ty :: HType: SwitchNotDatatype(ty)
+      match first_non_datatype(switches, dts)
+      | ty :: HType: NotDerivable(SwitchNotDatatype(ty))
       | ~else:
-          cond
-          | recinfo.method == #'measure:
-              // A measure needs no descending column: the order is its own
-              // result type's subterm relation, pulled back along it.  That
-              // type has to be an instance of a datatype declared here, for
-              // the same reason a switched position does.
-              //
-              // `recinfo.method`, not `spec.measure`: a measure written
-              // beside a definition that descends structurally anyway is
-              // not the order `check_termination` chose, and every other
-              // part of the derivation follows the choice it made.
-              let mty = measure_result_type(spec)
-              (if datatype_instance(dts, mty) | #false | MeasureNotOrdered(mty))
-          | recinfo.method != #'structural && recinfo.method != #'none:
-              UnsupportedTermination(recinfo.method)
-          | ~else:
-              let fn_ph = mk_const(spec.name, fun_type(spec))
+          match prepared.recursion
+          | NoRecursion(): NotDerivable(NoOrder())
+          | StructuralRecursion(columns, _, _):
+              let tys = for List (k in columns): spec.arg_types[k] :~ HType
+              match first_non_datatype(tys, dts)
+              | ty :: HType: NotDerivable(MeasureNotOrdered(ty))
+              | ~else:
+                  match missing_subterm_types(funs, tys)
+                  | []:
+                      let recursion_order:
+                        match columns
+                        | [k]: ColumnOrder(k, spec.arg_types[k])
+                        | ~else: LexOrder(columns, tys)
+                      let plan = DerivationPlan(prepared, recursion_order, subterm_equations(funs, tys), switches)
+                      Derivable(plan)
+                  | missing:
+                      NotDerivable(NoInstalledOrder(missing :~ List))
+          | MeasuredRecursion(ty, _, _, _):
               cond
-              | descent_column(spec, fn_ph,
-                               ~usable: fun (ty :: HType):
-                                          datatype_instance(dts, ty)) != #false:
-                  #false
-              // No single column descends everywhere, but the tuple of the
-              // lexicographic order's columns may.
-              | lex_descent_columns(spec, fn_ph, dts) != #false: #false
-              | ~else: NoOrder()
-
-fun can_derive_structurally(spec :: FunSpec, recinfo :: RecursionInfo,
-                            tree :: DecisionTree,
-                            dts :: Map.of(Symbol, DatatypeThms)) :: Boolean:
-  derivation_failure(spec, recinfo, tree, dts) == #false
+              | !datatype_instance(dts, ty):
+                  NotDerivable(MeasureNotOrdered(ty))
+              | ~else:
+                  match missing_subterm_types(funs, [ty]):
+                  | []:
+                      let plan = DerivationPlan(prepared, MeasureOrder(ty), subterm_equations(funs, [ty]), switches)
+                      Derivable(plan)
+                  | missing:
+                      NotDerivable(NoInstalledOrder(missing :~ List))
 
 fun describe_failure(f :: DeriveFailure) :: String:
   match f
@@ -198,31 +175,58 @@ fun describe_failure(f :: DeriveFailure) :: String:
       "a matched position has type " ++ type_to_string(ty)
         ++ ", which is not an instance of a datatype declared here"
   | MeasureNotOrdered(ty):
-      "the measure lands in " ++ type_to_string(ty)
+      "the order compares in " ++ type_to_string(ty)
         ++ ", which is not an instance of a datatype declared here"
-  | UnsupportedTermination(m):
-      "the termination check settled this by " ++ to_string(m)
-        ++ ", which has no derivation here"
-  | NoOrder():
-      "no argument column descends at every call, and no lexicographic "
-        ++ "order over the columns settles them either"
+  | NoInstalledOrder(tys):
+      "the order would have to compare in "
+        ++ String.join(tys.map(fun (ty :: HType): type_to_string(ty)), ", ")
+        ++ ", which "
+        ++ (if tys.length() == 1
+            | "is not a recursive datatype"
+            | "are not recursive datatypes")
+        ++ " declared here, so there is no subterm relation to descend in"
+  | NoOrder(): "no derivation order is needed for a non-recursive definition"
   | ~else: "the derivation does not apply"
 
-// What `~measure(e)` lands in: `e`'s type with the parameters peeled off.
-// `check_termination` has already refused a measure that does not take every
-// parameter, so the peel is total by the time this runs.
-fun measure_result_type(spec :: FunSpec) :: HType:
-  recur loop (ty :~ HType = type_of(spec.measure :~ Term),
-              k = spec.arg_types.length()):
-    cond
-    | k == 0: ty
-    | is_fun(ty):
-        let (_, r) = dest_fun(ty)
-        loop(r, k - 1)
-    | ~else: ty
+fun switch_types(tree :: DecisionTree) :: List.of(HType):
+  fun add(acc :: List.of(HType), ty :: HType) :: List.of(HType):
+    (if acc.contains(ty) | acc | acc ++ [ty])
+  match tree
+  | DTLeaf(_, _): []
+  | DTSwitch(_, ty, branches):
+      for values(acc :~ List = [ty]) (branch in branches):
+        for values(acc2 :~ List = acc) (t in switch_types((branch :~ DTBranch).tree)):
+          add(acc2, t)
 
+fun first_non_datatype(tys :: List.of(HType),
+                       dts :: Map.of(Symbol, DatatypeThms)) :: maybe(HType):
+  recur loop (remaining :~ List = tys):
+    match remaining
+    | []: #false
+    | List.cons(ty, rest):
+        (if datatype_instance(dts, ty :~ HType)
+         | loop(rest)
+         | ty)
+
+fun order_type_names(tys :: List.of(HType)) :: List.of(Symbol):
+  for values(acc :~ List = []) (ty in tys):
+    let n = (match ty | TyApp(n, _): n)
+    (if acc.contains(n) | acc | acc ++ [n])
+
+fun missing_subterm_types(funs :: Map.of(Symbol, FunInfo),
+                          tys :: List.of(HType)) :: List.of(HType):
+  for values(acc :~ List = []) (ty in tys):
+    let n = (match ty | TyApp(n, _): n)
+    let missing = funs.get(subterm_relation_name(n), #false) == #false
+    (if missing && !acc.contains(ty) | acc ++ [ty] | acc)
+
+fun subterm_equations(funs :: Map.of(Symbol, FunInfo),
+                      tys :: List.of(HType)) :: List.of(Thm):
+  for values(acc :~ List = []) (n in order_type_names(tys)):
+    let info :~ FunInfo = funs[subterm_relation_name(n)]
+    acc ++ info.equations
 // `ty` is *an instance of* a datatype declared here.  It used to have to be
-// the declaration's own type: `List('a)` was accepted and `List(Nat)` was
+// the declaration's own type: `List(?a)` was accepted and `List(Nat)` was
 // not, which refused a definition for the shape of its argument types rather
 // than for anything about its recursion.  The facts at an instance are the
 // declaration's facts under a type substitution (`instantiate_datatype`).
@@ -236,24 +240,6 @@ fun datatype_instance(dts :: Map.of(Symbol, DatatypeThms),
           (args :~ List).length() == (thms :~ DatatypeThms).spec.params.length()
   | ~else: #false
 
-// The first switched position whose type is not an instance of a datatype
-// declared here, or `#false` if every one of them is.  Returning the type
-// rather than a flag is what lets the refusal name it.
-fun bad_switch_type(t :: DecisionTree,
-                    dts :: Map.of(Symbol, DatatypeThms)) :: maybe(HType):
-  match t
-  | DTLeaf(_, _): #false
-  | DTSwitch(_, self_ty, branches):
-      cond
-      | !datatype_instance(dts, self_ty): self_ty
-      | ~else:
-          recur loop (bs :~ List = branches):
-            match bs
-            | []: #false
-            | List.cons(b, rest):
-                match bad_switch_type((b :~ DTBranch).tree, dts)
-                | ty :: HType: ty
-                | ~else: loop(rest)
 
 // The type substitution taking a declaration's own type to `ty`.
 fun type_substitution(spec :: DatatypeSpec,
@@ -281,8 +267,7 @@ fun spec_at(dts :: Map.of(Symbol, DatatypeThms), ty :: HType) :: DatatypeSpec:
             error.val(~label: "type", type_to_string(ty)))
 
 // The datatype's facts at a switched position's type, specialised to that
-// type.  Total in practice: `can_derive_structurally` has already
-// established every lookup succeeds.
+// type. `plan_derivation` has established every lookup succeeds.
 fun thms_at(thy :: Theory, dts :: Map.of(Symbol, DatatypeThms),
             ty :: HType) :: DatatypeView:
   match ty
@@ -400,9 +385,8 @@ fun direct_carrier(dom :: HType, rel :: Term, wf :: Thm) :: Carrier:
 // Several arguments, descending structurally in column `k`: the domain is
 // their tuple and the order is `T_lt` pulled back along the projection onto
 // that column -- `R(p, q)` holds exactly when `p`'s `k`-th component is a
-// proper subterm of `q`'s.  Well-founded because `T_lt` is
-// (`prove_wf_pullback`), and every recursive call satisfies it because
-// `descent_column` said column `k` descends at every one of them.
+// proper subterm of `q`'s. Well-foundedness comes from `prove_wf_pullback`;
+// the prepared structural plan establishes descent at every recursive call.
 fun tuple_carrier(thy :: Theory, name :: Symbol, prod_thms :: ProdThms,
                   tys :: List.of(HType), k :: Int, wf_t_lt :: Thm)
      :: values(Theory, Carrier, List.of(Thm)):
@@ -519,82 +503,28 @@ fun equation_head(t :: Term) :: maybe(Symbol):
         | ~else: #false
   | ~else: #false
 
-// The columns a lexicographic order descends in, or `#false` if there is no
-// such order over declared datatypes.  This is `terminate.rhm`'s own greedy
-// search -- the same one that decided the definition terminates -- narrowed
-// to columns whose type has a subterm relation to compare in.
-fun lex_descent_columns(spec :: FunSpec, fn_ph :: Term,
-                        dts :: Map.of(Symbol, DatatypeThms)) :: maybe(List):
-  let arity = spec.arg_types.length()
-  let all_sites = for values(acc :~ List = []) (cl in spec.clauses):
-                    let cl :~ DefClause = cl
-                    let sites = call_sites_in(#'function, spec.name, fn_ph,
-                                              arity, cl.rhs)
-                    acc ++ sites.map(fun ([conds, args]): [cl.pats, conds, args])
-  match lexicographic_order(arity, all_sites)
-  | #false: #false
-  | order :~ List:
-      // `lexicographic_order` appends columns that descend everywhere but
-      // are not needed; they would only make the order bigger, so the
-      // needed prefix is the one that settles every site.
-      let needed = settling_prefix(all_sites, order)
-      cond
-      | needed.length() < 2: #false
-      | (for all (k in needed): datatype_instance(dts, spec.arg_types[k])):
-          needed
-      | ~else: #false
-
-// The shortest prefix of `order` that already accounts for every call site.
-fun settling_prefix(all_sites :: List, order :: List) :: List:
-  recur loop (pending :~ List = all_sites, used :~ List = [], k = 0):
-    cond
-    | pending.length() == 0 || k >= order.length(): used
-    | ~else:
-        let col :~ Int = order[k]
-        let rest = pending.filter(
-          ~keep: fun ([pats, _, args]):
-                   !descends_at((pats :~ List)[col], (args :~ List)[col]))
-        loop(rest, used ++ [col], k + 1)
-
-// One discharged measure obligation, tied back to the call it came from.
-//
-// `check_termination` builds its sites clause by clause and, within a
-// clause, in `call_sites_in` order, then discharges one obligation per site
-// in that same order -- so zipping the same walk against
-// `RecursionInfo.proofs` recovers the pairing.  `recdef.rhm`'s
-// `recursive_calls` walks identically (a `cond` as condition, then, else;
-// anything else operator then operand), which is why the two agree.
-//
-// `binders` is the obligation's own universal prefix, recomputed rather
-// than read off the theorem: it is `free_vars(guarded)` by construction,
-// and stripping the quantifiers instead would lose the clause's variable
-// names, which are exactly what the instantiation needs to key on.
+// One discharged measure obligation, tied to the site collected during
+// termination analysis. No RHS traversal is repeated here.
 class MSite(clause :: Int, conds :: List.of(Term), args :: List.of(Term),
             binders :: List.of(FVar), proof :: Thm)
 
-fun measure_sites(spec :: FunSpec, fn_ph :: Term, m_rel :: Term,
-                  recinfo :: RecursionInfo) :: List.of(MSite):
-  let arity = spec.arg_types.length()
+fun measure_sites(spec :: FunSpec, m_rel :: Term,
+                  sites :: List.of(RecSite),
+                  proofs :: List.of(Thm)) :: List.of(MSite):
   let m :~ Term = spec.measure :~ Term
-  let n_clauses = spec.clauses.length()
-  let raw:
-    for values(acc :~ List = []) (cl in spec.clauses, i in List.iota(n_clauses)):
-      let cl :~ DefClause = cl
-      let sites = call_sites_in(#'function, spec.name, fn_ph, arity, cl.rhs)
-      acc ++ sites.map(fun (site :: List): [i, site[0], site[1]])
-  for List (r in raw, p in recinfo.decrease_proofs):
-    let [i, conds, args] = r :~ List
-    let cl :~ DefClause = spec.clauses[i :~ Int]
-    let core = list_mk_comb(m_rel, [measure_at(m, args :~ List),
+  for List (site in sites, proof in proofs):
+    let site :~ RecSite = site
+    let cl :~ DefClause = spec.clauses[site.clause]
+    let core = list_mk_comb(m_rel, [measure_at(m, site.args),
                                     measure_at(m, cl.pats)])
-    let guarded = for values(acc :~ Term = core) (c in (conds :~ List).reverse()):
-                    mk_imp(c :~ Term, acc)
+    let guarded = for values(acc :~ Term = core) (c in site.guards.reverse()):
+                    mk_imp(c, acc)
     let binders = free_vars(guarded)
-    unless concl_of(p :~ Thm) == mk_forall_list(binders, guarded)
+    unless concl_of(proof :~ Thm) == mk_forall_list(binders, guarded)
     | error(~who: #'install_structural_function,
             "cannot line a measure obligation up with its call site",
             error.val(~label: "name", spec.name))
-    MSite(i :~ Int, conds :~ List, args :~ List, binders, p :~ Thm)
+    MSite(site.clause, site.guards, site.args, binders, proof :~ Thm)
 
 // The components of a literal tuple, as they stand.
 fun split_tuple(tys :: List.of(HType), c :: Term) :: List.of(Term):
@@ -708,7 +638,7 @@ fun build_step_body(spec :: FunSpec, tree :: DecisionTree,
 //
 // The discriminators and selectors are those of *every* declared datatype,
 // not just the recursion's own: a definition may match on one argument's
-// type while descending in another's (`drop(n :: Nat, xs :: List(~a))`), or
+// type while descending in another's (`drop(n :: Nat, xs :: List(?a))`), or
 // nest into a field of a different type, and `H` cannot reduce past an
 // `is_Ci` it has no rule for.  Narrowing this to the descending column's
 // datatype leaves such a definition with a stuck `cond` and a `TRANS` that
@@ -957,12 +887,10 @@ fun condition_in_scope(thy :: Theory, db :: RuleDB, c :: Term,
 //
 // At a leaf, `H_const(f1)` and `H_const(f2)` applied to the refined `x`
 // both reduce (`reduce_h`) to that clause's body with `f1`/`f2` standing in
-// for the recursive call.  The two differ only where a recursive call
-// happens, and `R(<call>, <concrete>)` always holds -- for one argument
-// because `T_lt` is the proper-subterm relation, so it covers a field of a
-// field just as it covers an immediate one; for several because `R` is
-// exactly `T_lt` on the descending column, which `descent_column` checked
-// every call shrinks.  So the hypothesis gives `f1(v) = f2(v)` there, and
+// for the recursive call. The two differ only where a recursive call
+// happens. For one argument, `T_lt` covers a field of a field; for several,
+// `R` is `T_lt` on the selected plan column, which descends at every call.
+// The hypothesis therefore gives `f1(v) = f2(v)` there.
 // `bridge_calls` carries that through whatever the body builds around the
 // call -- including down into the branches of a `cond`, which it rebuilds
 // with `COND_CONG`.
@@ -1055,9 +983,9 @@ fun prove_congruence(thy :: Theory, spec :: FunSpec, by_measure :: Boolean,
     // Which reading of the descent to use is decided by what the
     // termination checker *did*, not by what the author wrote.  A `~measure`
     // beside a definition that also descends structurally is not used:
-    // `check_termination` prefers the structural order and leaves
-    // `recinfo.proofs` empty, so consulting `spec.measure` here would look
-    // for obligations nobody discharged.
+    // `check_termination` prefers a structural plan and records no measure
+    // proofs in that case, so consulting `spec.measure` here would look for
+    // obligations nobody discharged.
     let fact = (if by_measure | measure_fact | structural_fact)
     let l1 = reduce_h(thy, db, def_h, f1, concrete)
     let l2 = reduce_h(thy, db, def_h, f2, concrete)
@@ -1129,53 +1057,29 @@ fun apply_fn_def(thy :: Theory, def_fn :: Thm, arity :: Int,
   | arity == 1: AP_THM(thy, def_fn, args[0])
   | ~else: unfold_def(thy, def_fn, args)
 
-// `wr_def` is `build_wfrec_rel(thy)`'s result: `wfrec_rel`'s definition,
-// installed exactly once per theory (a `new_basic_definition`, not
-// reinstallable) and threaded in by the caller so every structurally
-// derived function in a session shares the one copy.
-//
-// `dts` is every declared datatype's theorems, not just the recursion
-// type's: a nested pattern splits at a position whose type need not be the
-// descending argument's, and the congruence proof needs that type's own
-// `cases`.  `alg` supplies `prod` for the several-argument case; it is
-// unused when there is only one argument.
+// `wr_def` is `build_wfrec_rel(thy)`'s definition, installed once at session
+// construction. `plan` is the complete analysis result: this function never
+// searches clauses or selects an order. `dts` supplies only datatype theorem
+// views needed to execute the proof plan.
 fun install_structural_function(thy :: Theory, wr_def :: Thm,
-                                spec :: FunSpec, dt :: DatatypeThms,
+                                plan :: DerivationPlan,
                                 dts :: Map.of(Symbol, DatatypeThms),
-                                tree :: DecisionTree,
-                                t_lt_equations :: List.of(Thm),
-                                recinfo :: RecursionInfo,
                                 alg :: AlgebraThms)
      :: values(Theory, FunInfo):
+  let prepared = plan.prepared
+  let spec = prepared.spec
+  let tree = prepared.tree
   let arity = spec.arg_types.length()
   let fty = fun_type(spec)
   let fn_ph = mk_const(spec.name, fty)
-  let by_measure = recinfo.method == #'measure
-  // The type the order compares in: the measure's result type for a
-  // `~measure`, the descending column's for structural descent.  It is the
-  // type as the definition actually uses it -- `List(Nat)`, not
-  // `List('a)` -- so the relation and its well-foundedness are taken there.
-  fun order_type() :: HType:
-    cond
-    | by_measure: measure_result_type(spec)
-    | ~else:
-        match descent_column(spec, fn_ph,
-                             ~usable: fun (ty :: HType):
-                                        datatype_instance(dts, ty))
-        | k :: Int: spec.arg_types[k]
-        | ~else: self_type(dt.spec)
-  let self = order_type()
-  let t_lt = subterm_rel(self)
-  // `T_lt`'s well-foundedness is proved once at the declaration's own type
-  // and instantiated, rather than re-proved per instance: it is the same
-  // theorem under a type substitution.  For lexicographic descent there is
-  // one of these per ordered column.
+  let by_measure = plan.order is_a MeasureOrder
+  // Every equation here was selected by `plan_derivation` for an order type.
   fun wf_of(ty :: HType) :: Thm:
     let n = (match ty | TyApp(n, _): n)
     let d :~ DatatypeThms = dts[n]
     let schematic = prove_wf_t_lt(thy, d.spec,
                                   equations_about(subterm_relation_name(n),
-                                                  t_lt_equations),
+                                                  plan.order_equations),
                                   d.induction)
     match instantiate_datatype(thy, d, ty)
     | #false:
@@ -1183,35 +1087,34 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
               "the order's type is not an instance of its datatype",
               error.val(~label: "type", type_to_string(ty)))
     | _: INST_TYPE(thy, type_substitution(d.spec, ty), schematic)
-  let wf_t_lt = wf_of(self)
-  let (thy0, carrier :~ Carrier, proj_rules :~ List):
-    cond
-    | by_measure:
-        measure_carrier(thy, spec.name, alg.prod, spec.arg_types,
-                        spec.measure :~ Term, wf_t_lt)
-    | ~else:
-        match descent_column(spec, fn_ph,
-                             ~usable: fun (ty :: HType):
-                                        datatype_instance(dts, ty))
-        | k :: Int:
-            cond
-            | arity == 1: values(thy, direct_carrier(self, t_lt, wf_t_lt), [])
-            | ~else:
-                tuple_carrier(thy, spec.name, alg.prod, spec.arg_types, k,
-                              wf_t_lt)
+  let (thy0, carrier :~ Carrier, proj_rules :~ List, order_rel :: Term):
+    match plan.order
+    | ColumnOrder(k, ty):
+        let rel = subterm_rel(ty)
+        let wf = wf_of(ty)
+        cond
+        | arity == 1:
+            values(thy, direct_carrier(ty, rel, wf), [], rel)
         | ~else:
-            // No single column descends everywhere; the tuple of the
-            // lexicographic order's columns does.
-            match lex_descent_columns(spec, fn_ph, dts)
-            | #false:
-                error(~who: #'install_structural_function,
-                      "no argument column descends at every recursive call",
-                      error.val(~label: "name", spec.name))
-            | ks :: List:
-                lex_carrier(thy, spec.name, alg, spec.arg_types, ks, wf_of)
-  let msites = (if by_measure
-                | measure_sites(spec, fn_ph, t_lt, recinfo)
-                | [])
+            let (thy2, c, rules) = tuple_carrier(
+              thy, spec.name, alg.prod, spec.arg_types, k, wf)
+            values(thy2, c, rules, rel)
+    | LexOrder(columns, _):
+        let first_ty = spec.arg_types[columns[0]]
+        let (thy2, c, rules) = lex_carrier(
+          thy, spec.name, alg, spec.arg_types, columns, wf_of)
+        values(thy2, c, rules, subterm_rel(first_ty))
+    | MeasureOrder(ty):
+        let rel = subterm_rel(ty)
+        let (thy2, c, rules) = measure_carrier(
+          thy, spec.name, alg.prod, spec.arg_types, spec.measure :~ Term,
+          wf_of(ty))
+        values(thy2, c, rules, rel)
+  let msites:
+    match prepared.recursion
+    | MeasuredRecursion(_, _, sites, proofs):
+        measure_sites(spec, order_rel, sites, proofs)
+    | ~else: []
 
   let hdom = mk_fun(carrier.dom, spec.ret_type)
   let f_var = mk_var(#'_stepf, hdom)
@@ -1225,7 +1128,7 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
   let hfty = mk_fun(hdom, hdom)
   let (thy1, def_h) = new_basic_definition(thy0, mk_eq(mk_var(h_name, hfty), h_term))
   let h_const = mk_const(h_name, hfty)
-  let db = base_reduction_db(thy1, dts, t_lt_equations, proj_rules)
+  let db = base_reduction_db(thy1, dts, plan.order_equations, proj_rules)
   let congr = prove_congruence(thy1, spec, by_measure, dts, tree, carrier,
                                fn_ph, h_const, def_h, db, msites)
   let (soln, final_thm) = WFREC(thy1, wr_def, carrier.rel, h_const, carrier.wf, congr)
@@ -1283,4 +1186,5 @@ fun install_structural_function(thy :: Theory, wr_def :: Thm,
                       | ~else: loop(TRANS(th, step), fuel - 1)
               GENL(thy2, row_vars(pats),
                    TRANS(fn_eq_soln, TRANS(spec_at_c, final_reduced)))
-  values(thy2, FunInfo(spec, mk_const(spec.name, fty), eqs, recinfo))
+  values(thy2, FunInfo(spec, mk_const(spec.name, fty), eqs,
+                       prepared.recursion))

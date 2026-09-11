@@ -6,7 +6,7 @@
 //
 // Scope: a single-argument, un-measured `function` whose termination check
 // finds plain structural descent into a *known* datatype.  `length` (over
-// the polymorphic `List(~a)`) and `double` (over the monomorphic `Nat`)
+// the polymorphic `List(?a)`) and `double` (over the monomorphic `Nat`)
 // each exercise a different datatype shape; both are installed with zero
 // new axioms, unlike `install_function`'s postulating fallback.
 
@@ -18,6 +18,7 @@ import:
   rhombus/hol/printer open
   rhombus/hol/datatype open
   rhombus/hol/recdef open
+  rhombus/hol/funcases open
   rhombus/hol/subterm open
   rhombus/hol/terminate open
   rhombus/hol/wfrec open
@@ -38,16 +39,16 @@ def list_spec:
                [Ctor(#'Nil, []),
                 Ctor(#'Cons, [Field(#'head, tya), Field(#'tail, list_ty)])])
 
-// The datatype's own axioms, its subterm relation (installed the ordinary
-// way, `subterm.rhm`), and `wfrec_rel`'s definition, all in one theory --
-// exactly what `driver.rhm`'s `add_type`/`initial_state` hand
-// `install_structural_function` in the real pipeline.
-fun setup(base :: Theory, spec :: DatatypeSpec) :: values(Theory, DatatypeThms, List.of(Thm), Thm):
+// The datatype's own axioms, its subterm relation, and `wfrec_rel`'s
+// definition, all in one theory -- exactly what `driver.rhm`'s
+// `add_type`/`initial_state` hand the installer in the real pipeline.
+fun setup(base :: Theory, spec :: DatatypeSpec)
+     :: values(Theory, DatatypeThms, FunInfo, Thm):
   let (thy0, thms) = datatype_axioms(base, spec)
-  let (thy1, tlt_info) = install_function(thy0, subterm_spec(spec) :~ FunSpec,
-                                          {spec.name: spec})
+  let (thy1, tlt_info) = install_function(
+    thy0, subterm_spec(spec) :~ FunSpec, {spec.name: spec})
   let (thy2, wr_def) = build_wfrec_rel(thy1)
-  values(thy2, thms, (tlt_info :~ FunInfo).equations, wr_def)
+  values(thy2, thms, tlt_info, wr_def)
 
 // `length`'s result type is `Nat`, so its theory needs both datatypes --
 // `Nat` declared first (plain, no subterm relation needed by `length`
@@ -55,9 +56,9 @@ fun setup(base :: Theory, spec :: DatatypeSpec) :: values(Theory, DatatypeThms, 
 def alg = algebra_base_thms()
 def (nat_base, nat_base_thms) = datatype_axioms(algebra_base_theory(), nat_spec)
 
-// -- length(xs :: List(~a)) :: Nat -------------------------------------------
+// -- length(xs :: List(?a)) :: Nat -------------------------------------------
 
-def (thy_l, list_thms, list_tlt_eqs, list_wr_def) = setup(nat_base, list_spec)
+def (thy_l, list_thms, list_tlt_info, list_wr_def) = setup(nat_base, list_spec)
 def x_var = mk_var(#'x, tya)
 def rest_var = mk_var(#'rest, list_ty)
 def length_ph = mk_const(#'length, mk_fun(list_ty, nat_ty))
@@ -66,33 +67,39 @@ def cons_ctor = mk_const(#'Cons, mk_fun(tya, mk_fun(list_ty, list_ty)))
 def zero_ctor = mk_const(#'zero, nat_ty)
 def succ_ctor = mk_const(#'succ, mk_fun(nat_ty, nat_ty))
 
-// What `driver.rhm` threads in: every declared datatype's theorems, and
-// the same map keyed by spec for the pattern compiler.
 def all_thms = {#'Nat: nat_base_thms, #'List: list_thms}
-def all_specs = {#'Nat: nat_spec, #'List: list_spec}
+def all_funs = {#'List_lt: list_tlt_info}
 
-fun tree_of(spec :: FunSpec) :: DecisionTree:
-  function_decision_tree(#'function, spec, all_specs)
+fun specs_of(dts :: Map.of(Symbol, DatatypeThms)) :: Map.of(Symbol, DatatypeSpec):
+  for values(out :~ Map = {}) ((name, thms) in dts):
+    out ++ {name: (thms :~ DatatypeThms).spec}
+
+fun plan_of(prepared :: PreparedFunction,
+            dts :: Map.of(Symbol, DatatypeThms),
+            funs :: Map.of(Symbol, FunInfo)) :: DerivationPlan:
+  match plan_derivation(prepared, dts, funs)
+  | Derivable(plan): plan
+  | NotDerivable(f): error(~who: #'test, describe_failure(f))
 
 def length_spec:
   FunSpec(#'length, [list_ty], nat_ty,
           [DefClause([nil_ctor], zero_ctor),
            DefClause([list_mk_comb(cons_ctor, [x_var, rest_var])],
                      mk_comb(succ_ctor, mk_comb(length_ph, rest_var)))])
-def length_recinfo:
-  check_termination(#'function, #'length, 1,
-                    length_spec.clauses.map(fun (cl :: DefClause): [cl.pats, clause_terms(cl)]),
-                    length_ph)
+def length_prepared = prepare_function(thy_l, length_spec, specs_of(all_thms))
+def length_plan = plan_of(length_prepared, all_thms, all_funs)
 
-check length_recinfo.method ~is #'structural
-check can_derive_structurally(length_spec, length_recinfo,
-                              tree_of(length_spec), all_thms) ~is #true
+check length_prepared.recursion ~matches StructuralRecursion([0], [0], _)
+check length_plan.order ~matches ColumnOrder(0, _)
+// Planning retains the single preparation product and exactly the relation
+// equations selected for this order; installation needs no second analysis.
+check length_plan.prepared ~is length_prepared
+check length_plan.order_equations ~is list_tlt_info.equations
+
 
 def axioms_before_length = axioms_of(thy_l).length()
 def (thy_length, length_info):
-  install_structural_function(thy_l, list_wr_def, length_spec, list_thms,
-                              all_thms, tree_of(length_spec),
-                              list_tlt_eqs, length_recinfo, alg)
+  install_structural_function(thy_l, list_wr_def, length_plan, all_thms, alg)
 
 // No `new_axiom` anywhere in the derivation: same axiom count as the
 // datatype + its subterm relation alone.
@@ -101,7 +108,7 @@ check axioms_of(thy_length).length() ~is axioms_before_length
 check:
   (length_info :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
   ~is ["length(Nil) === zero",
-       "forall (x :: 'a, y :: List('a)): length(Cons(x, y)) === succ(length(y))"]
+       "forall (x :: ?a, y :: List(?a)): length(Cons(x, y)) === succ(length(y))"]
 // Every equation is a closed theorem: derived, not assumed.
 check:
   (length_info :~ FunInfo).equations.map(fun (t :: Thm): hyps_of(t))
@@ -126,21 +133,15 @@ def cp_spec:
                                    [x_var,
                                     list_mk_comb(cons_ctor, [y_var, rest_var])])],
                      mk_comb(succ_ctor, mk_comb(cp_ph, rest_var)))])
-def cp_recinfo:
-  check_termination(#'function, #'count_pairs, 1,
-                    cp_spec.clauses.map(fun (cl :: DefClause): [cl.pats, clause_terms(cl)]),
-                    cp_ph)
+def cp_prepared = prepare_function(thy_l, cp_spec, specs_of(all_thms))
+def cp_plan = plan_of(cp_prepared, all_thms, all_funs)
 
-check cp_recinfo.method ~is #'structural
-check:
-  can_derive_structurally(cp_spec, cp_recinfo, tree_of(cp_spec), all_thms)
-  ~is #true
+check cp_prepared.recursion ~matches StructuralRecursion([0], [0], _)
+check cp_plan.order ~matches ColumnOrder(0, _)
 
 def axioms_before_cp = axioms_of(thy_l).length()
 def (thy_cp, cp_info):
-  install_structural_function(thy_l, list_wr_def, cp_spec, list_thms,
-                              all_thms, tree_of(cp_spec),
-                              list_tlt_eqs, cp_recinfo, alg)
+  install_structural_function(thy_l, list_wr_def, cp_plan, all_thms, alg)
 
 check axioms_of(thy_cp).length() ~is axioms_before_cp
 check:
@@ -149,37 +150,31 @@ check:
 check:
   (cp_info :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
   ~is ["count_pairs(Nil) === zero",
-       "forall (x :: 'a): count_pairs(Cons(x, Nil)) === zero",
-       "forall (x :: 'a, y :: 'a, z :: List('a)): "
+       "forall (x :: ?a): count_pairs(Cons(x, Nil)) === zero",
+       "forall (x :: ?a, y :: ?a, z :: List(?a)): "
          ++ "count_pairs(Cons(x, Cons(y, z))) === succ(count_pairs(z))"]
 
 // -- double(n :: Nat) :: Nat --------------------------------------------------
 
-def (thy_n, nat_thms, nat_tlt_eqs, nat_wr_def) = setup(algebra_base_theory(), nat_spec)
+def (thy_n, nat_thms, nat_tlt_info, nat_wr_def) = setup(algebra_base_theory(), nat_spec)
 def k_var = mk_var(#'k, nat_ty)
 def double_ph = mk_const(#'double, mk_fun(nat_ty, nat_ty))
 def nat_only_thms = {#'Nat: nat_thms}
+def nat_only_funs = {#'Nat_lt: nat_tlt_info}
 def double_spec:
   FunSpec(#'double, [nat_ty], nat_ty,
           [DefClause([zero_ctor], zero_ctor),
            DefClause([mk_comb(succ_ctor, k_var)],
                      mk_comb(succ_ctor, mk_comb(succ_ctor, mk_comb(double_ph, k_var))))])
-def double_recinfo:
-  check_termination(#'function, #'double, 1,
-                    double_spec.clauses.map(fun (cl :: DefClause): [cl.pats, clause_terms(cl)]),
-                    double_ph)
-def double_tree:
-  function_decision_tree(#'function, double_spec, {#'Nat: nat_spec})
+def double_prepared = prepare_function(thy_n, double_spec, specs_of(nat_only_thms))
+def double_plan = plan_of(double_prepared, nat_only_thms, nat_only_funs)
 
-check double_recinfo.method ~is #'structural
-check can_derive_structurally(double_spec, double_recinfo, double_tree,
-                              nat_only_thms) ~is #true
+check double_prepared.recursion ~matches StructuralRecursion([0], [0], _)
+check double_plan.order ~matches ColumnOrder(0, _)
 
 def axioms_before_double = axioms_of(thy_n).length()
 def (thy_double, double_info):
-  install_structural_function(thy_n, nat_wr_def, double_spec, nat_thms,
-                              nat_only_thms, double_tree,
-                              nat_tlt_eqs, double_recinfo, alg)
+  install_structural_function(thy_n, nat_wr_def, double_plan, nat_only_thms, alg)
 
 check axioms_of(thy_double).length() ~is axioms_before_double
 
@@ -188,7 +183,7 @@ check:
   ~is ["double(zero) === zero",
        "forall (x :: Nat): double(succ(x)) === succ(succ(double(x)))"]
 
-// -- app(xs :: List(~a), ys :: List(~a)) :: List(~a) -------------------------
+// -- app(xs :: List(?a), ys :: List(?a)) :: List(?a) -------------------------
 //
 // Two arguments, so the recursion runs over their product and the relation
 // is `List_lt` pulled back along the first projection.  The equations come
@@ -203,30 +198,23 @@ def app_spec:
                      list_mk_comb(cons_ctor,
                                   [x_var,
                                    list_mk_comb(app_ph, [rest_var, ys_var])]))])
-def app_recinfo:
-  check_termination(#'function, #'app, 2,
-                    app_spec.clauses.map(fun (cl :: DefClause): [cl.pats, clause_terms(cl)]),
-                    app_ph)
+def app_prepared = prepare_function(thy_l, app_spec, specs_of(all_thms))
+def app_plan = plan_of(app_prepared, all_thms, all_funs)
 
-check app_recinfo.method ~is #'structural
+check app_prepared.recursion ~matches StructuralRecursion([0], [0], _)
 // The first column shrinks at the one recursive call; the second does not.
-check descent_column(app_spec, app_ph) ~is 0
-check:
-  can_derive_structurally(app_spec, app_recinfo, tree_of(app_spec), all_thms)
-  ~is #true
+check app_plan.order ~matches ColumnOrder(0, _)
 
 def axioms_before_app = axioms_of(thy_l).length()
 def (thy_app, app_info):
-  install_structural_function(thy_l, list_wr_def, app_spec, list_thms,
-                              all_thms, tree_of(app_spec),
-                              list_tlt_eqs, app_recinfo, alg)
+  install_structural_function(thy_l, list_wr_def, app_plan, all_thms, alg)
 
 check axioms_of(thy_app).length() ~is axioms_before_app
 check (app_info :~ FunInfo).equations.map(fun (t :: Thm): hyps_of(t)) ~is [[], []]
 check:
   (app_info :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
-  ~is ["forall (x :: List('a)): app(Nil, x) === x",
-       "forall (x :: 'a, y :: List('a), z :: List('a)): "
+  ~is ["forall (x :: List(?a)): app(Nil, x) === x",
+       "forall (x :: ?a, y :: List(?a), z :: List(?a)): "
          ++ "app(Cons(x, y), z) === Cons(x, app(y, z))"]
 
 // -- drop: descending in one argument, matching on another's type ------------
@@ -245,38 +233,31 @@ def drop_spec:
            DefClause([mk_comb(succ_ctor, k_var),
                       list_mk_comb(cons_ctor, [x_var, rest_var])],
                      list_mk_comb(drop_ph, [k_var, rest_var]))])
-def drop_recinfo:
-  check_termination(#'function, #'drop, 2,
-                    drop_spec.clauses.map(fun (cl :: DefClause): [cl.pats, clause_terms(cl)]),
-                    drop_ph)
-def drop_tree:
-  function_decision_tree(#'function, drop_spec, all_specs)
 // `thy_l` has `List_lt` but not `Nat_lt`, and `drop` descends in `Nat`.
-def (thy_nl, nat_tlt_info):
+def (thy_nl, drop_nat_tlt_info):
   install_function(thy_l, subterm_spec(nat_spec) :~ FunSpec, {#'Nat: nat_spec})
-def nat_tlt_eqs_for_drop = (nat_tlt_info :~ FunInfo).equations
+def drop_funs = all_funs ++ {#'Nat_lt: drop_nat_tlt_info}
+def drop_prepared = prepare_function(thy_nl, drop_spec, specs_of(all_thms))
+def drop_plan = plan_of(drop_prepared, all_thms, drop_funs)
 
-check descent_column(drop_spec, drop_ph) ~is 0
+check drop_prepared.recursion ~matches StructuralRecursion([0], [0, 1], _)
+check drop_plan.order ~matches ColumnOrder(0, _)
 def axioms_before_drop = axioms_of(thy_nl).length()
 def (thy_drop, drop_info):
-  install_structural_function(thy_nl, list_wr_def, drop_spec, nat_base_thms,
-                              all_thms, drop_tree,
-                              nat_tlt_eqs_for_drop, drop_recinfo, alg)
+  install_structural_function(thy_nl, list_wr_def, drop_plan, all_thms, alg)
 
 check axioms_of(thy_drop).length() ~is axioms_before_drop
 check:
   (drop_info :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
-  ~is ["forall (x :: List('a)): drop(zero, x) === x",
+  ~is ["forall (x :: List(?a)): drop(zero, x) === x",
        "forall (x :: Nat): drop(succ(x), Nil) === Nil",
-       "forall (x :: Nat, y :: 'a, z :: List('a)): "
+       "forall (x :: Nat, y :: ?a, z :: List(?a)): "
          ++ "drop(succ(x), Cons(y, z)) === drop(x, z)"]
 
 // -- a definition that does not recurse at all -------------------------------
-//
-// `RecursionInfo.method` is `#'none`, not `#'structural`.  Nothing about
-// the derivation cares: `WFREC` still wants a well-founded relation, but
-// the congruence proof has no call to bridge.  Excluding these was costing
-// every non-recursive `function` one postulated equation.
+// No recursive call produces a `NoRecursion` plan. The normal function path
+// must choose ordinary/cases definition rather than manufacture a
+// well-founded recursion proof.
 
 def head_or_ph = mk_const(#'head_or, mk_fun(list_ty, nat_ty))
 def head_or_spec:
@@ -284,27 +265,18 @@ def head_or_spec:
           [DefClause([nil_ctor], zero_ctor),
            DefClause([list_mk_comb(cons_ctor, [x_var, rest_var])],
                      mk_comb(succ_ctor, zero_ctor))])
-def head_or_recinfo:
-  check_termination(#'function, #'head_or, 1,
-                    head_or_spec.clauses.map(fun (cl :: DefClause): [cl.pats, clause_terms(cl)]),
-                    head_or_ph)
+def head_or_prepared = prepare_function(thy_l, head_or_spec, specs_of(all_thms))
 
-check head_or_recinfo.method ~is #'none
-check:
-  can_derive_structurally(head_or_spec, head_or_recinfo,
-                          tree_of(head_or_spec), all_thms)
-  ~is #true
+check head_or_prepared.recursion ~matches NoRecursion()
 
 def axioms_before_head_or = axioms_of(thy_l).length()
 def (thy_head_or, head_or_info):
-  install_structural_function(thy_l, list_wr_def, head_or_spec, list_thms,
-                              all_thms, tree_of(head_or_spec),
-                              list_tlt_eqs, head_or_recinfo, alg)
+  define_nonrecursive(thy_l, head_or_prepared, all_thms)
 check axioms_of(thy_head_or).length() ~is axioms_before_head_or
 check:
   (head_or_info :~ FunInfo).equations.map(fun (t :: Thm): show(concl_of(t)))
   ~is ["head_or(Nil) === zero",
-       "forall (x :: 'a, y :: List('a)): head_or(Cons(x, y)) === succ(zero)"]
+       "forall (x :: ?a, y :: List(?a)): head_or(Cons(x, y)) === succ(zero)"]
 
 // -- Ackermann ---------------------------------------------------------------
 
@@ -329,13 +301,11 @@ def lex_spec:
                                                 [mk_comb(succ_ctor, m_var), k_var])]))])
 // Still no single descending column: that is what makes it the lexicographic
 // case rather than an ordinary structural one.
-check descent_column(lex_spec, lex_ph) ~is #false
+def lex_prepared = prepare_function(thy_n, lex_spec, specs_of(nat_only_thms))
+def lex_plan = plan_of(lex_prepared, nat_only_thms, nat_only_funs)
 
-check:
-  can_derive_structurally(lex_spec,
-                          RecursionInfo([0, 1], #'structural, [], []),
-                          DTLeaf(0, []), nat_only_thms)
-  ~is #true
+check lex_prepared.recursion ~matches StructuralRecursion([0, 1], [0, 1], _)
+check lex_plan.order ~matches LexOrder([0, 1], _)
 
 // -- a `~measure` definition ------------------------------------------------
 //
@@ -358,22 +328,33 @@ def cnt_spec:
           mk_abs(mk_var(#'n, nat_ty), mk_var(#'n, nat_ty)))
 
 // The measure lands in `Nat`, which is declared, so the derivation applies.
-check measure_result_type(cnt_spec) ~is nat_ty
-check descent_column(cnt_spec, cnt_ph) ~is #false
-check:
-  can_derive_structurally(cnt_spec,
-                          RecursionInfo([0], #'measure, [], []),
-                          function_decision_tree(#'function, cnt_spec, {#'Nat: nat_spec}),
-                          nat_only_thms)
-  ~is #true
+check measure_result_type(#'function, #'cnt, 1, cnt_spec.measure :~ Term) ~is nat_ty
 
-// A measure landing somewhere no datatype declares has no relation to pull
-// back, so it stays on the postulating seam.
+// `ASSUME` stands in for the waterfall: it returns a theorem of precisely
+// the instantiated decrease goal, letting preparation retain that proof.
+def thy_measure = new_constant(thy_n, #'pred_of, mk_fun(nat_ty, nat_ty))
+fun fake_measure_discharge(obligation :: Term) :: values(maybe(Thm), maybe(String)):
+  values(ASSUME(thy_measure, obligation), #false)
+
+def cnt_prepared:
+  prepare_function(thy_measure, cnt_spec, specs_of(nat_only_thms),
+                   ~measure: Measure(cnt_spec.measure :~ Term,
+                                     fake_measure_discharge))
+def cnt_plan = plan_of(cnt_prepared, nat_only_thms, nat_only_funs)
+
+check cnt_prepared.recursion ~matches MeasuredRecursion(nat_ty, [0], _, [_])
+check cnt_plan.order ~matches MeasureOrder(_)
+
+// A measure result without an installed subterm relation stays at the
+// axiomatic boundary; planning gives a precise reason rather than retrying
+// tree construction or termination analysis.
 check:
   let bool_measure = mk_abs(mk_var(#'n, nat_ty), tm_true)
-  can_derive_structurally(FunSpec(#'cntb, [nat_ty], nat_ty,
-                                  cnt_spec.clauses, bool_measure),
-                          RecursionInfo([0], #'measure, [], []),
-                          function_decision_tree(#'function, cnt_spec, {#'Nat: nat_spec}),
-                          nat_only_thms)
-  ~is #false
+  let bool_spec = FunSpec(#'cntb, [nat_ty], nat_ty,
+                          cnt_spec.clauses, bool_measure)
+  let bool_prepared = PreparedFunction(
+    bool_spec,
+    DTLeaf(0, []),
+    MeasuredRecursion(type_of(tm_true), [0], [], []))
+  plan_derivation(bool_prepared, nat_only_thms, nat_only_funs)
+  ~matches NotDerivable(MeasureNotOrdered(_))

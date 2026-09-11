@@ -35,23 +35,23 @@ export:
   decl_name
   syntax_error
 
-// `~a` reads as the keyword `#:a`; the logical side wants the plain symbol.
-fun keyword_symbol(k :: Syntax) :: Symbol:
-  Symbol.from_string(to_string(Syntax.unwrap(k)))
+// `?` is already one shrubbery operator token. A type variable is therefore
+// parsed structurally as that operator followed by one identifier; no string
+// splitting or keyword conversion is needed.
 
 fun syntax_error(who :: Symbol, message :: String, at :: Syntax):
   error(~who: who, message, error.val(~label: "in", to_string(at)))
 
 // -- types -------------------------------------------------------------------
 //
-// A type variable is written `~a`, which shrubbery reads as the keyword
-// `#:a`.  The specification writes `'a`, but `'` opens a syntax literal, so
-// `type List('a)` cannot be lexed at all.
+// A type variable is written `?a`. Shrubbery keeps `?` as one operator token
+// followed by the identifier `a`, which makes recognizing the prefix constant
+// time and leaves the identifier's source location intact.
 
 fun parse_type(stx :: Syntax, params :: List.of(Symbol)) :: HType:
   match stx
-  | '$(k :: Keyword)':
-      let n = keyword_symbol(k)
+  | '? $(id :: Identifier)':
+      let n = Syntax.unwrap(id)
       unless params.contains(n)
       | syntax_error(#'type, "unbound type variable", stx)
       mk_tyvar(n)
@@ -96,10 +96,10 @@ fun parse_type_decl(stx :: Syntax) :: DatatypeSpec:
 
 fun parse_param(stx :: Syntax) :: Symbol:
   match stx
-  | '$(k :: Keyword)': keyword_symbol(k)
+  | '? $(id :: Identifier)': Syntax.unwrap(id)
   | ~else:
       syntax_error(#'type,
-                   "a type parameter is written `~a`, not a plain name", stx)
+                   "a type parameter is written `?a`, not a plain name", stx)
 
 fun parse_ctor(stx :: Syntax, params :: List.of(Symbol)) :: Ctor:
   match stx
@@ -244,16 +244,17 @@ fun param_name(p :: Syntax) :: Syntax:
                    "a parameter needs a name and a type", p)
 
 fun collect_type_vars(stx :: Syntax) :: List.of(Symbol):
-  fun walk(d, acc :~ List) :~ List:
-    cond
-    | d is_a Keyword:
-        let n = Symbol.from_string(to_string(d))
-        (if acc.contains(n) | acc | acc ++ [n])
-    | d is_a List:
-        let items :~ List = d
-        for values(a :~ List = acc) (i in items): walk(i, a)
-    | ~else: acc
-  walk(Syntax.unwrap_all(stx), [])
+  fun add(acc :: List.of(Symbol), more :: List.of(Symbol)) :: List.of(Symbol):
+    for values(out :~ List = acc) (n in more):
+      (if out.contains(n) | out | out ++ [n])
+  match stx
+  | '? $(id :: Identifier)': [Syntax.unwrap(id)]
+  | 'Function($domain, $range)':
+      add(collect_type_vars(domain), collect_type_vars(range))
+  | '$(id :: Identifier)($arg, ...)':
+      for values(acc :~ List = []) (a in [arg, ...]):
+        add(acc, collect_type_vars(a))
+  | ~else: []
 
 fun fresh_wildcard(ty :: HType) :: FVar:
   mk_var(Symbol.gen("_wild"), ty)
@@ -403,7 +404,7 @@ fun core_const_instance(env :: PEnv, name :: Symbol,
                  | t: t)
   // A constant's type variables are schematic. Freshen them before
   // unification so a surrounding theorem variable with the same printed name
-  // cannot fail the occurs check (for example, equality on `List(~a)`).
+  // cannot fail the occurs check (for example, equality on `List(?a)`).
   let renaming:
     for values(m :~ Map = {}) (v in type_vars(generic)):
       m ++ {v: mk_tyvar(Symbol.gen(to_string(v))) :~ HType}

@@ -19,7 +19,7 @@ its pattern.
 Descending on a single argument is the one-element case:
 
 @rhombusblock(
-  function app(xs :: List(~a), ys :: List(~a)) :: List(~a):
+  function app(xs :: List(?a), ys :: List(?a)) :: List(?a):
     match xs
     | Nil(): ys
     | Cons(x, rest): Cons(x, app(rest, ys))
@@ -47,13 +47,15 @@ three calls.
 
 The search is greedy, and that is not an approximation: a column that is
 admissible at one step stays admissible, and taking it can only discharge call
-sites, so if any order works the greedy one does.
+sites, so if any order works the greedy one does. The recorded order contains
+only the columns needed to settle the calls. Separately, the prover records
+every position that descends at every call as an induction hint; those extra
+positions improve induction without widening the well-founded order.
 
-"Proper constructor subterm" is meant shallowly: the argument must be a field
-of the pattern at that position, at the same type. A deeper notion would admit
-definitions whose recursion the one-constructor-deep induction schemes could
-not follow, so the checker would be accepting functions the prover could not
-reason about.
+"Proper constructor subterm" may be reached through any number of recursive
+fields of the same datatype. A nested pattern variable is therefore a proper
+subterm exactly when the datatype's generated @tt{T_lt} relation connects it
+to the original pattern. Fields of other types do not count.
 
 @section{Measures}
 

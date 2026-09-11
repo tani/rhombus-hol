@@ -88,10 +88,7 @@ fun strip_who(msg :: String) :~ String:
        | msg
        | msg.substring((i + 2) .. msg.length()))
 
-class HolState(thy :: Theory,
-               db :: RuleDB,
-               dts :: Map.of(Symbol, DatatypeThms),
-               funs :: Map.of(Symbol, FunInfo),
+class HolState(ctx :: Context,
                thms :: Map.of(Symbol, Thm),
                // declaration order, for diagnostics
                names :: List.of(Symbol),
@@ -106,7 +103,7 @@ fun initial_state() :: HolState:
   // `wfrec_base_theory()`/`wfrec_base_def()` (`wfrec.rhm`) are memoized the
   // same way `bool.rhm`'s `base_theory()` is: `new_basic_definition` mints
   // a fresh `Stamp` on every call, so calling `build_wfrec_rel` fresh here
-  // would give every module's `HolState.thy` an incomparable stamp,
+  // would give every module's `HolState.ctx.thy` an incomparable stamp,
   // breaking `adopt`'s check the moment one module imports another's state.
   let thy = infinity_base_theory()
   // Propositional cleanup is in the database from the start: without it a
@@ -117,14 +114,14 @@ fun initial_state() :: HolState:
   // turn them off without also losing propositional cleanup.
   let db = for values(d :~ RuleDB = db) (th in conditionals(thy)):
              add_thm(thy, d, #'conditional, th)
-  HolState(thy, db, {}, {}, {}, [], wfrec_base_def())
+  HolState(mk_context(thy, ~rules: db), {}, [], wfrec_base_def())
 
 fun declared_names(st :: HolState) :: List.of(Symbol):
   st.names
 
 // The prover context for the state as it currently stands.
 fun state_context(st :: HolState) :: Context:
-  mk_context(st.thy, ~rules: st.db, ~datatypes: st.dts, ~functions: st.funs)
+  st.ctx
 
 // -- type --------------------------------------------------------------------
 
@@ -141,26 +138,26 @@ fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   let (thy2, thms) = try:
                        (cond
                         | is_nonrecursive_spec(spec):
-                            build_nonrecursive_datatype_thms(st.thy, spec)
+                            build_nonrecursive_datatype_thms(st.ctx.thy, spec)
                         | ~else:
                             // The two are exact complements -- a field is
                             // either the type itself or it is not -- so there
                             // is no third case and `datatype_axioms` is no
-                            // longer on this path at all.  It survives only as
+                            // longer on this path at all. It survives only as
                             // the differential baseline the derivations are
                             // tested against.
-                            build_recursive_datatype_thms(st.thy, spec,
-                                                          infinity_base_ind()))
+                            build_recursive_datatype_thms(
+                              st.ctx.thy, spec, infinity_base_ind()))
                        ~catch e :: Exn.Fail: hol_reraise(e, at)
-  require_no_new_axioms(#'type, st.thy, thy2, spec.name, at)
+  require_no_new_axioms(#'type, st.ctx.thy, thy2, spec.name, at)
   // Every equation the datatype brings -- injectivity, distinctness,
   // discriminators, selectors -- goes straight into the rule database, which
   // is what makes `match`-defined functions simplify.
-  let db2 = for values(d :~ RuleDB = st.db) (th in datatype_rules(thms)):
+  let db2 = for values(d :~ RuleDB = st.ctx.db) (th in datatype_rules(thms)):
               add_thm(thy2, d, spec.name, th)
+  let ctx2 = context_add_datatype(st.ctx, thy2, db2, spec.name, thms)
   add_subterm_relation(
-    HolState(thy2, db2, st.dts ++ {spec.name: thms}, st.funs, st.thms,
-             st.names ++ [spec.name], st.wfrec_def),
+    HolState(ctx2, st.thms, st.names ++ [spec.name], st.wfrec_def),
     spec, at)
 
 // Every recursive datatype brings its structural subterm relation with it, so
@@ -179,26 +176,25 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
   | #false: st
   | fs:
       let fs :~ FunSpec = fs
-      when const_type(st.thy, fs.name) != #false
+      when const_type(st.ctx.thy, fs.name) != #false
       | hol_error(#'type,
                   "the name of this datatype's subterm relation, "
                     ++ to_string(fs.name)
                     ++ ", is already taken",
                   at)
-      let dt :~ DatatypeThms = st.dts[spec.name]
+      let dt :~ DatatypeThms = st.ctx.dts[spec.name]
       let (thy2, equations) = try:
-                                derive_subterm_relation(st.thy, spec, dt)
+                                derive_subterm_relation(st.ctx.thy, spec, dt)
                                 ~catch e :: Exn.Fail: hol_reraise(e, at)
-      require_no_new_axioms(#'type, st.thy, thy2, fs.name, at)
+      require_no_new_axioms(#'type, st.ctx.thy, thy2, fs.name, at)
       require_closed_theorems(#'type, thy2, fs.name, equations, at)
       let self = mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol):
                                                        mk_tyvar(p) :~ HType))
-      // Not defined by recursion any more, so there is no descent to record.
       let info = FunInfo(fs, mk_const(fs.name, mk_fun(self, mk_fun(self, bool))),
-                         equations, RecursionInfo([], #'none, [], []))
-      let db2 = add_thms(thy2, st.db, fs.name, equations)
-      HolState(thy2, db2, st.dts, st.funs ++ {fs.name: info}, st.thms,
-               st.names ++ [fs.name], st.wfrec_def)
+                         equations, NoRecursion())
+      let db2 = add_thms(thy2, st.ctx.db, fs.name, equations)
+      let ctx2 = context_add_function(st.ctx, thy2, db2, fs.name, info)
+      HolState(ctx2, st.thms, st.names ++ [fs.name], st.wfrec_def)
 
 // -- function ----------------------------------------------------------------
 
@@ -222,202 +218,49 @@ fun install_declared_function(st :: HolState, core :: CoreFunctionSpec,
                               at :: Syntax,
                               ~postulate: postulate :: Boolean) :: HolState:
   let spec :~ FunSpec = try:
-                          elab.elaborate_function_decl(st.thy, core)
+                          elab.elaborate_function_decl(st.ctx.thy, core)
                           ~catch e :: Exn.Fail: hol_reraise(e, at)
-  let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.dts):
+  let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
-  try:
-    check_function_spec(st.thy, spec, dt_specs)
-    ~catch e :: Exn.Fail: hol_reraise(e, at)
-  // A definition that does not recurse is *defined* from its decision tree
-  // (`funcases.rhm`).  One that does gets a genuine `WFREC` derivation
-  // (`stepfn.rhm`) whenever an order can be built: structural descent in one
-  // column, several arguments over their tuple, a lexicographic product of
-  // several columns, or an explicit `~measure`.  What is left over --- a
-  // recursion scheme with no such order --- is refused here, and reaches
-  // `install_function`'s postulating seam only through
-  // `axiomatic_function`.
-  let arity = spec.arg_types.length()
-  let derivable:
-    cond
-    | arity == 0: NoArguments()
-    | ~else:
-        let fn_ph = mk_const(spec.name, fun_type(spec))
-        // A measure can only be discharged against the subterm relation of
-        // the type it lands in, so one landing anywhere else is not offered
-        // to the termination checker at all.  Handing it over anyway asks
-        // the checker to build a relation that was never declared, and the
-        // failure surfaces as an undeclared constant naming an internal
-        // spelling -- true, and no use to the author.
-        let measure_ty:
-          cond
-          | spec.measure: measure_result_type(spec)
-          | ~else: #false
-        let measure_usable = !spec.measure || has_subterm_relation(st, measure_ty)
-        let measure:
-          cond
-          | spec.measure && measure_usable:
-              Measure(spec.measure :~ Term, discharger(st))
-          | ~else: #false
-        let recinfo = try:
-                        check_termination(#'function, spec.name, arity,
-                                          spec.clauses.map(fun (cl :: DefClause): [cl.pats, clause_terms(cl)]),
-                                          fn_ph,
-                                          ~measure: measure)
-                        // The definition may still descend structurally, in
-                        // which case the unusable measure never mattered.
-                        // If it does not, the measure is what the author
-                        // was relying on, so say what is wrong with it.
-                        ~catch e :: Exn.Fail:
-                          cond
-                          | measure_usable: hol_reraise(e, at)
-                          | ~else:
-                              hol_error(#'function,
-                                        "a measure must land in a declared "
-                                          ++ "datatype that recurses: "
-                                          ++ type_to_string(measure_ty)
-                                          ++ " has no subterm relation for it "
-                                          ++ "to decrease in",
-                                        at)
-        // The same tree `check_function_spec` just checked, kept this time:
-        // `stepfn.rhm` builds `H` and its congruence proof from it, so the
-        // logical and executable readings of the patterns cannot drift.
-        let tree = try:
-                     function_decision_tree(#'function, spec, dt_specs)
-                     ~catch e :: Exn.Fail: hol_reraise(e, at)
-        match derivation_failure(spec, recinfo, tree, st.dts)
-        | f :: DeriveFailure: f
-        | ~else:
-            // `derivation_failure` has already checked that every type the
-            // order compares in is an instance of a datatype declared here;
-            // what is left is that each one's subterm relation was actually
-            // installed, which it is for every *recursive* datatype
-            // `add_type` declared.
-            //
-            // The types the order compares in: the measure's result type
-            // for a `~measure`, the descending column's for structural
-            // descent, and every ordered column's when the descent is
-            // lexicographic.  Each one needs its subterm relation to have
-            // been installed -- true of every *recursive* datatype
-            // `add_type` declared, and of no other -- so a definition over
-            // a non-recursive datatype has no order here and takes the
-            // definitional path instead.
-            let order_tys:
-              cond
-              | (recinfo :~ RecursionInfo).method == #'measure:
-                  [measure_result_type(spec)]
-              | ~else:
-                  match descent_column(spec, fn_ph,
-                                       ~usable: fun (ty :: HType):
-                                                  declared_datatype(st, ty))
-                  | k :: Int: [spec.arg_types[k]]
-                  | ~else:
-                      match lex_descent_columns(spec, fn_ph, st.dts)
-                      | ks :: List: for List (k in ks): spec.arg_types[k]
-                      | ~else: #false
-            cond
-            | !order_tys: NoOrder()
-            | !(for all (ty in order_tys :~ List): has_subterm_relation(st, ty)):
-                let missing = for values(acc :~ List = []) (ty in order_tys :~ List):
-                                if has_subterm_relation(st, ty)
-                                | acc
-                                | acc ++ [ty]
-                NoInstalledOrder(missing)
-            | ~else:
-                let tyname = (match (order_tys :~ List)[0] | TyApp(n, _): n)
-                [st.dts[tyname] :~ DatatypeThms, all_subterm_equations(st),
-                 recinfo, tree]
-  // Refused here rather than inside the `try` below: this is not a failure
-  // of the logical layer to be re-raised, it is this declaration form saying
-  // no.
-  // `axiomatic_function` postulates, full stop -- it does not quietly derive
-  // the ones it could.  A form whose meaning depends on which recursion
-  // schemes this version happens to handle is exactly what splitting the two
-  // forms was for, and it would be no better spelled this way round.
-  let plan = (if postulate || (derivable is_a DeriveFailure)
-              | #false
-              | derivable)
-  unless postulate || plan || nonrecursive_function(st, spec)
-  | hol_error(#'function,
-              "the termination analysis succeeded, but this version has no "
-                ++ "proof-producing definition compiler for this recursion "
-                ++ "scheme: "
-                ++ (match derivable
-                    | NoInstalledOrder(tys): describe_no_order(tys :~ List)
-                    | f :: DeriveFailure: describe_failure(f)
-                    | ~else: "the derivation does not apply")
-                ++ "; write `axiomatic_function` to postulate the equations "
-                ++ "instead",
-              at)
+  let prepared :~ PreparedFunction = try:
+                                      prepare_function(
+                                        st.ctx.thy, spec, dt_specs,
+                                        ~measure: prepare_measure(st, spec))
+                                      ~catch e :: Exn.Fail: hol_reraise(e, at)
   let (thy2, info0) = try:
-                        match plan
-                        | [thms, t_lt_equations, recinfo, tree]:
-                            install_structural_function(st.thy, st.wfrec_def, spec,
-                                                        thms :~ DatatypeThms,
-                                                        st.dts,
-                                                        tree :~ DecisionTree,
-                                                        t_lt_equations :~ List.of(Thm),
-                                                        recinfo :~ RecursionInfo,
-                                                        algebra_base_thms())
-                        | #false:
-                            // A function that does not call itself has
-                            // nothing to justify: its decision tree is
-                            // already a closed term, so it is *defined* and
-                            // its clausal equations are proved
-                            // (`funcases.rhm`).  Only recursion the deriver
-                            // cannot handle still reaches the postulating
-                            // seam.
-                            cond
-                            | !postulate && nonrecursive_function(st, spec):
-                                let tree = function_decision_tree(#'function,
-                                                                  spec,
-                                                                  dt_specs)
-                                let (t, info, _) = define_by_cases(st.thy, spec,
-                                                                   tree, st.dts)
-                                values(t, info)
-                            | ~else:
-                                // Only reachable under `postulate`: the
-                                // refusal above has already run.
-                                install_function(st.thy, spec, dt_specs,
-                                                 ~discharge: discharger(st))
+                        cond
+                        | postulate:
+                            install_axiomatic_function(st.ctx.thy, prepared,
+                                                       dt_specs)
+                        | prepared.recursion is_a NoRecursion:
+                            define_nonrecursive(st.ctx.thy, prepared, st.ctx.dts)
+                        | ~else:
+                            match plan_derivation(prepared, st.ctx.dts,
+                                                  st.ctx.funs)
+                            | NotDerivable(f):
+                                hol_error(
+                                  #'function,
+                                  "the termination analysis succeeded, but "
+                                    ++ "this version has no proof-producing "
+                                    ++ "definition compiler for this "
+                                    ++ "recursion scheme: "
+                                    ++ describe_failure(f)
+                                    ++ "; write `axiomatic_function` to "
+                                    ++ "postulate the equations instead",
+                                  at)
+                            | Derivable(plan):
+                                install_structural_function(
+                                  st.ctx.thy, st.wfrec_def, plan, st.ctx.dts,
+                                  algebra_base_thms())
                         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let info :~ FunInfo = info0
-  // `function` claims to add no axiom, so it is checked -- unconditionally,
-  // because every branch it can take is a derivation now.  Only
-  // `axiomatic_function` is exempt, and that is the whole difference between
-  // the two forms.
   unless postulate
-  | require_no_new_axioms(#'function, st.thy, thy2, spec.name, at)
+  | require_no_new_axioms(#'function, st.ctx.thy, thy2, spec.name, at)
     require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
-  // The defining equations become rewrite rules straight away: that is what
-  // makes a `match`-defined function compute during simplification.
-  let db2 = add_thms(thy2, st.db, spec.name, info.equations)
-  HolState(thy2, db2, st.dts, st.funs ++ {spec.name: info}, st.thms,
-           st.names ++ [spec.name], st.wfrec_def)
+  let db2 = add_thms(thy2, st.ctx.db, spec.name, info.equations)
+  let ctx2 = context_add_function(st.ctx, thy2, db2, spec.name, info)
+  HolState(ctx2, st.thms, st.names ++ [spec.name], st.wfrec_def)
 
-// The driver's own reason, beside `stepfn.rhm`'s: the order's type is a
-// datatype declared here, but a *non-recursive* one, so it has no subterm
-// relation to descend in.  `stepfn.rhm` cannot see this -- whether a
-// relation was installed is a fact about this module's state, not about the
-// definition.
-class NoInstalledOrder(types :: List.of(HType)):
-  extends DeriveFailure
-
-fun describe_no_order(tys :: List.of(HType)) :: String:
-  "the order would have to compare in "
-    ++ String.join(tys.map(fun (ty :: HType): type_to_string(ty)), ", ")
-    ++ ", which "
-    ++ (if tys.length() == 1 | "is not a recursive datatype" | "are not recursive datatypes")
-    ++ " declared here, so there is no subterm relation to descend in"
-
-// A type whose constructor names a datatype declared in this module.  Any
-// instance counts -- `List(Nat)` as much as `List(~a)` -- since a datatype's
-// theorems specialise to an instance by type substitution
-// (`instantiate_datatype`).
-fun declared_datatype(st :: HolState, ty :: HType) :: Boolean:
-  match ty
-  | TyApp(n, _): st.dts.get(n, #false) != #false
-  | ~else: #false
 
 // A path that claims to derive must not have added an axiom.  Every
 // declaration below that is documented as derived runs through this, so the
@@ -477,27 +320,40 @@ fun require_closed_theorems(who :: Symbol, thy :: Theory,
 fun has_subterm_relation(st :: HolState, ty :: HType) :: Boolean:
   match ty
   | TyApp(n, _):
-      st.dts.get(n, #false) != #false
-        && st.funs.get(subterm_relation_name(n), #false) != #false
+      st.ctx.dts.get(n, #false) != #false
+        && st.ctx.funs.get(subterm_relation_name(n), #false) != #false
   | ~else: #false
 
-// Every declared datatype's subterm-relation equations, together.  A
-// lexicographic order compares in more than one datatype, and the extra
-// equations are harmless where it compares in only one: they are rewrite
-// rules about relations the definition never mentions.
-fun all_subterm_equations(st :: HolState) :: List.of(Thm):
-  for values(acc :~ List = []) ((n, _) in st.dts):
-    match st.funs.get(subterm_relation_name(n), #false)
-    | #false: acc
-    | info: acc ++ (info :~ FunInfo).equations
+// A measure is checked only when structural descent did not settle the
+// declaration. An unusable landing type therefore becomes a targeted failure
+// only if the measure is actually needed.
+fun prepare_measure(st :: HolState, spec :: FunSpec) :: maybe(Measure):
+  match spec.measure
+  | #false: #false
+  | term:
+      match maybe_measure_result_type(spec)
+      | ty :: HType when !has_subterm_relation(st, ty):
+          Measure(term :~ Term,
+                  fun (_ :: Term):
+                    error(
+                      ~who: #'function,
+                      "a measure must land in a declared datatype that "
+                        ++ "recurses: " ++ type_to_string(ty)
+                        ++ " has no subterm relation for it to decrease in"))
+      | ~else: Measure(term :~ Term, discharger(st))
 
-// No clause's right-hand side mentions the function being declared, so there
-// is no recursion to justify -- whatever the patterns look like.
-fun nonrecursive_function(st :: HolState, spec :: FunSpec) :: Boolean:
-  let fn = mk_const(spec.name, fun_type(spec))
-  let recurses = for any (cl in spec.clauses):
-                   mentions(fn, (cl :~ DefClause).rhs)
-  !recurses && !spec.measure
+// `#false` leaves the diagnostic to `check_termination`, which can say that
+// the measure did not abstract every parameter. A structural recursion never
+// asks for that diagnostic.
+fun maybe_measure_result_type(spec :: FunSpec) :: maybe(HType):
+  recur loop (ty :~ HType = type_of(spec.measure :~ Term),
+              remaining = spec.arg_types.length()):
+    cond
+    | remaining == 0: ty
+    | is_fun(ty):
+        let (_, result) = dest_fun(ty)
+        loop(result, remaining - 1)
+    | ~else: #false
 
 // Discharge a termination obligation against the state as it stands -- which
 // is to say, without the function being defined.  That is not a limitation to
@@ -519,7 +375,7 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
                 at :: Syntax) :: HolState:
   let attrs = attr_kws.map(fun (k): Symbol.from_string(to_string(k)))
   let (statement, names) = try:
-                             elab.elaborate_theorem_statement(st.thy, stmt)
+                             elab.elaborate_theorem_statement(st.ctx.thy, stmt)
                              ~catch e :: Exn.Fail: hol_reraise(e, at)
   let induct = tactic.induct
   let using_names = tactic.using_names
@@ -530,7 +386,7 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
   let search_steps = tactic.search_steps
   // `~using:` adds named theorems for this proof only, and overrides
   // `disable_rules`: an explicit request beats a blanket one.
-  let db0 = for values(d :~ RuleDB = st.db) (u in (using_names :~ List)):
+  let db0 = for values(d :~ RuleDB = st.ctx.db) (u in (using_names :~ List)):
               match st.thms.get(u, #false)
               | #false:
                   hol_error(#'proof, "no such theorem to use: " ++ to_string(u), at)
@@ -538,16 +394,13 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
                   // `add_thm` does not touch `disabled`, so registering the
                   // theorem was not enough to override a module-level
                   // `disable_rules` -- the comment above claimed an override
-                  // the code did not perform.  Enable it explicitly.
-                  enable(add_thm(st.thy, d, u :~ Symbol, th :~ Thm),
+                  // the code did not perform. Enable it explicitly.
+                  enable(add_thm(st.ctx.thy, d, u :~ Symbol, th :~ Thm),
                          [u :~ Symbol])
   // `~in_theory:` disables further rules for this proof only, on top of the
-  // module's own `disable_rules`; it never re-enables one `disable_rules`
-  // already turned off, since the module-level rules are already baked into
-  // `st.db` by the time this runs.
+  // module's own `disable_rules`.
   let db = disable(db0, in_theory_names :~ List)
-  let ctx = mk_context(st.thy, ~rules: db, ~datatypes: st.dts,
-                       ~functions: st.funs)
+  let ctx = context_with_rules(st.ctx, db)
   let do_not = for values(acc :~ Set = Set()) (d in (do_not_names :~ List)):
                  acc ++ {d :~ Symbol}
   // Case terms and existential witnesses are elaborated against the theorem's
@@ -559,12 +412,12 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
   let cases:
     for List (c in case_exprs):
       try:
-        elab.parse_core_prop(st.thy, tyvars, env, c)
+        elab.parse_core_prop(st.ctx.thy, tyvars, env, c)
         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let witnesses:
     for List (w in witness_exprs):
       try:
-        elab.parse_core_prop(st.thy, tyvars, env, w)
+        elab.parse_core_prop(st.ctx.thy, tyvars, env, w)
         ~catch e :: Exn.Fail: hol_reraise(e, at)
   // A budget the proof asked for, or the default.  Nested searches still
   // join it rather than opening one of their own -- that is what makes the
@@ -590,9 +443,9 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
   | proved :~ Thm:
       let db2 = (cond
                  | attrs.contains(#'rewrite_rule) || attrs.contains(#'simp):
-                     add_thm(st.thy, st.db, name, proved)
-                 | ~else: st.db)
-      HolState(st.thy, db2, st.dts, st.funs, st.thms ++ {name: proved},
+                     add_thm(st.ctx.thy, st.ctx.db, name, proved)
+                 | ~else: st.ctx.db)
+      HolState(context_with_rules(st.ctx, db2), st.thms ++ {name: proved},
                st.names ++ [name], st.wfrec_def)
 
 // -- adopting an imported theory ----------------------------------------------
@@ -612,25 +465,25 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
 // together.  Keeping the lineage a chain is what makes this a comparison
 // rather than a theory merge.
 fun adopt(st :: HolState, imported :: HolState, at :: Syntax) :: HolState:
-  unless st.thy.stamp == imported.thy.stamp
-           || descends(st.thy.stamp, imported.thy.stamp)
+  unless st.ctx.thy.stamp == imported.ctx.thy.stamp
+           || descends(st.ctx.thy.stamp, imported.ctx.thy.stamp)
   | hol_error(#'import,
               "this theory does not extend the one in scope; an `import` of a "
                 ++ "theory must come before the module's own declarations, "
                 ++ "and several of them must be given in dependency order",
               at)
   // A rule switched off before the import stays off after it.
-  let off = for values(acc :~ List = []) (n in st.db.disabled): acc ++ [n]
-  HolState(imported.thy, disable(imported.db, off),
-           imported.dts, imported.funs, imported.thms, imported.names,
-           imported.wfrec_def)
+  let off = for values(acc :~ List = []) (n in st.ctx.db.disabled): acc ++ [n]
+  let ctx = context_with_rules(imported.ctx,
+                               disable(imported.ctx.db, off))
+  HolState(ctx, imported.thms, imported.names, imported.wfrec_def)
 
 // -- rule control ------------------------------------------------------------
 
 fun set_rules(st :: HolState, on :: Boolean,
               names :: List.of(Symbol)) :: HolState:
-  let db2 = (if on | enable(st.db, names) | disable(st.db, names))
-  HolState(st.thy, db2, st.dts, st.funs, st.thms, st.names, st.wfrec_def)
+  let db2 = (if on | enable(st.ctx.db, names) | disable(st.ctx.db, names))
+  HolState(context_with_rules(st.ctx, db2), st.thms, st.names, st.wfrec_def)
 
 fun datatype_rules(thms :: DatatypeThms) :: List.of(Thm):
   let inj = for values(acc :~ List = []) ((_, th) in thms.injectivity): acc ++ [th]
@@ -643,7 +496,7 @@ fun datatype_rules(thms :: DatatypeThms) :: List.of(Thm):
 // which is worth having because everything else depends on it.
 
 fun note_decl(st :: HolState, n :: Symbol) :: HolState:
-  HolState(st.thy, st.db, st.dts, st.funs, st.thms, st.names ++ [n], st.wfrec_def)
+  HolState(st.ctx, st.thms, st.names ++ [n], st.wfrec_def)
 
 fun expect_declared(st :: HolState, expected :: List.of(Symbol),
                     ~at: at :: Syntax) :: HolState:

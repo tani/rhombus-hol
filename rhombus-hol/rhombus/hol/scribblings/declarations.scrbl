@@ -22,7 +22,7 @@ type Id
 | ctor
 | ...
 
-type Id(~tyvar, ...)
+type Id(?tyvar, ...)
 | ctor
 | ...
 
@@ -31,13 +31,12 @@ ctor = CtorId()
 }
 
 Declares an @deftech{algebraic datatype}. A type variable is written
-@rhombus(~a) rather than @tt{'a}, because @tt{'} opens a syntax literal and
-could not be lexed here.
+@rhombus(?a).
 
 @rhombusblock(
-  type List(~a)
+  type List(?a)
   | Nil()
-  | Cons(head :: ~a, tail :: List(~a))
+  | Cons(head :: ?a, tail :: List(?a))
 )
 
 Logically this @emph{derives} the usual characterisation of the type ---
@@ -80,7 +79,7 @@ Declares a total, terminating function. The body must be in the grammar of
 expression.
 
 @rhombusblock(
-  function app(xs :: List(~a), ys :: List(~a)) :: List(~a):
+  function app(xs :: List(?a), ys :: List(?a)) :: List(?a):
     match xs
     | Nil(): ys
     | Cons(x, rest): Cons(x, app(rest, ys))
@@ -91,6 +90,12 @@ clause's variables, and each equation enters the rewriter. Before any of that
 the definition must pass three checks: the clauses must cover every case, no
 two may overlap, and the recursion must be shown to terminate
 (@secref("termination")).
+The compiler prepares that checked clause matrix once. An ordinary
+@rhombus(function, ~datum) defines a non-recursive matrix directly or derives
+its recursive equations from the selected well-founded order; the explicit
+@rhombus(axiomatic_function, ~datum) form reuses the same preparation and
+postulates those equations instead.
+
 
 Executably it emits a Rhombus @rhombus(fun) with the type annotations erased.
 The erasure is why the annotations may mention type variables that have no
@@ -210,10 +215,10 @@ follow its theorem immediately.
 
 @rhombusblock(
   theorem app_nil_r:
-    forall (xs :: List(~a)): app(xs, Nil()) === xs
+    forall (xs :: List(?a)): app(xs, Nil()) === xs
 
   theorem ~rewrite_rule app_assoc:
-    forall (xs :: List(~a), ys :: List(~a), zs :: List(~a)):
+    forall (xs :: List(?a), ys :: List(?a), zs :: List(?a)):
       app(app(xs, ys), zs) === app(xs, app(ys, zs))
   proof:
     auto ~induct: xs
@@ -258,7 +263,7 @@ built-in groups @rhombus(propositional, ~datum) and
   disable_rules [app]
 
   theorem about_app_without_unfolding_it:
-    forall (xs :: List(~a)): app(xs, Nil()) === app(xs, Nil())
+    forall (xs :: List(?a)): app(xs, Nil()) === app(xs, Nil())
 
   enable_rules [app]
 )

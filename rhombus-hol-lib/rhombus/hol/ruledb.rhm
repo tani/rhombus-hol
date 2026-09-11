@@ -30,6 +30,7 @@ export:
   spec_all_vars
   add_rule
   add_thm
+  add_rewrite_thm
   add_thms
   disable
   enable
@@ -138,7 +139,15 @@ fun strip_conditions(thy :: Theory, spec :: Thm) :: values(List.of(Term), Thm):
 
 fun mk_rule(thy :: Theory, name :: Symbol, th :: Thm)
      :: maybe(RewriteRule):
-  let (pvars, spec0) = spec_all_vars(thy, th)
+  let (pvars, spec) = spec_all_vars(thy, th)
+  mk_rule_from_spec(thy, name, pvars, spec)
+
+// `add_thm` may classify the same theorem both as rewrite and
+// type-prescription. It supplies this already-specialized view so quantified
+// variables are instantiated exactly once.
+fun mk_rule_from_spec(thy :: Theory, name :: Symbol,
+                      pvars :: List.of(FVar), spec0 :: Thm)
+     :: maybe(RewriteRule):
   let (conds, spec) = strip_conditions(thy, spec0)
   let (_, consequent) = strip_imp(concl_of(spec))
   match dest_eq(consequent)
@@ -176,7 +185,6 @@ fun mk_rule(thy :: Theory, name :: Symbol, th :: Thm)
               | ~else:
                   RewriteRule(name, spec, vars, conds, lhs, rhs, h,
                               is_variant(vars, lhs, rhs))
-
 fun type_vars_of(t :: Term) :: List.of(Symbol):
   fun add(ty :: HType, acc :~ List) :~ List:
     for values(a :~ List = acc) (x in type_vars(ty)):
@@ -226,28 +234,29 @@ fun type_prescription_head(spec :: Thm) :: maybe(Symbol):
           | ~else: #false
       | ~else: #false
 
-// Add a theorem as a rule, silently ignoring it when it cannot be oriented.
-// Independently of whether it became a rewrite rule, it may *also* be
-// registered as a type-prescription fact about some function's results --
-// the two classifications are not exclusive; see the comment on `RuleDB`.
+// Add a theorem as both applicable rule classes after one quantifier
+// specialization. Assumption contexts use `add_rewrite_thm` below instead,
+// because they never participate in type-prescription search.
 fun add_thm(thy :: Theory, db :: RuleDB, name :: Symbol, th :: Thm) :: RuleDB:
-  let db2 = add_thm_rewrite(db, thy, name, th)
-  let (_, spec) = spec_all_vars(thy, th)
+  let (pvars, spec) = spec_all_vars(thy, th)
+  let db2 :~ RuleDB:
+    match mk_rule_from_spec(thy, name, pvars, spec)
+    | #false: db
+    | rule: add_rule(db, rule)
   match type_prescription_head(spec)
   | #false: db2
   | fname:
       let cur = db2.type_by_head.get(fname, [])
-      // Kept with the name it was registered under, not just its head
-      // function, so `disable` can reach it: `add_thm(db, #'q_len_fact, th)`
-      // registers a fact *about* `length` under the name `q_len_fact`, and
-      // it is the latter a user disables.
       RuleDB(db2.by_head, db2.disabled,
              db2.type_by_head ++ {fname: List.cons([name, th], cur :~ List)})
 
-fun add_thm_rewrite(db :: RuleDB, thy :: Theory, name :: Symbol, th :: Thm) :: RuleDB:
+// Add only a rewrite rule. Local assumptions are never queried as
+// type-prescription facts, so classifying them there is avoidable work.
+fun add_rewrite_thm(thy :: Theory, db :: RuleDB, name :: Symbol,
+                    th :: Thm) :: RuleDB:
   match mk_rule(thy, name, th)
   | #false: db
-  | r: add_rule(db, r)
+  | rule: add_rule(db, rule)
 
 // A definition contributes one rule per clause; they share a name so that
 // `disable` can switch the whole definition off at once.
@@ -313,7 +322,7 @@ fun apply_rule(r :: RewriteRule, thy :: Theory, db :: RuleDB, t :: Term)
       // `INST(theta, INST_TYPE(tyin, src))`.  `m.theta`'s replacements are
       // already at the instantiated types, so for a polymorphic rule the
       // separately built condition came out at the wrong type and could
-      // never be discharged: `!x:'a. P x ==> f x = g x` simply never fired
+      // never be discharged: `!x:?a. P x ==> f x = g x` simply never fired
       // at a concrete type, even with `P(c)` in the database.
       //
       // Reading them back from the instantiated theorem removes the second
@@ -367,21 +376,20 @@ fun db_conv(db :: RuleDB):
     match head_symbol(t)
     | #false: #false
     | h:
-        // Nothing is charged here.  This loop is finite -- one pass over the
-        // rules stored under `h` -- so it is not what needs bounding, and
-        // charging for it would make a bare `db_conv` call, which never
-        // rewrites more than once, demand a resource scope.  The unbounded
-        // thing is repetition, and that is charged where it happens, in
-        // `REPEATC_BOUNDED`.  A side condition discharged from `apply_rule`
-        // rewrites through `simp_conv`, so it joins and spends this proof's
-        // budget rather than opening a fresh one.
-        recur loop (rs :~ List = rules_of(db, h)):
+        // Walk the indexed list directly. `rules_of` remains the allocating
+        // public inspection API; simplification does not need its filtered
+        // intermediate list.
+        recur loop (rs :~ List = db.by_head.get(h, [])):
           match rs
           | []: #false
           | List.cons(r, rest):
-              match apply_rule(r :~ RewriteRule, thy, db, t)
-              | #false: loop(rest)
-              | th: th
+              let rule :~ RewriteRule = r
+              cond
+              | rule.name in db.disabled: loop(rest)
+              | ~else:
+                  match apply_rule(rule, thy, db, t)
+                  | #false: loop(rest)
+                  | th: th
 
 
 // Close the tiny equality/implication tautologies that arise before the

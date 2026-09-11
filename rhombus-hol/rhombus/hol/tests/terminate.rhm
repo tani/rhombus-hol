@@ -1,10 +1,7 @@
 #lang rhombus/static
 
-// The lexicographic search, on its own.
-//
-// Driving it through `install_function` only ever shows whether a definition
-// was accepted; this shows which order was found, which is what the prover
-// later reads to pick an induction variable.
+// The termination planner on its own. It distinguishes the minimal
+// well-founded order from the broader induction heuristic.
 
 import:
   rhombus/hol/htype open
@@ -27,14 +24,13 @@ def q = mk_var(#'q, nat)
 
 def f = mk_const(#'f, mk_fun(nat, mk_fun(nat, nat)))
 
-// `[patterns, terms]` pairs, as `install_function` passes them: `terms` is
-// every term the clause evaluates (`core.rhm`), which for a body with no
-// `let` is the one term the equation states.  These tests write the body and
-// this wraps it.
-fun info(clauses :: List) :: RecursionInfo:
-  check_termination(#'test, #'f, 2,
-                    clauses.map(fun ([pats, rhs]): [pats, [rhs]]),
-                    f)
+// `[clause-index, patterns, terms]` triples. `terms` is every expression the
+// clause evaluates; the index is retained in each `RecSite`.
+fun info(clauses :: List) :: RecursionPlan:
+  let indexed = for List ([pats, rhs] in clauses,
+                          i in List.iota(clauses.length())):
+                  [i, pats, [rhs]]
+  check_termination(#'test, #'f, 2, indexed, f)
 
 fun call(args :: List.of(Term)) :: Term: list_mk_comb(f, args)
 
@@ -42,14 +38,13 @@ fun call(args :: List.of(Term)) :: Term: list_mk_comb(f, args)
 
 check:
   info([[[succ(p), n], call([p, n])]])
-  ~matches RecursionInfo([0], #'structural, _, [])
+  ~matches StructuralRecursion([0], [0], _)
 
-// A column that descends at every site is reported even when the first one
-// already settles every call, because the prover uses it as a hint.
-
+// The first column proves termination alone; the second still helps the
+// induction heuristic and therefore remains in `induction_positions` only.
 check:
   info([[[succ(p), succ(q)], call([p, q])]])
-  ~matches RecursionInfo([0, 1], #'structural, _, [])
+  ~matches StructuralRecursion([0], [0, 1], _)
 
 // -- neither argument descends everywhere -------------------------------------
 //
@@ -59,24 +54,22 @@ check:
 check:
   info([[[succ(p), zero], call([p, succ(zero)])],
         [[succ(p), succ(q)], call([succ(p), q])]])
-  ~matches RecursionInfo([0, 1], #'structural, _, [])
+  ~matches StructuralRecursion([0, 1], [0, 1], _)
 
 // Order matters: with the roles swapped the search has to pick column 1
 // first.
-
 check:
   info([[[zero, succ(q)], call([succ(zero), q])],
         [[succ(p), succ(q)], call([p, succ(q)])]])
-  ~matches RecursionInfo([1, 0], #'structural, _, [])
+  ~matches StructuralRecursion([1, 0], [1, 0], _)
 
 // One call holding a column while the other shrinks it is fine -- that is
-// what lexicographic order is for.  Here `m` is held and `n` shrinks, then
+// what lexicographic order is for. Here `m` is held and `n` shrinks, then
 // `m` shrinks; order [0, 1] settles both.
-
 check:
   info([[[succ(p), succ(q)], call([succ(p), q])],
         [[succ(p), succ(q)], call([p, succ(q)])]])
-  ~matches RecursionInfo([0, 1], #'structural, _, [])
+  ~matches StructuralRecursion([0, 1], [0, 1], _)
 
 // -- no order at all ----------------------------------------------------------
 //
@@ -90,15 +83,10 @@ check:
   ~throws "cannot see that the definition terminates"
 
 // -- not recursive at all -----------------------------------------------------
+check info([[[m, n], zero]]) ~matches NoRecursion()
 
-check info([[[m, n], zero]]) ~matches RecursionInfo([], #'none, [], [])
-
-// -- a measure retains the actual discharge proof, one per call site --------
-//
-// `check_measure` used to only check success/failure of `discharge` and
-// throw the proof away; `RecursionInfo.decrease_proofs` now keeps it, since
-// a `WFREC`-based derivation needs the real theorem for its congruence
-// obligation, not just a yes/no verdict.
+// A measured plan retains the actual discharge proof and the guarded call
+// sites that proof belongs to.
 
 def thy_m = new_constant(new_constant(new_constant(new_type(base_theory(), #'Nat, 0), #'zero, nat), #'succ, mk_fun(nat, nat)), #'Nat_lt, mk_fun(nat, mk_fun(nat, bool)))
 
@@ -112,18 +100,21 @@ def measure_id = mk_abs(m, mk_abs(n, m))
 def measure_spec = Measure(measure_id, fake_discharge)
 
 check:
-  let ri = check_termination(#'test, #'f, 2, [[[succ(p), n], [call([m, n])]]], f, ~measure: measure_spec)
-  let ri :~ RecursionInfo = ri
-  [ri.method, ri.decrease_proofs.length()]
-  ~is [#'measure, 1]
+  let plan = check_termination(
+    #'test, #'f, 2, [[0, [succ(p), n], [call([m, n])]]], f,
+    ~measure: measure_spec)
+  let plan :~ MeasuredRecursion = plan
+  [plan.result_type, plan.induction_positions, plan.decrease_proofs.length()]
+  ~is [nat, [0], 1]
 
 check:
-  let ri = check_termination(#'test, #'f, 2, [[[succ(p), n], [call([m, n])]]], f, ~measure: measure_spec)
-  let ri :~ RecursionInfo = ri
+  let plan = check_termination(
+    #'test, #'f, 2, [[0, [succ(p), n], [call([m, n])]]], f,
+    ~measure: measure_spec)
+  let plan :~ MeasuredRecursion = plan
   // The retained proof's conclusion is exactly the obligation this call
-  // site was asked to discharge: `Nat_lt(measure(m,n), measure(succ(p),n))`,
-  // universally closed over the clause's free variables.
-  show(concl_of(ri.decrease_proofs[0]))
+  // site was asked to discharge: `Nat_lt(measure(m,n), measure(succ(p),n))`.
+  show(concl_of(plan.decrease_proofs[0]))
   ~is "forall (x :: Nat, y :: Nat): Nat_lt(x, succ(y))"
 
 // Structural descent still needs no proof at all -- it is a syntactic fact,
@@ -131,11 +122,13 @@ check:
 
 check:
   info([[[succ(p), n], call([p, n])]])
-  ~matches RecursionInfo(_, #'structural, _, [])
+  ~matches StructuralRecursion(_, _, _)
 
 fun always_fails(obligation :: Term) :: values(maybe(Thm), maybe(String)):
   values(#false, "no proof")
 
 check:
-  check_termination(#'test, #'f, 2, [[[succ(p), n], [call([m, n])]]], f, ~measure: Measure(measure_id, always_fails))
+  check_termination(
+    #'test, #'f, 2, [[0, [succ(p), n], [call([m, n])]]], f,
+    ~measure: Measure(measure_id, always_fails))
   ~throws "cannot see that the measure decreases"

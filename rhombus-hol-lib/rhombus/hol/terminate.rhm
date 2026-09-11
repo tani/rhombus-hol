@@ -2,10 +2,9 @@
 
 // Termination checking for recursive definitions.
 //
-// The output is a `RecursionInfo`, and it is *also* the input to the
-// induction-scheme generator: the argument position a function recurses on is
-// the position the prover should induct on.  Computing it twice would let the
-// two drift apart, so it is computed once, here.
+// The output is a `RecursionPlan`. It records the exact order that settles
+// termination separately from the broader induction hint, so the proof
+// compiler never has to rediscover either one.
 //
 // Two methods, tried in that order:
 //
@@ -36,8 +35,11 @@ import:
   "bool.rhm" open
 
 export:
-  RecursionInfo
-  CallSite
+  RecSite
+  RecursionPlan
+  NoRecursion
+  StructuralRecursion
+  MeasuredRecursion
   Measure
   check_termination
   descends_at
@@ -45,24 +47,36 @@ export:
   call_sites_in
   measure_at
   mentions
-  lexicographic_order
+  measure_result_type
+  termination_order
 
-class CallSite(args :: List.of(Term))
+// A recursive call under one clause and its branch conditions. The clause
+// index recovers patterns from `FunSpec`, so patterns are not copied here.
+class RecSite(clause :: Int,
+              guards :: List.of(Term),
+              args :: List.of(Term))
 
-class RecursionInfo(// argument positions that strictly decrease, or -- for a
-                    // measure -- that the measure reads; empty for a
-                    // non-recursive definition
-                    positions :: List.of(Int),
-                    method :: Symbol,          // #'none | #'structural | #'measure
-                    sites :: List.of(CallSite),
-                    // The actual decrease proof discharged at each measure
-                    // call site, in the same order as `sites` -- empty for
-                    // `#'none`/`#'structural`, where descent is a syntactic
-                    // fact (`descends_at`) rather than a kernel theorem.
-                    // This is what a `WFREC`-based derivation needs for its
-                    // congruence obligation and records the corresponding
-                    // decrease proofs.
-                    decrease_proofs :: List.of(Thm))
+class.together:
+  class RecursionPlan():
+    nonfinal
+
+  class NoRecursion():
+    extends RecursionPlan
+
+  class StructuralRecursion(
+    // The minimum lexicographic order that settles all recursive calls.
+    order :: List.of(Int),
+    // A broader heuristic for selecting induction variables.
+    induction_positions :: List.of(Int),
+    sites :: List.of(RecSite)):
+    extends RecursionPlan
+
+  class MeasuredRecursion(
+    result_type :: HType,
+    induction_positions :: List.of(Int),
+    sites :: List.of(RecSite),
+    decrease_proofs :: List.of(Thm)):
+    extends RecursionPlan
 
 // `term` is `fun (p1, ..., pn): e`, an abstraction over the parameters, so
 // that instantiating it at a clause's patterns or at a call's arguments is
@@ -93,20 +107,18 @@ fun descends_at(pat :: Term, arg :: Term) :: Boolean:
             type_of(f) == type_of(pat) && (f == arg || descends_at(f, arg))
       | ~else: #false
 
-// Look for one argument position that descends at every recursive call in
-// every clause; failing that, check the measure if there is one.
-//
-// The clauses arrive as `[patterns, body]` pairs rather than as the
-// `FunSpec` that `recdef.rhm` owns: the induction-scheme generator needs this
-// module too, and passing the two fields it reads keeps the dependency going
-// one way only.
+// Collect recursive calls from the prepared clause triples. This module does
+// not depend on `FunSpec`, because induction uses the same analysis data.
+// `clauses` contains `[clause-index, patterns, evaluated-terms]`; preserving
+// the clause index, guards, and arguments in `RecSite` lets later derivation
+// use the result without traversing right-hand sides again.
 fun check_termination(who :: Symbol,
                       name :: Symbol,
                       arity :: Int,
                       clauses :: List,
                       fn :: Term,
                       ~measure: measure :: maybe(Measure) = #false)
-     :: RecursionInfo:
+     :: RecursionPlan:
   // Collect every recursive call together with the clause patterns it sits
   // under and the branch conditions guarding it, so that a failure can point
   // at the offending call and a measure obligation can assume its context.
@@ -115,42 +127,43 @@ fun check_termination(who :: Symbol,
   // still run, and a recursive call inside it still has to descend
   // (`core.rhm`).
   // A `let` initializer is an obligation *and*, where the body reads it, a
-  // subterm of the right-hand side, so the same call is found twice.  The
+  // subterm of the right-hand side, so the same call is found twice. The
   // duplicate is one call, and discharging its obligation twice is wasted
   // work -- for a `~measure` it is a second proof of the same thing.
   //
   // Deduplicated on the whole site, patterns and guards included, never on
-  // the call alone.  The two are genuinely different sites when the guards
-  // differ: in
-  //
-  //   let x = f(k)
-  //   if p | x | zero()
-  //
-  // `f(k)` runs unconditionally, and the occurrence inside the `if` runs
-  // under `p`.  Keeping only the guarded one would be unsound; keeping only
-  // the unguarded one happens to be right here and is not right in general,
-  // so neither is dropped.
-  let all_sites = for values(acc :~ List = []) ([pats, terms] in clauses):
+  // the call alone. The two are genuinely different sites when the guards
+  // differ.
+  let all_sites = for values(acc :~ List = []) ([clause, pats, terms] in clauses):
                     for values(a :~ List = acc) (t in terms :~ List):
                       let calls = call_sites_in(who, name, fn, arity,
                                                 t :~ Term)
-                      for values(b :~ List = a) ([conds, args] in calls):
-                        let site = [pats, conds, args]
+                      for values(b :~ List = a) ([guards, args] in calls):
+                        let site = [clause, pats, guards, args]
                         if b.contains(site) | b | b ++ [site]
   cond
   | all_sites.length() == 0:
-      RecursionInfo([], #'none, [], [])
+      NoRecursion()
   | ~else:
-      let sites = all_sites.map(fun ([_, _, args]): CallSite(args :~ List))
-      let order = lexicographic_order(arity, all_sites)
+      let sites = all_sites.map(
+        fun ([clause, _, guards, args]):
+          RecSite(clause :~ Int, guards :~ List, args :~ List))
+      let order = termination_order(arity, all_sites)
       cond
-      | order: RecursionInfo(order :~ List, #'structural, sites, [])
+      | order:
+          let order :~ List = order
+          StructuralRecursion(order,
+                              induction_positions(arity, all_sites, order),
+                              sites)
       | measure:
           let m :~ Measure = measure
-          let proofs = check_measure(who, name, arity, fn, m, all_sites)
-          RecursionInfo(measure_positions(arity, m.term), #'measure, sites, proofs)
+          let result_type = measure_result_type(who, name, arity, m.term)
+          let proofs = check_measure(who, name, arity, fn, m, result_type,
+                                     all_sites)
+          MeasuredRecursion(result_type, measure_positions(arity, m.term),
+                            sites, proofs)
       | ~else:
-          let [pats, _, args] = all_sites[0]
+          let [_, pats, _, args] = all_sites[0]
           error(~who: who,
                 "cannot see that the definition terminates",
                 error.val(~label: "name", name),
@@ -179,17 +192,17 @@ fun check_termination(who :: Symbol,
 // Descending on one argument is the common case and comes out as a
 // single-element order, so this subsumes the plain structural check rather
 // than sitting beside it.
-fun lexicographic_order(arity :: Int, all_sites :: List) :: maybe(List.of(Int)):
+fun termination_order(arity :: Int, all_sites :: List) :: maybe(List.of(Int)):
   recur loop (pending :~ List = all_sites, used :~ List = [], order :~ List = []):
     cond
-    | pending.length() == 0: order ++ fully_descending(arity, all_sites, order)
+    | pending.length() == 0: order
     | ~else:
         match next_column(arity, pending, used)
         | #false: #false
         | col:
             let col :~ Int = col
             let rest = pending.filter(
-              ~keep: fun ([pats, _, args]):
+              ~keep: fun ([_, pats, _, args]):
                        !descends_at((pats :~ List)[col], (args :~ List)[col]))
             loop(rest, used ++ [col], order ++ [col])
 
@@ -199,27 +212,26 @@ fun next_column(arity :: Int, pending :: List, used :: List.of(Int)) :: maybe(In
     | i >= arity: #false
     | used.contains(i): loop(i + 1)
     | ~else:
-        let ok = for all ([pats, _, args] in pending):
+        let ok = for all ([_, pats, _, args] in pending):
                    let p = (pats :~ List)[i]
                    let a = (args :~ List)[i]
                    descends_at(p, a) || a == p
-        let any_shrinks = for any ([pats, _, args] in pending):
+        let any_shrinks = for any ([_, pats, _, args] in pending):
                             descends_at((pats :~ List)[i], (args :~ List)[i])
         (if ok && any_shrinks | i | loop(i + 1))
 
-// Columns that shrink at *every* call site, beyond those the order already
-// names.  They are not needed for termination, but the prover uses them to
-// pick an induction variable, and a column that always shrinks is a good
-// guess whether or not the lexicographic search happened to reach it.
-fun fully_descending(arity :: Int, all_sites :: List,
-                     order :: List.of(Int)) :: List.of(Int):
-  for values(acc :~ List = []) (i in List.iota(arity)):
+// Columns that shrink at every site are useful induction hints even when the
+// shortest termination order did not need them. They do not enlarge the
+// well-founded relation.
+fun induction_positions(arity :: Int, all_sites :: List,
+                        order :: List.of(Int)) :: List.of(Int):
+  for values(acc :~ List = order) (i in List.iota(arity)):
     cond
     | order.contains(i): acc
     | ~else:
-        let ok = for all ([pats, _, args] in all_sites):
-                   descends_at((pats :~ List)[i], (args :~ List)[i])
-        (if ok | acc ++ [i] | acc)
+        let all_descend = for all ([_, pats, _, args] in all_sites):
+                            descends_at((pats :~ List)[i], (args :~ List)[i])
+        (if all_descend | acc ++ [i] | acc)
 
 // -- the measure -------------------------------------------------------------
 
@@ -260,19 +272,19 @@ fun measure_at(m :: Term, args :: List.of(Term)) :: Term:
 // exactly the statement that it has no infinite descending chains; see
 // `subterm.rhm`.
 fun check_measure(who :: Symbol, name :: Symbol, arity :: Int, fn :: Term,
-                  measure :: Measure, all_sites :: List) :: List.of(Thm):
-  let mty = measure_type(who, name, arity, measure.term)
-  let tyname = (match mty
+                  measure :: Measure, result_type :: HType,
+                  all_sites :: List) :: List.of(Thm):
+  let tyname = (match result_type
                 | TyApp(n, _) when n != ty_fun && n != ty_bool: n
                 | ~else:
                     error(~who: who,
                           "a measure must land in a declared datatype that recurses",
                           error.val(~label: "name", name),
                           error.val(~label: "measure type",
-                                    type_to_string(mty))))
-  let relname = subterm_relation_name(tyname)
-  let rel = mk_const(relname, mk_fun(mty, mk_fun(mty, bool)))
-  for List ([pats, conds, args] in all_sites):
+                                    type_to_string(result_type))))
+  let rel = mk_const(subterm_relation_name(tyname),
+                     mk_fun(result_type, mk_fun(result_type, bool)))
+  for List ([_, pats, guards, args] in all_sites):
     let pats :~ List = pats
     let args :~ List = args
     // The obligation would mention `fn`, which is not a constant yet.
@@ -288,7 +300,7 @@ fun check_measure(who :: Symbol, name :: Symbol, arity :: Int, fn :: Term,
                           ++ "nested recursion"))
     let core = list_mk_comb(rel, [measure_at(measure.term, args),
                                   measure_at(measure.term, pats)])
-    let guarded = for values(acc :~ Term = core) (c in (conds :~ List).reverse()):
+    let guarded = for values(acc :~ Term = core) (c in (guards :~ List).reverse()):
                     mk_imp(c, acc)
     let obligation = mk_forall_list(free_vars(guarded), guarded)
     let (th_opt, residue) = measure.discharge(obligation)
@@ -307,8 +319,8 @@ fun check_measure(who :: Symbol, name :: Symbol, arity :: Int, fn :: Term,
 
 // The measure's result type, checking on the way that it really is an
 // abstraction over every parameter.
-fun measure_type(who :: Symbol, name :: Symbol, arity :: Int,
-                 m :: Term) :: HType:
+fun measure_result_type(who :: Symbol, name :: Symbol, arity :: Int,
+                        m :: Term) :: HType:
   recur loop (ty :~ HType = type_of(m), k = arity):
     cond
     | k == 0: ty

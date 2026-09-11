@@ -8,17 +8,17 @@ executable Rhombus code.
 ```rhombus
 #lang rhombus/hol
 
-type List(~a)
+type List(?a)
 | Nil()
-| Cons(head :: ~a, tail :: List(~a))
+| Cons(head :: ?a, tail :: List(?a))
 
-function app(xs :: List(~a), ys :: List(~a)) :: List(~a):
+function app(xs :: List(?a), ys :: List(?a)) :: List(?a):
   match xs
   | Nil(): ys
   | Cons(x, rest): Cons(x, app(rest, ys))
 
 theorem ~rewrite_rule app_nil_r:
-  forall (xs :: List(~a)): app(xs, Nil()) === xs
+  forall (xs :: List(?a)): app(xs, Nil()) === xs
 ```
 
 That module exports a working `app` function, and it does not compile unless

@@ -66,7 +66,7 @@ comparison: none of the three exists in @tt{fusion.ml} either, and none of
 the three is one of the ten rules or a definitional principle --- printing
 lives beside the kernel only because @tt{check_term}'s error messages need it;
 moving it would create a circular import. Type unification was already moved
-out to the elaborator (@tt{rhombus-hol-lib/.../elab.rhm}) before this section
+out to the elaborator (@tt{rhombus-hol-prover/.../elab.rhm}) before this section
 was written.
 
 @section{The axioms}

@@ -1,0 +1,173 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD AND BSD-2-Clause
+
+import:
+  "htype.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "kernel_generated.rhm" as generated
+
+export:
+  Stamp
+  Thm
+  Theory
+  fresh_generation
+  raw_thm
+  raw_thm_theory
+  raw_theory
+  descends
+  combine_stamps
+  later_raw_theory
+  wrap_raw_thm
+  make_initial_theory
+  extend_with_delta
+  hyps_of
+  concl_of
+  stamp_of
+  type_arity
+  const_type
+  axioms_of
+  definition_of
+  in_theory
+
+class Stamp(id :: Symbol,
+            gen :: Int,
+            ancestors :: Set.of(Symbol),
+            private raw):
+  constructor ~none
+  reconstructor ~none
+  internal _Stamp
+
+class Thm(hyps :: List.of(Term),
+          concl :: Term,
+          stamp :: Stamp,
+          private raw,
+          private raw_theory):
+  authentic
+  constructor ~none
+  reconstructor ~none
+  internal _Thm
+  private implements Equatable
+  private override equals(other :: Thm, recur):
+    (recur(concl, other.concl)
+       && hyps.length() == other.hyps.length()
+       && (for all (h in hyps):
+             for any (k in other.hyps): recur(h, k)))
+  private override hash_code(recur):
+    let hs = for values(acc = 0) (h in hyps): acc + recur(h)
+    Equatable.hash_code_combine(recur(concl), hyps.length(), hs)
+
+class Theory(private tyops :: Map.of(Symbol, Int),
+             private consts :: Map.of(Symbol, HType),
+             private axioms :: List.of(Thm),
+             private defs :: Map.of(Symbol, Thm),
+             stamp :: Stamp,
+             private raw):
+  constructor ~none
+  reconstructor ~none
+  internal _Theory
+
+fun raw_thm(th :: Thm): _Thm.raw(th)
+fun raw_thm_theory(th :: Thm): _Thm.raw_theory(th)
+fun raw_theory(thy :: Theory): _Theory.raw(thy)
+
+fun theory_tyops(thy :: Theory) :: Map.of(Symbol, Int): _Theory.tyops(thy)
+fun theory_consts(thy :: Theory) :: Map.of(Symbol, HType): _Theory.consts(thy)
+fun theory_axioms(thy :: Theory) :: List.of(Thm): _Theory.axioms(thy)
+fun theory_defs(thy :: Theory) :: Map.of(Symbol, Thm): _Theory.defs(thy)
+
+fun fresh_stamp(raw) :: Stamp:
+  let id = Symbol.uninterned_from_string("thy")
+  _Stamp(id, 0, {id}, raw)
+
+fun next_stamp(prev :: Stamp, raw) :: Stamp:
+  let id = Symbol.uninterned_from_string("thy")
+  _Stamp(id, prev.gen + 1, prev.ancestors ++ {id}, raw)
+
+def stamp_serial :: Box = Box(0)
+
+fun fresh_generation() :: NonnegInt:
+  let n = stamp_serial.value :~ NonnegInt
+  stamp_serial.value := n + 1
+  n
+
+fun descends(a :: Stamp, b :: Stamp) :: Boolean:
+  a.id in b.ancestors
+
+fun combine_stamps(who :: Symbol, a :: Stamp, b :: Stamp) :: Stamp:
+  cond
+  | descends(a, b): b
+  | descends(b, a): a
+  | ~else:
+      error(~who: who,
+            "theorems come from different theories",
+            error.val(~label: "detail",
+                      "neither theory is an extension of the other, so the "
+                        ++ "two theorems may disagree about what a shared name means"))
+
+fun later_raw_theory(a :: Thm, b :: Thm):
+  (if descends(a.stamp, b.stamp) | raw_thm_theory(b) | raw_thm_theory(a))
+
+fun wrap_raw_thm(raw, stamp :: Stamp, raw_thy) :: Thm:
+  _Thm(generated.hyps(raw), generated.concl(raw), stamp, raw, raw_thy)
+
+fun hyps_of(th :: Thm) :: List.of(Term): th.hyps
+fun concl_of(th :: Thm) :: Term: th.concl
+fun stamp_of(th :: Thm) :: Stamp: th.stamp
+
+fun type_arity(thy :: Theory, n :: Symbol) :: maybe(Int):
+  theory_tyops(thy).get(n, #false)
+
+fun const_type(thy :: Theory, n :: Symbol) :: maybe(HType):
+  theory_consts(thy).get(n, #false)
+
+fun axioms_of(thy :: Theory) :: List.of(Thm): theory_axioms(thy)
+fun definition_of(thy :: Theory, n :: Symbol) :: maybe(Thm):
+  theory_defs(thy).get(n, #false)
+
+fun make_initial_theory() :: Theory:
+  let raw = generated.initial_theory(fresh_generation())
+  let a = mk_tyvar(v_alpha)
+  _Theory({ty_bool: 0, ty_fun: 2},
+          {c_eq: mk_fun(a, mk_fun(a, mk_tyapp(ty_bool, [])))},
+          [],
+          {},
+          fresh_stamp(generated.thy_stamp(raw)),
+          raw)
+
+fun extend_with_delta(thy :: Theory, raw, delta) :: values(Theory, List.of(Thm)):
+  let st = next_stamp(thy.stamp, generated.thy_stamp(raw))
+  match delta
+  | generated.TypeDelta(n, arity):
+      values(_Theory(theory_tyops(thy) ++ {n: arity},
+                     theory_consts(thy), theory_axioms(thy), theory_defs(thy),
+                     st, raw),
+             [])
+  | generated.ConstantDelta(n, ty):
+      values(_Theory(theory_tyops(thy), theory_consts(thy) ++ {n: ty},
+                     theory_axioms(thy), theory_defs(thy), st, raw),
+             [])
+  | generated.AxiomDelta(raw_th):
+      let th = wrap_raw_thm(raw_th, st, raw)
+      values(_Theory(theory_tyops(thy), theory_consts(thy),
+                     List.cons(th, theory_axioms(thy)), theory_defs(thy), st, raw),
+             [th])
+  | generated.DefinitionDelta(n, ty, raw_th):
+      let th = wrap_raw_thm(raw_th, st, raw)
+      values(_Theory(theory_tyops(thy), theory_consts(thy) ++ {n: ty},
+                     theory_axioms(thy), theory_defs(thy) ++ {n: th}, st, raw),
+             [th])
+  | generated.TypeDefinitionDelta(tyname, arity,
+                                  absname, abs_ty, repname, rep_ty,
+                                  raw_abs_rep, raw_pred):
+      let abs_rep = wrap_raw_thm(raw_abs_rep, st, raw)
+      let pred_th = wrap_raw_thm(raw_pred, st, raw)
+      values(_Theory(theory_tyops(thy) ++ {tyname: arity},
+                     theory_consts(thy) ++ {absname: abs_ty, repname: rep_ty},
+                     theory_axioms(thy), theory_defs(thy), st, raw),
+             [abs_rep, pred_th])
+
+fun in_theory(who :: Symbol, thy :: Theory, th :: Thm) :: Void:
+  unless descends(th.stamp, thy.stamp)
+  | error(~who: who,
+          "theorem was not proved in this theory or an ancestor of it")

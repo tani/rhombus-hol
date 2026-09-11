@@ -3,11 +3,9 @@
 // Conservatively covered by the HOL Light notice in THIRD_PARTY_NOTICES.
 
 // Public compatibility boundary for the Isabelle-generated LCF kernel.
-// `kernel_generated.rhm` is the theorem-producing implementation. This module
-// preserves the established Symbol/HType/Term API, error behavior, readable
-// theorem fields, derivation tracing, and opaque Stamp/Theory/Thm types. The
-// generated values carried in private fields are the authority used by every
-// primitive inference and theory extension.
+// The generated module decides every primitive inference and theory extension;
+// this module supplies opaque public values, stable errors, queries, and trace
+// events without reimplementing generated validity checks.
 
 import:
   "htype.rhm" open
@@ -15,6 +13,9 @@ import:
   "names.rhm" open
   "printer.rhm" open
   "kernel_generated.rhm" as generated
+  "kernel_values.rhm" open
+  "kernel_errors.rhm" open
+  "kernel_trace.rhm" open
 
 export:
   hol_version
@@ -53,109 +54,41 @@ export:
   definition_of
   hyps
   trace
-  all_from("htype.rhm")
-  all_from("term.rhm")
 
 def hol_version :: String = "0.1"
 
-// -- generated stamp source ------------------------------------------------
-
-def stamp_serial :: Box = Box(0)
-
-fun fresh_generation() :: NonnegInt:
-  let n = stamp_serial.value :~ NonnegInt
-  stamp_serial.value := n + 1
-  n
-
-// -- opaque public values ---------------------------------------------------
-
-class Stamp(id :: Symbol,
-            gen :: Int,
-            ancestors :: Set.of(Symbol),
-            private raw):
-  constructor ~none
-  reconstructor ~none
-  internal _Stamp
-
-class Thm(hyps :: List.of(Term),
-          concl :: Term,
-          stamp :: Stamp,
-          private raw,
-          private raw_theory):
-  authentic
-  constructor ~none
-  reconstructor ~none
-  internal _Thm
-  private implements Equatable
-  private override equals(other :: Thm, recur):
-    (recur(concl, other.concl)
-       && hyps.length() == other.hyps.length()
-       && (for all (h in hyps):
-             for any (k in other.hyps): recur(h, k)))
-  private override hash_code(recur):
-    let hs = for values(acc = 0) (h in hyps): acc + recur(h)
-    Equatable.hash_code_combine(recur(concl), hyps.length(), hs)
-
-class Theory(tyops :: Map.of(Symbol, Int),
-             consts :: Map.of(Symbol, HType),
-             axioms :: List.of(Thm),
-             defs :: Map.of(Symbol, Thm),
-             stamp :: Stamp,
-             private raw):
-  constructor ~none
-  reconstructor ~none
-  internal _Theory
-
-fun raw_stamp(st :: Stamp): _Stamp.raw(st)
-fun raw_thm(th :: Thm): _Thm.raw(th)
-fun raw_thm_theory(th :: Thm): _Thm.raw_theory(th)
-fun raw_theory(thy :: Theory): _Theory.raw(thy)
-
-fun fresh_stamp(raw) :: Stamp:
-  let id = Symbol.uninterned_from_string("thy")
-  _Stamp(id, 0, {id}, raw)
-
-fun next_stamp(prev :: Stamp, raw) :: Stamp:
-  let id = Symbol.uninterned_from_string("thy")
-  _Stamp(id, prev.gen + 1, prev.ancestors ++ {id}, raw)
-
-fun descends(a :: Stamp, b :: Stamp) :: Boolean:
-  a.id in b.ancestors
-
-fun combine_stamps(who :: Symbol, a :: Stamp, b :: Stamp) :: Stamp:
-  cond
-  | descends(a, b): b
-  | descends(b, a): a
-  | ~else:
-      error(~who: who,
-            "theorems come from different theories",
-            error.val(~label: "detail",
-                      "neither theory is an extension of the other, so the "
-                        ++ "two theorems may disagree about what a shared name means"))
-
-fun later_raw_theory(a :: Thm, b :: Thm):
-  (if descends(a.stamp, b.stamp) | raw_thm_theory(b) | raw_thm_theory(a))
-
-fun wrap_raw_thm(raw, stamp :: Stamp, raw_thy) :: Thm:
-  _Thm(generated.hyps(raw),
-       generated.concl(raw),
-       stamp,
-       raw,
-       raw_thy)
-
-fun generated_thm(who :: Symbol, result, stamp :: Stamp, raw_thy,
-                  on_failure) :: Thm:
+fun generated_thm(who :: Symbol, result, stamp :: Stamp, raw_thy) :: Thm:
   match result
   | generated.Success(raw): wrap_raw_thm(raw, stamp, raw_thy)
-  | generated.Failure(_):
-      on_failure()
-      error(~who: who, "generated kernel rejected the inference")
+  | generated.Failure(failure): raise_generated_failure(who, failure)
 
-fun hyps_of(th :: Thm) :: List.of(Term): th.hyps
-fun concl_of(th :: Thm) :: Term: th.concl
-fun stamp_of(th :: Thm) :: Stamp: th.stamp
+fun check_type(thy :: Theory, ty :: HType) :: Void:
+  match generated.check_type_result(raw_theory(thy))(ty)
+  | generated.Success(_): #void
+  | generated.Failure(failure): raise_generated_failure(#'check_type, failure)
 
-// -- hypothesis-set compatibility -----------------------------------------
+fun check_term(thy :: Theory, t :: Term) :: Void:
+  match generated.check_term_result(raw_theory(thy))(t)
+  | generated.Success(_): #void
+  | generated.Failure(failure): raise_generated_failure(#'check_term, failure)
+
+fun is_bool(t :: Term) :: Boolean:
+  generated.is_bool(t)
+
+fun mk_eq(l :: Term, r :: Term) :: Term:
+  let ty = type_of(l)
+  unless ty == type_of(r)
+  | error(~who: #'mk_eq, "sides of an equation have different types",
+          error.val(~label: "left", show_typed(l)),
+          error.val(~label: "right", show_typed(r)))
+  mk_comb(mk_comb(mk_const(c_eq, mk_fun(ty, mk_fun(ty, mk_tyapp(ty_bool, [])))), l), r)
+
+fun dest_eq(t :: Term) :: maybe(List.of(Term)):
+  match t
+  | Comb(Comb(Const(n, _), l), r) when n == c_eq: [l, r]
+  | ~else: #false
+
+fun is_eq(t :: Term) :: Boolean: dest_eq(t) != #false
 
 namespace hyps:
   export:
@@ -179,277 +112,72 @@ namespace hyps:
   fun rehash_hyps(hs :: List.of(Term)) :: List.of(Term):
     for values(acc :~ List = []) (h in hs): hyp_insert(h, acc)
 
-def hyp_insert = hyps.hyp_insert
-def hyp_union = hyps.hyp_union
-def hyp_remove = hyps.hyp_remove
-def rehash_hyps = hyps.rehash_hyps
-
-// -- theories and queries ---------------------------------------------------
-
-fun type_arity(thy :: Theory, n :: Symbol) :: maybe(Int):
-  thy.tyops.get(n, #false)
-
-fun const_type(thy :: Theory, n :: Symbol) :: maybe(HType):
-  thy.consts.get(n, #false)
-
-fun axioms_of(thy :: Theory) :: List.of(Thm): thy.axioms
-fun definition_of(thy :: Theory, n :: Symbol) :: maybe(Thm): thy.defs.get(n, #false)
-
 fun initial_theory() :: Theory:
-  let raw = generated.initial_theory(fresh_generation())
-  let a = mk_tyvar(v_alpha)
-  let st = fresh_stamp(generated.thy_stamp(raw))
-  let res = _Theory({ty_bool: 0, ty_fun: 2},
-                    {c_eq: mk_fun(a, mk_fun(a, mk_tyapp(ty_bool, [])))},
-                    [],
-                    {},
-                    st,
-                    raw)
-  when tracing.value
-  | note(#'initial_theory, #false, [], [], st.id, [])
-  res
-
-fun extended_theory(thy :: Theory,
-                    raw,
-                    ~tyops: tyops = thy.tyops,
-                    ~consts: consts = thy.consts,
-                    ~axioms: axioms = thy.axioms,
-                    ~defs: defs = thy.defs) :: Theory:
-  _Theory(tyops, consts, axioms, defs,
-          next_stamp(thy.stamp, generated.thy_stamp(raw)), raw)
-
-fun in_theory(who :: Symbol, thy :: Theory, th :: Thm) :: Void:
-  unless descends(th.stamp, thy.stamp)
-  | error(~who: who,
-          "theorem was not proved in this theory or an ancestor of it")
-
-// -- generated validity checks and compatibility diagnostics ---------------
-
-fun diagnose_type(thy :: Theory, t :: HType) :: Void:
-  match t
-  | TyVar(_): #void
-  | TyApp(n, args):
-      match type_arity(thy, n)
-      | #false:
-          error(~who: #'check_type, "undeclared type constructor",
-                error.val(~label: "name", n))
-      | ar when ar != args.length():
-          error(~who: #'check_type, "type constructor arity mismatch",
-                error.val(~label: "name", n),
-                error.val(~label: "expected", ar),
-                error.val(~label: "given", args.length()))
-      | _: for (a in args): diagnose_type(thy, a)
-
-fun check_type(thy :: Theory, t :: HType) :: Void:
-  unless generated.check_type(raw_theory(thy))(t)
-  | diagnose_type(thy, t)
-    error(~who: #'check_type, "generated kernel rejected the type")
-
-fun diagnose_open_term(thy :: Theory, t :: Term,
-                       env :: List.of(HType)) :: Void:
-  match t
-  | FVar(_, ty): diagnose_type(thy, ty)
-  | BVar(i, ty):
-      cond
-      | i >= env.length():
-          error(~who: #'check_term, "term has an unbound de Bruijn index",
-                error.val(~label: "index", i),
-                error.val(~label: "binders in scope", env.length()))
-      | env[i] != ty:
-          error(~who: #'check_term,
-                "bound variable's type does not match its binder",
-                error.val(~label: "index", i),
-                error.val(~label: "binder type", type_to_string(env[i])),
-                error.val(~label: "claimed", type_to_string(ty)))
-      | ~else: diagnose_type(thy, ty)
-  | Const(n, ty):
-      diagnose_type(thy, ty)
-      match const_type(thy, n)
-      | #false:
-          error(~who: #'check_term, "undeclared constant",
-                error.val(~label: "name", n))
-      | gty:
-          when type_match(gty, ty, {}) == #false
-          | error(~who: #'check_term, "constant used at a non-instance type",
-                  error.val(~label: "name", n),
-                  error.val(~label: "generic", type_to_string(gty)),
-                  error.val(~label: "used at", type_to_string(ty)))
-  | Abs(aty, b):
-      diagnose_type(thy, aty)
-      diagnose_open_term(thy, b, List.cons(aty, env))
-  | Comb(f, x):
-      diagnose_open_term(thy, f, env)
-      diagnose_open_term(thy, x, env)
-      let fty = type_of(f)
-      cond
-      | !is_fun(fty):
-          error(~who: #'check_term, "operator is not a function",
-                error.val(~label: "term", show(t)))
-      | ~else:
-          let (dom, _) = dest_fun(fty)
-          unless dom == type_of(x)
-          | error(~who: #'check_term, "ill-typed application",
-                  error.val(~label: "term", show(t)))
-
-fun check_term(thy :: Theory, t :: Term) :: Void:
-  unless generated.check_term(raw_theory(thy))(t)
-  | diagnose_open_term(thy, t, [])
-    error(~who: #'check_term, "generated kernel rejected the term")
-
-fun is_bool(t :: Term) :: Boolean:
-  generated.is_bool(t)
-
-fun check_prop(who :: Symbol, thy :: Theory, t :: Term) :: Void:
-  check_term(thy, t)
-  unless is_bool(t)
-  | error(~who: who, "term is not a proposition",
-          error.val(~label: "term", show_typed(t)))
-
-fun mk_eq(l :: Term, r :: Term) :: Term:
-  let ty = type_of(l)
-  unless ty == type_of(r)
-  | error(~who: #'mk_eq, "sides of an equation have different types",
-          error.val(~label: "left", show_typed(l)),
-          error.val(~label: "right", show_typed(r)))
-  mk_comb(mk_comb(mk_const(c_eq, mk_fun(ty, mk_fun(ty, mk_tyapp(ty_bool, [])))), l), r)
-
-fun dest_eq(t :: Term) :: maybe(List.of(Term)):
-  match t
-  | Comb(Comb(Const(n, _), l), r) when n == c_eq: [l, r]
-  | ~else: #false
-
-fun is_eq(t :: Term) :: Boolean: dest_eq(t) != #false
-
-fun need_eq(who :: Symbol, th :: Thm) :: List.of(Term):
-  match dest_eq(th.concl)
-  | #false: error(~who: who, "theorem is not an equation",
-                  error.val(~label: "theorem", show(th.concl)))
-  | pair: pair
-
-// -- derivation tracing -----------------------------------------------------
-
-namespace trace:
-  export:
-    TraceStep
-    start
-    stop
-
-  class TraceStep(rule :: Symbol,
-                  thy :: maybe(Symbol),
-                  thms :: List,
-                  data :: List,
-                  out_thy :: maybe(Symbol),
-                  out_thms :: List)
-
-  fun start() :: Void:
-    trace_log.value := []
-    tracing.value := #true
-
-  fun stop() :: List:
-    tracing.value := #false
-    let steps = (trace_log.value :~ List).reverse()
-    trace_log.value := []
-    steps
-
-fun thm_key(th :: Thm) :: List: [th.stamp.id, th.hyps, th.concl]
-def tracing :: Box = Box(#false)
-def trace_log :: Box = Box([])
-
-fun note(rule :: Symbol, thy, thms :: List, data :: List,
-         out_thy, out_thms :: List) :: Void:
-  trace_log.value := List.cons(trace.TraceStep(rule, thy, thms, data,
-                                               out_thy, out_thms),
-                               trace_log.value :~ List)
-
-// -- ten generated primitive rules -----------------------------------------
+  let thy = make_initial_theory()
+  note(#'initial_theory, #false, [], [], thy.stamp.id, [])
+  thy
 
 fun REFL(thy :: Theory, t :: Term) :: Thm:
-  let res = generated_thm(
-    #'REFL, generated.refl(raw_theory(thy))(t),
-    thy.stamp, raw_theory(thy),
-    fun (): check_term(thy, t))
-  when tracing.value | note(#'REFL, thy.stamp.id, [], [t], #false, [thm_key(res)])
+  let res = generated_thm(#'REFL,
+                          generated.refl(raw_theory(thy))(t),
+                          thy.stamp,
+                          raw_theory(thy))
+  note(#'REFL, thy.stamp.id, [], [t], #false, [thm_key(res)])
   res
 
 fun TRANS(a :: Thm, b :: Thm) :: Thm:
   let st = combine_stamps(#'TRANS, a.stamp, b.stamp)
   let rthy = later_raw_theory(a, b)
-  let res = generated_thm(
-    #'TRANS, generated.trans(rthy)(raw_thm(a))(raw_thm(b)), st, rthy,
-    fun ():
-      let [_, m1] = need_eq(#'TRANS, a)
-      let [m2, _] = need_eq(#'TRANS, b)
-      unless m1 == m2
-      | error(~who: #'TRANS, "middle terms do not match",
-              error.val(~label: "left", show(m1)),
-              error.val(~label: "right", show(m2))))
-  when tracing.value | note(#'TRANS, #false, [thm_key(a), thm_key(b)], [], #false, [thm_key(res)])
+  let res = generated_thm(#'TRANS,
+                          generated.trans(rthy)(raw_thm(a))(raw_thm(b)),
+                          st,
+                          rthy)
+  note(#'TRANS, #false, [thm_key(a), thm_key(b)], [], #false, [thm_key(res)])
   res
 
 fun MK_COMB(fth :: Thm, xth :: Thm) :: Thm:
   let st = combine_stamps(#'MK_COMB, fth.stamp, xth.stamp)
   let rthy = later_raw_theory(fth, xth)
-  let res = generated_thm(
-    #'MK_COMB, generated.mK_COMB(rthy)(raw_thm(fth))(raw_thm(xth)), st, rthy,
-    fun ():
-      let [f, _] = need_eq(#'MK_COMB, fth)
-      let [x, _] = need_eq(#'MK_COMB, xth)
-      let fty = type_of(f)
-      unless is_fun(fty) | error(~who: #'MK_COMB, "operator is not a function")
-      let (dom, _) = dest_fun(fty)
-      unless dom == type_of(x) | error(~who: #'MK_COMB, "types do not agree"))
-  when tracing.value | note(#'MK_COMB, #false, [thm_key(fth), thm_key(xth)], [], #false, [thm_key(res)])
+  let res = generated_thm(#'MK_COMB,
+                          generated.mk_comb(rthy)(raw_thm(fth))(raw_thm(xth)),
+                          st,
+                          rthy)
+  note(#'MK_COMB, #false, [thm_key(fth), thm_key(xth)], [], #false, [thm_key(res)])
   res
 
 fun ABS(thy :: Theory, v :: FVar, th :: Thm) :: Thm:
   in_theory(#'ABS, thy, th)
-  let res = generated_thm(
-    #'ABS, generated.abs(raw_theory(thy))(v.name)(v.ty)(raw_thm(th)),
-    thy.stamp, raw_theory(thy),
-    fun ():
-      check_term(thy, v)
-      when (for any (h in th.hyps): vfree_in(v, h))
-      | error(~who: #'ABS, "abstracted variable is free in the hypotheses",
-              error.val(~label: "variable", v.name))
-      need_eq(#'ABS, th)
-      #void)
-  when tracing.value | note(#'ABS, thy.stamp.id, [thm_key(th)], [v], #false, [thm_key(res)])
+  let res = generated_thm(#'ABS,
+                          generated.abs(raw_theory(thy))(v.name)(v.ty)(raw_thm(th)),
+                          thy.stamp,
+                          raw_theory(thy))
+  note(#'ABS, thy.stamp.id, [thm_key(th)], [v], #false, [thm_key(res)])
   res
 
 fun BETA(thy :: Theory, t :: Term) :: Thm:
-  let res = generated_thm(
-    #'BETA, generated.beta(raw_theory(thy))(t),
-    thy.stamp, raw_theory(thy),
-    fun ():
-      check_term(thy, t)
-      match t
-      | Comb(Abs(_, _), _): #void
-      | ~else:
-          error(~who: #'BETA, "not a beta redex",
-                error.val(~label: "term", show(t))))
-  when tracing.value | note(#'BETA, thy.stamp.id, [], [t], #false, [thm_key(res)])
+  let res = generated_thm(#'BETA,
+                          generated.beta(raw_theory(thy))(t),
+                          thy.stamp,
+                          raw_theory(thy))
+  note(#'BETA, thy.stamp.id, [], [t], #false, [thm_key(res)])
   res
 
 fun ASSUME(thy :: Theory, p :: Term) :: Thm:
-  let res = generated_thm(
-    #'ASSUME, generated.assume(raw_theory(thy))(p),
-    thy.stamp, raw_theory(thy),
-    fun (): check_prop(#'ASSUME, thy, p))
-  when tracing.value | note(#'ASSUME, thy.stamp.id, [], [p], #false, [thm_key(res)])
+  let res = generated_thm(#'ASSUME,
+                          generated.assume(raw_theory(thy))(p),
+                          thy.stamp,
+                          raw_theory(thy))
+  note(#'ASSUME, thy.stamp.id, [], [p], #false, [thm_key(res)])
   res
 
 fun EQ_MP(eqth :: Thm, th :: Thm) :: Thm:
   let st = combine_stamps(#'EQ_MP, eqth.stamp, th.stamp)
   let rthy = later_raw_theory(eqth, th)
-  let res = generated_thm(
-    #'EQ_MP, generated.eQ_MP(rthy)(raw_thm(eqth))(raw_thm(th)), st, rthy,
-    fun ():
-      let [p, _] = need_eq(#'EQ_MP, eqth)
-      unless p == th.concl
-      | error(~who: #'EQ_MP, "antecedent does not match",
-              error.val(~label: "expected", show(p)),
-              error.val(~label: "given", show(th.concl))))
-  when tracing.value | note(#'EQ_MP, #false, [thm_key(eqth), thm_key(th)], [], #false, [thm_key(res)])
+  let res = generated_thm(#'EQ_MP,
+                          generated.eq_mp(rthy)(raw_thm(eqth))(raw_thm(th)),
+                          st,
+                          rthy)
+  note(#'EQ_MP, #false, [thm_key(eqth), thm_key(th)], [], #false, [thm_key(res)])
   res
 
 fun DEDUCT_ANTISYM_RULE(a :: Thm, b :: Thm) :: Thm:
@@ -457,145 +185,73 @@ fun DEDUCT_ANTISYM_RULE(a :: Thm, b :: Thm) :: Thm:
   let rthy = later_raw_theory(a, b)
   let res = generated_thm(
     #'DEDUCT_ANTISYM_RULE,
-    generated.dEDUCT_ANTISYM_RULE(rthy)(raw_thm(a))(raw_thm(b)),
-    st, rthy, fun (): #void)
-  when tracing.value
-  | note(#'DEDUCT_ANTISYM_RULE, #false, [thm_key(a), thm_key(b)], [], #false, [thm_key(res)])
+    generated.deduct_antisym(rthy)(raw_thm(a))(raw_thm(b)),
+    st,
+    rthy)
+  note(#'DEDUCT_ANTISYM_RULE, #false, [thm_key(a), thm_key(b)], [], #false,
+       [thm_key(res)])
   res
 
 fun INST(thy :: Theory, theta :: List, th :: Thm) :: Thm:
   in_theory(#'INST, thy, th)
-  let entries = theta.map(
-    fun ([rep, v]): generated.PairValue(rep, v))
-  let res = generated_thm(
-    #'INST, generated.inst(raw_theory(thy))(entries)(raw_thm(th)),
-    thy.stamp, raw_theory(thy),
-    fun ():
-      for ([rep, v] in theta):
-        unless v is_a FVar
-        | error(~who: #'INST, "substitution target is not a free variable",
-                error.val(~label: "target", show(v)))
-        check_term(thy, rep)
-        unless type_of(rep) == type_of(v)
-        | error(~who: #'INST, "instantiation changes a variable's type",
-                error.val(~label: "variable", show_typed(v)),
-                error.val(~label: "replacement", show_typed(rep))))
-  when tracing.value | note(#'INST, thy.stamp.id, [thm_key(th)], [theta], #false, [thm_key(res)])
+  let entries = theta.map(fun ([replacement, target]):
+                            generated.PairValue(replacement, target))
+  let res = generated_thm(#'INST,
+                          generated.inst(raw_theory(thy))(entries)(raw_thm(th)),
+                          thy.stamp,
+                          raw_theory(thy))
+  note(#'INST, thy.stamp.id, [thm_key(th)], [theta], #false, [thm_key(res)])
   res
 
 fun INST_TYPE(thy :: Theory, tyin :: Map.of(Symbol, HType), th :: Thm) :: Thm:
   in_theory(#'INST_TYPE, thy, th)
-  let entries = for List ((n, ty) in tyin):
-                  generated.PairValue(n, ty)
+  let entries = for List ((n, ty) in tyin): generated.PairValue(n, ty)
   let res = generated_thm(
-    #'INST_TYPE, generated.iNST_TYPE(raw_theory(thy))(entries)(raw_thm(th)),
-    thy.stamp, raw_theory(thy),
-    fun (): for ((_, ty) in tyin): check_type(thy, ty))
-  when tracing.value | note(#'INST_TYPE, thy.stamp.id, [thm_key(th)], [tyin], #false, [thm_key(res)])
+    #'INST_TYPE,
+    generated.inst_type(raw_theory(thy))(entries)(raw_thm(th)),
+    thy.stamp,
+    raw_theory(thy))
+  note(#'INST_TYPE, thy.stamp.id, [thm_key(th)], [tyin], #false, [thm_key(res)])
   res
 
-// -- generated theory extensions ------------------------------------------
-
-fun generated_extension(who :: Symbol, result, on_failure):
+fun generated_extension(who :: Symbol, thy :: Theory, result)
+    :: values(Theory, List.of(Thm)):
   match result
-  | generated.Success(raw): raw
-  | generated.Failure(_):
-      on_failure()
-      error(~who: who, "generated kernel rejected the extension")
+  | generated.Success(generated.PairValue(raw, delta)):
+      extend_with_delta(thy, raw, delta)
+  | generated.Failure(failure): raise_generated_failure(who, failure)
 
 fun new_type(thy :: Theory, n :: Symbol, arity :: NonnegInt) :: Theory:
-  let result = generated.new_type_result(fresh_generation())(raw_theory(thy))(n)(arity)
-  let raw = generated_extension(
-    #'new_type, result,
-    fun ():
-      when type_arity(thy, n) != #false
-      | error(~who: #'new_type, "type constructor is already declared",
-              error.val(~label: "name", n)))
-  let res = extended_theory(thy, raw, ~tyops: thy.tyops ++ {n: arity})
-  when tracing.value | note(#'new_type, thy.stamp.id, [], [n, arity], res.stamp.id, [])
+  let (res, _) = generated_extension(
+    #'new_type,
+    thy,
+    generated.new_type(fresh_generation())(raw_theory(thy))(n)(arity))
+  note(#'new_type, thy.stamp.id, [], [n, arity], res.stamp.id, [])
   res
 
 fun new_constant(thy :: Theory, n :: Symbol, ty :: HType) :: Theory:
-  let result = generated.new_constant_result(fresh_generation())(raw_theory(thy))(n)(ty)
-  let raw = generated_extension(
-    #'new_constant, result,
-    fun ():
-      when const_type(thy, n) != #false
-      | error(~who: #'new_constant, "constant is already declared",
-              error.val(~label: "name", n))
-      check_type(thy, ty))
-  let res = extended_theory(thy, raw, ~consts: thy.consts ++ {n: ty})
-  when tracing.value | note(#'new_constant, thy.stamp.id, [], [n, ty], res.stamp.id, [])
+  let (res, _) = generated_extension(
+    #'new_constant,
+    thy,
+    generated.new_constant(fresh_generation())(raw_theory(thy))(n)(ty))
+  note(#'new_constant, thy.stamp.id, [], [n, ty], res.stamp.id, [])
   res
 
 fun new_axiom(thy :: Theory, p :: Term) :: values(Theory, Thm):
-  let result = generated.new_axiom_result(fresh_generation())(raw_theory(thy))(p)
-  match result
-  | generated.Success(generated.PairValue(raw, raw_th)):
-      let st = next_stamp(thy.stamp, generated.thy_stamp(raw))
-      let th = wrap_raw_thm(raw_th, st, raw)
-      let thy2 = _Theory(thy.tyops, thy.consts, List.cons(th, thy.axioms),
-                         thy.defs, st, raw)
-      when tracing.value
-      | note(#'new_axiom, thy.stamp.id, [], [p], thy2.stamp.id, [thm_key(th)])
-      values(thy2, th)
-  | generated.Failure(_):
-      check_prop(#'new_axiom, thy, p)
-      error(~who: #'new_axiom, "generated kernel rejected the axiom")
-
-fun term_type_vars(t :: Term) :: List.of(Symbol):
-  fun add(ty :: HType, acc :~ List) :~ List:
-    for values(a :~ List = acc) (v in type_vars(ty)):
-      (if a.contains(v) | a | a ++ [v])
-  fun walk(t :: Term, acc :~ List) :~ List:
-    match t
-    | FVar(_, ty): add(ty, acc)
-    | BVar(_, ty): add(ty, acc)
-    | Const(_, ty): add(ty, acc)
-    | Comb(f, x): walk(x, walk(f, acc))
-    | Abs(aty, b): walk(b, add(aty, acc))
-  walk(t, [])
+  let (res, [th]) = generated_extension(
+    #'new_axiom,
+    thy,
+    generated.new_axiom(fresh_generation())(raw_theory(thy))(p))
+  note(#'new_axiom, thy.stamp.id, [], [p], res.stamp.id, [thm_key(th)])
+  values(res, th)
 
 fun new_basic_definition(thy :: Theory, tm :: Term) :: values(Theory, Thm):
-  let result = generated.new_basic_definition_result(
-    fresh_generation())(raw_theory(thy))(tm)
-  match result
-  | generated.Success(generated.PairValue(raw, raw_th)):
-      let [FVar(n, ty), _] = dest_eq(tm)
-      let st = next_stamp(thy.stamp, generated.thy_stamp(raw))
-      let th = wrap_raw_thm(raw_th, st, raw)
-      let thy2 = _Theory(thy.tyops, thy.consts ++ {n: ty}, thy.axioms,
-                         thy.defs ++ {n: th}, st, raw)
-      when tracing.value
-      | note(#'new_basic_definition, thy.stamp.id, [], [tm],
-             thy2.stamp.id, [thm_key(th)])
-      values(thy2, th)
-  | generated.Failure(_):
-      match dest_eq(tm)
-      | #false:
-          error(~who: #'new_basic_definition, "definition is not an equation")
-      | [lhs, rhs]:
-          match lhs
-          | FVar(n, ty):
-              when const_type(thy, n) != #false
-              | error(~who: #'new_basic_definition, "constant is already declared",
-                      error.val(~label: "name", n))
-              check_term(thy, rhs)
-              unless free_vars(rhs).length() == 0
-              | error(~who: #'new_basic_definition, "right-hand side is not closed",
-                      error.val(~label: "free", show(free_vars(rhs)[0])))
-              unless ty == type_of(rhs)
-              | error(~who: #'new_basic_definition, "type mismatch in definition")
-              let rhs_tvs = term_type_vars(rhs)
-              let ty_tvs = type_vars(ty)
-              unless (for all (v in rhs_tvs): ty_tvs.contains(v))
-              | error(~who: #'new_basic_definition,
-                      "right-hand side has type variables not in the type")
-          | ~else:
-              error(~who: #'new_basic_definition,
-                    "left-hand side is not a fresh name")
-      error(~who: #'new_basic_definition,
-            "generated kernel rejected the definition")
+  let (res, [th]) = generated_extension(
+    #'new_basic_definition,
+    thy,
+    generated.new_basic_definition(fresh_generation())(raw_theory(thy))(tm))
+  note(#'new_basic_definition, thy.stamp.id, [], [tm], res.stamp.id, [thm_key(th)])
+  values(res, th)
 
 fun new_basic_type_definition(thy :: Theory,
                               tyname :: Symbol,
@@ -603,56 +259,12 @@ fun new_basic_type_definition(thy :: Theory,
                               repname :: Symbol,
                               th :: Thm) :: values(Theory, Thm, Thm):
   in_theory(#'new_basic_type_definition, thy, th)
-  let result = generated.new_basic_type_definition_result(
-    fresh_generation())(raw_theory(thy))(tyname)(absname)(repname)(raw_thm(th))
-  match result
-  | generated.Success(
-      generated.PairValue(raw,
-                          generated.PairValue(raw_abs_rep, raw_pred))):
-      let Comb(pred, witness) = th.concl
-      let tvs = term_type_vars(pred)
-      let rty = type_of(witness)
-      let st = next_stamp(thy.stamp, generated.thy_stamp(raw))
-      let aty = mk_tyapp(tyname, tvs.map(fun (v :: Symbol): mk_tyvar(v)))
-      let abs_ty = mk_fun(rty, aty)
-      let rep_ty = mk_fun(aty, rty)
-      let abs_rep = wrap_raw_thm(raw_abs_rep, st, raw)
-      let pred_th = wrap_raw_thm(raw_pred, st, raw)
-      let thy2 = _Theory(thy.tyops ++ {tyname: tvs.length()},
-                         thy.consts ++ {absname: abs_ty, repname: rep_ty},
-                         thy.axioms,
-                         thy.defs,
-                         st,
-                         raw)
-      when tracing.value
-      | note(#'new_basic_type_definition, thy.stamp.id, [thm_key(th)],
-             [tyname, absname, repname], thy2.stamp.id,
-             [thm_key(abs_rep), thm_key(pred_th)])
-      values(thy2, abs_rep, pred_th)
-  | generated.Failure(_):
-      when const_type(thy, absname) != #false || const_type(thy, repname) != #false
-      | error(~who: #'new_basic_type_definition, "constant is already declared")
-      when type_arity(thy, tyname) != #false
-      | error(~who: #'new_basic_type_definition,
-              "type constructor is already declared",
-              error.val(~label: "name", tyname))
-      when absname == repname
-      | error(~who: #'new_basic_type_definition,
-              "abstraction and representation functions have the same name")
-      unless th.hyps.length() == 0
-      | error(~who: #'new_basic_type_definition, "witness theorem has hypotheses")
-      match th.concl
-      | Comb(pred, witness):
-          unless free_vars(pred).length() == 0
-          | error(~who: #'new_basic_type_definition, "predicate is not closed")
-          let tvs = term_type_vars(pred)
-          let rty = type_of(witness)
-          unless (for all (v in type_vars(rty)): tvs.contains(v))
-          | error(~who: #'new_basic_type_definition,
-                  "witness has type variables not present in the predicate",
-                  error.val(~label: "representing type", type_to_string(rty)))
-      | ~else:
-          error(~who: #'new_basic_type_definition,
-                "witness theorem is not an application")
-      error(~who: #'new_basic_type_definition,
-            "generated kernel rejected the type definition")
+  let (res, [abs_rep, pred_th]) = generated_extension(
+    #'new_basic_type_definition,
+    thy,
+    generated.new_basic_type_definition(
+      fresh_generation())(raw_theory(thy))(tyname)(absname)(repname)(raw_thm(th)))
+  note(#'new_basic_type_definition, thy.stamp.id, [thm_key(th)],
+       [tyname, absname, repname], res.stamp.id,
+       [thm_key(abs_rep), thm_key(pred_th)])
+  values(res, abs_rep, pred_th)

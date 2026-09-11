@@ -154,7 +154,7 @@ it is not, so the axiom schema is no longer on the declaration path at all.
 It survives only as the baseline the derivations are differentially tested
 against.
 
-The @tech{strict positivity} check still guards the declaration, but it no
+The @deftech{strict positivity} check still guards the declaration, but it
 longer guards a consistency claim about axioms nobody proved --- an
 ill-founded declaration now fails to be carved rather than being assumed.
 
@@ -229,10 +229,14 @@ do that, which is not the same as holding unconditionally. Sealing this
 properly needs the kernel module to be protected at the module-system level;
 that is not done.
 
-@bold{The implementation is not verified.} The kernel is a few hundred lines of
-ordinary Rhombus. It is small enough to read, and it is structured so that
-reading it is the intended way to gain confidence, but nothing has been proved
-about it.
+@bold{The extraction toolchain is trusted.} Primitive inferences and theory
+extensions are definitions in Isabelle, with machine-checked soundness,
+well-formedness, model existence, and consistency results. Those definitions
+are exported to @tt{kernel_generated.rhm}; the handwritten façade cannot
+construct @rhombus(Thm, ~datum) or @rhombus(Theory, ~datum) values and only
+converts public values, failures, extension deltas, and trace events. The
+Isabelle kernel, code generator, Rhombus compiler, and runtime therefore remain
+part of the trusted computing base.
 
 @bold{Type variables in specialised theorems.} A datatype's theorems are
 proved at its own type and instantiated at each use through the same

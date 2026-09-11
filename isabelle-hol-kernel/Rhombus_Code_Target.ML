@@ -391,13 +391,21 @@ fun serialize ctxt {module_name, reserved_syms, identifiers, includes,
     val export_names = distinct (op =) (map (deresolver module) exports);
     val export_block = suite (Pretty.str "export:")
       (Pretty.chunks (map Pretty.str export_names));
-    val abi_import = vertical
-      [Pretty.str "import:",
-       Pretty.str "  rhombus/hol/private/kernel_abi as abi"];
-    val p = Pretty.chunks2
-      ([Pretty.str "#lang rhombus", abi_import, export_block] @
-        map snd includes @ body);
-  in (Code_Target.Singleton ("rhm", p), try (deresolver "")) end;
+    val generated_header = vertical
+      [Pretty.str "// GENERATED FILE - DO NOT EDIT.",
+       Pretty.str "// Source: isabelle-hol-kernel/Rhombus_HOL_Code.thy",
+       Pretty.str "// Regenerate: isabelle-hol-kernel/export-kernel.sh",
+       Pretty.str "// Kernel ABI: 1",
+       Pretty.str "// SPDX-License-Identifier: 0BSD AND BSD-2-Clause"];
+     val abi_import = vertical
+       [Pretty.str "import:",
+        Pretty.str "  rhombus/hol/kernel_abi as abi",
+        Pretty.str "",
+        Pretty.str "unless abi.kernel_abi_version == 1",
+        Pretty.str "| error(\"generated kernel ABI mismatch\")"];
+     val p = Pretty.chunks2
+      ([Pretty.str "#lang rhombus", generated_header, abi_import, export_block] @
+        map snd includes @ body);  in (Code_Target.Singleton ("rhm", p), try (deresolver "")) end;
 
 val serializer : Code_Target.serializer =
   Code_Target.parse_args (Scan.succeed ()) #> K serialize;

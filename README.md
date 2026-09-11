@@ -40,6 +40,19 @@ raco make rhombus-hol-lib/rhombus/hol.rkt
 raco test rhombus-hol/rhombus/hol/tests
 ```
 
+## Formal kernel generation
+
+`rhombus-hol-kernel/rhombus/hol/kernel_generated.rhm` is generated from the
+Isabelle definitions and has a versioned ABI with the handwritten façade.
+Regenerate it, including the Isabelle session build, with:
+
+```sh
+./isabelle-hol-kernel/export-kernel.sh
+```
+
+CI runs the same entry point with `--check`; that mode fails unless the
+committed artifact exactly matches the Isabelle export.
+
 ## Documentation
 
 ```sh

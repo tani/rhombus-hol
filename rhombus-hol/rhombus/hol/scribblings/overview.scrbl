@@ -123,7 +123,7 @@ it possible to report a body outside the definable grammar as an error instead
 of silently treating the definition as an ordinary one.
 
 @rhombusblock(
-  // a logical definition: equations, axioms, a termination check
+  // a logical definition: equations, derivation, a termination check
   function double(n :: Nat) :: Nat:
     match n
     | zero(): zero()

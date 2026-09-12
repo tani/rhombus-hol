@@ -154,9 +154,9 @@ it is not, so the axiom schema is no longer on the declaration path at all.
 It survives only as the baseline the derivations are differentially tested
 against.
 
-The @deftech{strict positivity} check still guards the declaration, but it
-longer guards a consistency claim about axioms nobody proved --- an
-ill-founded declaration now fails to be carved rather than being assumed.
+The @deftech{strict positivity} check still guards the declaration, but it no
+longer guards a consistency claim about axioms nobody proved --- an ill-founded
+declaration now fails to be carved rather than being assumed.
 
 @bold{Function definitions.} A @rhombus(function, ~datum) that does not call
 itself is @emph{defined}, whatever its patterns look like: its decision tree

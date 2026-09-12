@@ -1,5 +1,5 @@
-(* SPDX-License-Identifier: 0BSD AND BSD-2-Clause AND BSD-3-Clause *)
-(* Conservatively covered by HOL Light and HOL4 notices; see THIRD_PARTY_NOTICES. *)
+(* SPDX-License-Identifier: 0BSD *)
+(* Original theorem-index audit for the formal kernel development. *)
 
 theory Rhombus_HOL_Audit
   imports Rhombus_HOL_Adequacy Rhombus_HOL_Countermodels

@@ -43,7 +43,10 @@ unless @rhombus(app_nil_r) is proved.
 @section{License and Third-Party Notices}
 
 @tt{LICENSE} contains the 0BSD terms for original Rhombus/HOL material.
-@tt{THIRD_PARTY_NOTICES} maps components to retained third-party notices, and
-@tt{LICENSES/} contains those complete terms. Package-local copies keep
-independently distributable archives self-contained. The public site links the
-repository-level documents from its front page.
+@tt{REUSE.toml} is the authoritative per-file copyright and SPDX license map.
+@tt{THIRD_PARTY_NOTICES} records exact source-derived scopes separately from
+design references and generated assets. @tt{LICENSES/} contains canonical SPDX
+terms; @tt{THIRD_PARTY_LICENSES/} retains audited upstream notices and exact
+revisions. Package-local copies keep independently distributable archives
+self-contained. The public site links the repository-level documents from its
+front page.

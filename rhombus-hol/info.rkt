@@ -5,6 +5,6 @@
 (define implies '("rhombus-hol-prover" "rhombus-hol-kernel"))
 (define build-deps '("rhombus" "rhombus-scribble-lib"))
 (define pkg-desc "Rhombus/HOL: a theorem prover embedded in Rhombus")
-(define license '(0BSD AND (MIT AND (OFL-1.1 AND Bitstream-Charter))))
+(define license '0BSD)
 (define version "0.1")
 (define language-families '("Rhombus"))

@@ -77,6 +77,10 @@ links into the imported HOL and HOL-ZF sessions.
 ## License
 
 `LICENSE` contains the 0BSD terms for original Rhombus/HOL material.
-[`THIRD_PARTY_NOTICES`](THIRD_PARTY_NOTICES) maps components to retained
-third-party notices; [`LICENSES/`](LICENSES/) contains those complete terms.
-Package-local copies keep independently distributable archives self-contained.
+[`REUSE.toml`](REUSE.toml) is the authoritative per-file copyright and SPDX
+license map. [`THIRD_PARTY_NOTICES`](THIRD_PARTY_NOTICES) records exact
+source-derived scopes separately from design references and generated assets;
+[`LICENSES/`](LICENSES/) contains canonical SPDX terms, while
+[`THIRD_PARTY_LICENSES/`](THIRD_PARTY_LICENSES/) retains audited upstream
+notices and exact revisions. Package-local copies keep independently
+distributable archives self-contained.

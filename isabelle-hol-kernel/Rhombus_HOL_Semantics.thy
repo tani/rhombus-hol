@@ -1,5 +1,5 @@
-(* SPDX-License-Identifier: 0BSD AND BSD-2-Clause AND BSD-3-Clause *)
-(* Conservatively covered by HOL Light and HOL4 notices; see THIRD_PARTY_NOTICES. *)
+(* SPDX-License-Identifier: 0BSD *)
+(* Original semantic model over the imported Isabelle/HOL-ZF framework. *)
 
 theory Rhombus_HOL_Semantics
   imports Rhombus_HOL_Kernel

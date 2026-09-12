@@ -1,4 +1,9 @@
-(* SPDX-License-Identifier: 0BSD *)
+(* SPDX-FileCopyrightText: 2026 Masaya Taniguchi
+   SPDX-FileCopyrightText: 1986-2026 University of Cambridge, Technische Universitaet Muenchen, and contributors
+   SPDX-License-Identifier: 0BSD AND BSD-3-Clause
+
+   Adapts Isabelle's code_ml.ML, code_haskell.ML, and code_scala.ML
+   serializers by Florian Haftmann; see THIRD_PARTY_NOTICES. *)
 
 signature RHOMBUS_CODE_TARGET =
 sig
@@ -396,6 +401,9 @@ fun serialize ctxt {module_name, reserved_syms, identifiers, includes,
        Pretty.str "// Source: isabelle-hol-kernel/Rhombus_HOL_Code.thy",
        Pretty.str "// Regenerate: isabelle-hol-kernel/export-kernel.sh",
        Pretty.str "// Kernel ABI: 1",
+       Pretty.str "// SPDX-FileCopyrightText: 2026 Masaya Taniguchi",
+       Pretty.str "// SPDX-FileCopyrightText: 1998 University of Cambridge",
+       Pretty.str "// SPDX-FileCopyrightText: 1998-2007 John Harrison",
        Pretty.str "// SPDX-License-Identifier: 0BSD AND BSD-2-Clause"];
      val abi_import = vertical
        [Pretty.str "import:",

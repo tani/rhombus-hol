@@ -1,0 +1,378 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD-3-Clause
+
+// Kernel-checked replay certificates for proved theorem declarations.
+//
+// A certificate is an untrusted sequence of primitive inferences. Replaying it
+// can only produce a `Thm` through the LCF kernel; `driver.rhm` additionally
+// compares its conclusion with the theorem source it is replacing.
+
+import:
+  lib("racket/base.rkt") as rb
+  lib("file/gzip.rkt") as gzip
+  lib("file/gunzip.rkt") as gunzip
+  lib("net/base64.rkt") as base64
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+
+export:
+  Certificate
+  artifact_recording
+  certificates_required
+  decode_rows
+  capture
+  certificate
+  replay
+  flush
+  remember_seed
+  seed_theorems
+
+class Certificate(scope :: String, name :: Symbol, terms :: List,
+                  steps :: List, result)
+
+// Recording is opt-in. The generated registry is never consulted while it is
+// being rebuilt, so a complete recording cannot accidentally retain an older
+// proof trace.
+def artifact_output = rb.#{getenv}("RHOMBUS_HOL_CERTIFICATE_OUTPUT")
+def artifact_recording :: Boolean = artifact_output != #false
+
+fun certificates_required(scope :: String) :: Boolean:
+  scope != "" && rb.#{getenv}("RHOMBUS_HOL_REQUIRE_CERTIFICATES") != #false
+
+def records :: Box = Box([])
+
+// The initial HOL tower owns foundational facts that are intentionally not
+// all registered as rewrite rules. Capture their live theorem values once,
+// while that tower is built, so a later certificate can reference them without
+// serializing an opaque `Thm`.
+def seeds :: Box = Box([])
+
+fun remember_seed(thy :: Theory, theorems :: List) :: Void:
+  when (theorems :~ List).length() > 0
+  | let known = for values(acc :: Map = {}) (theorem in theorems):
+                  acc ++ {theorem_key(theorem :~ Thm): theorem}
+    seeds.value := (seeds.value :~ List) ++ [[thy.stamp, known]]
+
+fun seed_theorems(thy :: Theory) :: Map:
+  for values(acc :: Map = {}) (entry in seeds.value :~ List):
+    match entry
+    | [stamp :~ Stamp, known :~ Map]:
+        (if descends(stamp, thy.stamp) | acc ++ known | acc)
+    | ~else: error(~who: #'certificate, "malformed foundational theorem cache")
+
+fun theorem_key(th :: Thm) :: List: [hyps_of(th), concl_of(th)]
+
+fun trace_key(th :: Thm) :: List: [th.stamp.id, hyps_of(th), concl_of(th)]
+
+fun encode_symbol(s :: Symbol) :: List:
+  let kind = (if rb.#{symbol-interned?}(s) | "interned" | "uninterned")
+  [kind, to_string(s)]
+
+fun encode_type(ty :: HType) :: List:
+  match ty
+  | TyVar(name): ["var", encode_symbol(name)]
+  | TyApp(name, args): ["app", encode_symbol(name), (args :~ List).map(fun (arg): encode_type(arg))]
+
+// Terms dominate certificate size. Intern each structural term once per
+// theorem certificate; trace steps then carry small integer references.
+class TermEncoder(rows :: Box, ids, next :: Box)
+
+fun new_term_encoder() :: TermEncoder:
+  TermEncoder(Box([]), rb.#{make-hash}(), Box(0))
+
+fun term_id(term :: Term) :: Int: rb.#{equal-hash-code}(term)
+
+fun intern_term(encoder :: TermEncoder, term :: Term) :: Int:
+  let key = term_id(term)
+  match rb.#{hash-ref}(encoder.ids, key, #false)
+  | index :: Int: index
+  | #false:
+      let row:
+        match term
+        | FVar(name, ty): ["fvar", encode_symbol(name), encode_type(ty)]
+        | BVar(index, ty): ["bvar", index, encode_type(ty)]
+        | Const(name, ty): ["const", encode_symbol(name), encode_type(ty)]
+        | Comb(func, arg):
+            ["comb", intern_term(encoder, func), intern_term(encoder, arg)]
+        | Abs(arg_ty, body): ["abs", encode_type(arg_ty), intern_term(encoder, body)]
+      let index = encoder.next.value :~ Int
+      rb.#{hash-set!}(encoder.ids, key, index)
+      encoder.rows.value := List.cons(row, encoder.rows.value :~ List)
+      encoder.next.value := index + 1
+      index
+
+fun encoded_terms(encoder :: TermEncoder) :: List:
+  (encoder.rows.value :~ List).reverse()
+
+// This identity index exists only while recording. Every object inserted is a
+// genuine kernel theorem; a hash collision can only make replay fail, never
+// add a trusted proof path.
+fun trace_id(th :: Thm) :: Int: rb.#{eq-hash-code}(th)
+
+fun encode_ref(th :: Thm, produced, encoder :: TermEncoder) :: List:
+  match rb.#{hash-ref}(produced, trace_id(th), #false)
+  | #false:
+      ["known", hyps_of(th).map(fun (hyp): intern_term(encoder, hyp)),
+       intern_term(encoder, concl_of(th))]
+  | index: ["local", index]
+
+fun encode_inst(theta :: List, encoder :: TermEncoder) :: List:
+  for List (entry in theta):
+    match entry
+    | [replacement, target]:
+        [intern_term(encoder, replacement), intern_term(encoder, target)]
+    | ~else: error(~who: #'certificate, "malformed term instantiation")
+
+fun encode_type_inst(theta :: Map) :: List:
+  for List ((name, ty) in theta): [encode_symbol(name), encode_type(ty)]
+
+fun encode_step(step, produced, encoder :: TermEncoder, next :: Int) :: values(List, Int):
+  match step
+  | trace.TraceStep(rule, _, thms, data, out_thy, out_thms):
+      when out_thy != #false
+      | error(~who: #'certificate, "theorem proof extended its theory")
+      let thms :~ List = thms
+      let out_thms :~ List = out_thms
+      let refs = thms.map(fun (th): encode_ref(th :~ Thm, produced, encoder))
+      let encoded_data:
+        match rule
+        | #'REFL || #'BETA || #'ASSUME || #'ABS:
+            match data
+            | [term]: [intern_term(encoder, term)]
+            | ~else: error(~who: #'certificate, "malformed unary trace")
+        | #'INST:
+            match data
+            | [theta]: [encode_inst(theta :~ List, encoder)]
+            | ~else: error(~who: #'certificate, "malformed INST trace")
+        | #'INST_TYPE:
+            match data
+            | [theta]: [encode_type_inst(theta :~ Map)]
+            | ~else: error(~who: #'certificate, "malformed INST_TYPE trace")
+        | #'TRANS || #'MK_COMB || #'EQ_MP || #'DEDUCT_ANTISYM_RULE:
+            (if (data :~ List).length() == 0
+             | []
+             | error(~who: #'certificate, "unexpected inference trace data"))
+        | ~else:
+            error(~who: #'certificate,
+                  "unsupported kernel inference in theorem certificate: " ++ to_string(rule))
+      match out_thms
+      | [out]:
+          rb.#{hash-set!}(produced, trace_id(out :~ Thm), next)
+          values([to_string(rule), refs, encoded_data], next + 1)
+      | ~else: error(~who: #'certificate, "an inference must produce one theorem")
+  | ~else: error(~who: #'certificate, "malformed kernel trace step")
+
+fun encode_certificate(scope :: String, name :: Symbol, result :: Thm,
+                       trace_steps :: List) :: Certificate:
+  let produced = rb.#{make-hash}()
+  let encoder = new_term_encoder()
+  recur loop (remaining :: List = trace_steps, encoded_rev :: List = [], next = 0):
+    match remaining
+    | []:
+        match rb.#{hash-ref}(produced, trace_id(result), #false)
+        | #false: error(~who: #'certificate,
+                        "proof trace did not produce its reported theorem")
+        | index:
+            Certificate(scope, name, encoded_terms(encoder),
+                        encoded_rev.reverse(), ["local", index])
+    | List.cons(step, rest):
+        let (encoded_step, next2) = encode_step(step, produced, encoder, next)
+        loop(rest, List.cons(encoded_step, encoded_rev), next2)
+// `thunk` returns `[proved_theorem, proof_node]`. Its trace is retained only
+// when the theorem actually closed; source-level diagnostics stay unchanged.
+fun capture(scope :: String, name :: Symbol, thunk) :: List:
+  cond
+  | !artifact_recording || scope == "": thunk()
+  | ~else:
+      let (result, trace_steps) = trace.with_recording(thunk)
+      match result
+      | [#false, _]: result
+      | [proved :~ Thm, _]:
+          let cert = encode_certificate(scope, name, proved, trace_steps :~ List)
+          let Certificate(cert_scope, cert_name, terms, steps, cert_result) = cert
+          let row = [cert_scope, to_string(cert_name), terms, steps, cert_result]
+          let chunk = encode_rows([row])
+          records.value := List.cons(chunk, records.value :~ List)
+          rb.#{collect-garbage}()
+          result
+      | ~else: error(~who: #'certificate, "malformed proof result")
+
+class TermDecoder(cert :: Certificate)
+
+fun new_term_decoder(cert :: Certificate) :: TermDecoder:
+  TermDecoder(cert)
+
+fun expand_term(decoder :: TermDecoder, index :: Int) :: List:
+  let data = decoder.cert.terms[index]
+  match data
+  | ["fvar", symbol, ty]: ["fvar", symbol, ty]
+  | ["bvar", position, ty]: ["bvar", position, ty]
+  | ["const", symbol, ty]: ["const", symbol, ty]
+  | ["comb", func :: Int, arg :: Int]:
+      ["comb", expand_term(decoder, func), expand_term(decoder, arg)]
+  | ["abs", ty, body :: Int]: ["abs", ty, expand_term(decoder, body)]
+  | ~else: error(~who: #'certificate, "malformed interned term")
+
+fun certificate_term_at(decoder :: TermDecoder, index :: Int) :: Term:
+  certificate_term(expand_term(decoder, index))
+
+fun decode_key(hyps_data :: List, concl_data :: Int, decoder :: TermDecoder) :: List:
+  [hyps_data.map(fun (hyp): certificate_term_at(decoder, hyp :~ Int)),
+   certificate_term_at(decoder, concl_data)]
+
+fun lookup_known(known :: Map, key :: List) :: maybe(Thm):
+  for values(found :: maybe(Thm) = #false) ((candidate, theorem) in known):
+    (if candidate == key | theorem :~ Thm | found)
+
+fun resolve_ref(ref, known :: Map, local :: Map, decoder :: TermDecoder) :: Thm:
+  match ref
+  | ["local", index :: Int]:
+      match local.get(index, #false)
+      | #false: error(~who: #'certificate, "certificate refers to a future theorem")
+      | th: th :~ Thm
+  | ["known", hyps_data, concl_data :: Int]:
+      let key = decode_key(hyps_data :~ List, concl_data, decoder)
+      match lookup_known(known, key)
+      | #false:
+          error(~who: #'certificate,
+                "certificate refers to a theorem unavailable in this theory",
+                error.val(~label: "conclusion",
+                          term_to_string(certificate_term_at(decoder, concl_data))))
+      | th: th :~ Thm
+  | ~else: error(~who: #'certificate, "malformed theorem reference")
+
+fun checked_term(thy :: Theory, decoder :: TermDecoder, index :: Int) :: Term:
+  let term = certificate_term_at(decoder, index)
+  check_term(thy, term)
+  term
+
+fun decode_inst(data :: List, thy :: Theory, decoder :: TermDecoder) :: List:
+  for List (entry in data):
+    match entry
+    | [replacement :: Int, target :: Int]:
+        [checked_term(thy, decoder, replacement), checked_term(thy, decoder, target)]
+    | ~else: error(~who: #'certificate, "malformed term instantiation")
+
+fun decode_type_inst(data :: List) :: Map:
+  for values(acc :: Map = {}) (entry in data):
+    match entry
+    | [name_data, type_data]: acc ++ {certificate_symbol(name_data): certificate_type(type_data)}
+    | ~else: error(~who: #'certificate, "malformed type instantiation")
+
+fun replay_step(thy :: Theory, raw_step, known :: Map, local :: Map,
+                decoder :: TermDecoder) :: Thm:
+  match raw_step
+  | [rule_text :: String, refs_data, data]:
+      let refs_data :~ List = refs_data
+      let refs = refs_data.map(fun (ref): resolve_ref(ref, known, local, decoder))
+      let rule = Symbol.from_string(rule_text)
+      match rule
+      | #'REFL:
+          match data
+          | [term :: Int]: REFL(thy, checked_term(thy, decoder, term))
+          | ~else: error(~who: #'certificate, "malformed REFL certificate")
+      | #'BETA:
+          match data
+          | [term :: Int]: BETA(thy, checked_term(thy, decoder, term))
+          | ~else: error(~who: #'certificate, "malformed BETA certificate")
+      | #'ASSUME:
+          match data
+          | [term :: Int]: ASSUME(thy, checked_term(thy, decoder, term))
+          | ~else: error(~who: #'certificate, "malformed ASSUME certificate")
+      | #'ABS:
+          match [refs, data]
+          | [[th], [variable :: Int]]:
+              match checked_term(thy, decoder, variable)
+              | fvar :~ FVar: ABS(thy, fvar, th :~ Thm)
+              | ~else: error(~who: #'certificate, "ABS needs a free variable")
+          | ~else: error(~who: #'certificate, "malformed ABS certificate")
+      | #'TRANS:
+          match refs | [left, right]: TRANS(left :~ Thm, right :~ Thm)
+                     | ~else: error(~who: #'certificate, "malformed TRANS certificate")
+      | #'MK_COMB:
+          match refs | [func, arg]: MK_COMB(func :~ Thm, arg :~ Thm)
+                     | ~else: error(~who: #'certificate, "malformed MK_COMB certificate")
+      | #'EQ_MP:
+          match refs | [eq, th]: EQ_MP(eq :~ Thm, th :~ Thm)
+                     | ~else: error(~who: #'certificate, "malformed EQ_MP certificate")
+      | #'DEDUCT_ANTISYM_RULE:
+          match refs | [left, right]: DEDUCT_ANTISYM_RULE(left :~ Thm, right :~ Thm)
+                     | ~else: error(~who: #'certificate, "malformed DEDUCT certificate")
+      | #'INST:
+          match [refs, data]
+          | [[th], [theta]]: INST(thy, decode_inst(theta :~ List, thy, decoder), th :~ Thm)
+          | ~else: error(~who: #'certificate, "malformed INST certificate")
+      | #'INST_TYPE:
+          match [refs, data]
+          | [[th], [theta]]: INST_TYPE(thy, decode_type_inst(theta :~ List), th :~ Thm)
+          | ~else: error(~who: #'certificate, "malformed INST_TYPE certificate")
+      | ~else: error(~who: #'certificate, "unsupported certificate inference: " ++ rule_text)
+  | ~else: error(~who: #'certificate, "malformed certificate step")
+
+fun replay(thy :: Theory, known :: Map, cert :: Certificate) :: Thm:
+  let decoder = new_term_decoder(cert)
+  let local = for values(acc :: Map = {}) (step in cert.steps, index in List.iota(cert.steps.length())):
+                acc ++ {index: replay_step(thy, step, known, acc, decoder)}
+  resolve_ref(cert.result, known, local, decoder)
+
+fun certificate(rows :: List, scope :: String, name :: Symbol) :: maybe(Certificate):
+  cond
+  | artifact_recording: #false
+  | ~else:
+      recur loop (remaining :: List = rows):
+        match remaining
+        | []: #false
+        | List.cons(row, rest):
+            match row
+            | [row_scope :: String, row_name :: String, terms, steps, result] when row_scope == scope && row_name == to_string(name):
+                Certificate(row_scope, name, terms :~ List, steps :~ List, result)
+            | ~else: loop(rest)
+fun racket_data(data):
+  cond
+  | data is_a List:
+      for values(acc = rb.#{list}()) (item in (data :~ List).reverse()):
+        rb.#{cons}(racket_data(item), acc)
+  | ~else: data
+
+fun rhombus_data(data):
+  cond
+  | rb.#{null?}(data): []
+  | rb.#{pair?}(data):
+      recur loop (remaining = data, acc :: List = []):
+        cond
+        | rb.#{null?}(remaining): acc.reverse()
+        | ~else:
+            loop(rb.#{cdr}(remaining),
+                 List.cons(rhombus_data(rb.#{car}(remaining)), acc))
+  | rb.#{string?}(data): to_string(data)
+  | ~else: data
+
+fun encode_rows(rows :: List) :: String:
+  let raw_out = rb.#{open-output-bytes}()
+  rb.#{write}(racket_data(rows), raw_out)
+  let compressed_out = rb.#{open-output-bytes}()
+  gzip.#{gzip-through-ports}(rb.#{open-input-bytes}(rb.#{get-output-bytes}(raw_out)),
+                             compressed_out, #false, 0)
+  to_string(rb.#{bytes->string/utf-8}(
+    base64.#{base64-encode}(rb.#{get-output-bytes}(compressed_out))))
+
+fun decode_rows(encoded :: String) :: List:
+  let compressed = base64.#{base64-decode}(rb.#{string->bytes/utf-8}(encoded))
+  let raw_out = rb.#{open-output-bytes}()
+  gunzip.#{gunzip-through-ports}(rb.#{open-input-bytes}(compressed), raw_out)
+  rhombus_data(rb.#{read}(rb.#{open-input-bytes}(rb.#{get-output-bytes}(raw_out)))) :~ List
+
+fun flush() :: Void:
+  when artifact_recording
+  | let path = artifact_output :~ String
+    let temporary = path ++ ".tmp"
+    when rb.#{file-exists?}(temporary)
+    | rb.#{delete-file}(temporary)
+    let out = rb.#{open-output-file}(temporary)
+    let chunks = (records.value :~ List).reverse()
+    rb.display("#lang rhombus/static\n\nimport rhombus/hol/artifact as artifact\n\nexport:\n  certificate\n\ndef chunks = artifact.decode_rows(", out)
+    rb.#{write}(encode_rows(chunks), out)
+    rb.display(")\n\nfun certificate(scope :: String, name :: Symbol):\n  recur loop (remaining :: List = chunks):\n    match remaining\n    | []: #false\n    | List.cons(chunk, rest):\n        match artifact.certificate(artifact.decode_rows(chunk :~ String), scope, name)\n        | #false: loop(rest)\n        | cert: cert\n", out)
+    rb.#{close-output-port}(out)
+    rb.#{rename-file-or-directory}(temporary, path, #true)

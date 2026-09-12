@@ -8,11 +8,15 @@ export:
   trace
   note
   thm_key
+  record_theorem
 
 namespace trace:
   export:
     TraceStep
     with_recording
+    with_recording_objects
+    bootstrap_theorems
+    finish_bootstrap
 
   class TraceStep(rule :: Symbol,
                   thy :: maybe(Symbol),
@@ -34,9 +38,47 @@ namespace trace:
         recording.value := was_recording
         trace_log.value := outer_log
 
+  fun with_recording_objects(thunk):
+    let was_recording = recording.value
+    let outer_log = trace_log.value
+    let outer_objects = object_log.value
+    let was_collecting = collect_objects.value
+    recording.value := #true
+    trace_log.value := []
+    object_log.value := []
+    collect_objects.value := #true
+    try:
+      let result = thunk()
+      let steps = (trace_log.value :~ List).reverse()
+      let theorems = (object_log.value :~ List).reverse()
+      values(result, steps, theorems)
+      ~finally:
+        recording.value := was_recording
+        trace_log.value := outer_log
+        object_log.value := outer_objects
+        collect_objects.value := was_collecting
+
 fun thm_key(th :: Thm) :: List: [th.stamp.id, th.hyps, th.concl]
 def recording :: Box = Box(#false)
 def trace_log :: Box = Box([])
+def object_log :: Box = Box([])
+def collect_objects :: Box = Box(#false)
+def bootstrap_active :: Box = Box(#true)
+def bootstrap_log :: Box = Box([])
+
+fun bootstrap_theorems(thy :: Theory) :: List:
+  for values(acc :: List = []) (theorem in bootstrap_log.value :~ List):
+    (if descends((theorem :~ Thm).stamp, thy.stamp) | acc ++ [theorem] | acc)
+
+fun finish_bootstrap() :: Void:
+  bootstrap_active.value := #false
+  bootstrap_log.value := []
+
+fun record_theorem(th :: Thm) :: Void:
+  when bootstrap_active.value
+  | bootstrap_log.value := List.cons(th, bootstrap_log.value :~ List)
+  when collect_objects.value
+  | object_log.value := List.cons(th, object_log.value :~ List)
 
 fun note(rule :: Symbol, thy, thms :: List, data :: List,
          out_thy, out_thms :: List) :: Void:

@@ -47,6 +47,9 @@ export:
   Const
   Comb
   Abs
+  certificate_symbol
+  certificate_type
+  certificate_term
   mk_var
   mk_const
   mk_comb
@@ -352,6 +355,43 @@ fun is_locally_closed(t :: Term) :: Boolean:
     | Abs(_, b): go(b, depth + 1)
     | ~else: #true
   go(t, 0)
+
+// A certificate carries only first-order data. Reconstructing its locally
+// nameless terms here keeps raw constructors out of the artifact loader; the
+// kernel still checks every reconstructed term before an inference accepts it.
+fun certificate_symbol(data) :: Symbol:
+  match data
+  | ["interned", text :: String]: Symbol.from_string(text)
+  | ["uninterned", text :: String]: Symbol.uninterned_from_string(text)
+  | ~else: error(~who: #'certificate_term, "malformed symbol encoding")
+
+fun certificate_type(data) :: HType:
+  match data
+  | ["var", name]: mk_tyvar(certificate_symbol(name))
+  | ["app", name, args]:
+      let args :~ List = args
+      mk_tyapp(certificate_symbol(name),
+               args.map(fun (arg): certificate_type(arg)))
+  | ~else: error(~who: #'certificate_term, "malformed type encoding")
+
+fun certificate_term(data) :: Term:
+  fun decode(data) :: Term:
+    match data
+    | ["fvar", name, ty]:
+        raw_fvar(certificate_symbol(name), certificate_type(ty))
+    | ["bvar", index :: NonnegInt, ty]:
+        raw_bvar(index, certificate_type(ty))
+    | ["const", name, ty]:
+        raw_const(certificate_symbol(name), certificate_type(ty))
+    | ["comb", func, arg]:
+        raw_comb(decode(func), decode(arg))
+    | ["abs", arg_ty, body]:
+        raw_abs(certificate_type(arg_ty), decode(body))
+    | ~else: error(~who: #'certificate_term, "malformed term encoding")
+  let term = decode(data)
+  unless is_locally_closed(term)
+  | error(~who: #'certificate_term, "term has a dangling bound variable")
+  term
 
 // -- free variables --------------------------------------------------------
 

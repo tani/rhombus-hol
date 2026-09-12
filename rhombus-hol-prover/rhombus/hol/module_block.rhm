@@ -378,9 +378,25 @@ meta:
     | '(hol_group: $g; ...)': '$g; ...'
     | ~else: syntax_meta.error("internal malformed expansion group", box)
 
-  fun render_step(step :: Syntax) :: List.of(Syntax):
+  // A stdlib module can opt into a sibling registry with
+  // `certificate_artifact "scope" "path.rhm"`. The directive is consumed by
+  // this expander and never becomes a runtime binding.
+  fun artifact_config(steps :: List) :: maybe(List.of(Syntax)):
+    recur loop (remaining :: List = steps, found = #false):
+      match remaining
+      | []: found
+      | List.cons(step, rest):
+          match step.replace_scopes(id_ctx)
+          | '(~artifact $scope $path)':
+              when found != #false
+              | syntax_meta.error("duplicate certificate_artifact directive", step)
+              loop(rest, [scope, path])
+          | ~else: loop(rest, found)
+
+  fun render_step(step :: Syntax, artifact :: maybe(List.of(Syntax))) :: List.of(Syntax):
     let step = step.replace_scopes(id_ctx)
     match step
+    | '(~artifact $_ $_)': []
     | '(~import $alias [$term, ...])':
         let [t, ...] = [term, ...]
         let path = '$t ...'
@@ -404,18 +420,35 @@ meta:
                           _hol_driver.hol_reraise(e, '$at')
            _hol_driver.add_axiomatic_function($cur, spec, '$at')']
     | '(~theorem $cur $nxt [$name] [$attr, ...] [$core] [$tactic] [$at])':
-        ['def $nxt:
-           let statement = try:
-                             _hol_surface.decode_prop('$core')
+        match artifact
+        | #false:
+            ['def $nxt:
+               let statement = try:
+                                _hol_surface.decode_prop('$core')
+                                ~catch e :: Exn.Fail:
+                                  _hol_driver.hol_reraise(e, '$at')
+               let proof = try:
+                             _hol_surface.decode_tactic('$tactic')
                              ~catch e :: Exn.Fail:
                                _hol_driver.hol_reraise(e, '$at')
-           let proof = try:
-                         _hol_surface.decode_tactic('$tactic')
-                         ~catch e :: Exn.Fail:
-                           _hol_driver.hol_reraise(e, '$at')
-           _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
-                                   [Syntax.unwrap('$attr'), ...],
-                                   statement, proof, '$at')']
+               _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
+                                       [Syntax.unwrap('$attr'), ...],
+                                       statement, proof, '$at')']
+        | [scope, _]:
+            ['def $nxt:
+               let statement = try:
+                                _hol_surface.decode_prop('$core')
+                                ~catch e :: Exn.Fail:
+                                  _hol_driver.hol_reraise(e, '$at')
+               let proof = try:
+                             _hol_surface.decode_tactic('$tactic')
+                             ~catch e :: Exn.Fail:
+                               _hol_driver.hol_reraise(e, '$at')
+               _hol_driver.add_theorem_with_certificate(
+                 $cur, Syntax.unwrap('$name'), [Syntax.unwrap('$attr'), ...],
+                 statement, proof,
+                 _hol_artifact.certificate($scope, Syntax.unwrap('$name')),
+                 $scope, '$at')']
     | '(~rules $cur $nxt [$flag] [$name, ...])':
         ['def $nxt = _hol_driver.set_rules($cur, $flag, [Syntax.unwrap('$name'), ...])']
     | '(~declare $cur $nxt [$name])':
@@ -574,6 +607,15 @@ decl.macro
      $rest; ...':
     continue_theorem(n, [step_box, ...], name, [attr, ...],
                      hol_expr_meta.unpack(stmt), #false, [rest, ...])
+| 'hol_expand($(n :: Int), [$step_box, ...]):
+     certificate_artifact $scope $path
+     $rest; ...':
+    let config = '(~artifact $scope $path)'
+    let boxed = box_group(config)
+    let [f, ...] = [rest, ...]
+    'hol_expand($n, [$step_box, ..., $boxed]):
+       $f
+       ...'
 | 'hol_expand($(n :: Int), [$step_box, ...]): $form; ...':
     let steps = [step_box, ...].map(unbox_group)
     let forms = [form, ...]
@@ -581,20 +623,29 @@ decl.macro
     match next
     | #false:
         let final = st(Syntax.unwrap(n))
+        let artifact = artifact_config(steps)
         let rendered:
           for values(acc :~ List = []) (encoded in steps):
-            acc ++ render_step(encoded)
+            acc ++ render_step(encoded, artifact)
+        let artifact_import:
+          match artifact
+          | #false: []
+          | [_, path]:
+              let path = recontext(path)
+              ['import: $path as _hol_artifact']
+        let [artifact_form, ...] = artifact_import
         let [step, ...] = rendered
         '«
            module hol_theory ~lang rhombus:
              import: rhombus/hol/driver as _hol_driver
              import: rhombus/hol/surface_core as _hol_surface
+             $artifact_form
+             ...
              export: theory
              def $(st(0)) = _hol_driver.initial_state()
              $step
              ...
-             def theory = $final
-           import: meta: self!hol_theory as _hol_self
+             def theory = _hol_driver.finish_artifact($final)
          »'
     | d:
         let (runtime, chain, n2) = emit_one(d :~ expand.Decl,

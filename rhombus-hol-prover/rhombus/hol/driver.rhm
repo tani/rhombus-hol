@@ -132,7 +132,15 @@ fun state_context(st :: HolState) :: Context:
 // usable wherever an earlier one was.
 fun theorem_key(th :: Thm) :: List: [hyps_of(th), concl_of(th)]
 
-fun known_theorems(st :: HolState) :: Map:
+// Replay is the only consumer of this index. Key it by `HolState` identity so
+// immutable states cannot leak a descendant's theorems into an earlier state.
+// Weak keys keep completed module expansions collectable.
+def known_theorem_cache = rb.#{make-weak-hasheq}()
+
+fun cache_known_theorems(st :: HolState, known :: Map) :: Void:
+  rb.#{hash-set!}(known_theorem_cache, st, known)
+
+fun build_known_theorems(st :: HolState) :: Map:
   fun add(known :: Map, th :: Thm) :: Map:
     known ++ {theorem_key(th): th}
   let known = add({}, st.wfrec_def)
@@ -165,6 +173,14 @@ fun known_theorems(st :: HolState) :: Map:
   for values(acc :: Map = known) ((_, info) in st.ctx.funs):
     for values(a :: Map = acc) (th in (info :~ FunInfo).equations):
       add(a, th :~ Thm)
+
+fun known_theorems(st :: HolState) :: Map:
+  match rb.#{hash-ref}(known_theorem_cache, st, #false)
+  | known :: Map: known
+  | #false:
+      let known = build_known_theorems(st)
+      cache_known_theorems(st, known)
+      known
 
 // A recording build writes after every opted-in module. Rewriting the complete
 // registry is intentional: dependencies compile before their consumers, and
@@ -492,8 +508,13 @@ fun add_theorem_with_certificate(st :: HolState, name :: Symbol, attr_kws :: Lis
                  | attrs.contains(#'rewrite_rule) || attrs.contains(#'simp):
                      add_thm(st.ctx.thy, st.ctx.db, name, proved)
                  | ~else: st.ctx.db)
-      HolState(context_with_rules(st.ctx, db2), st.thms ++ {name: proved},
-               st.names ++ [name], st.wfrec_def)
+      let next = HolState(context_with_rules(st.ctx, db2), st.thms ++ {name: proved},
+                          st.names ++ [name], st.wfrec_def)
+      match certificate
+      | _ :: artifact.Certificate:
+          cache_known_theorems(next, known_theorems(st) ++ {theorem_key(proved): proved})
+      | ~else: #void
+      next
   | ~else: error(~who: #'certificate, "malformed proof result")
 
 fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,

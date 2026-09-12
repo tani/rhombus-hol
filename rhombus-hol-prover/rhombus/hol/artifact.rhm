@@ -198,32 +198,45 @@ fun capture(scope :: String, name :: Symbol, thunk) :: List:
           result
       | ~else: error(~who: #'certificate, "malformed proof result")
 
-class TermDecoder(cert :: Certificate)
+class TermDecoder(cert :: Certificate, expanded, decoded)
 
 fun new_term_decoder(cert :: Certificate) :: TermDecoder:
-  TermDecoder(cert)
+  TermDecoder(cert, rb.#{make-hash}(), rb.#{make-hash}())
 
+// Certificates refer to interned terms repeatedly across theorem references
+// and inference data. Expand and validate each direct reference once per
+// replay; every cached term has passed `certificate_term`'s closure check.
 fun expand_term(decoder :: TermDecoder, index :: Int) :: List:
-  let data = decoder.cert.terms[index]
-  match data
-  | ["fvar", symbol, ty]: ["fvar", symbol, ty]
-  | ["bvar", position, ty]: ["bvar", position, ty]
-  | ["const", symbol, ty]: ["const", symbol, ty]
-  | ["comb", func :: Int, arg :: Int]:
-      ["comb", expand_term(decoder, func), expand_term(decoder, arg)]
-  | ["abs", ty, body :: Int]: ["abs", ty, expand_term(decoder, body)]
-  | ~else: error(~who: #'certificate, "malformed interned term")
+  match rb.#{hash-ref}(decoder.expanded, index, #false)
+  | expanded :: List: expanded
+  | #false:
+      let data = decoder.cert.terms[index]
+      let expanded:
+        match data
+        | ["fvar", symbol, ty]: ["fvar", symbol, ty]
+        | ["bvar", position, ty]: ["bvar", position, ty]
+        | ["const", symbol, ty]: ["const", symbol, ty]
+        | ["comb", func :: Int, arg :: Int]:
+            ["comb", expand_term(decoder, func), expand_term(decoder, arg)]
+        | ["abs", ty, body :: Int]: ["abs", ty, expand_term(decoder, body)]
+        | ~else: error(~who: #'certificate, "malformed interned term")
+      rb.#{hash-set!}(decoder.expanded, index, expanded)
+      expanded
 
 fun certificate_term_at(decoder :: TermDecoder, index :: Int) :: Term:
-  certificate_term(expand_term(decoder, index))
+  match rb.#{hash-ref}(decoder.decoded, index, #false)
+  | term :: Term: term
+  | #false:
+      let term = certificate_term(expand_term(decoder, index))
+      rb.#{hash-set!}(decoder.decoded, index, term)
+      term
 
 fun decode_key(hyps_data :: List, concl_data :: Int, decoder :: TermDecoder) :: List:
   [hyps_data.map(fun (hyp): certificate_term_at(decoder, hyp :~ Int)),
    certificate_term_at(decoder, concl_data)]
 
 fun lookup_known(known :: Map, key :: List) :: maybe(Thm):
-  for values(found :: maybe(Thm) = #false) ((candidate, theorem) in known):
-    (if candidate == key | theorem :~ Thm | found)
+  known.get(key, #false)
 
 fun resolve_ref(ref, known :: Map, local :: Map, decoder :: TermDecoder) :: Thm:
   match ref

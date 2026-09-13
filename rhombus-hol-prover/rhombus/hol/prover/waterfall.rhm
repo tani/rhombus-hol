@@ -103,14 +103,13 @@ fun prove_goal(ctx :: Context, g :: Goal,
                ~induct: hint :: maybe(FVar) = #false,
                ~skipped_stages: skipped :: Set.of(Symbol) = Set(),
                ~limits: limits :: SearchLimits = SearchLimits()) :: ProofNode:
-  with_search_limits(
-    fun ():
-      run_proof_scope(
-        ctx, RuleScope([], [], skipped),
-        effect:
-          let proof_ctx :: ProofContext <- ask()
-          return prove_goal_impl(proof_ctx, g, ~induct: hint)),
-    ~limits: limits)
+  fun prove_scoped() :: Computation:
+    effect:
+      let proof_ctx :: ProofContext <- ask()
+      return prove_goal_impl(proof_ctx, g, ~induct: hint)
+  fun run_scoped_proof() :: ProofNode:
+    run_proof_scope(ctx, RuleScope([], [], skipped), prove_scoped())
+  with_search_limits(run_scoped_proof, ~limits: limits)
 
 fun prove_goal_impl(ctx :: ProofContext, g :: Goal,
                     ~induct: hint :: maybe(FVar) = #false) :: ProofNode:
@@ -166,19 +165,18 @@ fun prove(ctx :: Context, statement :: Term,
           ~witnesses: witnesses :: List.of(Term) = [],
           ~limits: limits :: SearchLimits = SearchLimits())
      :: values(maybe(Thm), ProofNode):
+  fun prove_scoped() :: Computation:
+    effect:
+      let proof_ctx :: ProofContext <- ask()
+      let (proved, node) = prove_impl(
+                             proof_ctx, statement, ~names: names,
+                             ~induct: hint, ~cases: cases,
+                             ~witnesses: witnesses)
+      return ProofResult(proved, node)
+  fun run_scoped_proof() :: ProofResult:
+    run_proof_scope(ctx, scope, prove_scoped())
   let result :~ ProofResult:
-    with_search_limits(
-      fun ():
-        run_proof_scope(
-          ctx, scope,
-          effect:
-            let proof_ctx :: ProofContext <- ask()
-            let (proved, node) = prove_impl(
-                                   proof_ctx, statement, ~names: names,
-                                   ~induct: hint, ~cases: cases,
-                                   ~witnesses: witnesses)
-            return ProofResult(proved, node)),
-      ~limits: limits)
+    with_search_limits(run_scoped_proof, ~limits: limits)
   values(result.proved, result.node)
 
 fun prove_impl(ctx :: ProofContext, statement :: Term,
@@ -237,9 +235,9 @@ fun apply_witnesses(ctx :: ProofContext, witnesses :: List.of(Term),
       | [antecedent, consequent]:
           let sub = note(Goal(g.asms ++ [antecedent], consequent, g.trail),
                          "assuming " ++ show(antecedent))
-          let step = Step([sub],
-                          fun (ths :: List.of(Thm)):
-                            DISCH(ctx.base.thy, antecedent, ths[0]))
+          fun discharge_antecedent(ths :: List.of(Thm)) :: Thm:
+            DISCH(ctx.base.thy, antecedent, ths[0])
+          let step = Step([sub], discharge_antecedent)
           Derived(step,
                   [apply_witnesses(ctx, witnesses, cases, sub, hint)])
       | ~else:
@@ -256,9 +254,9 @@ fun apply_witnesses(ctx :: ProofContext, witnesses :: List.of(Term),
               let instantiated = inst_fvar([[witness, v :~ FVar]], body)
               let sub = note(Goal(g.asms, instantiated, g.trail),
                              "existential witness " ++ show(witness))
-              let step = Step([sub],
-                              fun (ths :: List.of(Thm)):
-                                EXISTS(ctx.base.thy, g.concl, witness, ths[0]))
+              fun introduce_witness(ths :: List.of(Thm)) :: Thm:
+                EXISTS(ctx.base.thy, g.concl, witness, ths[0])
+              let step = Step([sub], introduce_witness)
               Derived(step,
                       [apply_witnesses(ctx, rest :~ List, cases, sub, hint)])
 
@@ -280,10 +278,10 @@ fun apply_cases(ctx :: ProofContext, cases :: List.of(Term), g :: Goal,
                           "case split: " ++ show(c))
       let sub_false = note(Goal(g.asms ++ [mk_neg(c)], g.concl, g.trail),
                            "case split: not (" ++ show(c) ++ ")")
-      let step = Step([sub_true, sub_false],
-                      fun (ths :: List.of(Thm)):
-                        let em = excluded_middle(ctx.base.thy, c)
-                        DISJ_CASES(ctx.base.thy, em, ths[0], ths[1]))
+      fun discharge_cases(ths :: List.of(Thm)) :: Thm:
+        let em = excluded_middle(ctx.base.thy, c)
+        DISJ_CASES(ctx.base.thy, em, ths[0], ths[1])
+      let step = Step([sub_true, sub_false], discharge_cases)
       Derived(step, [apply_cases(ctx, rest, sub_true, hint),
                      apply_cases(ctx, rest, sub_false, hint)])
 

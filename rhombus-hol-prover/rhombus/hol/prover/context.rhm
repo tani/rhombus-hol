@@ -11,6 +11,7 @@ import:
   rhombus/hol/recursion/recdef open
   rhombus/hol/logic/ruledb open
   rhombus/hol/effect/core open
+  rhombus/hol/effect/syntax open
   rhombus/hol/effect/reader open
 
 export:
@@ -69,22 +70,21 @@ fun context_add_function(ctx :: Context, thy :: Theory, db :: RuleDB,
 // exist only in the `ProofContext` supplied to this computation.
 fun run_proof_scope(ctx :: Context, scope :: RuleScope,
                     body :: Computation):
-  let initial = ProofContext(ctx, ctx.db, Set())
   let scoped:
-    local(
-      fun (proof_ctx):
-        let proof_ctx :~ ProofContext = proof_ctx
-        let db0 = for values(d :~ RuleDB = proof_ctx.db) (binding in scope.using):
-                    let binding :~ RuleBinding = binding
-                    add_thm(proof_ctx.base.thy, d,
-                            binding.name, binding.theorem)
-        let used_names = scope.using.map(
-                           fun (binding :: RuleBinding): binding.name)
-        let db1 = enable(db0, used_names)
-        let db2 = disable(db1, scope.disabled)
-        ProofContext(proof_ctx.base, db2,
-                     proof_ctx.skipped_stages ++ scope.skipped_stages),
-      body)
-  match run_reader(scoped, initial)
+    effect:
+      let proof_ctx :: ProofContext <- ask()
+      let db0 = for values(d :~ RuleDB = proof_ctx.db) (binding in scope.using):
+                  let binding :~ RuleBinding = binding
+                  add_thm(proof_ctx.base.thy, d,
+                          binding.name, binding.theorem)
+      let used_names = scope.using.map(
+                         fun (binding :: RuleBinding): binding.name)
+      let db1 = enable(db0, used_names)
+      let db2 = disable(db1, scope.disabled)
+      let scoped_context = ProofContext(
+                             proof_ctx.base, db2,
+                             proof_ctx.skipped_stages ++ scope.skipped_stages)
+      local(fun (_): scoped_context, body)
+  match run_reader(scoped, ProofContext(ctx, ctx.db, Set()))
   | Pure(value): value
   | ~else: error(~who: #'run_proof_scope, "internal error: unhandled effect")

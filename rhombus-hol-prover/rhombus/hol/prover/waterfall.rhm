@@ -36,9 +36,15 @@ import:
   rhombus/hol/prover/context open
   rhombus/hol/prover/stage open
   rhombus/hol/prover/search/scheduler open
+  rhombus/hol/effect/core open
+  rhombus/hol/effect/syntax open
+  rhombus/hol/effect/reader open
 
 export:
   Context
+  ProofContext
+  RuleBinding
+  RuleScope
   mk_context
   context_with_rules
   context_add_datatype
@@ -80,8 +86,8 @@ def max_induction_path = 6
 def stage_names :: Set = {#'simplify, #'eliminate, #'fertilize, #'generalize,
                           #'irrelevance, #'induct}
 
-fun check_do_not(do_not :: Set.of(Symbol)) :: Void:
-  for (n in do_not):
+fun check_skipped_stages(skipped :: Set.of(Symbol)) :: Void:
+  for (n in skipped):
     unless stage_names.contains(n)
     | error(~who: #'proof, "no such waterfall stage to skip",
             error.val(~label: "name", n),
@@ -95,16 +101,20 @@ fun check_do_not(do_not :: Set.of(Symbol)) :: Void:
 // spends from the same budget rather than starting over.
 fun prove_goal(ctx :: Context, g :: Goal,
                ~induct: hint :: maybe(FVar) = #false,
-               ~do_not: do_not :: Set.of(Symbol) = Set(),
+               ~skipped_stages: skipped :: Set.of(Symbol) = Set(),
                ~limits: limits :: SearchLimits = SearchLimits()) :: ProofNode:
-  with_search_limits(fun ():
-                       prove_goal_impl(ctx, g, ~induct: hint, ~do_not: do_not),
-                     ~limits: limits)
+  with_search_limits(
+    fun ():
+      run_proof_scope(
+        ctx, RuleScope([], [], skipped),
+        effect:
+          let proof_ctx :: ProofContext <- ask()
+          return prove_goal_impl(proof_ctx, g, ~induct: hint)),
+    ~limits: limits)
 
-fun prove_goal_impl(ctx :: Context, g :: Goal,
-                    ~induct: hint :: maybe(FVar) = #false,
-                    ~do_not: do_not :: Set.of(Symbol) = Set()) :: ProofNode:
-  check_do_not(do_not)
+fun prove_goal_impl(ctx :: ProofContext, g :: Goal,
+                    ~induct: hint :: maybe(FVar) = #false) :: ProofNode:
+  check_skipped_stages(ctx.skipped_stages)
   // `inducted` is the goals already inducted on along this branch, oldest
   // first: its length is the branch limit above, and membership is the
   // duplicate check.  A goal that comes back around unchanged would induct
@@ -117,13 +127,13 @@ fun prove_goal_impl(ctx :: Context, g :: Goal,
     spend_search_step(#'waterfall)
     fun descend(st :: Step, next :: List) :: ProofNode:
       Derived(st, st.subgoals.map(fun (s :: Goal): go(s, next, #false)))
-    match first_success(ctx, do_not, standard_stages(), g)
+    match first_success(ctx, standard_stages(), g)
     | #false:
         let key = [g.asms, g.concl]
         cond
         | inducted.length() >= max_induction_path: Open(g)
         | inducted.contains(key): Open(g)
-        | do_not.contains(#'induct): Open(g)
+        | ctx.skipped_stages.contains(#'induct): Open(g)
         | ~else:
             match run_stage(ctx, induction_stage(hint), g)
             | #false: Open(g)
@@ -146,28 +156,38 @@ fun prove_goal_impl(ctx :: Context, g :: Goal,
 // Everything the proof does -- simplification, discharging a rewrite rule's
 // side conditions, the waterfall's own stages -- spends from this one budget,
 // so no nested search can escape the limit by starting a fresh one.
+class ProofResult(proved :: maybe(Thm), node :: ProofNode)
+
 fun prove(ctx :: Context, statement :: Term,
           ~names: names :: List.of(Symbol) = [],
           ~induct: hint :: maybe(Symbol) = #false,
-          ~do_not: do_not :: Set.of(Symbol) = Set(),
+          ~scope: scope :: RuleScope = RuleScope(),
           ~cases: cases :: List.of(Term) = [],
           ~witnesses: witnesses :: List.of(Term) = [],
           ~limits: limits :: SearchLimits = SearchLimits())
      :: values(maybe(Thm), ProofNode):
-  with_search_limits(fun ():
-                       prove_impl(ctx, statement, ~names: names,
-                                  ~induct: hint, ~do_not: do_not,
-                                  ~cases: cases, ~witnesses: witnesses),
-                     ~limits: limits)
+  let result :~ ProofResult:
+    with_search_limits(
+      fun ():
+        run_proof_scope(
+          ctx, scope,
+          effect:
+            let proof_ctx :: ProofContext <- ask()
+            let (proved, node) = prove_impl(
+                                   proof_ctx, statement, ~names: names,
+                                   ~induct: hint, ~cases: cases,
+                                   ~witnesses: witnesses)
+            return ProofResult(proved, node)),
+      ~limits: limits)
+  values(result.proved, result.node)
 
-fun prove_impl(ctx :: Context, statement :: Term,
+fun prove_impl(ctx :: ProofContext, statement :: Term,
                ~names: names :: List.of(Symbol) = [],
                ~induct: hint :: maybe(Symbol) = #false,
-               ~do_not: do_not :: Set.of(Symbol) = Set(),
                ~cases: cases :: List.of(Term) = [],
                ~witnesses: witnesses :: List.of(Term) = [])
      :: values(maybe(Thm), ProofNode):
-  let thy = ctx.thy
+  let thy = ctx.base.thy
   let (vars, matrix) = strip_forall_all(statement, names)
   let hint_var = (cond
                   | hint:
@@ -188,7 +208,7 @@ fun prove_impl(ctx :: Context, statement :: Term,
                         | List.cons(v, rest):
                             (if (v :~ FVar).name == hint | v | loop(rest))
                   | ~else: #false)
-  let node = apply_witnesses(ctx, witnesses, cases, mk_goal([], matrix), hint_var, do_not)
+  let node = apply_witnesses(ctx, witnesses, cases, mk_goal([], matrix), hint_var)
   match run_with_scheduler(sequential_scheduler(), node)
   | #false: values(#false, node)
   | th :~ Thm:
@@ -207,11 +227,11 @@ fun prove_impl(ctx :: Context, statement :: Term,
 // Apply explicit existential witnesses before Boolean case splits. Each step
 // is justified by the derived EXISTS rule, and mismatched hints fail loudly
 // rather than being ignored.
-fun apply_witnesses(ctx :: Context, witnesses :: List.of(Term),
+fun apply_witnesses(ctx :: ProofContext, witnesses :: List.of(Term),
                     cases :: List.of(Term), g :: Goal,
-                    hint :: maybe(FVar), do_not :: Set.of(Symbol)) :: ProofNode:
+                    hint :: maybe(FVar)) :: ProofNode:
   match witnesses
-  | []: apply_cases(ctx, cases, g, hint, do_not)
+  | []: apply_cases(ctx, cases, g, hint)
   | List.cons(witness, rest):
       match dest_imp(g.concl)
       | [antecedent, consequent]:
@@ -219,9 +239,9 @@ fun apply_witnesses(ctx :: Context, witnesses :: List.of(Term),
                          "assuming " ++ show(antecedent))
           let step = Step([sub],
                           fun (ths :: List.of(Thm)):
-                            DISCH(ctx.thy, antecedent, ths[0]))
+                            DISCH(ctx.base.thy, antecedent, ths[0]))
           Derived(step,
-                  [apply_witnesses(ctx, witnesses, cases, sub, hint, do_not)])
+                  [apply_witnesses(ctx, witnesses, cases, sub, hint)])
       | ~else:
           match dest_exists(g.concl)
           | #false:
@@ -238,9 +258,9 @@ fun apply_witnesses(ctx :: Context, witnesses :: List.of(Term),
                              "existential witness " ++ show(witness))
               let step = Step([sub],
                               fun (ths :: List.of(Thm)):
-                                EXISTS(ctx.thy, g.concl, witness, ths[0]))
+                                EXISTS(ctx.base.thy, g.concl, witness, ths[0]))
               Derived(step,
-                      [apply_witnesses(ctx, rest :~ List, cases, sub, hint, do_not)])
+                      [apply_witnesses(ctx, rest :~ List, cases, sub, hint)])
 
 // `split(p)`, applied before the waterfall runs: split the goal on each term
 // in turn, true branch and false branch, so `n` terms give `2^n` subgoals.
@@ -250,10 +270,10 @@ fun apply_witnesses(ctx :: Context, witnesses :: List.of(Term),
 // costs search effort, never soundness. Every subgoal, however deep the
 // nesting, restarts at the top of the ordinary waterfall (`prove_goal`), so
 // `split` composes with `induct` and `skip` rather than replacing them.
-fun apply_cases(ctx :: Context, cases :: List.of(Term), g :: Goal,
-                hint :: maybe(FVar), do_not :: Set.of(Symbol)) :: ProofNode:
+fun apply_cases(ctx :: ProofContext, cases :: List.of(Term), g :: Goal,
+                hint :: maybe(FVar)) :: ProofNode:
   match cases
-  | []: prove_goal(ctx, g, ~induct: hint, ~do_not: do_not)
+  | []: prove_goal_impl(ctx, g, ~induct: hint)
   | List.cons(c, rest):
       let rest :~ List = rest
       let sub_true = note(Goal(g.asms ++ [c], g.concl, g.trail),
@@ -262,10 +282,10 @@ fun apply_cases(ctx :: Context, cases :: List.of(Term), g :: Goal,
                            "case split: not (" ++ show(c) ++ ")")
       let step = Step([sub_true, sub_false],
                       fun (ths :: List.of(Thm)):
-                        let em = excluded_middle(ctx.thy, c)
-                        DISJ_CASES(ctx.thy, em, ths[0], ths[1]))
-      Derived(step, [apply_cases(ctx, rest, sub_true, hint, do_not),
-                     apply_cases(ctx, rest, sub_false, hint, do_not)])
+                        let em = excluded_middle(ctx.base.thy, c)
+                        DISJ_CASES(ctx.base.thy, em, ths[0], ths[1]))
+      Derived(step, [apply_cases(ctx, rest, sub_true, hint),
+                     apply_cases(ctx, rest, sub_false, hint)])
 
 fun strip_forall_all(t :: Term, names :: List.of(Symbol))
      :: values(List.of(FVar), Term):

@@ -639,79 +639,113 @@ fun core_sub_pattern(thy :: Theory, pat :: CorePattern,
       [term, bound]
   | ~else: error(~who: #'function, "unknown CorePattern variant")
 
-fun core_parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
-                    pats :: List.of(Term), env :: Map.of(Symbol, Term),
-                    body :: CoreFunBody, at :: Syntax) :: List.of(DefClause):
-  match body
-  | CoreBodyRows(rows, _):
-      core_clause_rows(thy, self_name, self, pats, env, rows, at)
-  | CoreBodyMatch(scrutinee, clauses, body_at):
-      let v = matched_var(env, pats, scrutinee, body_at)
-      for values(acc :~ List = []) (clause in clauses):
-        acc ++ core_parse_clause(thy, self_name, self, pats, v, env,
-                                 clause, at)
-  | CoreBodyLet(name, init, tail, _):
-      let value = run_elaboration(PEnv(thy, [], env, #'function, self_name, self), init)
-      let env2 = env ++ {name: value}
-      let clauses = core_parse_body(thy, self_name, self, pats, env2,
-                                    tail, at)
-      for List (clause in clauses):
-        let clause :~ DefClause = clause
-        let core = EvalCoreLet(name, EvalCoreLeaf(value), clause_core(clause))
-        DefClause(clause.pats, eval_core_term(core),
-                  eval_core_obligations(core))
-  | CoreBodyExpr(expr, _):
-      let value = run_elaboration(PEnv(thy, [], env, #'function, self_name, self), expr)
-      [DefClause(pats, value, [value])]
-  | ~else: error(~who: #'function, "unknown CoreFunBody variant")
+class ClauseEnv(thy :: Theory,
+                self_name :: Symbol,
+                self :: Term,
+                pats :: List.of(Term),
+                vars :: Map.of(Symbol, Term),
+                at :: Syntax)
 
-fun core_parse_clause(thy :: Theory, self_name :: Symbol, self :: Term,
-                      pats :: List.of(Term), v :: FVar,
-                      env :: Map.of(Symbol, Term),
-                      clause :: CoreMatchClause,
-                      at :: Syntax) :: List.of(DefClause):
-  match clause.pattern
-  | CorePatWildcard(_):
-      core_parse_body(thy, self_name, self, pats, env, clause.body, at)
-  | CorePatCtor(name, args, pat_at):
-      let (pat, bound) = core_ctor_pattern(thy, name, args, v.ty, pat_at)
-      let env2 = for values(m :~ Map = env) (bv in bound):
-                   m ++ {(bv :~ FVar).name: bv :~ Term}
-      core_parse_body(thy, self_name, self, refine_pats(pats, v, pat),
-                      env2, clause.body, at)
-  | ~else:
-      syntax_error(#'function, "malformed match clause", clause.at)
+fun core_parse_body(body :: CoreFunBody) :: Computation:
+  effect:
+    let env :: ClauseEnv <- ask()
+    match body
+    | CoreBodyRows(rows, _):
+        core_clause_rows(rows)
+    | CoreBodyMatch(scrutinee, clauses, body_at):
+        let v = matched_var(env.vars, env.pats, scrutinee, body_at)
+        core_parse_clauses(v, clauses)
+    | CoreBodyLet(name, init, tail, _):
+        effect:
+          let value = run_elaboration(
+                        PEnv(env.thy, [], env.vars, #'function,
+                             env.self_name, env.self),
+                        init)
+          let vars2 = env.vars ++ {name: value}
+          fun bind_let(_):
+            ClauseEnv(env.thy, env.self_name, env.self, env.pats,
+                      vars2, env.at)
+          let clauses :: List <- local(bind_let, core_parse_body(tail))
+          return for List (clause in clauses):
+                   let clause :~ DefClause = clause
+                   let core = EvalCoreLet(name, EvalCoreLeaf(value),
+                                          clause_core(clause))
+                   DefClause(clause.pats, eval_core_term(core),
+                             eval_core_obligations(core))
+    | CoreBodyExpr(expr, _):
+        let value = run_elaboration(
+                      PEnv(env.thy, [], env.vars, #'function,
+                           env.self_name, env.self),
+                      expr)
+        return [DefClause(env.pats, value, [value])]
+    | ~else: error(~who: #'function, "unknown CoreFunBody variant")
 
-fun core_clause_rows(thy :: Theory, self_name :: Symbol, self :: Term,
-                     pats :: List.of(Term), env :: Map.of(Symbol, Term),
-                     rows :: List.of(CoreRow),
-                     at :: Syntax) :: List.of(DefClause):
-  for values(acc :~ List = []) (row in rows):
-    acc ++ core_clause_row(thy, self_name, self, pats, env, row, at)
+fun core_parse_clauses(v :: FVar,
+                       clauses :: List.of(CoreMatchClause)) :: Computation:
+  recur loop (remaining :~ List = clauses, acc :~ List = []):
+    match remaining
+    | []: return acc
+    | List.cons(clause, rest):
+        effect:
+          let parsed :: List <- core_parse_clause(
+                                  v, clause :~ CoreMatchClause)
+          loop(rest, acc ++ parsed)
 
-fun core_clause_row(thy :: Theory, self_name :: Symbol, self :: Term,
-                    pats :: List.of(Term), env :: Map.of(Symbol, Term),
-                    row :: CoreRow, at :: Syntax) :: List.of(DefClause):
-  unless row.patterns.length() == pats.length()
-  | syntax_error(#'function,
-                 "this clause has " ++ to_string(row.patterns.length())
-                   ++ " patterns but the function takes "
-                   ++ to_string(pats.length()),
-                 row.at)
-  let (pats2, env2):
-    for values(ps :~ List = pats, e :~ Map = env) (col in List.iota(row.patterns.length())):
-      let v :~ FVar:
-        match ps[col]
-        | FVar(_, _): ps[col]
-        | ~else:
-            syntax_error(#'function, "this argument has already been matched",
-                         row.at)
-      let [pat, bound] = core_sub_pattern(
-                           thy, row.patterns[col] :~ CorePattern, v.ty)
-      values(refine_pats(ps, v, pat :~ Term),
-             for values(m :~ Map = e) (bv in bound :~ List):
-               m ++ {(bv :~ FVar).name: bv :~ Term})
-  core_parse_body(thy, self_name, self, pats2, env2, row.body, at)
+fun core_parse_clause(v :: FVar,
+                      clause :: CoreMatchClause) :: Computation:
+  effect:
+    let env :: ClauseEnv <- ask()
+    match clause.pattern
+    | CorePatWildcard(_):
+        core_parse_body(clause.body)
+    | CorePatCtor(name, args, pat_at):
+        let (pat, bound) = core_ctor_pattern(
+                             env.thy, name, args, v.ty, pat_at)
+        let vars2 = for values(m :~ Map = env.vars) (bv in bound):
+                      m ++ {(bv :~ FVar).name: bv :~ Term}
+        fun bind_pattern(_):
+          ClauseEnv(env.thy, env.self_name, env.self,
+                    refine_pats(env.pats, v, pat :~ Term),
+                    vars2, env.at)
+        local(bind_pattern, core_parse_body(clause.body))
+    | ~else:
+        syntax_error(#'function, "malformed match clause", clause.at)
+
+fun core_clause_rows(rows :: List.of(CoreRow)) :: Computation:
+  recur loop (remaining :~ List = rows, acc :~ List = []):
+    match remaining
+    | []: return acc
+    | List.cons(row, rest):
+        effect:
+          let parsed :: List <- core_clause_row(row :~ CoreRow)
+          loop(rest, acc ++ parsed)
+
+fun core_clause_row(row :: CoreRow) :: Computation:
+  effect:
+    let env :: ClauseEnv <- ask()
+    unless row.patterns.length() == env.pats.length()
+    | syntax_error(#'function,
+                   "this clause has " ++ to_string(row.patterns.length())
+                     ++ " patterns but the function takes "
+                     ++ to_string(env.pats.length()),
+                   row.at)
+    let (pats2, vars2):
+      for values(ps :~ List = env.pats, e :~ Map = env.vars) (col in List.iota(row.patterns.length())):
+        let v :~ FVar:
+          match ps[col]
+          | FVar(_, _): ps[col]
+          | ~else:
+              syntax_error(#'function,
+                           "this argument has already been matched",
+                           row.at)
+        let [pat, bound] = core_sub_pattern(
+                             env.thy, row.patterns[col] :~ CorePattern, v.ty)
+        values(refine_pats(ps, v, pat :~ Term),
+               for values(m :~ Map = e) (bv in bound :~ List):
+                 m ++ {(bv :~ FVar).name: bv :~ Term})
+    fun bind_row(_):
+      ClauseEnv(env.thy, env.self_name, env.self, pats2, vars2, env.at)
+    local(bind_row, core_parse_body(row.body))
 
 fun elaborate_function_decl(thy :: Theory,
                             spec :: CoreFunctionSpec) :: FunSpec:
@@ -735,9 +769,16 @@ fun elaborate_function_decl(thy :: Theory,
     | expr:
         let value = run_elaboration(PEnv(thy, tyvars, env0, #'function, #false, #false), expr :~ CoreExpr)
         list_mk_abs(pvars, value)
-  let clauses0 = core_parse_body(thy, spec.name, self,
-                                 pvars.map(fun (v :: FVar): v :~ Term),
-                                 env0, spec.body, spec.at)
+  let clause_env = ClauseEnv(
+                     thy, spec.name, self,
+                     pvars.map(fun (v :: FVar): v :~ Term),
+                     env0, spec.at)
+  let clauses0 :~ List:
+    match run_reader(core_parse_body(spec.body), clause_env)
+    | Pure(clauses): clauses :~ List
+    | ~else:
+        error(~who: #'elaborate_function_decl,
+              "internal error: unhandled effect")
   // A polymorphic constructor can leave phantom result parameters fresh
   // (`left(x)` does not mention the right-hand sum type). Specialize those
   // parameters from the declared function result before validating clauses.

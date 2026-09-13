@@ -1,7 +1,8 @@
 #lang rhombus/static
 
-// Immutable prover capability. Stages receive it only through the Reader
-// handler in `stage.rhm`; declaration processing creates updated values.
+// Immutable declaration and proof capabilities. `Context` is durable module
+// state. `ProofContext` is created only under a Reader handler, so proof-local
+// rules and skipped stages cannot be installed in a `HolState` accidentally.
 
 import:
   rhombus/hol/term open
@@ -9,13 +10,19 @@ import:
   rhombus/hol/datatype/datatype open
   rhombus/hol/recursion/recdef open
   rhombus/hol/logic/ruledb open
+  rhombus/hol/effect/core open
+  rhombus/hol/effect/reader open
 
 export:
   Context
+  ProofContext
+  RuleBinding
+  RuleScope
   mk_context
   context_with_rules
   context_add_datatype
   context_add_function
+  run_proof_scope
 
 class Context(thy :: Theory,
               db :: RuleDB,
@@ -24,6 +31,16 @@ class Context(thy :: Theory,
               // Every known constructor; generalization must not hide one
               // behind a fresh variable.
               ctors :: Set.of(Symbol))
+
+class ProofContext(base :: Context,
+                   db :: RuleDB,
+                   skipped_stages :: Set.of(Symbol))
+
+class RuleBinding(name :: Symbol, theorem :: Thm)
+
+class RuleScope(using :: List.of(RuleBinding) = [],
+                disabled :: List.of(Symbol) = [],
+                skipped_stages :: Set.of(Symbol) = Set())
 
 fun mk_context(thy :: Theory,
                ~rules: db :: RuleDB = empty_db,
@@ -46,3 +63,28 @@ fun context_add_datatype(ctx :: Context, thy :: Theory, db :: RuleDB,
 fun context_add_function(ctx :: Context, thy :: Theory, db :: RuleDB,
                          name :: Symbol, info :: FunInfo) :: Context:
   Context(thy, db, ctx.dts, ctx.funs ++ {name: info}, ctx.ctors)
+
+// Run `body` under a lexically bound proof environment. The durable `Context`
+// is never transformed: additions, enablement, disabling, and skipped stages
+// exist only in the `ProofContext` supplied to this computation.
+fun run_proof_scope(ctx :: Context, scope :: RuleScope,
+                    body :: Computation):
+  let initial = ProofContext(ctx, ctx.db, Set())
+  let scoped:
+    local(
+      fun (proof_ctx):
+        let proof_ctx :~ ProofContext = proof_ctx
+        let db0 = for values(d :~ RuleDB = proof_ctx.db) (binding in scope.using):
+                    let binding :~ RuleBinding = binding
+                    add_thm(proof_ctx.base.thy, d,
+                            binding.name, binding.theorem)
+        let used_names = scope.using.map(
+                           fun (binding :: RuleBinding): binding.name)
+        let db1 = enable(db0, used_names)
+        let db2 = disable(db1, scope.disabled)
+        ProofContext(proof_ctx.base, db2,
+                     proof_ctx.skipped_stages ++ scope.skipped_stages),
+      body)
+  match run_reader(scoped, initial)
+  | Pure(value): value
+  | ~else: error(~who: #'run_proof_scope, "internal error: unhandled effect")

@@ -24,16 +24,17 @@ export:
   show_typed
   show_hyps
 
-// Binding strengths, matching the `hol_prop` space's precedence:
-//   ===        70
-//   not        60
-//   and        50
-//   or         40
-//   ==>        30   (right associative)
-//   <=>        20
-//   forall/exists/lambda  10  (body extends as far right as possible)
-// An atom or application binds at 100 and never needs parentheses.
+// Binding strengths, matching the `hol_expr` space's precedence. Standard
+// data operators bind above equality; the logical hierarchy remains below it.
 def prec_atom = 100
+def prec_power = 95
+def prec_prefix = 90
+def prec_multiply = 85
+def prec_add = 80
+def prec_append = 78
+def prec_intersection = 77
+def prec_union = 76
+def prec_relation = 75
 def prec_eq = 70
 def prec_not = 60
 def prec_and = 50
@@ -106,6 +107,47 @@ fun strip_quants(n :: Symbol, t :: Term, env :: Env)
         let env2 = push(env, nm)
         loop(body, env2, acc ++ [decl(nm, aty)])
     | ~else: values(acc, t, env)
+// Canonical reverse lookup for the standard provider constants.  The fourth
+// field records constants whose kernel argument order differs from the
+// surface order (membership).
+fun standard_binop(n :: Symbol) :: maybe(List):
+  cond
+  | n == #'nat_add || n == #'int_add || n == #'rational_add:
+      ["+", prec_add, #'left, #false]
+  | n == #'nat_sub || n == #'int_subtract || n == #'rational_subtract:
+      ["-", prec_add, #'left, #false]
+  | n == #'nat_mul || n == #'int_multiply || n == #'rational_multiply:
+      ["*", prec_multiply, #'left, #false]
+  | n == #'nat_pow: ["**", prec_power, #'right, #false]
+  | n == #'nat_lt || n == #'int_lt || n == #'rational_lt:
+      ["<", prec_relation, #'none, #false]
+  | n == #'nat_le || n == #'int_le || n == #'rational_le:
+      ["<=", prec_relation, #'none, #false]
+  | n == #'nat_gt: [">", prec_relation, #'none, #false]
+  | n == #'nat_ge: [">=", prec_relation, #'none, #false]
+  | n == #'list_append || n == #'string_append:
+      ["++", prec_append, #'right, #false]
+  | n == #'set_member: ["in", prec_relation, #'none, #true]
+  | n == #'set_union || n == #'relation_union:
+      ["union", prec_union, #'left, #false]
+  | n == #'set_intersection || n == #'relation_intersection:
+      ["intersect", prec_intersection, #'left, #false]
+  | ~else: #false
+
+fun standard_prefix(n :: Symbol) :: maybe(List):
+  cond
+  | n == #'int_negate || n == #'rational_negate: ["-", prec_prefix]
+  | ~else: #false
+
+fun pp_infix(a :: Term, word :~ String, b :: Term, precedence :: Int,
+             association :: Symbol, want :: Int, trailing :: Boolean,
+             env :: Env) :~ String:
+  let left_want = if association == #'left | precedence | precedence + 1
+  let right_want = if association == #'right | precedence | precedence + 1
+  paren(pp(a, left_want, #false, env) ++ " " ++ word ++ " "
+          ++ pp(b, right_want, trailing, env),
+        precedence, want)
+
 
 // -- the printer -----------------------------------------------------------
 
@@ -143,6 +185,15 @@ fun pp_app(t :: Term, want :: Int, trailing :: Boolean, env :: Env) :~ String:
     // so each one is both unconstrained and trailing.
     "(" ++ String.join(args.map(fun (a): pp(a, 0, #true, env)), ", ") ++ ")"
   match as_binop(t)
+  | [n, a, b] when standard_binop(n):
+      let spec :~ List = standard_binop(n)
+      let word :~ String = spec[0]
+      let precedence :~ Int = spec[1]
+      let association :~ Symbol = spec[2]
+      let swap :~ Boolean = spec[3]
+      let left :~ Term = if swap | b | a
+      let right :~ Term = if swap | a | b
+      pp_infix(left, word, right, precedence, association, want, trailing, env)
   | [n, a, b] when n == c_eq:
       // Equality at type `bool` is if-and-only-if, and reads much better
       // spelled that way in a residue.
@@ -170,6 +221,11 @@ fun pp_app(t :: Term, want :: Int, trailing :: Boolean, env :: Env) :~ String:
             prec_or, want)
   | ~else:
       match t
+      | Comb(Const(n, _), a) when standard_prefix(n):
+          let spec :~ List = standard_prefix(n)
+          let word :~ String = spec[0]
+          let precedence :~ Int = spec[1]
+          paren(word ++ pp(a, precedence, trailing, env), precedence, want)
       | Comb(Const(n, _), a) when n == c_neg:
           // `not` binds looser than `===`, so `not a === b` is unambiguous --
           // but it does not *read* that way.  Parenthesize any operand that is

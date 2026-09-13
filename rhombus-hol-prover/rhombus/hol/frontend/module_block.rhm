@@ -27,11 +27,18 @@ import:
   rhombus/hol/frontend/surface_space!meta:
     expose:
       hol_expr_meta
+  rhombus/hol/frontend/surface_notation open
   meta:
+    lib("racket/base.rkt") as rb
     rhombus/hol/htype open
+    rhombus/hol/kernel open
+    rhombus/hol/frontend/tyunify open
+    rhombus/hol/datatype/datatype open
     rhombus/hol/frontend/expand as expand
     rhombus/hol/frontend/elab as elab
-
+    rhombus/hol/frontend/driver open
+    rhombus/hol/frontend/operator open
+    rhombus/hol/frontend/surface_core open
 export:
   module_block
   check_property
@@ -41,9 +48,168 @@ meta:
   // that all the generated identifiers share one, and that the expander's
   // introduction scope lands on them alike.
   def id_ctx :: Syntax = 'hol_state'
+  Parameter.def runtime_context :: Syntax = id_ctx
+
 
   fun st(n :: Int) :: Syntax:
     Syntax.make_id("_hol_st" ++ to_string(n), id_ctx)
+
+  class RuntimeState(operators :: OperatorRegistry,
+                     thy :: maybe(Theory),
+                     constants :: Map.of(Symbol, HType),
+                     pending_import :: maybe(List.of(Syntax)))
+
+  def runtime_state_key = #'rhombus_hol_runtime_state
+  def initial_runtime_state:
+    let base = initial_state()
+    RuntimeState(base.operators, base.ctx.thy, {}, #false)
+
+
+  fun state_on(stx :: Syntax) :: RuntimeState:
+    match rb.#{syntax-property}(stx, runtime_state_key)
+    | state :: RuntimeState: state
+    | #false: initial_runtime_state
+    | ~else: error(~who: #'module_block, "invalid runtime operator state")
+
+  fun carry_state(stx :: Syntax, state :: RuntimeState) :: Syntax:
+    rb.#{syntax-property}(stx, runtime_state_key, state)
+  fun imported_runtime_state(terms :: List.of(Syntax)) :: RuntimeState:
+    let [t, ...] = terms
+    let path:
+      match ModulePath.maybe('$t ...')
+      | #false: error(~who: #'import, "invalid imported theory path")
+      | p: p :~ ModulePath
+    let imported = Evaluator.instantiate(
+                     path.add(ModulePath('self ! hol_theory')), #'theory)
+    let imported :~ HolState = imported
+    RuntimeState(imported.operators, imported.ctx.thy, {}, #false)
+
+  fun force_runtime_state(state :: RuntimeState) :: RuntimeState:
+    match state.pending_import
+    | #false: state
+    | terms:
+        let imported = imported_runtime_state(terms :~ List.of(Syntax))
+        let with_families:
+          for values(registry :~ OperatorRegistry = imported.operators) ((_, family) in state.operators.families):
+            let family :~ OperatorFamily = family
+            match operator_family(registry, family.name)
+            | #false: add_operator_family(registry, family)
+            | existing:
+                unless (existing :~ OperatorFamily) == family
+                | error(~who: #'operator,
+                        "imported operator family conflicts with a local "
+                          ++ "declaration")
+                registry
+        let with_providers:
+          for values(registry :~ OperatorRegistry = with_families) (provider in state.operators.providers):
+            add_operator_provider(
+              registry, provider :~ OperatorProvider)
+        RuntimeState(with_providers, imported.thy, state.constants, #false)
+
+  fun defer_runtime_import(state :: RuntimeState,
+                           terms :: List.of(Syntax)) :: RuntimeState:
+    RuntimeState(state.operators, state.thy, state.constants, terms)
+
+  fun runtime_const_type(state :: RuntimeState, name :: Symbol)
+       :: maybe(HType):
+    match state.constants.get(name, #false)
+    | ty :: HType: ty
+    | #false:
+        match state.thy
+        | #false: #false
+        | thy: const_type(thy :~ Theory, name)
+
+  fun runtime_add_family(state :: RuntimeState, name :: Symbol,
+                         operand_names :: List.of(Symbol),
+                         spelling :: String) :: RuntimeState:
+    RuntimeState(
+      add_operator_family(
+        state.operators, OperatorFamily(name, operand_names, spelling)),
+      state.thy, state.constants, state.pending_import)
+
+  fun operand_position(operand_names :: List.of(Symbol), name :: Symbol,
+                       at :: Syntax) :: NonnegInt:
+    recur find (index = 0):
+      cond
+      | index == operand_names.length():
+          syntax_meta.error(
+            "provider template uses an unknown operand `" ++ to_string(name)
+              ++ "`",
+            at)
+      | operand_names[index] == name: index
+      | ~else: find(index + 1)
+
+  fun provider_layout(family :: OperatorFamily,
+                      template_arguments :: maybe(List.of(Symbol)),
+                      at :: Syntax)
+       :: values(List.of(NonnegInt), NonnegInt):
+    let order:
+      match template_arguments
+      | #false: List.iota(family.arity)
+      | arguments:
+          for List (argument in (arguments :~ List.of(Symbol))):
+            operand_position(family.operand_names, argument, at)
+    unless order.length() == family.arity
+    | syntax_meta.error(
+        "provider template must use every operator operand exactly once", at)
+    let seen:
+      for values(acc :~ Set = Set()) (position in order):
+        acc ++ {position}
+    unless seen.length() == family.arity
+    | syntax_meta.error(
+        "provider template must use every operator operand exactly once", at)
+    values(order, order[0])
+
+  fun runtime_add_provider(state :: RuntimeState, family_name :: Symbol,
+                           carrier_stx :: Syntax, constant :: Symbol,
+                           template_arguments :: maybe(List.of(Symbol)),
+                           at :: Syntax)
+       :: values(RuntimeState, List.of(NonnegInt), NonnegInt):
+    let ready = (if operator_family(state.operators, family_name)
+                 | state
+                 | force_runtime_state(state))
+    let family:
+      match operator_family(ready.operators, family_name)
+      | #false: syntax_meta.error("operator family is not declared", at)
+      | f: f :~ OperatorFamily
+    let (order, dispatch_argument) = provider_layout(
+                                       family, template_arguments, at)
+    let provider = OperatorProvider(
+                     family_name,
+                     elab.parse_open_type(carrier_stx),
+                     constant, order, dispatch_argument)
+    values(
+      RuntimeState(add_operator_provider(ready.operators, provider),
+                   ready.thy, ready.constants, ready.pending_import),
+      order,
+      dispatch_argument)
+
+  fun runtime_add_function(state :: RuntimeState, form :: Syntax)
+       :: RuntimeState:
+    let [name, params, result_type, _, _] = elab.function_parts(form)
+    let ps :~ List = params
+    let result = elab.parse_open_type(result_type :~ Syntax)
+    let domains = ps.map(
+                    fun (param :: Syntax):
+                      match param
+                      | '$_ :: $ty ...':
+                          elab.parse_open_type('$ty ...')
+                      | ~else:
+                          error(~who: #'function,
+                                "a parameter needs a type"))
+    let full_type = for values(ty :~ HType = result) (domain in domains.reverse()):
+                      mk_fun(domain :~ HType, ty)
+    RuntimeState(state.operators, state.thy,
+                 state.constants ++ {Syntax.unwrap(name): full_type},
+                 state.pending_import)
+
+  fun runtime_add_type(state :: RuntimeState, form :: Syntax) :: RuntimeState:
+    let spec = elab.parse_type_decl(form)
+    let additions = for values(out :~ Map = state.constants) (ctor in spec.ctors):
+                      let ctor :~ Ctor = ctor
+                      out ++ {ctor.name: ctor_type(spec, ctor)}
+    RuntimeState(state.operators, state.thy, additions, state.pending_import)
+
 
   // A term rebuilt with this module's context.
   //
@@ -204,34 +370,478 @@ meta:
 
   // -- functions -------------------------------------------------------------
 
-  // The executable meaning: the surface code with its annotations removed.
-  //
-  // Not a second translation that could drift from the logical one.  The
-  // surface *is* Rhombus; the only difference is the types.  What makes
-  // Rhombus's first-match `match` agree with the unordered clausal equations is
-  // the exhaustiveness and non-overlap `recdef.rhm` checks before installing
-  // anything.
-  fun emit_function(name :: Syntax, params :: List, body :: Syntax) :: Syntax:
+  class RuntimeExpr(stx :: Syntax, ty :: HType)
+
+  fun source_id(name :: Symbol, _at :: Syntax) :: Syntax:
+    Syntax.make_id(to_string(name), runtime_context())
+
+  fun runtime_call_syntax(name :: Symbol, args :: List.of(Syntax),
+                          at :: Syntax) :: Syntax:
+    let id = source_id(name, at)
+    let [arg, ...] = args
+    '$id($arg, ...)'
+
+  fun runtime_peel(ty :: HType, arity :: NonnegInt)
+       :: values(List.of(HType), HType):
+    recur loop (current = ty, remaining = arity, domains :~ List = []):
+      cond
+      | remaining == 0: values(domains, current)
+      | is_fun(current):
+          let (domain, range) = dest_fun(current)
+          loop(range, remaining - 1, domains ++ [domain])
+      | ~else:
+          error(~who: #'operator,
+                "provider constant has fewer arguments than its family")
+
+  fun runtime_fresh_type(ty :: HType) :: HType:
+    let renaming:
+      for values(out :~ Map = {}) (v in type_vars(ty)):
+        out ++ {v: mk_tyvar(Symbol.gen(to_string(v))) :~ HType}
+    type_subst(renaming, ty)
+
+  fun runtime_needs_expected(expr :: CoreExpr) :: Boolean:
+    match expr
+    | CoreNumeral(_, _): #true
+    | CoreOperator(_, args, _):
+        recur loop (remaining :~ List = args):
+          match remaining
+          | []: args.length() > 0
+          | List.cons(arg, rest):
+              runtime_needs_expected(arg :~ CoreExpr) && loop(rest)
+    | ~else: #false
+
+  fun runtime_numeral(value :: NonnegInt, expected :: HType,
+                      at :: Syntax) :: RuntimeExpr:
+    let nat_ty = mk_tyapp(#'Nat, [])
+    let int_ty = mk_tyapp(#'Integer, [])
+    let rational_ty = mk_tyapp(#'Rational, [])
+    fun nat_syntax() :: Syntax:
+      recur build (remaining = value,
+                   term = runtime_call_syntax(#'zero, [], at)):
+        if remaining == 0
+        | term
+        | build(remaining - 1,
+                runtime_call_syntax(#'succ, [term], at))
+    cond
+    | expected == nat_ty: RuntimeExpr(nat_syntax(), nat_ty)
+    | expected == int_ty:
+        RuntimeExpr(runtime_call_syntax(#'int_from_nat, [nat_syntax()], at),
+                    int_ty)
+    | expected == rational_ty:
+        let integer = runtime_call_syntax(
+                        #'int_from_nat, [nat_syntax()], at)
+        RuntimeExpr(runtime_call_syntax(
+                      #'rational_from_integer, [integer], at),
+                    rational_ty)
+    | ~else:
+        syntax_meta.error(
+          "a numeral has no representation at type "
+            ++ type_to_string(expected),
+          at)
+
+  fun runtime_surface_domain(domains :: List.of(HType),
+                             order :: List.of(NonnegInt),
+                             surface_index :: NonnegInt) :: HType:
+    recur find (constant_index = 0):
+      cond
+      | constant_index >= order.length():
+          error(~who: #'operator, "invalid provider argument order")
+      | order[constant_index] == surface_index: domains[constant_index]
+      | ~else: find(constant_index + 1)
+
+  fun runtime_provider_match(state :: RuntimeState,
+                             provider :: OperatorProvider,
+                             known :: List,
+                             arity :: PosInt,
+                             expected_result :: maybe(HType))
+       :: maybe(List):
+    match runtime_const_type(state, provider.constant)
+    | #false: #false
+    | generic:
+        let (domains, result) = runtime_peel(generic :~ HType, arity)
+        recur match_args (index = 0, theta :~ Map = {}):
+          cond
+          | index == known.length():
+              match expected_result
+              | #false: [theta, domains, result]
+              | expected:
+                  match type_match(result, expected :~ HType, theta)
+                  | #false: #false
+                  | next: [next, domains, result]
+          | ~else:
+              match known[index]
+              | #false: match_args(index + 1, theta)
+              | runtime:
+                  let domain = runtime_surface_domain(
+                                 domains, provider.argument_order, index)
+                  match type_match(domain,
+                                   (runtime :~ RuntimeExpr).ty,
+                                   theta)
+                  | #false: #false
+                  | next: match_args(index + 1, next :~ Map)
+
+  fun runtime_operator_expr(state :: RuntimeState,
+                            env :: Map.of(Symbol, HType),
+                            family_name :: Symbol,
+                            args :: List.of(CoreExpr),
+                            expected :: maybe(HType),
+                            at :: Syntax) :: RuntimeExpr:
+    let family:
+      match operator_family(state.operators, family_name)
+      | #false:
+          syntax_meta.error(
+            "unknown operator family " ++ to_string(family_name), at)
+      | value: value :~ OperatorFamily
+    let known:
+      for List (arg in args):
+        let arg :~ CoreExpr = arg
+        (if runtime_needs_expected(arg)
+         | #false
+         | runtime_expr(state, env, arg, #false))
+    let matches:
+      for values(out :~ List = []) (provider in operator_candidates(state.operators, family_name)):
+        match runtime_provider_match(
+                state, provider :~ OperatorProvider, known,
+                family.arity, expected)
+        | #false: out
+        | instance: out ++ [[provider, instance]]
+    when matches.length() == 0
+    | syntax_meta.error(
+        "operator `" ++ family.spelling ++ "` has no applicable provider",
+        at)
+    when matches.length() > 1
+    | syntax_meta.error(
+        "operator `" ++ family.spelling ++ "` is ambiguous",
+        at)
+    let chosen :~ List = matches[0]
+    let provider :~ OperatorProvider = chosen[0]
+    let instance :~ List = chosen[1]
+    let theta :~ Map = instance[0]
+    let domains :~ List.of(HType) = instance[1]
+    let result :~ HType = instance[2]
+    let rendered:
+      for List (arg in args, prior in known,
+                index in List.iota(args.length())):
+        match prior
+        | runtime :: RuntimeExpr: runtime
+        | #false:
+            runtime_expr(
+              state, env, arg :~ CoreExpr,
+              type_subst(
+                theta,
+                runtime_surface_domain(
+                  domains, provider.argument_order, index)))
+    let ordered = provider.argument_order.map(
+                    fun (index):
+                      (rendered[index] :~ RuntimeExpr).stx)
+    RuntimeExpr(runtime_call_syntax(provider.constant, ordered, at),
+                type_subst(theta, result))
+
+  fun needs_runtime_lowering(expr :: CoreExpr) :: Boolean:
+    match expr
+    | CoreNumeral(_, _) || CoreOperator(_, _, _): #true
+    | CoreCall(func, args, _):
+        needs_runtime_lowering(func)
+          || for values(found = #false) (arg in args):
+               found || needs_runtime_lowering(arg :~ CoreExpr)
+    | CoreIf(condition, then_expr, else_expr, _):
+        needs_runtime_lowering(condition)
+          || needs_runtime_lowering(then_expr)
+          || needs_runtime_lowering(else_expr)
+    | ~else: #false
+
+  fun runtime_expr(state :: RuntimeState, env :: Map.of(Symbol, HType),
+                   expr :: CoreExpr,
+                   expected :: maybe(HType) = #false) :: RuntimeExpr:
+    fun ensure(value :: RuntimeExpr) :: RuntimeExpr:
+      match expected
+      | #false: value
+      | wanted:
+          match type_unify(value.ty, wanted :~ HType, {})
+          | #false:
+              syntax_meta.error("expression has an unexpected type",
+                                runtime_context())
+          | _:
+              RuntimeExpr(value.stx, wanted :~ HType)
+    match expr
+    | CoreRef(name, at) when name == #'true:
+        ensure(RuntimeExpr(Syntax.make(#true, runtime_context()),
+                           mk_tyapp(#'bool, [])))
+    | CoreRef(name, at) when name == #'false:
+        ensure(RuntimeExpr(Syntax.make(#false, runtime_context()),
+                           mk_tyapp(#'bool, [])))
+    | CoreRef(name, at):
+        let ty:
+          match env.get(name, #false)
+          | found :: HType: found
+          | #false:
+              match runtime_const_type(state, name)
+              | found :: HType: found
+              | #false:
+                  syntax_meta.error("unknown constant " ++ to_string(name),
+                                    at)
+        ensure(RuntimeExpr(source_id(name, at), ty))
+    | CoreNumeral(value, at):
+        match expected
+        | #false:
+            syntax_meta.error("a numeral needs an expected numeric type", at)
+        | wanted: runtime_numeral(value, wanted :~ HType, at)
+    | CoreOperator(family, args, at):
+        runtime_operator_expr(state, env, family, args, expected, at)
+    | CoreCall(func, args, at):
+        match func
+        | CoreRef(name, _) when name == #'eq && args.length() == 2:
+            let left_core :~ CoreExpr = args[0]
+            let right_core :~ CoreExpr = args[1]
+            let (left, right):
+              cond
+              | runtime_needs_expected(right_core)
+                  && !runtime_needs_expected(left_core):
+                  let left = runtime_expr(state, env, left_core, #false)
+                  values(left,
+                         runtime_expr(state, env, right_core, left.ty))
+              | runtime_needs_expected(left_core)
+                  && !runtime_needs_expected(right_core):
+                  let right = runtime_expr(state, env, right_core, #false)
+                  values(runtime_expr(state, env, left_core, right.ty),
+                         right)
+              | ~else:
+                  let left = runtime_expr(state, env, left_core, #false)
+                  let right = runtime_expr(state, env, right_core, #false)
+                  unless type_unify(left.ty, right.ty, {}) != #false
+                  | syntax_meta.error(
+                      "equality operands have different types", at)
+                  values(left, right)
+            ensure(RuntimeExpr('$((left.stx)) == $((right.stx))',
+                               mk_tyapp(#'bool, [])))
+        | CoreRef(name, _) when (name == #'conj || name == #'disj)
+                                  && args.length() == 2:
+            let bool_ty = mk_tyapp(#'bool, [])
+            let left = runtime_expr(state, env, args[0] :~ CoreExpr, bool_ty)
+            let right = runtime_expr(state, env, args[1] :~ CoreExpr, bool_ty)
+            let rendered = (if name == #'conj
+                            | '$((left.stx)) && $((right.stx))'
+                            | '$((left.stx)) || $((right.stx))')
+            ensure(RuntimeExpr(rendered, bool_ty))
+        | CoreRef(name, _) when name == #'neg && args.length() == 1:
+            let bool_ty = mk_tyapp(#'bool, [])
+            let operand = runtime_expr(
+                            state, env, args[0] :~ CoreExpr, bool_ty)
+            ensure(RuntimeExpr('! $((operand.stx))', bool_ty))
+        | ~else:
+            let head = runtime_expr(state, env, func, #false)
+            recur apply (remaining :~ List = args,
+                         current :~ HType = runtime_fresh_type(head.ty),
+                         rendered :~ List = [],
+                         theta :~ Map = {}):
+              match remaining
+              | []:
+                  let [arg, ...] = rendered
+                  ensure(RuntimeExpr('$((head.stx))($arg, ...)',
+                                     type_subst(theta, current)))
+              | List.cons(arg, rest):
+                  let instantiated = type_subst(theta, current)
+                  unless is_fun(instantiated)
+                  | syntax_meta.error("too many function arguments", at)
+                  let (domain, range) = dest_fun(instantiated)
+                  let value = (if runtime_needs_expected(arg :~ CoreExpr)
+                               | runtime_expr(
+                                   state, env, arg :~ CoreExpr, domain)
+                               | runtime_expr(
+                                   state, env, arg :~ CoreExpr, #false))
+                  let next:
+                    match type_unify(domain, value.ty, theta)
+                    | #false:
+                        syntax_meta.error(
+                          "operand type does not match function domain", at)
+                    | substitution: substitution :~ Map
+                  apply(rest, range, rendered ++ [value.stx], next)
+    | CoreIf(condition, then_expr, else_expr, at):
+        let condition_value = runtime_expr(
+                                state, env, condition,
+                                mk_tyapp(#'bool, []))
+        let then_value = runtime_expr(state, env, then_expr, expected)
+        let else_value = runtime_expr(
+                           state, env, else_expr, then_value.ty)
+        let rendered:
+          'if $((condition_value.stx))
+           | $((then_value.stx))
+           | $((else_value.stx))'
+        ensure(RuntimeExpr(rendered, then_value.ty))
+    | ~else:
+        syntax_meta.error("expression has no runtime meaning",
+                          runtime_context())
+
+  fun runtime_pattern(state :: RuntimeState, pat :: CorePattern,
+                      expected :: HType)
+       :: values(Syntax, Map.of(Symbol, HType)):
+    match pat
+    | CorePatWildcard(at): values(source_id(#'_, at), {})
+    | CorePatVar(name, at):
+        values(source_id(name, at), {name: expected})
+    | CorePatCtor(name, args, at):
+        let generic:
+          match runtime_const_type(state, name)
+          | #false:
+              syntax_meta.error("unknown constructor " ++ to_string(name), at)
+          | ty: ty :~ HType
+        let (domains, result) = runtime_peel(generic, args.length())
+        let theta:
+          match type_match(result, expected, {})
+          | #false:
+              syntax_meta.error(
+                "constructor does not build the matched type", at)
+          | substitution: substitution :~ Map
+        let parsed:
+          for List (arg in args, domain in domains):
+            let (rendered, bindings) = runtime_pattern(
+                                          state, arg :~ CorePattern,
+                                          type_subst(theta,
+                                                     domain :~ HType))
+            [rendered, bindings]
+        let [rendered, ...] = parsed.map(
+                                fun (entry :: List):
+                                  entry[0] :~ Syntax)
+        let bindings:
+          for values(out :~ Map = {}) (entry in parsed):
+            out ++ ((entry :~ List)[1] :~ Map)
+        let constructor = source_id(name, at)
+        values('$constructor($rendered, ...)', bindings)
+    | ~else:
+        error(~who: #'function, "unknown runtime pattern")
+
+  fun runtime_body(state :: RuntimeState,
+                   env :: Map.of(Symbol, HType),
+                   body :: CoreFunBody,
+                   expected :: HType) :: Syntax:
+    match body
+    | CoreBodyExpr(expr, _):
+        runtime_expr(state, env, expr, expected).stx
+    | CoreBodyLet(name, init, tail, at):
+        let value = runtime_expr(state, env, init, #false)
+        let id = source_id(name, at)
+        let rest = runtime_body(
+                     state, env ++ {name: value.ty}, tail, expected)
+        'let $id = $((value.stx))
+         $rest'
+    | CoreBodyMatch(scrutinee, clauses, at):
+        let scrutinee_type:
+          match env.get(scrutinee, #false)
+          | #false:
+              syntax_meta.error("match scrutinee is not bound", at)
+          | ty: ty :~ HType
+        let rendered:
+          for List (clause in clauses):
+            let clause :~ CoreMatchClause = clause
+            let (pattern_stx, bindings) = runtime_pattern(
+                                            state, clause.pattern,
+                                            scrutinee_type)
+            let result = runtime_body(
+                           state, env ++ bindings, clause.body, expected)
+            '$pattern_stx: $result'
+        let target = source_id(scrutinee, at)
+        let [clause, ...] = rendered
+        'match $target
+         | $clause
+         | ...'
+    | ~else:
+        error(~who: #'function, "invalid nested function body")
+
+  fun runtime_row(state :: RuntimeState,
+                  base_env :: Map.of(Symbol, HType),
+                  name :: Syntax,
+                  parameter_types :: List.of(HType),
+                  expected :: HType,
+                  row :: CoreRow) :: Syntax:
+    let parsed:
+      for List (pat in row.patterns, ty in parameter_types):
+        let (rendered, bindings) = runtime_pattern(
+                                      state, pat :~ CorePattern,
+                                      ty :~ HType)
+        [rendered, bindings]
+    let bindings:
+      for values(out :~ Map = base_env) (entry in parsed):
+        out ++ ((entry :~ List)[1] :~ Map)
+    let result = runtime_body(state, bindings, row.body, expected)
+    let [pattern_stx, ...] = parsed.map(
+                               fun (entry :: List): entry[0] :~ Syntax)
+    '$name($pattern_stx, ...): $result'
+
+  // The executable half lowers the same CoreExpr tree as the logical half.
+  // Operator providers are therefore selected at expansion time from declared
+  // operand types; generated code contains only direct named calls.
+  fun body_needs_runtime_lowering(body :: CoreFunBody) :: Boolean:
+    match body
+    | CoreBodyExpr(expr, _): needs_runtime_lowering(expr)
+    | CoreBodyLet(_, init, tail, _):
+        needs_runtime_lowering(init)
+          || body_needs_runtime_lowering(tail)
+    | CoreBodyMatch(_, clauses, _):
+        for values(found = #false) (clause in clauses):
+          found || body_needs_runtime_lowering(
+                     (clause :~ CoreMatchClause).body)
+    | CoreBodyRows(rows, _):
+        for values(found = #false) (row in rows):
+          found || body_needs_runtime_lowering((row :~ CoreRow).body)
+    | ~else: #false
+
+  fun emit_raw_function(name :: Syntax, parameter_names :: List.of(Syntax),
+                        body :: Syntax) :: Syntax:
     match elab.body_clauses(body)
     | #false:
-        let [p, ...] = params
-        'fun $name($p, ...):
+        let [parameter, ...] = parameter_names
+        'fun $name($parameter, ...):
            $body'
-    | cs :: List:
-        // The clausal declaration form emits Rhombus's own multi-case `fun`,
-        // which is what it was written to look like.  Its patterns are the
-        // clause's patterns verbatim, so the first matching clause wins on
-        // both sides -- the same reading the decision tree gives them.
-        let alts = for List (c in cs): emit_clause(name, params.length(), c)
-        let [a, ...] = alts
+    | clauses:
+        let rendered:
+          for List (clause in clauses :~ List):
+            let (patterns, result) = elab.row_parts(
+                                      clause :~ Syntax,
+                                      parameter_names.length())
+            let [pat, ...] = patterns
+            '$name($pat, ...): $result'
+        let [alternative, ...] = rendered
         'fun
-         | $a
+         | $alternative
          | ...'
 
-  fun emit_clause(name :: Syntax, arity :: Int, c :: Syntax) :: Syntax:
-    let (row, body) = elab.row_parts(c, arity)
-    let [p, ...] = row
-    '$name($p, ...): $body'
+  fun emit_function(spec :: CoreFunctionSpec, state :: RuntimeState,
+                    name :: Syntax, parameter_names :: List.of(Syntax),
+                    raw_body :: Syntax)
+       :: Syntax:
+    cond
+    | !body_needs_runtime_lowering(spec.body):
+        emit_raw_function(name, parameter_names, raw_body)
+    | ~else:
+        emit_lowered_function(spec, state, name, parameter_names)
+
+  fun emit_lowered_function(spec :: CoreFunctionSpec, state :: RuntimeState,
+                            name :: Syntax,
+                            parameter_names :: List.of(Syntax)) :: Syntax:
+    parameterize { runtime_context: name }:
+      let parameter_types = spec.params.map(
+                              fun (binder :: CoreBinder):
+                                elab.parse_open_type(binder.type_stx))
+      let result_type = elab.parse_open_type(spec.result_type)
+      let env:
+        for values(out :~ Map = {}) (binder in spec.params,
+                                     ty in parameter_types):
+          out ++ {(binder :~ CoreBinder).name: ty :~ HType}
+      match spec.body
+      | CoreBodyRows(rows, _):
+          let rendered = rows.map(
+                           fun (row :: CoreRow):
+                             runtime_row(state, env, name,
+                                         parameter_types, result_type, row))
+          let [alternative, ...] = rendered
+          'fun
+           | $alternative
+           | ...'
+      | body:
+          let [parameter, ...] = parameter_names
+          let result = runtime_body(state, env, body, result_type)
+          'fun $name($parameter, ...):
+             $result'
 
   // -- rule control ----------------------------------------------------------
 
@@ -372,6 +982,29 @@ meta:
     let steps_stx = option_int_stx(search_steps)
     '(core_tactic $induct_stx [$u, ...] [$d, ...] [$r, ...] [$c, ...] [$w, ...] $steps_stx)'.relocate_span([at])
 
+  fun operator_notation_form(family :: Syntax, syntax_spec :: List,
+                             order :: Syntax,
+                             associativity :: Symbol) :: Syntax:
+    let syntax_pattern :~ Syntax = syntax_spec[0]
+    match associativity
+    | #'left:
+        'internal_operator_notation $syntax_pattern:
+           ~family: $family
+           ~order: $order
+           ~associativity: ~left'
+    | #'right:
+        'internal_operator_notation $syntax_pattern:
+           ~family: $family
+           ~order: $order
+           ~associativity: ~right'
+    | #'none:
+        'internal_operator_notation $syntax_pattern:
+           ~family: $family
+           ~order: $order
+           ~associativity: ~none'
+    | ~else:
+        syntax_meta.error("invalid operator associativity", family)
+
   fun box_group(g :: Syntax) :: Syntax:
     '(hol_group: $g)'
 
@@ -417,6 +1050,16 @@ meta:
                            _hol_driver.hol_reraise(e, '$at')
            _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
                                    statement, proof, '$at')']
+    | '(~operator_family $cur $nxt [$name] [$operand, ...] [$spelling] [$at])':
+        ['def $nxt:
+           let operands = [Syntax.unwrap('$operand'), ...]
+           _hol_driver.add_operator_family_decl(
+             $cur, Syntax.unwrap('$name'), operands, $spelling, '$at')']
+    | '(~operator_provider $cur $nxt [$family] [$carrier] [$constant] [$order, ...] [$dispatch] [$at])':
+        ['def $nxt = _hol_driver.add_operator_provider_decl(
+                       $cur, Syntax.unwrap('$family'), '$carrier',
+                       Syntax.unwrap('$constant'), [$order, ...], $dispatch,
+                       '$at')']
     | '(~rules $cur $nxt [$flag] [$name, ...])':
         ['def $nxt = _hol_driver.set_rules($cur, $flag, [Syntax.unwrap('$name'), ...])']
     | ~else: syntax_meta.error("internal malformed logical step", step)
@@ -437,33 +1080,26 @@ meta:
   // module, and the chain steps go into the `hol_theory` submodule.  Nothing
   // in the runtime half ever refers to the chain, which is what makes the
   // split possible.
-  fun emit_one(d :: expand.Decl, n :: Int)
-       :: values(List.of(Syntax), List.of(Syntax), Int):
+  fun emit_one(d :: expand.Decl, n :: Int, runtime_state :: RuntimeState)
+       :: values(List.of(Syntax), List.of(Syntax), Int, RuntimeState):
     let cur = st(n)
     let nxt = st(n + 1)
     match d.kind
-    | #'other: values([d.form], [], n)
+    | #'other: values([d.form], [], n, runtime_state)
     | #'import:
-        // The import itself is passed through untouched.  When it names
-        // theories, the submodule imports their theories too and adopts them,
-        // one step per theory, in the order written.
         let [paths] = d.parts
         let at = head_term(d.form)
         let (chain, n2):
           for values(acc :~ List = [], k = n) (terms in (paths :~ List)):
             let alias = Syntax.make_id("_hol_used" ++ to_string(k), id_ctx)
-            // Reassembled here, not in `expand.rhm`: see the note there.
-            //
-            // Rebuilt with this module's context as well.  The submodule's
-            // language is plain `rhombus`, and a term carrying the user's
-            // `rhombus/hol` context cannot find the implicit import forms
-            // there -- a string path fails on `#%literal`.  The datum is all
-            // that matters for a module path.
             let [t, ...] = (terms :~ List).map(recontext)
             values(acc ++ ['(~import $alias [$t, ...])',
                            '(~adopt $(st(k)) $(st(k + 1)) $alias [$at])'],
                    k + 1)
-        values([d.form], chain, n2)
+        let next_runtime:
+          for values(state :~ RuntimeState = runtime_state) (terms in (paths :~ List)):
+            defer_runtime_import(state, terms :~ List.of(Syntax))
+        values([d.form], chain, n2, next_runtime)
     | #'type:
         let [name, ctors, params, gen] = d.parts
         let at = head_term(d.form)
@@ -472,28 +1108,37 @@ meta:
                 emit_generator(name, params :~ List, gen :~ List),
                 emit_shrinker(name, gen :~ List)],
                ['(~type $cur $nxt [$form] [$at])'],
-               n + 1)
+               n + 1,
+               runtime_add_type(runtime_state, form))
     | #'function:
         let [name, params, body] = d.parts
         let at = head_term(d.form)
         let form = d.form
         let core = function_encoding(form)
-        values([emit_function(name, params :~ List, body)],
+        let spec = decode_function(core)
+        let registered_runtime = runtime_add_function(runtime_state, form)
+        let next_runtime = (if body_needs_runtime_lowering(spec.body)
+                            | force_runtime_state(registered_runtime)
+                            | registered_runtime)
+        values([emit_function(spec, next_runtime, name,
+                              params :~ List.of(Syntax), body :~ Syntax)],
                ['(~function $cur $nxt [$core] [$at])'],
-               n + 1)
+               n + 1, next_runtime)
     | #'axiomatic_function:
-        // Identical runtime code; the logical step is the one that differs.
         let [name, params, body] = d.parts
         let at = head_term(d.form)
         let form = d.form
         let core = function_encoding(form)
-        values([emit_function(name, params :~ List, body)],
+        let spec = decode_function(core)
+        let registered_runtime = runtime_add_function(runtime_state, form)
+        let next_runtime = (if body_needs_runtime_lowering(spec.body)
+                            | force_runtime_state(registered_runtime)
+                            | registered_runtime)
+        values([emit_function(spec, next_runtime, name,
+                              params :~ List.of(Syntax), body :~ Syntax)],
                ['(~axiomatic $cur $nxt [$core] [$at])'],
-               n + 1)
+               n + 1, next_runtime)
     | #'theorem:
-        // Enforestation happens now, while preceding declaration/import
-        // bindings are in scope. The generated theory step receives decoded
-        // CoreExpr/CoreTactic values, never the proposition's raw syntax.
         let [name, stmt, tactic] = d.parts
         let at = head_term(d.form)
         let gs :~ List = stmt
@@ -502,9 +1147,47 @@ meta:
         let tactic_core = tactic_encoding(tactic, at)
         values([],
                ['(~theorem $cur $nxt [$name] [$core] [$tactic_core] [$at])'],
-               n + 1)
-    | #'disable_rules: rule_step(d, n, cur, nxt, #false)
-    | #'enable_rules: rule_step(d, n, cur, nxt, #true)
+               n + 1, runtime_state)
+    | #'operator_family:
+        let [name, syntaxes, order, associativity,
+             operand_names, spelling] = d.parts
+        let spelling_stx = Syntax.make(spelling, id_ctx)
+        let [operand, ...] = (operand_names :~ List).map(
+                              fun (value): symbol_id(value :~ Symbol))
+        let notation_forms:
+          for List (syntax_spec in (syntaxes :~ List)):
+            operator_notation_form(
+              name, syntax_spec :~ List, order :~ Syntax,
+              associativity :~ Symbol)
+        let at = head_term(d.form)
+        values(notation_forms,
+               ['(~operator_family $cur $nxt [$name] [$operand, ...] [$spelling_stx] [$at])'],
+               n + 1,
+               runtime_add_family(
+                 runtime_state, Syntax.unwrap(name),
+                 operand_names :~ List.of(Symbol), spelling))
+    | #'operator_provider:
+        let [family, carrier, constant, template_arguments] = d.parts
+        let at = head_term(d.form)
+        let (next_runtime, positions, dispatch) = runtime_add_provider(
+                                                    runtime_state,
+                                                    Syntax.unwrap(family),
+                                                    carrier :~ Syntax,
+                                                    Syntax.unwrap(constant),
+                                                    template_arguments,
+                                                    at)
+        let dispatch_stx = Syntax.make(dispatch, id_ctx)
+        let [position, ...] = positions.map(
+                              fun (value): Syntax.make(value, id_ctx))
+        values([],
+               ['(~operator_provider $cur $nxt [$family] [$carrier] [$constant] [$position, ...] [$dispatch_stx] [$at])'],
+               n + 1, next_runtime)
+    | #'disable_rules:
+        let (forms, chain, n2) = rule_step(d, n, cur, nxt, #false)
+        values(forms, chain, n2, runtime_state)
+    | #'enable_rules:
+        let (forms, chain, n2) = rule_step(d, n, cur, nxt, #true)
+        values(forms, chain, n2, runtime_state)
 
 
 // `check_property` is a genuine, independently bound macro, not a form
@@ -536,7 +1219,8 @@ meta:
     let prior = step_boxes.map(unbox_group)
     let [sb, ...] = (prior ++ [chain]).map(box_group)
     let [f, ...] = rest
-    let next_n = Syntax.make(step_n + 1, id_ctx)
+    let next_n = carry_state(
+                   Syntax.make(step_n + 1, id_ctx), state_on(n))
     'hol_expand($next_n, [$sb, ...]):
        $f
        ...'
@@ -578,12 +1262,14 @@ decl.macro
              def theory = $final
          »'
     | d:
-        let (runtime, chain, n2) = emit_one(d :~ expand.Decl,
-                                            Syntax.unwrap(n))
+        let (runtime, chain, n2, next_runtime) = emit_one(
+                                                   d :~ expand.Decl,
+                                                   Syntax.unwrap(n),
+                                                   state_on(n))
         let [r, ...] = runtime
         let [sb, ...] = (steps ++ chain).map(box_group)
         let [f, ...] = rest
-        let next_n = Syntax.make(n2, id_ctx)
+        let next_n = carry_state(Syntax.make(n2, id_ctx), next_runtime)
         '«
            $r
            ...

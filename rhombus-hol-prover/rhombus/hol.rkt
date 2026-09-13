@@ -27,7 +27,15 @@ export:
   hol_disjunction
   hol_conjunction
   hol_negation
+  hol_relation
   hol_equality
+  hol_set_union
+  hol_set_intersection
+  hol_append
+  hol_addition
+  hol_multiplication
+  hol_prefix_arithmetic
+  hol_power
   hol_application
   notation
   only_space hol_expr:
@@ -35,5 +43,5 @@ export:
       #%literal
       #%parens
       #%call
-    === <=> ==> and or not == && || ! if cond forall exists
+    === <=> ==> and or not == && || ! + - * ** < <= > >= ++ in union intersect if cond forall exists
   mb.check_property

@@ -38,6 +38,7 @@ class Decl(kind :: Symbol,
 def declaration_heads :: List.of(Symbol) = [#'type, #'function,
                                             #'axiomatic_function,
                                             #'theorem, #'proof,
+                                            #'operator,
                                             #'disable_rules, #'enable_rules,
                                             #'import]
 
@@ -105,6 +106,8 @@ fun plan_one(form :: Syntax) :: Decl:
       // its equations, and `function` is not.  See `driver.rhm`.
       let [name, params, body] = elab.function_decl_shape(form)
       Decl(#'axiomatic_function, form, [name, params, body])
+  | #'operator:
+      operator_decl(form)
   | #'proof:
       syntax_error_here(#'proof, "a `proof:` with no `theorem` before it", form)
   | #'import:
@@ -122,6 +125,119 @@ fun rule_control(kind :: Symbol, form :: Syntax) :: Decl:
   | 'enable_rules [$(n :: Identifier), ...]': Decl(kind, form, [[n, ...]])
   | ~else:
       syntax_error_here(kind, "expected a bracketed list of rule names", form)
+
+fun operator_syntax_clause(clause :: Syntax) :: List:
+  match clause
+  | 'syntax ($(left :: Identifier) $(op :: Operator) $(right :: Identifier))':
+      ['($left $op $right)',
+       [Syntax.unwrap(left), Syntax.unwrap(right)],
+       to_string(Syntax.unwrap(op)),
+       #'infix]
+  | 'syntax ($(op :: Operator) $(operand :: Identifier))':
+      ['($op $operand)',
+       [Syntax.unwrap(operand)],
+       to_string(Syntax.unwrap(op)),
+       #'prefix]
+  | ~else:
+      syntax_error_here(
+        #'operator,
+        "expected `syntax (left operator right)` or `syntax (operator value)`",
+        clause)
+
+fun operator_family_decl(name :: Syntax, clauses :: List.of(Syntax),
+                         form :: Syntax) :: Decl:
+  let (syntaxes, order, associativity):
+    for values(syntaxes :~ List = [],
+               order = #false,
+               associativity = #false) (clause in clauses):
+      match clause
+      | 'syntax $_ ...':
+          when order || associativity
+          | syntax_error_here(
+              #'operator,
+              "`syntax` clauses must precede operator options",
+              clause)
+          values(syntaxes ++ [operator_syntax_clause(clause)],
+                 order, associativity)
+      | '~order: $(value :: Identifier)':
+          when order
+          | syntax_error_here(#'operator, "duplicate `~order` option", clause)
+          values(syntaxes, value, associativity)
+      | '~associativity: ~left':
+          when associativity
+          | syntax_error_here(
+              #'operator, "duplicate `~associativity` option", clause)
+          values(syntaxes, order, #'left)
+      | '~associativity: ~right':
+          when associativity
+          | syntax_error_here(
+              #'operator, "duplicate `~associativity` option", clause)
+          values(syntaxes, order, #'right)
+      | '~associativity: ~none':
+          when associativity
+          | syntax_error_here(
+              #'operator, "duplicate `~associativity` option", clause)
+          values(syntaxes, order, #'none)
+      | '~associativity: $_':
+          syntax_error_here(
+            #'operator,
+            "`~associativity` must be `~left`, `~right`, or `~none`",
+            clause)
+      | ~else:
+          syntax_error_here(#'operator, "unknown operator declaration clause",
+                            clause)
+  when syntaxes.length() == 0
+  | syntax_error_here(#'operator, "an operator needs at least one `syntax` clause",
+                      form)
+  unless order
+  | syntax_error_here(#'operator, "an operator needs a `~order` option", form)
+  let first :~ List = syntaxes[0]
+  let operand_names :~ List.of(Symbol) = first[1]
+  let fixity :~ Symbol = first[3]
+  for (syntax_spec in syntaxes):
+    let syntax_spec :~ List = syntax_spec
+    unless syntax_spec[1] == operand_names && syntax_spec[3] == fixity
+    | syntax_error_here(
+        #'operator,
+        "all `syntax` clauses must use the same operands and fixity",
+        form)
+  when fixity == #'infix && !associativity
+  | syntax_error_here(
+      #'operator, "an infix operator needs a `~associativity` option", form)
+  let assoc = (if associativity | associativity | #'none)
+  Decl(#'operator_family, form,
+       [name, syntaxes, order, assoc, operand_names, first[2]])
+
+fun operator_provider_decl(form :: Syntax) :: Decl:
+  match form
+  | 'operator $(family :: Identifier) for $carrier ...:
+       $(constant :: Identifier)($(argument :: Identifier), ...)':
+      Decl(#'operator_provider, form,
+           [family, '$carrier ...', constant,
+            [Syntax.unwrap(argument), ...]])
+  | 'operator $(family :: Identifier) for $carrier ...:
+       $(constant :: Identifier)':
+      Decl(#'operator_provider, form,
+           [family, '$carrier ...', constant, #false])
+  | ~else:
+      syntax_error_here(
+        #'operator,
+        "expected `operator Family for Type: function` or a function call "
+          ++ "using the family operand names",
+        form)
+
+fun operator_decl(form :: Syntax) :: Decl:
+  match form
+  | 'operator $_ for $_ ...: $_ ...':
+      operator_provider_decl(form)
+  | 'operator $(name :: Identifier): $clause; ...':
+      operator_family_decl(name, [clause, ...], form)
+  | ~else:
+      syntax_error_here(
+        #'operator,
+        "expected `operator Family:` or `operator Family for Type:`",
+        form)
+
 
 fun syntax_error_here(who :: Symbol, message :: String, at :: Syntax):
   error(~who: who, message, error.val(~label: "in", to_string(at)))

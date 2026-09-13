@@ -26,6 +26,7 @@ import:
   rhombus/hol/frontend/surface_core open
   rhombus/hol/logic/bool open
   rhombus/hol/frontend/tyunify open
+  rhombus/hol/frontend/operator open
   rhombus/hol/effect/core open
   rhombus/hol/effect/core as effect
   rhombus/hol/effect/syntax open
@@ -33,6 +34,7 @@ import:
 export:
   parse_type_decl
   type_decl_shape
+  parse_open_type
 
 // `?` is already one shrubbery operator token. A type variable is therefore
 // parsed structurally as that operator followed by one identifier; no string
@@ -246,6 +248,9 @@ fun collect_type_vars(stx :: Syntax) :: List.of(Symbol):
       for values(acc :~ List = []) (a in [arg, ...]):
         add(acc, collect_type_vars(a))
   | ~else: []
+fun parse_open_type(stx :: Syntax) :: HType:
+  parse_type(stx, collect_type_vars(stx))
+
 
 fun fresh_wildcard(ty :: HType) :: FVar:
   mk_var(Symbol.gen("_wild"), ty)
@@ -378,7 +383,8 @@ class ElabEnv(thy :: Theory,
               vars :: Map.of(Symbol, Term),
               mode :: Symbol,
               self_name :: maybe(Symbol),
-              self :: maybe(Term)):
+              self :: maybe(Term),
+              operators :: OperatorRegistry = standard_operator_registry()):
   property who :: Symbol: (if mode == #'prop | #'theorem | #'function)
 
   reader_effect
@@ -447,6 +453,87 @@ fun elaborate_arguments_effect(args :: List.of(CoreExpr)) :: Computation:
         effect:
           let term :: Term <- elaborate_effect(first :~ CoreExpr)
           loop(rest, terms ++ [term])
+fun elaborate_equality_arguments_effect(args :: List.of(CoreExpr))
+     :: Computation:
+  match args
+  | [left, right]:
+      cond
+      | requires_expected_type(right):
+          effect:
+            let left_term :: Term <- infer_core(left)
+            let right_term :: Term <- check_core(right, type_of(left_term))
+            return [left_term, right_term]
+      | requires_expected_type(left):
+          effect:
+            let right_term :: Term <- infer_core(right)
+            let left_term :: Term <- check_core(left, type_of(right_term))
+            return [left_term, right_term]
+      | ~else: elaborate_arguments_effect(args)
+  | ~else: elaborate_arguments_effect(args)
+fun core_location(expr :: CoreExpr) :: Syntax:
+  match expr
+  | CoreRef(_, at): at
+  | CoreCall(_, _, at): at
+  | CoreOperator(_, _, at): at
+  | CoreNumeral(_, at): at
+  | CoreIf(_, _, _, at): at
+  | CoreForall(_, _, at): at
+  | CoreExists(_, _, at): at
+  | ~else: error(~who: #'elaborate, "unknown CoreExpr variant")
+
+fun elaborate_typed_arguments_effect(func :: CoreRef,
+                                     args :: List.of(CoreExpr))
+     :: Computation:
+  effect:
+    let env :: ElabEnv <- ElabEnv.ask()
+    let generic:
+      match func
+      | CoreRef(name, at):
+          match env.vars.get(name, #false)
+          | value :: Term: type_of(value)
+          | #false:
+              cond
+              | name == env.self_name: type_of(env.self :~ Term)
+              | ~else:
+                  match const_type(env.thy, name)
+                  | #false: syntax_error(env.who, "unknown constant", at)
+                  | ty:
+                      let ty :~ HType = ty
+                      let renaming:
+                        for values(m :~ Map = {}) (v in type_vars(ty)):
+                          m ++ {v: mk_tyvar(
+                                     Symbol.gen(to_string(v))) :~ HType}
+                      type_subst(renaming, ty)
+    recur loop (remaining :~ List = args,
+                current :~ HType = generic,
+                theta :~ Map = {},
+                terms :~ List = []):
+      match remaining
+      | []: return terms
+      | List.cons(arg, rest):
+          let instantiated = type_subst(theta, current)
+          unless is_fun(instantiated)
+          | syntax_error(env.who, "too many function arguments",
+                         core_location(arg :~ CoreExpr))
+          let (domain, range) = dest_fun(instantiated)
+          effect:
+            let term :: Term <- (if requires_expected_type(arg :~ CoreExpr)
+                                 | check_core(arg, domain)
+                                 | infer_core(arg))
+            let next:
+              match type_match(domain, type_of(term), theta)
+              | #false:
+                  syntax_error(env.who,
+                               "argument has an unexpected type",
+                               core_location(arg :~ CoreExpr))
+              | substitution: substitution :~ Map
+            loop(rest, range, next, terms ++ [term])
+
+fun arguments_require_expected(args :: List.of(CoreExpr)) :: Boolean:
+  for values(found = #false) (arg in args):
+    found || requires_expected_type(arg :~ CoreExpr)
+
+
 
 fun core_apply_effect(func :: CoreExpr, args :: List.of(CoreExpr),
                       at :: Syntax) :: Computation:
@@ -475,8 +562,184 @@ fun core_apply_effect(func :: CoreExpr, args :: List.of(CoreExpr),
             return list_mk_comb(
               head, specialize_call_args(type_of(head), terms))
   effect:
-    let terms :: List.of(Term) <- elaborate_arguments_effect(args)
+    let terms :: List.of(Term) <- (match func
+                                   | CoreRef(name, _) when name == #'eq:
+                                       elaborate_equality_arguments_effect(args)
+                                   | CoreRef(_, _) when arguments_require_expected(args):
+                                       elaborate_typed_arguments_effect(
+                                         func :~ CoreRef, args)
+                                   | ~else: elaborate_arguments_effect(args))
     apply_terms(terms)
+fun elaborate_non_numerals_effect(args :: List.of(CoreExpr)) :: Computation:
+  recur loop (remaining :~ List = args, terms :~ List = []):
+    match remaining
+    | []: return terms
+    | List.cons(first, rest):
+        match first
+        | CoreNumeral(_, _): loop(rest, terms ++ [#false])
+        | ~else:
+            effect:
+              let term :: Term <- elaborate_effect(first :~ CoreExpr)
+              loop(rest, terms ++ [term])
+
+fun surface_domain(domains :: List.of(HType),
+                   order :: List.of(NonnegInt),
+                   surface_index :: NonnegInt) :: HType:
+  recur find (constant_index = 0):
+    cond
+    | constant_index >= order.length():
+        error(~who: #'operator, "internal invalid provider argument order")
+    | order[constant_index] == surface_index: domains[constant_index]
+    | ~else: find(constant_index + 1)
+
+fun provider_match(env :: ElabEnv, provider :: OperatorProvider,
+                   known :: List, arity :: PosInt,
+                   expected_result :: maybe(HType) = #false)
+     :: maybe(List):
+  let generic = const_type(env.thy, provider.constant)
+  match generic
+  | #false: #false
+  | generic:
+      let (domains, result) = peel_fun(generic :~ HType, arity)
+      recur match_args (index = 0, theta :~ Map = {}):
+        cond
+        | index == known.length():
+            match expected_result
+            | #false: [theta, domains, result]
+            | expected:
+                match type_match(result, expected :~ HType, theta)
+                | #false: #false
+                | next: [next, domains, result]
+        | ~else:
+            match known[index]
+            | #false: match_args(index + 1, theta)
+            | term:
+                let expected = surface_domain(domains,
+                                              provider.argument_order,
+                                              index)
+                match type_match(expected, type_of(term :~ Term), theta)
+                | #false: #false
+                | next: match_args(index + 1, next :~ Map)
+
+fun numeral_apply(env :: ElabEnv, name :: Symbol,
+                  args :: List.of(Term), at :: Syntax) :: Term:
+  let cty = core_const_instance(env, name, args, at)
+  list_mk_comb(mk_const(name, cty), specialize_call_args(cty, args))
+
+fun nat_numeral(env :: ElabEnv, value :: NonnegInt, at :: Syntax) :: Term:
+  let zero_term = numeral_apply(env, #'zero, [], at)
+  recur build (remaining = value, term = zero_term):
+    (if remaining == 0
+     | term
+     | build(remaining - 1, numeral_apply(env, #'succ, [term], at)))
+
+fun elaborate_numeral(env :: ElabEnv, value :: NonnegInt,
+                      expected :: HType, at :: Syntax) :: Term:
+  cond
+  | expected == mk_tyapp(#'Nat, []): nat_numeral(env, value, at)
+  | expected == mk_tyapp(#'Integer, []):
+      numeral_apply(env, #'int_from_nat, [nat_numeral(env, value, at)], at)
+  | expected == mk_tyapp(#'Rational, []):
+      let integer = numeral_apply(
+                      env, #'int_from_nat,
+                      [nat_numeral(env, value, at)], at)
+      numeral_apply(env, #'rational_from_integer, [integer], at)
+  | ~else:
+      syntax_error(env.who,
+                   "a numeral has no representation at type "
+                     ++ type_to_string(expected),
+                   at)
+
+fun operator_signature(env :: ElabEnv,
+                       provider :: OperatorProvider,
+                       family :: OperatorFamily) :: String:
+  match const_type(env.thy, provider.constant)
+  | #false:
+      type_to_string(provider.carrier)
+        ++ " via " ++ to_string(provider.constant)
+  | ty:
+      let (domains, result) = peel_fun(ty :~ HType, family.arity)
+      let surface_domains:
+        for List (index in 0 .. family.arity):
+          type_to_string(
+            surface_domain(domains, provider.argument_order, index))
+      String.join(surface_domains, " * ")
+        ++ " -> " ++ type_to_string(result)
+        ++ " via " ++ to_string(provider.constant)
+
+fun elaborate_operator_effect(family_name :: Symbol,
+                              args :: List.of(CoreExpr),
+                              at :: Syntax,
+                              ~expected: expected_result :: maybe(HType) = #false)
+     :: Computation:
+  effect:
+    let env :: ElabEnv <- ElabEnv.ask()
+    let family = operator_family(env.operators, family_name)
+    unless family
+    | syntax_error(env.who,
+                   "unknown operator family " ++ to_string(family_name),
+                   at)
+    let family :~ OperatorFamily = family
+    unless args.length() == family.arity
+    | syntax_error(env.who,
+                   "operator `" ++ family.spelling ++ "` expects "
+                     ++ to_string(family.arity) ++ " operands",
+                   at)
+    let known :: List <- elaborate_non_numerals_effect(args)
+    let matches:
+      for values(out :~ List = []) (provider in operator_candidates(env.operators, family_name)):
+        match provider_match(env, provider :~ OperatorProvider,
+                             known, family.arity, expected_result)
+        | #false: out
+        | instance: out ++ [[provider, instance]]
+    when matches.length() == 0
+    | let available = operator_candidates(env.operators, family_name)
+      let signatures = available.map(
+                         fun (provider :: OperatorProvider):
+                           operator_signature(env, provider, family))
+      syntax_error(
+        env.who,
+        "operator `" ++ family.spelling ++ "` has no applicable provider"
+          ++ (if signatures.length() == 0
+              | ""
+              | "\navailable providers:\n  "
+                  ++ String.join(signatures, "\n  ")),
+        at)
+    when matches.length() > 1
+    | let candidates = matches.map(
+                         fun (entry :: List):
+                           operator_signature(
+                             env, entry[0] :~ OperatorProvider, family))
+      syntax_error(env.who,
+                   "operator `" ++ family.spelling ++ "` is ambiguous"
+                     ++ "\ncandidates:\n  "
+                     ++ String.join(candidates, "\n  "),
+                   at)
+    let chosen :~ List = matches[0]
+    let provider :~ OperatorProvider = chosen[0]
+    let instance :~ List = chosen[1]
+    let theta :~ Map = instance[0]
+    let domains :~ List.of(HType) = instance[1]
+    let terms:
+      for List (arg in args, maybe_term in known, index in List.iota(args.length())):
+        match maybe_term
+        | #false:
+            match arg
+            | CoreNumeral(value, numeral_at):
+                elaborate_numeral(
+                  env, value,
+                  type_subst(
+                    theta,
+                    surface_domain(domains, provider.argument_order, index)),
+                  numeral_at)
+            | ~else:
+                error(~who: #'operator,
+                      "internal missing elaborated operator operand")
+        | term: term
+    let ordered = provider.argument_order.map(
+                    fun (index): terms[index] :~ Term)
+    return numeral_apply(env, provider.constant, ordered, at)
+
 
 fun elaborate_binders_effect(binders :: List.of(CoreBinder), body :: CoreExpr,
                              is_forall :: Boolean) :: Computation:
@@ -520,6 +783,14 @@ fun elaborate_effect(expr :: CoreExpr) :: Computation:
         let env :: ElabEnv <- ElabEnv.ask()
         return core_lookup(env, name, at)
   | CoreCall(func, args, at): core_apply_effect(func, args, at)
+  | CoreOperator(family, args, at):
+      elaborate_operator_effect(family, args, at)
+  | CoreNumeral(_, at):
+      effect:
+        let env :: ElabEnv <- ElabEnv.ask()
+        syntax_error(env.who,
+                     "a numeral needs an expected numeric type from an operator",
+                     at)
   | CoreIf(condition_expr, then_expr, else_expr, at):
       elaborate_if_effect(condition_expr, then_expr, else_expr, at)
   | CoreForall(binders, body, _):
@@ -534,17 +805,61 @@ fun elaborate_effect(expr :: CoreExpr) :: Computation:
 fun infer_core(expr :: CoreExpr) :: Computation:
   elaborate_effect(expr)
 
+fun requires_expected_type(expr :: CoreExpr) :: Boolean:
+  match expr
+  | CoreNumeral(_, _): #true
+  | CoreOperator(_, args, _):
+      recur loop (remaining :~ List = args):
+        match remaining
+        | []: args.length() > 0
+        | List.cons(arg, rest):
+            requires_expected_type(arg :~ CoreExpr) && loop(rest)
+  | CoreIf(_, then_expr, else_expr, _):
+      requires_expected_type(then_expr)
+        || requires_expected_type(else_expr)
+  | ~else: #false
+
 fun check_core(expr :: CoreExpr, expected :: HType) :: Computation:
-  effect:
-    let term :: Term <- infer_core(expr)
-    unless type_of(term) == expected
-    | error(~who: #'check_core, "expression has an unexpected type")
-    return term
+  match expr
+  | CoreNumeral(value, at):
+      effect:
+        let env :: ElabEnv <- ElabEnv.ask()
+        return elaborate_numeral(env, value, expected, at)
+  | CoreOperator(family, args, at):
+      elaborate_operator_effect(family, args, at, ~expected: expected)
+  | CoreIf(condition_expr, then_expr, else_expr, at):
+      effect:
+        let condition :: Term <- infer_core(condition_expr)
+        let env :: ElabEnv <- ElabEnv.ask()
+        unless type_of(condition) == bool
+        | syntax_error(env.who, "the condition of an `if` must be a Boolean", at)
+        let then_term :: Term <- check_core(then_expr, expected)
+        let else_term :: Term <- check_core(else_expr, expected)
+        return mk_cond(condition, then_term, else_term)
+  | ~else:
+      effect:
+        let term :: Term <- infer_core(expr)
+        match type_match(type_of(term), expected, {})
+        | theta:
+            let specialized = inst_type(theta :~ Map, term)
+            unless type_of(specialized) == expected
+            | error(~who: #'check_core, "expression has an unexpected type")
+            return specialized
+        | #false:
+            error(~who: #'check_core, "expression has an unexpected type")
 
 fun run_elaboration(env :: ElabEnv, expr :: CoreExpr) :: Term:
   match ElabEnv.handle(env, infer_core(expr))
   | Pure(term): term :~ Term
   | ~else: error(~who: #'run_elaboration, "internal error: unhandled effect")
+
+fun run_checked_elaboration(env :: ElabEnv, expr :: CoreExpr,
+                            expected :: HType) :: Term:
+  match ElabEnv.handle(env, check_core(expr, expected))
+  | Pure(term): term :~ Term
+  | ~else:
+      error(~who: #'run_checked_elaboration,
+            "internal error: unhandled effect")
 
 fun parse_type_effect(stx :: Syntax) :: Computation:
   effect:
@@ -558,8 +873,10 @@ fun run_type_elaboration(env :: ElabEnv, stx :: Syntax) :: HType:
 
 fun parse_core_prop(thy :: Theory, tyvars :: List.of(Symbol),
                     vars :: Map.of(Symbol, Term),
-                    expr :: CoreExpr) :: Term:
-  run_elaboration(ElabEnv(thy, tyvars, vars, #'prop, #false, #false), expr)
+                    expr :: CoreExpr,
+                    ~operators: operators :: OperatorRegistry = standard_operator_registry()) :: Term:
+  run_elaboration(ElabEnv(thy, tyvars, vars, #'prop, #false, #false,
+                          operators), expr)
 
 fun append_unique(base :: List.of(Symbol),
                   more :: List.of(Symbol)) :: List.of(Symbol):
@@ -580,6 +897,10 @@ fun core_type_vars(expr :: CoreExpr) :: List.of(Symbol):
                     append_unique(core_type_vars(t), core_type_vars(e)))
   | CoreForall(bs, body, _):
       append_unique(binders_vars(bs), core_type_vars(body))
+  | CoreOperator(_, args, _):
+      for values(acc :~ List = []) (a in args):
+        append_unique(acc, core_type_vars(a))
+  | CoreNumeral(_, _): []
   | CoreExists(bs, body, _):
       append_unique(binders_vars(bs), core_type_vars(body))
   | ~else: []
@@ -591,10 +912,12 @@ fun leading_core_binder_names(expr :: CoreExpr) :: List.of(Symbol):
         ++ leading_core_binder_names(body)
   | ~else: []
 
-fun elaborate_theorem_statement(thy :: Theory, expr :: CoreExpr)
+fun elaborate_theorem_statement(
+      thy :: Theory, expr :: CoreExpr,
+      ~operators: operators :: OperatorRegistry = standard_operator_registry())
      :: values(Term, List.of(Symbol)):
   let tyvars = core_type_vars(expr)
-  values(parse_core_prop(thy, tyvars, {}, expr),
+  values(parse_core_prop(thy, tyvars, {}, expr, ~operators: operators),
          leading_core_binder_names(expr))
 
 // -- CoreFunctionSpec elaboration -------------------------------------------
@@ -646,7 +969,9 @@ class ClauseEnv(thy :: Theory,
                 self :: Term,
                 pats :: List.of(Term),
                 vars :: Map.of(Symbol, Term),
-                at :: Syntax):
+                at :: Syntax,
+                result_type :: HType,
+                operators :: OperatorRegistry):
   reader_effect
 
 fun core_parse_body(body :: CoreFunBody) :: Computation:
@@ -662,12 +987,12 @@ fun core_parse_body(body :: CoreFunBody) :: Computation:
         effect:
           let value = run_elaboration(
                         ElabEnv(env.thy, [], env.vars, #'function,
-                                env.self_name, env.self),
+                                env.self_name, env.self, env.operators),
                         init)
           let vars2 = env.vars ++ {name: value}
           fun bind_let(_):
             ClauseEnv(env.thy, env.self_name, env.self, env.pats,
-                      vars2, env.at)
+                      vars2, env.at, env.result_type, env.operators)
           let clauses :: List <- ClauseEnv.local(bind_let, core_parse_body(tail))
           return for List (clause in clauses):
                    let clause :~ DefClause = clause
@@ -676,10 +1001,13 @@ fun core_parse_body(body :: CoreFunBody) :: Computation:
                    DefClause(clause.pats, eval_core_term(core),
                              eval_core_obligations(core))
     | CoreBodyExpr(expr, _):
-        let value = run_elaboration(
-                      ElabEnv(env.thy, [], env.vars, #'function,
-                              env.self_name, env.self),
-                      expr)
+        let elab_env = ElabEnv(
+                         env.thy, [], env.vars, #'function,
+                         env.self_name, env.self, env.operators)
+        let value = (if requires_expected_type(expr)
+                     | run_checked_elaboration(
+                         elab_env, expr, env.result_type)
+                     | run_elaboration(elab_env, expr))
         return [DefClause(env.pats, value, [value])]
     | ~else: error(~who: #'function, "unknown CoreFunBody variant")
 
@@ -709,7 +1037,7 @@ fun core_parse_clause(v :: FVar,
         fun bind_pattern(_):
           ClauseEnv(env.thy, env.self_name, env.self,
                     refine_pats(env.pats, v, pat :~ Term),
-                    vars2, env.at)
+                    vars2, env.at, env.result_type, env.operators)
         ClauseEnv.local(bind_pattern, core_parse_body(clause.body))
     | ~else:
         syntax_error(#'function, "malformed match clause", clause.at)
@@ -747,11 +1075,14 @@ fun core_clause_row(row :: CoreRow) :: Computation:
                for values(m :~ Map = e) (bv in bound :~ List):
                  m ++ {(bv :~ FVar).name: bv :~ Term})
     fun bind_row(_):
-      ClauseEnv(env.thy, env.self_name, env.self, pats2, vars2, env.at)
+      ClauseEnv(env.thy, env.self_name, env.self, pats2, vars2, env.at,
+                env.result_type, env.operators)
     ClauseEnv.local(bind_row, core_parse_body(row.body))
 
-fun elaborate_function_decl(thy :: Theory,
-                            spec :: CoreFunctionSpec) :: FunSpec:
+fun elaborate_function_decl(
+      thy :: Theory, spec :: CoreFunctionSpec,
+      ~operators: operators :: OperatorRegistry = standard_operator_registry())
+     :: FunSpec:
   let tyvars = spec_type_vars(spec)
   let bindings:
     for List (b in spec.params):
@@ -770,12 +1101,15 @@ fun elaborate_function_decl(thy :: Theory,
     match spec.measure
     | #false: #false
     | expr:
-        let value = run_elaboration(ElabEnv(thy, tyvars, env0, #'function, #false, #false), expr :~ CoreExpr)
+        let value = run_elaboration(
+                      ElabEnv(thy, tyvars, env0, #'function, #false, #false,
+                              operators),
+                      expr :~ CoreExpr)
         list_mk_abs(pvars, value)
   let clause_env = ClauseEnv(
                      thy, spec.name, self,
                      pvars.map(fun (v :: FVar): v :~ Term),
-                     env0, spec.at)
+                     env0, spec.at, result_ty, operators)
   let clauses0 :~ List:
     match ClauseEnv.handle(clause_env, core_parse_body(spec.body))
     | Pure(clauses): clauses :~ List
@@ -797,7 +1131,8 @@ fun elaborate_function_decl(thy :: Theory,
   FunSpec(spec.name, arg_tys, result_ty, clauses, measure)
 
 fun sub_env(env :: ElabEnv, vars :: Map.of(Symbol, Term)) :: ElabEnv:
-  ElabEnv(env.thy, env.tyvars, vars, env.mode, env.self_name, env.self)
+  ElabEnv(env.thy, env.tyvars, vars, env.mode, env.self_name, env.self,
+          env.operators)
 
 // ============================================================================
 // Tactics

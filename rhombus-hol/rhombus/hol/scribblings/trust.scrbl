@@ -283,8 +283,10 @@ Beyond the termination restrictions in @secref("termination"):
   error surfaces at run time, when the property is actually checked, rather
   than at compile time.}
 
- @item{The function body grammar has @rhombus(if), @rhombus(cond), local
-  @rhombus(let), no arithmetic, and no literals other than the Booleans.}
+ @item{The function body grammar has named applications, @rhombus(if),
+  @rhombus(cond), local @rhombus(let), matching, Booleans, type-directed
+  nonnegative numerals, and registered operators. It has no lambdas,
+  effects, implicit numeric coercions, or arbitrary runtime expressions.}
 
  @item{Proof search is bounded, but a rule that does not make progress is
   still admitted. @rhombus(mk_rule)'s conditions catch a variable left-hand

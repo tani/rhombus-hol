@@ -161,7 +161,11 @@ The @rhombus(~logic) clause must have the form
 in order.
 
 The available named orders, strongest to weakest, are
-@rhombus(hol_application), @rhombus(hol_equality),
+@rhombus(hol_application), @rhombus(hol_power),
+@rhombus(hol_prefix_arithmetic), @rhombus(hol_multiplication),
+@rhombus(hol_addition), @rhombus(hol_append),
+@rhombus(hol_set_intersection), @rhombus(hol_set_union),
+@rhombus(hol_relation), @rhombus(hol_equality),
 @rhombus(hol_negation), @rhombus(hol_conjunction),
 @rhombus(hol_disjunction), @rhombus(hol_implication), and
 @rhombus(hol_equivalence). See @secref("propositions") for the built-in
@@ -175,17 +179,89 @@ ordinary and HOL-space bindings:
   export: both <+>
 )
 
-@subsection{Migrating operator extensions}
+@subsection{Choosing an extension form}
 
-An ordinary @rhombus(operator) remains runtime-only. Code that previously
-expected the proposition parser to recognize an operator by spelling should
-instead declare @rhombus(notation, ~datum) with the meanings it needs. There
-is no numeric precedence hook and no parser table to modify.
+Use @rhombus(notation, ~datum) when one spelling has a fixed runtime or logical
+interpretation. Use the registered @rhombus(operator, ~datum) form below when
+the spelling is a statically overloaded family with a provider selected by
+operand type. The HOL language reserves the @rhombus(operator, ~datum)
+declaration head for family and provider declarations.
 
-Choose a named @tt{hol_*} order. Omit @rhombus(~runtime) for proof-only
-notation; omit @rhombus(~logic) for runtime-only notation. Existing ordinary
-operators intentionally remain rejected by logical declarations instead of
-being assigned a default logical meaning.
+Both forms use a named @tt{hol_*} order; there is no numeric precedence hook
+or parser table to modify. Existing runtime-only operators intentionally remain
+rejected by logical declarations instead of receiving a default logical
+meaning.
+
+@section{Registered operator families}
+
+The standard spellings are capabilities of the theory in scope, not a global
+overload table. Their families are @tt{Add}, @tt{Subtract}, @tt{Negate},
+@tt{Multiply}, @tt{Power}, @tt{Less}, @tt{LessEqual}, @tt{Greater},
+@tt{GreaterEqual}, @tt{Append}, @tt{Membership}, @tt{Union}, and
+@tt{Intersection}. Importing a theory imports its provider registry together
+with its constants and theorems.
+
+The standard provider set is:
+
+@itemlist(
+  @item{@tt{Nat}: addition, subtraction, multiplication, power, and all four
+        order comparisons.}
+  @item{@tt{Integer} and @tt{Rational}: addition, subtraction,
+        multiplication, unary negation, and all four order comparisons.}
+  @item{@tt{List(?a)} and @tt{String}: append.}
+  @item{@tt{Function(?a, Boolean)} sets: membership, union, and intersection.}
+  @item{@tt{Function(?a, Function(?a, Boolean))} relations: union and
+        intersection.}
+)
+
+New families, spellings, and providers use the same
+@rhombus(operator, ~datum) declaration head:
+
+@verbatim{
+operator CustomAdd:
+  syntax (left <+> right)
+  syntax (left <++> right)
+  ~order: hol_addition
+  ~associativity: ~left
+
+operator CustomAdd for Nat:
+  nat_add
+}
+
+Each @rhombus(syntax, ~datum) clause binds a spelling in the HOL expression
+space at the named precedence order. Its shape determines the family arity and
+whether the spelling is infix or prefix. Multiple spellings may share a family
+when they use the same operand names and fixity. Infix declarations require
+@rhombus(~associativity); prefix declarations omit it:
+
+@verbatim{
+operator CustomNegate:
+  syntax (!! value)
+  ~order: hol_prefix_arithmetic
+}
+
+A provider is canonical for its family and carrier; a duplicate declaration is
+an error instead of an order-dependent winner. Resolution uses the statically
+known operand and result types. No provider means a compile error listing the
+available candidates; more than one applicable provider is an ambiguity.
+Generated executable functions contain a direct call to the selected provider,
+not a runtime type test.
+
+A bare provider constant is shorthand for passing the family operands in their
+canonical order. When the provider's parameter order differs, write a call
+template using the operand names from the family's @rhombus(syntax, ~datum)
+clause:
+
+@verbatim{
+operator Membership for Function(?a, Boolean):
+  set_member(collection, element)
+
+operator Greater for Integer:
+  int_lt(right, left)
+}
+
+Thus @tt{x in s} lowers to @tt{set_member(s, x)}, while @tt{x > y} lowers to
+@tt{int_lt(y, x)}. A template must use every family operand exactly once.
 
 @section{@rhombus(theorem, ~datum) and @rhombus(proof, ~datum)}
 

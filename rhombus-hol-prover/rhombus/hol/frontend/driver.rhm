@@ -39,6 +39,7 @@ import:
   rhombus/hol/recursion/stepfn open
   rhombus/hol/frontend/surface_core open
   rhombus/hol/frontend/elab as elab
+  rhombus/hol/frontend/operator open
 
 export:
   hol_reraise
@@ -48,6 +49,8 @@ export:
   add_function
   add_axiomatic_function
   add_theorem
+  add_operator_family_decl
+  add_operator_provider_decl
   set_rules
   adopt
 
@@ -84,11 +87,12 @@ fun strip_who(msg :: String) :~ String:
 
 class HolState(ctx :: Context,
                thms :: Map.of(Symbol, Thm),
+               // Surface capabilities are import-scoped elaboration metadata.
+               // They never enter Theory or the theorem database.
+               operators :: OperatorRegistry,
                // `wfrec_rel`'s definition (`wfrec.rhm`'s `build_wfrec_rel`),
                // installed exactly once at the very start of the session so
-               // every structurally derived `function` can share it --
-               // `new_basic_definition` refuses a second declaration of the
-               // same constant.
+               // every structurally derived `function` can share it.
                wfrec_def :: Thm)
 
 def initial_context:
@@ -103,7 +107,7 @@ def initial_context:
   mk_context(thy, ~rules: db)
 
 fun initial_state() :: HolState:
-  HolState(initial_context, {}, wfrec_base_def())
+  HolState(initial_context, {}, standard_operator_registry(), wfrec_base_def())
 
 // The prover context for the state as it currently stands.
 fun state_context(st :: HolState) :: Context:
@@ -140,7 +144,7 @@ fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
               add_thm(thy2, d, spec.name, th)
   let ctx2 = context_add_datatype(st.ctx, thy2, db2, spec.name, thms)
   add_subterm_relation(
-    HolState(ctx2, st.thms, st.wfrec_def),
+    HolState(ctx2, st.thms, st.operators, st.wfrec_def),
     spec, at)
 
 // Every recursive datatype brings its structural subterm relation with it, so
@@ -176,7 +180,7 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
                          equations, NoRecursion())
       let db2 = add_thms(thy2, st.ctx.db, fs.name, equations)
       let ctx2 = context_add_function(st.ctx, thy2, db2, fs.name, info)
-      HolState(ctx2, st.thms, st.wfrec_def)
+      HolState(ctx2, st.thms, st.operators, st.wfrec_def)
 
 // -- function ----------------------------------------------------------------
 
@@ -200,7 +204,8 @@ fun install_declared_function(st :: HolState, core :: CoreFunctionSpec,
                               at :: Syntax,
                               ~postulate: postulate :: Boolean) :: HolState:
   let spec :~ FunSpec = try:
-                          elab.elaborate_function_decl(st.ctx.thy, core)
+                          elab.elaborate_function_decl(
+                            st.ctx.thy, core, ~operators: st.operators)
                           ~catch e :: Exn.Fail: hol_reraise(e, at)
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
@@ -241,7 +246,7 @@ fun install_declared_function(st :: HolState, core :: CoreFunctionSpec,
     require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
   let db2 = add_thms(thy2, st.ctx.db, spec.name, info.equations)
   let ctx2 = context_add_function(st.ctx, thy2, db2, spec.name, info)
-  HolState(ctx2, st.thms, st.wfrec_def)
+  HolState(ctx2, st.thms, st.operators, st.wfrec_def)
 
 // A path that claims to derive must not have added an axiom.  Every
 // declaration below that is documented as derived runs through this, so the
@@ -356,7 +361,8 @@ fun add_theorem(st :: HolState, name :: Symbol,
                 stmt :: CoreExpr, tactic :: CoreTactic,
                 at :: Syntax) :: HolState:
   let (statement, names) = try:
-                             elab.elaborate_theorem_statement(st.ctx.thy, stmt)
+                             elab.elaborate_theorem_statement(
+                               st.ctx.thy, stmt, ~operators: st.operators)
                              ~catch e :: Exn.Fail: hol_reraise(e, at)
   let induct = tactic.induct
   let using_names = tactic.using_names
@@ -382,12 +388,14 @@ fun add_theorem(st :: HolState, name :: Symbol,
   let cases:
     for List (c in case_exprs):
       try:
-        elab.parse_core_prop(st.ctx.thy, tyvars, env, c)
+        elab.parse_core_prop(st.ctx.thy, tyvars, env, c,
+                             ~operators: st.operators)
         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let witnesses:
     for List (w in witness_exprs):
       try:
-        elab.parse_core_prop(st.ctx.thy, tyvars, env, w)
+        elab.parse_core_prop(st.ctx.thy, tyvars, env, w,
+                             ~operators: st.operators)
         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let limits :~ SearchLimits:
     match search_steps
@@ -404,7 +412,77 @@ fun add_theorem(st :: HolState, name :: Symbol,
       | hol_error(#'theorem,
                   "prover returned a result that does not prove this theorem source",
                   at)
-      HolState(st.ctx, st.thms ++ {name: th}, st.wfrec_def)
+      HolState(st.ctx, st.thms ++ {name: th}, st.operators, st.wfrec_def)
+// -- surface operator capabilities -----------------------------------------
+
+fun add_operator_family_decl(st :: HolState, name :: Symbol,
+                             operand_names :: List.of(Symbol),
+                             spelling :: String,
+                             at :: Syntax) :: HolState:
+  let registry = try:
+                   add_operator_family(
+                     st.operators,
+                     OperatorFamily(name, operand_names, spelling))
+                   ~catch e :: Exn.Fail: hol_reraise(e, at)
+  HolState(st.ctx, st.thms, registry, st.wfrec_def)
+
+fun provider_domains(st :: HolState, constant :: Symbol, arity :: PosInt,
+                     at :: Syntax) :: List.of(HType):
+  let generic:
+    match const_type(st.ctx.thy, constant)
+    | #false:
+        hol_error(#'operator,
+                  "provider constant is not declared: " ++ to_string(constant),
+                  at)
+    | ty: ty :~ HType
+  recur peel (ty = generic, remaining = arity, domains :~ List = []):
+    cond
+    | remaining == 0: domains
+    | is_fun(ty):
+        let (domain, range) = dest_fun(ty)
+        peel(range, remaining - 1, domains ++ [domain])
+    | ~else:
+        hol_error(#'operator,
+                  "provider constant has fewer arguments than its family",
+                  at)
+
+fun add_operator_provider_decl(
+      st :: HolState, family_name :: Symbol, carrier_stx :: Syntax,
+      constant :: Symbol, argument_order :: maybe(List.of(NonnegInt)),
+      dispatch_argument :: NonnegInt, at :: Syntax) :: HolState:
+  let family = operator_family(st.operators, family_name)
+  unless family
+  | hol_error(#'operator,
+              "operator family is not declared: " ++ to_string(family_name),
+              at)
+  let family :~ OperatorFamily = family
+  let carrier = try:
+                  elab.parse_open_type(carrier_stx)
+                  ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let order :~ List.of(NonnegInt):
+    match argument_order
+    | #false: List.iota(family.arity)
+    | positions: positions :~ List.of(NonnegInt)
+  let domains = provider_domains(st, constant, family.arity, at)
+  let provider = OperatorProvider(family_name, carrier, constant,
+                                  order, dispatch_argument)
+  // Registration validates the permutation and canonical uniqueness. The
+  // selected dispatch domain must be the declared carrier.
+  let registry = try:
+                   let checked = add_operator_provider(st.operators, provider)
+                   let constant_index:
+                     recur find (index = 0):
+                       cond
+                       | order[index] == dispatch_argument: index
+                       | ~else: find(index + 1)
+                   unless domains[constant_index] == carrier
+                   | error(~who: #'operator,
+                           "declared carrier does not match the provider "
+                             ++ "constant's dispatch argument")
+                   checked
+                   ~catch e :: Exn.Fail: hol_reraise(e, at)
+  HolState(st.ctx, st.thms, registry, st.wfrec_def)
+
 
 // -- adopting an imported theory ----------------------------------------------
 
@@ -434,14 +512,15 @@ fun adopt(st :: HolState, imported :: HolState, at :: Syntax) :: HolState:
   let off = for values(acc :~ List = []) (n in st.ctx.db.disabled): acc ++ [n]
   let ctx = context_with_rules(imported.ctx,
                                disable(imported.ctx.db, off))
-  HolState(ctx, imported.thms, imported.wfrec_def)
+  HolState(ctx, imported.thms, imported.operators, imported.wfrec_def)
 
 // -- rule control ------------------------------------------------------------
 
 fun set_rules(st :: HolState, on :: Boolean,
               names :: List.of(Symbol)) :: HolState:
   let db2 = (if on | enable(st.ctx.db, names) | disable(st.ctx.db, names))
-  HolState(context_with_rules(st.ctx, db2), st.thms, st.wfrec_def)
+  HolState(context_with_rules(st.ctx, db2), st.thms, st.operators,
+           st.wfrec_def)
 
 fun datatype_rules(thms :: DatatypeThms) :: List.of(Thm):
   let inj = for values(acc :~ List = []) ((_, th) in thms.injectivity): acc ++ [th]

@@ -1,0 +1,115 @@
+#lang rhombus/static
+
+// Surface operator capabilities are elaboration metadata, not logical
+// constants or kernel primitives. Registries are immutable and travel with a
+// module's HolState so imports determine exactly which providers are visible.
+
+import:
+  rhombus/hol/htype open
+
+export:
+  OperatorFamily
+  OperatorProvider
+  OperatorRegistry
+  standard_operator_registry
+  add_operator_family
+  add_operator_provider
+  operator_family
+  operator_candidates
+
+class OperatorFamily(name :: Symbol,
+                     operand_names :: List.of(Symbol),
+                     spelling :: String):
+  property arity: operand_names.length()
+
+class OperatorProvider(family :: Symbol,
+                       carrier :: HType,
+                       constant :: Symbol,
+                       argument_order :: List.of(NonnegInt),
+                       dispatch_argument :: NonnegInt)
+
+class OperatorRegistry(families :: Map.of(Symbol, OperatorFamily),
+                       providers :: List.of(OperatorProvider))
+
+fun standard_operator_registry() :: OperatorRegistry:
+  let families = [
+    OperatorFamily(#'Add, [#'left, #'right], "+"),
+    OperatorFamily(#'Subtract, [#'left, #'right], "-"),
+    OperatorFamily(#'Negate, [#'value], "-"),
+    OperatorFamily(#'Multiply, [#'left, #'right], "*"),
+    OperatorFamily(#'Power, [#'left, #'right], "**"),
+    OperatorFamily(#'Less, [#'left, #'right], "<"),
+    OperatorFamily(#'LessEqual, [#'left, #'right], "<="),
+    OperatorFamily(#'Greater, [#'left, #'right], ">"),
+    OperatorFamily(#'GreaterEqual, [#'left, #'right], ">="),
+    OperatorFamily(#'Append, [#'left, #'right], "++"),
+    OperatorFamily(#'Membership, [#'element, #'collection], "in"),
+    OperatorFamily(#'Union, [#'left, #'right], "union"),
+    OperatorFamily(#'Intersection, [#'left, #'right], "intersect")
+  ]
+  OperatorRegistry(
+    for values(out :~ Map = {}) (family in families):
+      out ++ {(family :~ OperatorFamily).name: family},
+    [])
+
+fun operator_family(registry :: OperatorRegistry,
+                    name :: Symbol) :: maybe(OperatorFamily):
+  registry.families.get(name, #false)
+
+fun add_operator_family(registry :: OperatorRegistry,
+                        family :: OperatorFamily) :: OperatorRegistry:
+  match registry.families.get(family.name, #false)
+  | #false:
+      OperatorRegistry(registry.families ++ {family.name: family},
+                       registry.providers)
+  | existing:
+      unless (existing :~ OperatorFamily) == family
+      | error(~who: #'operator,
+              "operator family conflicts with an existing declaration",
+              error.val(~label: "family", family.name))
+      registry
+
+fun valid_argument_order(order :: List.of(NonnegInt), arity :: PosInt)
+     :: Boolean:
+  recur loop (remaining :~ List = order, seen :~ Set = Set()):
+    match remaining
+    | []: seen.length() == arity
+    | List.cons(position, rest):
+        position < arity
+          && !(position in seen)
+          && loop(rest, seen ++ {position})
+
+fun same_carrier(a :: HType, b :: HType) :: Boolean:
+  type_match(a, b, {}) != #false && type_match(b, a, {}) != #false
+
+fun add_operator_provider(registry :: OperatorRegistry,
+                          provider :: OperatorProvider) :: OperatorRegistry:
+  let family = operator_family(registry, provider.family)
+  unless family
+  | error(~who: #'operator,
+          "operator family is not declared",
+          error.val(~label: "family", provider.family))
+  let family :~ OperatorFamily = family
+  unless valid_argument_order(provider.argument_order, family.arity)
+  | error(~who: #'operator,
+          "argument order must be a permutation of the family arguments")
+  unless provider.dispatch_argument < family.arity
+  | error(~who: #'operator,
+          "dispatch argument is outside the family arity")
+  for (existing in registry.providers):
+    let existing :~ OperatorProvider = existing
+    when existing.family == provider.family
+           && same_carrier(existing.carrier, provider.carrier)
+    | error(~who: #'operator,
+            "a canonical provider already exists for this family and carrier",
+            error.val(~label: "family", provider.family),
+            error.val(~label: "carrier", type_to_string(provider.carrier)))
+  OperatorRegistry(registry.families,
+                   registry.providers ++ [provider])
+
+fun operator_candidates(registry :: OperatorRegistry,
+                        family :: Symbol) :: List.of(OperatorProvider):
+  for values(out :~ List = []) (provider in registry.providers):
+    (if (provider :~ OperatorProvider).family == family
+     | out ++ [provider]
+     | out)

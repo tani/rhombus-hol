@@ -11,6 +11,8 @@ export:
   CoreExpr
   CoreRef
   CoreCall
+  CoreOperator
+  CoreNumeral
   CoreIf
   CoreForall
   CoreExists
@@ -42,6 +44,14 @@ class CoreCall(func :: CoreExpr,
                args :: List.of(CoreExpr),
                at :: Syntax):
   extends CoreExpr
+class CoreOperator(family :: Symbol,
+                   args :: List.of(CoreExpr),
+                   at :: Syntax):
+  extends CoreExpr
+
+class CoreNumeral(value :: NonnegInt, at :: Syntax):
+  extends CoreExpr
+
 
 class CoreIf(cond :: CoreExpr,
              then_expr :: CoreExpr,
@@ -137,13 +147,21 @@ fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
                           "logic-only notation cannot appear in a function body",
                           stx)
         | mode == #'prop:
-            surface_error(#'theorem,
-                          "a proposition admits variables, named applications, `not`, `and`, `or`, `===`, `<=>`, `==>`, `forall`, `exists` and `if`",
-                          stx)
+            surface_error(
+              #'theorem,
+              "a proposition admits variables, named applications, "
+                ++ "registered operators, nonnegative numerals, `not`, "
+                ++ "`and`, `or`, `===`, `<=>`, `==>`, `forall`, `exists` "
+                ++ "and `if`",
+              stx)
         | ~else:
-            surface_error(#'function,
-                          "this version admits only variables, named applications, `if`, `cond`, and notation with both runtime and logic meanings in a function body",
-                          stx)
+            surface_error(
+              #'function,
+              "this version admits only variables, named applications, "
+                ++ "registered operators, nonnegative numerals, `if`, "
+                ++ "`cond`, and notation with both runtime and logic "
+                ++ "meanings in a function body",
+              stx)
       decode_expr(inner, mode)
   | '(core_ref $(name :: Identifier))':
       CoreRef(Syntax.unwrap(name), stx)
@@ -151,6 +169,15 @@ fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
       CoreCall(decode_expr(func, mode),
                [decode_expr(arg, mode), ...],
                stx)
+  | '(core_operator $(family :: Identifier) [$arg, ...])':
+      CoreOperator(Syntax.unwrap(family),
+                   [decode_expr(arg, mode), ...],
+                   stx)
+  | '(core_numeral $(value :: Int))':
+      let n = Syntax.unwrap(value)
+      when n < 0
+      | surface_error(#'operator, "a numeral cannot be negative", stx)
+      CoreNumeral(n, stx)
   | '(core_if $cond $then_expr $else_expr)':
       CoreIf(decode_expr(cond, mode),
              decode_expr(then_expr, mode),
@@ -164,8 +191,13 @@ fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
       surface_error(
         (if mode == #'prop | #'theorem | #'function),
         (if mode == #'prop
-         | "a proposition admits variables, named applications, `not`, `and`, `or`, `===`, `<=>`, `==>`, `forall`, `exists` and `if`"
-         | "this version admits only variables, named applications, `if`, `cond`, and the Boolean operators `!`, `&&`, `||` and `==` in a function body"),
+         | "a proposition admits variables, named applications, registered "
+             ++ "operators, nonnegative numerals, `not`, `and`, `or`, "
+             ++ "`===`, `<=>`, `==>`, `forall`, `exists` and `if`"
+         | "this version admits only variables, named applications, "
+             ++ "registered operators, nonnegative numerals, `if`, `cond`, "
+             ++ "and the Boolean operators `!`, `&&`, `||` and `==` in a "
+             ++ "function body"),
         stx)
   | ~else:
       surface_error((if mode == #'prop | #'theorem | #'function),

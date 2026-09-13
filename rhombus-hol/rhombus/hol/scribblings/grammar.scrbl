@@ -34,13 +34,24 @@ body = expr                        the value of the body
 
 expr = Id                          a parameter, pattern variable or local
      | Id(expr, ...)               a constructor, or a declared function
+     | NonnegativeInteger          an expected Nat, Integer, or Rational
      | #true | #false
      | !expr
      | expr && expr
      | expr || expr
      | expr == expr
+     | -expr
+     | expr ** expr
+     | expr * expr
+     | expr + expr | expr - expr
+     | expr ++ expr
+     | expr in expr
+     | expr union expr
+     | expr intersect expr
+     | expr < expr | expr <= expr | expr > expr | expr >= expr
      | if expr | expr | expr
      | expr reflected-op expr
+     | expr registered-op expr
      | (expr)
 
 clause = CtorId(Id, ...): body
@@ -58,21 +69,28 @@ not a notational choice --- it is what the elaborator accepts.
 The built-in operators mean in the logic what they mean in Rhombus:
 @rhombus(#true) and @rhombus(#false) are the truth values, @rhombus(!) is
 negation, @rhombus(&&) and @rhombus(||) are conjunction and disjunction, and
-@rhombus(==) is equality at any type. A @rhombus(notation, ~datum)
-declaration with both @rhombus(~runtime) and @rhombus(~logic) adds another
-operator with both meanings. An ordinary Rhombus operator and runtime-only
-notation have no logical meaning and are rejected in a
-@rhombus(function); logic-only notation is rejected because no executable
-operator exists.
+@rhombus(==) is equality at any type. Arithmetic, append, membership and set
+operators are resolved statically through the providers imported with the
+current theory. There is no runtime type switch and no implicit numeric
+coercion: both operands must select one canonical provider. A
+@rhombus(notation, ~datum) declaration with both @rhombus(~runtime) and
+@rhombus(~logic) adds another operator with both meanings. An ordinary
+Rhombus operator and runtime-only notation have no logical meaning and are
+rejected in a @rhombus(function); logic-only notation is rejected because no
+executable operator exists.
 
 @rhombus(&&) and @rhombus(||) short-circuit when the module runs, while the
 logical @tt{and} and @tt{or} are strict. Nothing can tell the difference,
 because every function in this grammar is total.
 
 Anything outside the grammar is a compile error that names the offending
-expression. Arithmetic, string literals, @rhombus(block), ordinary
-runtime-only operators, runtime-only notation, and logic-only notation are all
-outside it in this version.
+expression. String literals, @rhombus(block), ordinary runtime-only operators,
+runtime-only notation, and logic-only notation are outside it. A bare numeral
+is also rejected when its numeric type cannot be determined from an operator,
+function domain, or checked result.
+The lexical form @tt{-1} is the same registered unary-negation operator
+applied to the nonnegative numeral @tt{1}; it therefore requires an expected
+type with a @tt{Negate} provider.
 
 @subsection{Local definitions}
 
@@ -196,8 +214,11 @@ equations reads without parentheses.)
 
 @subsection{Precedence}
 
-Strongest first. Only @tt{==>} is right-associative. User-defined operators
-select one of these named orders with @rhombus(~order).
+Strongest first. @tt{**}, @tt{++}, and @tt{==>} are right-associative.
+Arithmetic multiplication, addition, set intersection, set union, conjunction,
+and disjunction associate to the left. Relations and equality are
+non-associative, so chains such as @tt{a < b < c} and @tt{a === b === c} are
+syntax errors.
 
 @tabular(
   ~sep: @hspace(2),
@@ -205,6 +226,14 @@ select one of these named orders with @rhombus(~order).
   ~row_properties: [#'bottom_border],
   [[@bold{order}, @bold{proposition}, @bold{expression}],
    [@tt{hol_application}, "named application", "named application"],
+   [@tt{hol_power}, @tt{**}, @tt{**}],
+   [@tt{hol_prefix_arithmetic}, @tt{-x}, @tt{-x}],
+   [@tt{hol_multiplication}, @tt{*}, @tt{*}],
+   [@tt{hol_addition}, @tt{+ -}, @tt{+ -}],
+   [@tt{hol_append}, @tt{++}, @tt{++}],
+   [@tt{hol_set_intersection}, @tt{intersect}, @tt{intersect}],
+   [@tt{hol_set_union}, @tt{union}, @tt{union}],
+   [@tt{hol_relation}, @tt{< <= > >= in}, @tt{< <= > >= in}],
    [@tt{hol_equality}, @tt{===}, @tt{==}],
    [@tt{hol_negation}, @tt{not}, @tt{!}],
    [@tt{hol_conjunction}, @tt{and}, @tt{&&}],

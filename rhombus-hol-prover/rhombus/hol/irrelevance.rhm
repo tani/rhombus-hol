@@ -34,25 +34,44 @@ export:
   eliminate_irrelevance_goal
   relevant_hyps
 
+// Convert each term's free variables once before entering the fixpoint.
+fun variable_set(t :: Term) :: Set.of(FVar):
+  for values(acc :~ Set.of(FVar) = Set()) (v in free_vars(t)):
+    acc ++ {v :~ FVar}
+
+fun shares(a :: Set.of(FVar), b :: Set.of(FVar)) :: Boolean:
+  for any (v in a): v in b
+
 // The subset of `g.asms` that is relevant to proving `g.concl`, by the
-// fixpoint above.
+// fixpoint above. Free-variable sets are computed once, and integer indexes
+// track discovery; neither structural term comparison nor repeated
+// `free_vars` walks belong in the fixpoint.
 fun relevant_hyps(g :: Goal) :: List.of(Term):
-  fun vars_of(t :: Term) :: List.of(FVar): free_vars(t)
-  fun shares(a :: List.of(FVar), b :: List.of(FVar)) :: Boolean:
-    for any (v in a): b.contains(v)
-  let concl_vars = vars_of(g.concl)
-  recur grow (relevant :~ List = [], frontier :~ List.of(FVar) = concl_vars):
-    let newly = for values(acc :~ List = []) (a in g.asms):
-                  cond
-                  | relevant.contains(a): acc
-                  | shares(vars_of(a), frontier): acc ++ [a]
-                  | ~else: acc
+  let vars = g.asms.map(fun (a :: Term): variable_set(a))
+  recur grow (relevant :: Set.of(Int) = Set(),
+              relevant_rev :: List.of(Term) = [],
+              frontier :: Set.of(FVar) = variable_set(g.concl)):
+    let newly_rev:
+      for values(acc :~ List.of(Int) = []) (vs in vars,
+                                            i in List.iota(vars.length())):
+        (if i in relevant || !shares(vs :~ Set.of(FVar), frontier)
+         | acc
+         | List.cons(i, acc))
+    let newly = newly_rev.reverse()
     cond
-    | newly.length() == 0: relevant
+    | newly.length() == 0: relevant_rev.reverse()
     | ~else:
-        let new_vars = for values(acc :~ List.of(FVar) = []) (a in newly):
-                         acc ++ vars_of(a)
-        grow(relevant ++ newly, new_vars)
+        let relevant2:
+          for values(acc :~ Set.of(Int) = relevant) (i in newly):
+            acc ++ {i :~ Int}
+        let relevant_rev2:
+          for values(acc :~ List.of(Term) = relevant_rev) (i in newly):
+            List.cons(g.asms[i :~ Int] :~ Term, acc)
+        let frontier2:
+          for values(acc :~ Set.of(FVar) = Set()) (i in newly):
+            for values(s :~ Set.of(FVar) = acc) (v in (vars[i :~ Int] :~ Set.of(FVar))):
+              s ++ {v :~ FVar}
+        grow(relevant2, relevant_rev2, frontier2)
 
 fun eliminate_irrelevance_goal(g :: Goal) :: maybe(Step):
   // `relevant_hyps` builds its result in the order it discovers relevance,

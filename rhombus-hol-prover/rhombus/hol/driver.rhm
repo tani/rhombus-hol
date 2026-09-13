@@ -30,7 +30,6 @@ import:
   "algebra.rhm" open
   "recdef.rhm" open
   "funcases.rhm" open
-  "dtree.rhm" open
   "subterm.rhm" open
   "ruledb.rhm" open
   "taut.rhm" open
@@ -42,20 +41,15 @@ import:
   "elab.rhm" as elab
 
 export:
-  hol_error
   hol_reraise
   HolState
   initial_state
-  state_context
-  declared_names
   add_type
   add_function
   add_axiomatic_function
   add_theorem
   set_rules
   adopt
-  note_decl
-  expect_declared
 
 // Failures reported from here happen while the user's module is being visited
 // at phase 1, not inside a macro transformer, so `syntax_meta.error` is not
@@ -90,8 +84,6 @@ fun strip_who(msg :: String) :~ String:
 
 class HolState(ctx :: Context,
                thms :: Map.of(Symbol, Thm),
-               // declaration order, for diagnostics
-               names :: List.of(Symbol),
                // `wfrec_rel`'s definition (`wfrec.rhm`'s `build_wfrec_rel`),
                // installed exactly once at the very start of the session so
                // every structurally derived `function` can share it --
@@ -99,17 +91,19 @@ class HolState(ctx :: Context,
                // same constant.
                wfrec_def :: Thm)
 
-fun initial_state() :: HolState:
-  // The shared base is memoized so every module begins on one stamp lineage.
+def initial_context:
+  // These derived base rules are immutable and belong to the one memoized
+  // base theory. Derive and index them once; every module can safely share
+  // this context because rule updates construct fresh RuleDB values.
   let thy = infinity_base_theory()
   let db = for values(d :~ RuleDB = empty_db) (th in tautologies(thy)):
              add_thm(thy, d, #'propositional, th)
   let db = for values(d :~ RuleDB = db) (th in conditionals(thy)):
              add_thm(thy, d, #'conditional, th)
-  HolState(mk_context(thy, ~rules: db), {}, [], wfrec_base_def())
+  mk_context(thy, ~rules: db)
 
-fun declared_names(st :: HolState) :: List.of(Symbol):
-  st.names
+fun initial_state() :: HolState:
+  HolState(initial_context, {}, wfrec_base_def())
 
 // The prover context for the state as it currently stands.
 fun state_context(st :: HolState) :: Context:
@@ -120,24 +114,21 @@ fun state_context(st :: HolState) :: Context:
 fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   let spec = elab.parse_type_decl(form)
   // Non-recursive specs (no self-recursive fields) get a genuinely derived
-  // `DatatypeThms` -- proved from `unit`/`prod`/`sum` via
-  // `new_basic_type_definition`, with zero `new_axiom` calls -- rather than
-  // using the axiom schema. A *self-recursive* one is derived too by carving
-  // it out of the labelled trees over `num` (`datatype_rec.rhm`): its
-  // characterisation and its
-  // observers are proved, and the one axiom they rest on -- infinity -- is in
-  // the base theory once, not once per datatype.
+  // `DatatypeThms`, proved from `unit`/`prod`/`sum` via
+  // `new_basic_type_definition`, with zero `new_axiom` calls. A
+  // *self-recursive* one is derived by carving it out of the labelled trees
+  // over `num` (`datatype_rec.rhm`): its characterisation and observers are
+  // proved, and the one axiom they rest on -- infinity -- is in the base
+  // theory once, not once per datatype.
   let (thy2, thms) = try:
                        (cond
                         | is_nonrecursive_spec(spec):
                             build_nonrecursive_datatype_thms(st.ctx.thy, spec)
                         | ~else:
-                            // The two are exact complements -- a field is
-                            // either the type itself or it is not -- so there
-                            // is no third case and `datatype_axioms` is no
-                            // longer on this path at all. It survives only as
-                            // the differential baseline the derivations are
-                            // tested against.
+                            // The two cases are exact complements: a field is
+                            // either the type itself or it is not. There is no
+                            // postulating fallback; differential tests compare
+                            // both derivations with a test-only schema oracle.
                             build_recursive_datatype_thms(
                               st.ctx.thy, spec, infinity_base_ind()))
                        ~catch e :: Exn.Fail: hol_reraise(e, at)
@@ -149,17 +140,16 @@ fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
               add_thm(thy2, d, spec.name, th)
   let ctx2 = context_add_datatype(st.ctx, thy2, db2, spec.name, thms)
   add_subterm_relation(
-    HolState(ctx2, st.thms, st.names ++ [spec.name], st.wfrec_def),
+    HolState(ctx2, st.thms, st.wfrec_def),
     spec, at)
 
 // Every recursive datatype brings its structural subterm relation with it, so
 // that a `~measure` into it has an order to decrease in.  It is *derived*:
 // `T_child` is a non-recursive predicate over the discriminators and
 // selectors, `T_lt` is its transitive closure, and the constructor equations
-// are proved from those two definitions (`subterm.rhm`). It
-// used to be a clausal definition whose equations `install_function`
-// postulated -- the last `new_axiom` a `type` declaration reached.  The
-// equations join the rule database under their own name, so
+// are proved from those two definitions (`subterm.rhm`). This replaces the
+// former clausal postulation. The equations join the rule database under their
+// own name, so
 // `disable_rules [Nat_lt]` reaches them without touching the datatype's own
 // rules.
 fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
@@ -186,7 +176,7 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
                          equations, NoRecursion())
       let db2 = add_thms(thy2, st.ctx.db, fs.name, equations)
       let ctx2 = context_add_function(st.ctx, thy2, db2, fs.name, info)
-      HolState(ctx2, st.thms, st.names ++ [fs.name], st.wfrec_def)
+      HolState(ctx2, st.thms, st.wfrec_def)
 
 // -- function ----------------------------------------------------------------
 
@@ -251,17 +241,16 @@ fun install_declared_function(st :: HolState, core :: CoreFunctionSpec,
     require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
   let db2 = add_thms(thy2, st.ctx.db, spec.name, info.equations)
   let ctx2 = context_add_function(st.ctx, thy2, db2, spec.name, info)
-  HolState(ctx2, st.thms, st.names ++ [spec.name], st.wfrec_def)
-
+  HolState(ctx2, st.thms, st.wfrec_def)
 
 // A path that claims to derive must not have added an axiom.  Every
 // declaration below that is documented as derived runs through this, so the
 // claim is checked at each one rather than resting on the reader following
 // the construction.  It costs a length comparison.
 //
-// This is the check that would have caught the `type` declaration quietly
-// falling back to the axiom schema, and it is why the fallback's removal is
-// something the compiler enforces rather than something a comment asserts.
+// This is the check that prevents `type` declarations from quietly gaining a
+// postulating fallback. The compiler enforces the claim instead of leaving it
+// to a comment.
 fun require_no_new_axioms(who :: Symbol, before :: Theory, after :: Theory,
                           what :: Symbol, at :: Syntax) :: Void:
   // Three things, because "added no axiom" on its own is not the whole
@@ -421,7 +410,7 @@ fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
                      add_thm(st.ctx.thy, st.ctx.db, name, th)
                  | ~else: st.ctx.db)
       HolState(context_with_rules(st.ctx, db2), st.thms ++ {name: th},
-               st.names ++ [name], st.wfrec_def)
+               st.wfrec_def)
 
 // -- adopting an imported theory ----------------------------------------------
 
@@ -451,33 +440,15 @@ fun adopt(st :: HolState, imported :: HolState, at :: Syntax) :: HolState:
   let off = for values(acc :~ List = []) (n in st.ctx.db.disabled): acc ++ [n]
   let ctx = context_with_rules(imported.ctx,
                                disable(imported.ctx.db, off))
-  HolState(ctx, imported.thms, imported.names, imported.wfrec_def)
+  HolState(ctx, imported.thms, imported.wfrec_def)
 
 // -- rule control ------------------------------------------------------------
 
 fun set_rules(st :: HolState, on :: Boolean,
               names :: List.of(Symbol)) :: HolState:
   let db2 = (if on | enable(st.ctx.db, names) | disable(st.ctx.db, names))
-  HolState(context_with_rules(st.ctx, db2), st.thms, st.names, st.wfrec_def)
+  HolState(context_with_rules(st.ctx, db2), st.thms, st.wfrec_def)
 
 fun datatype_rules(thms :: DatatypeThms) :: List.of(Thm):
   let inj = for values(acc :~ List = []) ((_, th) in thms.injectivity): acc ++ [th]
   inj ++ thms.distinctness ++ thms.discriminators ++ thms.selectors
-
-// -- test hooks --------------------------------------------------------------
-//
-// `declare` and `expect` are not part of the language the specification
-// describes; they exist so that the state threading can be tested directly,
-// which is worth having because everything else depends on it.
-
-fun note_decl(st :: HolState, n :: Symbol) :: HolState:
-  HolState(st.ctx, st.thms, st.names ++ [n], st.wfrec_def)
-
-fun expect_declared(st :: HolState, expected :: List.of(Symbol),
-                    ~at: at :: Syntax) :: HolState:
-  unless st.names == expected
-  | hol_error(#'expect,
-              "declarations do not match\n  expected: " ++ to_string(expected)
-                ++ "\n  got: " ++ to_string(st.names),
-              at)
-  st

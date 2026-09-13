@@ -8,8 +8,7 @@
 ;; setup`, while this exact set is instantiated by negative tests and must
 ;; remain uncompiled so its diagnostic is observed by the test harness.
 (define compile-omit-paths
-  '("bad_expect.rhm"
-    "clausal_arity.rhm"
+  '("clausal_arity.rhm"
     "cond_missing_else.rhm"
     "conditional_stuck.rhm"
     "fun_inexhaustive.rhm"

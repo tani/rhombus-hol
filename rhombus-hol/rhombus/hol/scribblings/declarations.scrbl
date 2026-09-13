@@ -371,21 +371,6 @@ than proving anything, so there is no state for it to thread through. That
 also means it can be written by a macro of the user's own, and Rhombus's
 ordinary expansion will still find it.
 
-@section{@rhombus(declare, ~datum) and @rhombus(expect, ~datum)}
-
-@verbatim{
-declare Id
-expect [Id, ...]
-}
-
-@rhombus(expect, ~datum) asserts, at compile time, that the module has declared
-exactly the named things in exactly that order, and is an error otherwise.
-@rhombus(declare, ~datum) adds a name to that record without declaring anything
-logical.
-
-These exist for testing the language itself. They are documented because they
-are visible, not because a proof development needs them.
-
 @section{@rhombus(axiomatic_function, ~datum)}
 
 The same grammar as @rhombus(function, ~datum), and a different contract: it

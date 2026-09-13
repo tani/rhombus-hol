@@ -193,13 +193,9 @@ being assigned a default logical meaning.
 theorem Id:
   proposition
 
-theorem ~attribute ... Id:
-  proposition
 proof:
   tactic
   ...
-
-attribute = ~rewrite_rule | ~simp
 
 tactic = induct(Id)
        | split(proposition)
@@ -221,16 +217,16 @@ must follow its theorem immediately and contain one or more tactic forms.
   theorem app_nil_r:
     forall (xs :: List(?a)): app(xs, Nil()) === xs
 
-  theorem ~rewrite_rule app_assoc:
+  theorem app_assoc:
     forall (xs :: List(?a), ys :: List(?a), zs :: List(?a)):
       app(app(xs, ys), zs) === app(xs, app(ys, zs))
   proof:
     induct(xs)
 )
 
-@rhombus(~rewrite_rule) (equivalently @rhombus(~simp)) adds the proved theorem
-to the rewriter, so later proofs can use it. Without an attribute a theorem is
-recorded but not used for rewriting.
+Every theorem is retained by name but is not added to the global rule database.
+Use a theorem explicitly in a proof with @rhombus(use([theorem]), ~datum).
+Adding an unrelated theorem therefore cannot change later automation.
 
 @rhombus(induct(variable), ~datum) names a variable to induct on; it may
 appear once. @rhombus(split(proposition), ~datum) adds a Boolean case split;

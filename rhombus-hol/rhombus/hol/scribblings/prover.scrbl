@@ -21,8 +21,8 @@ successful proof stable when an unrelated theorem is added elsewhere.
 
 The goal is rewritten to a normal form with every enabled rule: the equations
 of every declared function, the injectivity, distinctness, discriminator and
-selector equations of every datatype, every theorem marked
-@rhombus(~rewrite_rule), and the goal's own assumptions.
+selector equations of every datatype, proof-local theorems selected by
+@rhombus(use), and the goal's own assumptions.
 
 The assumptions are simplified too, not merely used as rules. An assumption is
 only a rule for the conclusion, which says nothing when the assumption is
@@ -119,12 +119,12 @@ for arbitrary distinct @tt{x} and @tt{y}, which no lemma will close.
 
 When a goal is instead a true statement the prover could not reach --- an
 instance of associativity, say --- the fix is to prove that statement as its
-own theorem and mark it @rhombus(~rewrite_rule).
+own theorem and select it explicitly with @rhombus(use([associativity]), ~datum).
 
-The things to reach for, in order: prove the missing lemma and mark it a
-rewrite rule; give @rhombus(induct(variable), ~datum) when the prover picked
-the wrong variable; give @rhombus(use([lemma]), ~datum) when a lemma is needed
-here but is too aggressive to leave enabled everywhere; give
+The things to reach for, in order: prove the missing theorem and select it with
+@rhombus(use); give @rhombus(induct(variable), ~datum) when the prover picked
+the wrong variable; give @rhombus(use([lemma]), ~datum) when an existing theorem
+is needed here; give
 @rhombus(disable([rule]), ~datum) --- ACL2's @tt{:in-theory (disable ...)} ---
 to turn off a named rewrite rule for this proof only, layered on top of whatever
 a module-level @rhombus(disable_rules, ~datum) already turned off, on the

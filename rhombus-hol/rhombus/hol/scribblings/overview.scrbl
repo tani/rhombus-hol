@@ -86,10 +86,10 @@ Remaining goal,
     | Nil(): Nil()
     | Cons(x, rest): app(rev(rest), Cons(x, Nil()))
 
-  theorem ~rewrite_rule app_nil_r:
+  theorem app_nil_r:
     forall (xs :: List(?a)): app(xs, Nil()) === xs
 
-  theorem ~rewrite_rule app_assoc:
+  theorem app_assoc:
     forall (xs :: List(?a), ys :: List(?a), zs :: List(?a)):
       app(app(xs, ys), zs) === app(xs, app(ys, zs))
 

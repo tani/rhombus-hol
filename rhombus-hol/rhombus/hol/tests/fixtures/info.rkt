@@ -38,6 +38,7 @@
     "theorem_do_not_bad_name.rhm"
     "theorem_do_not_stuck.rhm"
     "theorem_in_theory_stuck.rhm"
+    "theorem_not_automatic.rhm"
     "theorem_orphan_proof.rhm"
     "theorem_stuck.rhm"
     "theory_after_decl.rhm"

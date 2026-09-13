@@ -24,7 +24,7 @@ theorem is a claim that is proved while the module compiles.
     | Nil(): ys
     | Cons(x, rest): Cons(x, app(rest, ys))
 
-  theorem ~rewrite_rule app_nil_r:
+  theorem app_nil_r:
     forall (xs :: List(?a)): app(xs, Nil()) === xs
 )
 

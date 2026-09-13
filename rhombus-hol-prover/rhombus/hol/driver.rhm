@@ -40,7 +40,6 @@ import:
   "stepfn.rhm" open
   "surface_core.rhm" open
   "elab.rhm" as elab
-  "artifact.rhm" as artifact
 
 export:
   hol_error
@@ -53,8 +52,6 @@ export:
   add_function
   add_axiomatic_function
   add_theorem
-  add_theorem_with_certificate
-  finish_artifact
   set_rules
   adopt
   note_decl
@@ -104,20 +101,12 @@ class HolState(ctx :: Context,
 
 fun initial_state() :: HolState:
   // The shared base is memoized so every module begins on one stamp lineage.
-  // Recording its live theorems once supplies certificate replay with the
-  // foundational facts that are deliberately absent from user rule tables.
-  let build_state = fun ():
-    let thy = infinity_base_theory()
-    let db = for values(d :~ RuleDB = empty_db) (th in tautologies(thy)):
-               add_thm(thy, d, #'propositional, th)
-    let db = for values(d :~ RuleDB = db) (th in conditionals(thy)):
-               add_thm(thy, d, #'conditional, th)
-    HolState(mk_context(thy, ~rules: db), {}, [], wfrec_base_def())
-  let (state, _, seed) = trace.with_recording_objects(build_state)
-  let all_seed = (seed :~ List) ++ trace.bootstrap_theorems((state :~ HolState).ctx.thy)
-  artifact.remember_seed((state :~ HolState).ctx.thy, all_seed)
-  trace.finish_bootstrap()
-  state :~ HolState
+  let thy = infinity_base_theory()
+  let db = for values(d :~ RuleDB = empty_db) (th in tautologies(thy)):
+             add_thm(thy, d, #'propositional, th)
+  let db = for values(d :~ RuleDB = db) (th in conditionals(thy)):
+             add_thm(thy, d, #'conditional, th)
+  HolState(mk_context(thy, ~rules: db), {}, [], wfrec_base_def())
 
 fun declared_names(st :: HolState) :: List.of(Symbol):
   st.names
@@ -125,69 +114,6 @@ fun declared_names(st :: HolState) :: List.of(Symbol):
 // The prover context for the state as it currently stands.
 fun state_context(st :: HolState) :: Context:
   st.ctx
-
-// The replay engine resolves certificates only against the current state.
-// Every source is already kernel-authenticated; matching by proposition is
-// sufficient because the state is a lineage, so a later identical theorem is
-// usable wherever an earlier one was.
-fun theorem_key(th :: Thm) :: List: [hyps_of(th), concl_of(th)]
-
-// Replay is the only consumer of this index. Key it by `HolState` identity so
-// immutable states cannot leak a descendant's theorems into an earlier state.
-// Weak keys keep completed module expansions collectable.
-def known_theorem_cache = rb.#{make-weak-hasheq}()
-
-fun cache_known_theorems(st :: HolState, known :: Map) :: Void:
-  rb.#{hash-set!}(known_theorem_cache, st, known)
-
-fun build_known_theorems(st :: HolState) :: Map:
-  fun add(known :: Map, th :: Thm) :: Map:
-    known ++ {theorem_key(th): th}
-  let known = add({}, st.wfrec_def)
-  let known = for values(acc :: Map = known) (th in axioms_of(st.ctx.thy)):
-                add(acc, th :~ Thm)
-  let known = known ++ artifact.seed_theorems(st.ctx.thy)
-  let known = for values(acc :: Map = known) ((_, th) in st.thms):
-                add(acc, th :~ Thm)
-  let known = for values(acc :: Map = known) ((_, rules) in st.ctx.db.by_head):
-                for values(a :: Map = acc) (rule in rules :~ List):
-                  add(a, (rule :~ RewriteRule).src)
-  let known = for values(acc :: Map = known) ((_, facts) in st.ctx.db.type_by_head):
-                for values(a :: Map = acc) (fact in facts :~ List):
-                  match fact
-                  | [_, th]: add(a, th :~ Thm)
-                  | ~else: error(~who: #'certificate, "malformed type fact")
-  let known = for values(acc :: Map = known) ((_, datatype_thms) in st.ctx.dts):
-                let dt :~ DatatypeThms = datatype_thms
-                let a = for values(m :: Map = acc) ((_, th) in dt.injectivity):
-                          add(m, th :~ Thm)
-                let a = for values(m :: Map = a) (th in dt.distinctness):
-                          add(m, th :~ Thm)
-                let a = add(a, dt.induction)
-                let a = add(a, dt.cases)
-                let a = for values(m :: Map = a) (th in dt.discriminators):
-                          add(m, th :~ Thm)
-                let a = for values(m :: Map = a) (th in dt.selectors):
-                          add(m, th :~ Thm)
-                for values(m :: Map = a) (th in dt.elim_rules): add(m, th :~ Thm)
-  for values(acc :: Map = known) ((_, info) in st.ctx.funs):
-    for values(a :: Map = acc) (th in (info :~ FunInfo).equations):
-      add(a, th :~ Thm)
-
-fun known_theorems(st :: HolState) :: Map:
-  match rb.#{hash-ref}(known_theorem_cache, st, #false)
-  | known :: Map: known
-  | #false:
-      let known = build_known_theorems(st)
-      cache_known_theorems(st, known)
-      known
-
-// A recording build writes after every opted-in module. Rewriting the complete
-// registry is intentional: dependencies compile before their consumers, and
-// the last write therefore contains the whole selected chain.
-fun finish_artifact(st :: HolState) :: HolState:
-  artifact.flush()
-  st
 
 // -- type --------------------------------------------------------------------
 
@@ -436,12 +362,9 @@ fun discharger(st :: HolState) :: Function:
 
 // `attrs` arrive as keywords -- `~rewrite_rule` reads as `#:rewrite_rule` --
 // so they are normalised to symbols here rather than at every use.
-// `certificate` is untrusted data. It never bypasses source elaboration or
-// the kernel: replay must produce exactly the elaborated closed proposition.
-fun add_theorem_with_certificate(st :: HolState, name :: Symbol, attr_kws :: List,
-                                 stmt :: CoreExpr, tactic :: CoreTactic,
-                                 certificate, scope :: String,
-                                 at :: Syntax) :: HolState:
+fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
+                stmt :: CoreExpr, tactic :: CoreTactic,
+                at :: Syntax) :: HolState:
   let attrs = attr_kws.map(fun (k): Symbol.from_string(to_string(k)))
   let (statement, names) = try:
                              elab.elaborate_theorem_statement(st.ctx.thy, stmt)
@@ -482,46 +405,23 @@ fun add_theorem_with_certificate(st :: HolState, name :: Symbol, attr_kws :: Lis
     match search_steps
     | #false: SearchLimits()
     | n: SearchLimits(n :~ NonnegInt)
-  let run_proof = fun ():
-    let (th, node) = prove(ctx, statement, ~names: names,
-                           ~induct: (induct :~ maybe(Symbol)),
-                           ~do_not: do_not, ~cases: cases,
-                           ~witnesses: witnesses, ~limits: limits)
-    [th, node]
-  let result:
-    match certificate
-    | #false:
-        if artifact.certificates_required(scope)
-        | error(~who: #'certificate, "missing required theorem certificate",
-                error.val(~label: "theorem", to_string(name)))
-        | artifact.capture(scope, name, run_proof)
-    | cert :~ artifact.Certificate:
-        [artifact.replay(st.ctx.thy, known_theorems(st), cert), #false]
-    | ~else: error(~who: #'certificate, "malformed theorem certificate")
-  match result
-  | [#false, node]: hol_error(#'theorem, residue_message(name, node), at)
-  | [proved :~ Thm, _]:
-      unless hyps_of(proved).length() == 0 && concl_of(proved) == statement
-      | hol_error(#'certificate,
-                  "replayed certificate does not prove this theorem source", at)
+  let (proved, node) = prove(ctx, statement, ~names: names,
+                             ~induct: (induct :~ maybe(Symbol)),
+                             ~do_not: do_not, ~cases: cases,
+                             ~witnesses: witnesses, ~limits: limits)
+  match proved
+  | #false: hol_error(#'theorem, residue_message(name, node), at)
+  | th :~ Thm:
+      unless hyps_of(th).length() == 0 && concl_of(th) == statement
+      | hol_error(#'theorem,
+                  "prover returned a result that does not prove this theorem source",
+                  at)
       let db2 = (cond
                  | attrs.contains(#'rewrite_rule) || attrs.contains(#'simp):
-                     add_thm(st.ctx.thy, st.ctx.db, name, proved)
+                     add_thm(st.ctx.thy, st.ctx.db, name, th)
                  | ~else: st.ctx.db)
-      let next = HolState(context_with_rules(st.ctx, db2), st.thms ++ {name: proved},
-                          st.names ++ [name], st.wfrec_def)
-      match certificate
-      | _ :: artifact.Certificate:
-          cache_known_theorems(next, known_theorems(st) ++ {theorem_key(proved): proved})
-      | ~else: #void
-      next
-  | ~else: error(~who: #'certificate, "malformed proof result")
-
-fun add_theorem(st :: HolState, name :: Symbol, attr_kws :: List,
-                stmt :: CoreExpr, tactic :: CoreTactic,
-                at :: Syntax) :: HolState:
-  add_theorem_with_certificate(st, name, attr_kws, stmt, tactic,
-                               #false, "", at)
+      HolState(context_with_rules(st.ctx, db2), st.thms ++ {name: th},
+               st.names ++ [name], st.wfrec_def)
 
 // -- adopting an imported theory ----------------------------------------------
 

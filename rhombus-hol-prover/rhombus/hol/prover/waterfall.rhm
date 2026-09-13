@@ -225,8 +225,8 @@ fun prove_impl(statement :: Term,
                           | List.cons(v, rest):
                               (if (v :~ FVar).name == hint | v | loop(rest))
                     | ~else: #false)
-    let node <- apply_witnesses(env, witnesses, cases,
-                                mk_goal([], matrix), hint_var)
+    let node <- apply_witnesses(witnesses, cases, mk_goal([], matrix),
+                                hint_var)
     let scheduled <- Scheduler.solve(node)
     match scheduled
     | #false: return ProofResult(#false, node)
@@ -246,23 +246,23 @@ fun prove_impl(statement :: Term,
 // Apply explicit existential witnesses before Boolean case splits. Each step
 // is justified by the derived EXISTS rule, and mismatched hints fail loudly
 // rather than being ignored.
-fun apply_witnesses(env :: ProofEnv, witnesses :: List.of(Term),
-                    cases :: List.of(Term), g :: Goal,
-                    hint :: maybe(FVar)) :: Computation:
+fun apply_witnesses(witnesses :: List.of(Term), cases :: List.of(Term),
+                    g :: Goal, hint :: maybe(FVar)) :: Computation:
   match witnesses
-  | []: apply_cases(env, cases, g, hint)
+  | []: apply_cases(cases, g, hint)
   | List.cons(witness, rest):
       match dest_imp(g.concl)
       | [antecedent, consequent]:
           let sub = Goal(g.asms ++ [antecedent], consequent)
           let event = Assumed(antecedent)
-          fun discharge_antecedent(ths :: List.of(Thm)) :: Thm:
-            DISCH(env.base.thy, antecedent, ths[0])
-          let step = Step([sub], discharge_antecedent, [event])
           effect:
+            let env :: ProofEnv <- ProofEnv.ask()
+            fun discharge_antecedent(ths :: List.of(Thm)) :: Thm:
+              DISCH(env.base.thy, antecedent, ths[0])
+            let step = Step([sub], discharge_antecedent, [event])
             let child <- Trace.note(
                            event,
-                           apply_witnesses(env, witnesses, cases, sub, hint))
+                           apply_witnesses(witnesses, cases, sub, hint))
             return Derived(step, [child])
       | ~else:
           match dest_exists(g.concl)
@@ -279,14 +279,14 @@ fun apply_witnesses(env :: ProofEnv, witnesses :: List.of(Term),
               let instantiated = inst_fvar([[witness, v :~ FVar]], body)
               let sub = Goal(g.asms, instantiated)
               let event = Witnessed(witness)
-              fun introduce_witness(ths :: List.of(Thm)) :: Thm:
-                EXISTS(env.base.thy, g.concl, witness, ths[0])
-              let step = Step([sub], introduce_witness, [event])
               effect:
+                let env :: ProofEnv <- ProofEnv.ask()
+                fun introduce_witness(ths :: List.of(Thm)) :: Thm:
+                  EXISTS(env.base.thy, g.concl, witness, ths[0])
+                let step = Step([sub], introduce_witness, [event])
                 let child <- Trace.note(
                                event,
-                               apply_witnesses(env, rest :~ List,
-                                               cases, sub, hint))
+                               apply_witnesses(rest :~ List, cases, sub, hint))
                 return Derived(step, [child])
 
 // `split(p)`, applied before the waterfall runs: split the goal on each term
@@ -297,7 +297,7 @@ fun apply_witnesses(env :: ProofEnv, witnesses :: List.of(Term),
 // costs search effort, never soundness. Every subgoal, however deep the
 // nesting, restarts at the top of the ordinary waterfall, so case splitting
 // composes with induction and stage skipping rather than replacing them.
-fun apply_cases(env :: ProofEnv, cases :: List.of(Term), g :: Goal,
+fun apply_cases(cases :: List.of(Term), g :: Goal,
                 hint :: maybe(FVar)) :: Computation:
   match cases
   | []: prove_goal_impl(g, ~induct: hint)
@@ -307,18 +307,19 @@ fun apply_cases(env :: ProofEnv, cases :: List.of(Term), g :: Goal,
       let sub_false = Goal(g.asms ++ [mk_neg(c)], g.concl)
       let true_event = CaseSplit(c, #true)
       let false_event = CaseSplit(c, #false)
-      fun discharge_cases(ths :: List.of(Thm)) :: Thm:
-        let em = excluded_middle(env.base.thy, c)
-        DISJ_CASES(env.base.thy, em, ths[0], ths[1])
-      let step = Step([sub_true, sub_false], discharge_cases,
-                      [true_event, false_event])
       effect:
+        let env :: ProofEnv <- ProofEnv.ask()
+        fun discharge_cases(ths :: List.of(Thm)) :: Thm:
+          let em = excluded_middle(env.base.thy, c)
+          DISJ_CASES(env.base.thy, em, ths[0], ths[1])
+        let step = Step([sub_true, sub_false], discharge_cases,
+                        [true_event, false_event])
         let true_child <- Trace.note(
                             true_event,
-                            apply_cases(env, rest, sub_true, hint))
+                            apply_cases(rest, sub_true, hint))
         let false_child <- Trace.note(
                              false_event,
-                             apply_cases(env, rest, sub_false, hint))
+                             apply_cases(rest, sub_false, hint))
         return Derived(step, [true_child, false_child])
 
 fun strip_forall_all(t :: Term, names :: List.of(Symbol))

@@ -124,7 +124,7 @@ requested by its clauses:
         operator. It is not accepted in theorem statements or logical
         @rhombus(function) bodies.}
   @item{With only @rhombus(~logic), the notation is available in theorem
-        statements and proof @rhombus(~cases) propositions. It has no
+        statements and proof @rhombus(split) propositions. It has no
         ordinary Rhombus binding and is rejected in a logical
         @rhombus(function) body.}
   @item{With both clauses, the notation is reflected: it is available as an
@@ -197,21 +197,25 @@ theorem ~attribute ... Id:
   proposition
 proof:
   tactic
+  ...
 
 attribute = ~rewrite_rule | ~simp
 
-tactic = auto
-       | auto ~induct: Id
-       | auto(~induct: Id, ~using: [Id, ...], ~do_not: [Id, ...],
-              ~in_theory: [Id, ...], ~cases: [proposition, ...])
+tactic = induct(Id)
+       | split(proposition)
+       | choose(term)
+       | use([Id, ...])
+       | skip([Id, ...])
+       | disable([Id, ...])
+       | limit(nonnegative_integer)
 }
 
 States a proposition and proves it while the module compiles. The proposition
 grammar is in @secref("propositions").
 
-The @rhombus(proof, ~datum) clause is optional and defaults to
-@rhombus(auto, ~datum); write one only when the prover needs a hint. It must
-follow its theorem immediately.
+The @rhombus(proof, ~datum) clause is optional and defaults to the same
+waterfall automation as an empty directive configuration. When present, it
+must follow its theorem immediately and contain one or more tactic forms.
 
 @rhombusblock(
   theorem app_nil_r:
@@ -221,30 +225,28 @@ follow its theorem immediately.
     forall (xs :: List(?a), ys :: List(?a), zs :: List(?a)):
       app(app(xs, ys), zs) === app(xs, app(ys, zs))
   proof:
-    auto ~induct: xs
+    induct(xs)
 )
 
 @rhombus(~rewrite_rule) (equivalently @rhombus(~simp)) adds the proved theorem
 to the rewriter, so later proofs can use it. Without an attribute a theorem is
 recorded but not used for rewriting.
 
-The options of @rhombus(auto, ~datum) must be parenthesised when there is more
-than one: two keyword-and-block forms written in sequence nest the second
-inside the first.
-
-@rhombus(~induct) names a variable to induct on. @rhombus(~using) names
+@rhombus(induct(variable), ~datum) names a variable to induct on; it may
+appear once. @rhombus(split(proposition), ~datum) adds a Boolean case split;
+repeat it for each proposition. @rhombus(choose(term), ~datum) supplies one
+existential candidate; it may repeat. @rhombus(use([theorem]), ~datum) names
 theorems to enable for this proof only, which is useful when a lemma is too
-aggressive to leave in the rewriter permanently. @rhombus(~in_theory) names
-rules to disable for this proof only, on top of whatever a module-level
-@rhombus(disable_rules, ~datum) already disabled --- useful when an enabled
-rule is firing somewhere it should not, without turning it off for the whole
-module. @rhombus(~cases) splits the goal on one or more Boolean terms up
-front, one true/false branch per term, before the waterfall runs; the terms
-may refer to the theorem's own quantified variables. @rhombus(~do_not) names
-waterfall stages --- @tt{simplify}, @tt{eliminate}, @tt{fertilize},
-@tt{generalize}, @tt{irrelevance}, @tt{induct} --- to skip for this proof
-only; see @secref("prover"). None of these change what the prover is
-allowed to conclude, only what it tries.
+aggressive to leave in the rewriter permanently. @rhombus(disable([rule]), ~datum)
+names rules to disable for this proof only, on top of whatever a
+module-level @rhombus(disable_rules, ~datum) already disabled.
+@rhombus(skip([stage]), ~datum) names waterfall stages ---
+@tt{simplify}, @tt{eliminate}, @tt{fertilize}, @tt{generalize},
+@tt{irrelevance}, @tt{induct} --- to skip for this proof only; see
+@secref("prover"). @rhombus(limit(steps), ~datum) sets this proof's
+nonnegative search-step ceiling and may appear once. The list directives may
+repeat and append their values in source order. None of the directives change what the
+prover is allowed to conclude, only what it tries.
 
 @section{@rhombus(disable_rules, ~datum) and @rhombus(enable_rules, ~datum)}
 
@@ -271,7 +273,7 @@ built-in groups @rhombus(propositional, ~datum) and
 The usual reason is to keep a proof from unfolding something --- to reason
 about a function through its proved properties rather than its equations --- or
 to park a lemma that is useful in one place and too aggressive everywhere else.
-For the latter, @rhombus(~using) on a single proof is usually better than
+For the latter, @rhombus(use, ~datum) on a single proof is usually better than
 disabling the rule around it.
 
 @section(~tag: "importing"){Importing a theory}

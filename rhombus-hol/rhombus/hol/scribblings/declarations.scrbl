@@ -114,8 +114,8 @@ notation (left op right):
   ~order: order
 }
 
-@rhombus(notation, ~datum) assigns runtime meaning, logical meaning, or both
-to an infix spelling. At least one of @rhombus(~runtime) and
+The anonymous @rhombus(notation, ~datum) form assigns runtime meaning, logical
+meaning, or both to an infix spelling. At least one of @rhombus(~runtime) and
 @rhombus(~logic) is required. The declaration creates only the bindings
 requested by its clauses:
 
@@ -179,29 +179,42 @@ ordinary and HOL-space bindings:
   export: both <+>
 )
 
-@subsection{Choosing an extension form}
+@subsection{Fixed and overloaded notation}
 
-Use @rhombus(notation, ~datum) when one spelling has a fixed runtime or logical
-interpretation. Use the registered @rhombus(operator, ~datum) form below when
-the spelling is a statically overloaded family with a provider selected by
-operand type. The HOL language reserves the @rhombus(operator, ~datum)
-declaration head for family and provider declarations.
+The @rhombus(notation, ~datum) declaration has two expression forms. An
+anonymous pattern has one fixed interpretation:
 
-Both forms use a named @tt{hol_*} order; there is no numeric precedence hook
-or parser table to modify. Existing runtime-only operators intentionally remain
-rejected by logical declarations instead of receiving a default logical
-meaning.
+@verbatim{
+notation (x <&> y):
+  ~logic: conj(x, y)
+  ~order: hol_conjunction
+}
 
-@section{Registered operator families}
+A named pattern introduces a statically overloaded notation family:
 
-The standard spellings are capabilities of the theory in scope, not a global
-overload table. Their families are @tt{Add}, @tt{Subtract}, @tt{Negate},
+@verbatim{
+notation Add (left + right):
+  ~order: hol_addition
+  ~associativity: ~left
+}
+
+The fixed form uses @rhombus(~logic) and @rhombus(~runtime) as described above.
+The named form instead receives interpretations from declarations selected by
+operand type. Rhombus's ordinary @rhombus(operator) declaration remains
+runtime-only and is not assigned a logical meaning.
+
+Both notation forms use a named @tt{hol_*} order; there is no numeric
+precedence hook or parser table to modify.
+
+@section{Named overloaded notations}
+
+The standard notation families are @tt{Add}, @tt{Subtract}, @tt{Negate},
 @tt{Multiply}, @tt{Power}, @tt{Less}, @tt{LessEqual}, @tt{Greater},
 @tt{GreaterEqual}, @tt{Append}, @tt{Membership}, @tt{Union}, and
-@tt{Intersection}. Importing a theory imports its provider registry together
-with its constants and theorems.
+@tt{Intersection}. Importing a theory imports its interpretation registry
+together with its constants and theorems.
 
-The standard provider set is:
+The standard interpretation set is:
 
 @itemlist(
   @item{@tt{Nat}: addition, subtraction, multiplication, power, and all four
@@ -214,49 +227,53 @@ The standard provider set is:
         intersection.}
 )
 
-New families, spellings, and providers use the same
-@rhombus(operator, ~datum) declaration head:
+A named pattern and its type-specific interpretations use the same declaration
+head:
 
 @verbatim{
-operator CustomAdd:
-  syntax (left <+> right)
+notation CustomAdd (left <+> right):
   syntax (left <++> right)
   ~order: hol_addition
   ~associativity: ~left
 
-operator CustomAdd for Nat:
+notation CustomAdd for Nat:
   nat_add
 }
 
-Each @rhombus(syntax, ~datum) clause binds a spelling in the HOL expression
-space at the named precedence order. Its shape determines the family arity and
-whether the spelling is infix or prefix. Multiple spellings may share a family
-when they use the same operand names and fixity. Infix declarations require
+The header pattern binds the first spelling in the HOL expression space.
+Additional @rhombus(syntax, ~datum) clauses bind aliases. Pattern shape
+determines arity and whether the spelling is infix or prefix. All aliases must
+use the same operand names and fixity. Infix declarations require
 @rhombus(~associativity); prefix declarations omit it:
 
 @verbatim{
-operator CustomNegate:
-  syntax (!! value)
+notation Negate (- value):
   ~order: hol_prefix_arithmetic
+
+notation Negate for Integer:
+  int_negate
 }
 
-A provider is canonical for its family and carrier; a duplicate declaration is
-an error instead of an order-dependent winner. Resolution uses the statically
-known operand and result types. No provider means a compile error listing the
-available candidates; more than one applicable provider is an ambiguity.
-Generated executable functions contain a direct call to the selected provider,
-not a runtime type test.
+An interpretation is canonical for its family and carrier; a duplicate
+declaration is an error instead of an order-dependent winner. Resolution uses
+the statically known operand and result types. No applicable interpretation
+means a compile error listing the available candidates; more than one is an
+ambiguity. Generated executable functions contain a direct call to the
+selected constant, not a runtime type test.
 
-A bare provider constant is shorthand for passing the family operands in their
-canonical order. When the provider's parameter order differs, write a call
-template using the operand names from the family's @rhombus(syntax, ~datum)
-clause:
+A bare constant is shorthand for passing the named pattern's operands in
+canonical order. When its parameter order differs, write a call template using
+the pattern's operand names:
 
 @verbatim{
-operator Membership for Function(?a, Boolean):
+notation Membership (element in collection):
+  ~order: hol_relation
+  ~associativity: ~none
+
+notation Membership for Function(?a, Boolean):
   set_member(collection, element)
 
-operator Greater for Integer:
+notation Greater for Integer:
   int_lt(right, left)
 }
 

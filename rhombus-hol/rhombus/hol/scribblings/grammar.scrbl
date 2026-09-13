@@ -70,14 +70,14 @@ The built-in operators mean in the logic what they mean in Rhombus:
 @rhombus(#true) and @rhombus(#false) are the truth values, @rhombus(!) is
 negation, @rhombus(&&) and @rhombus(||) are conjunction and disjunction, and
 @rhombus(==) is equality at any type. Arithmetic, append, membership and set
-operators are resolved statically through the providers imported with the
-current theory. There is no runtime type switch and no implicit numeric
-coercion: both operands must select one canonical provider. A
-@rhombus(notation, ~datum) declaration with both @rhombus(~runtime) and
-@rhombus(~logic) adds another operator with both meanings. An ordinary
-Rhombus operator and runtime-only notation have no logical meaning and are
-rejected in a @rhombus(function); logic-only notation is rejected because no
-executable operator exists.
+operators are resolved statically through named notation interpretations
+imported with the current theory. There is no runtime type switch and no
+implicit numeric coercion: the operands must select one canonical
+interpretation. A fixed @rhombus(notation, ~datum) declaration with both
+@rhombus(~runtime) and @rhombus(~logic) adds a spelling with both meanings.
+An ordinary Rhombus operator and runtime-only notation have no logical meaning
+and are rejected in a @rhombus(function); logic-only notation is rejected
+because no executable operator exists.
 
 @rhombus(&&) and @rhombus(||) short-circuit when the module runs, while the
 logical @tt{and} and @tt{or} are strict. Nothing can tell the difference,

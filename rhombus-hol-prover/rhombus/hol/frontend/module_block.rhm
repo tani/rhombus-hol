@@ -1,0 +1,605 @@
+#lang rhombus/and_meta
+// SPDX-License-Identifier: 0BSD
+// QuickCheck is a design reference for generated testing support; see THIRD_PARTY_NOTICES.
+
+
+// The `#%module_block` of `#lang rhombus/hol`.
+//
+// It hands the module body to `expand.rhm` for recognition, then emits, for
+// each declaration, the runtime code and one step of the compile-time state.
+//
+// The state is threaded as ordinary phase-1 definitions *in the user's
+// module* -- `_hol_st0`, `_hol_st1`, ... -- rather than as compile-time state
+// belonging to this macro.  `raco make` compiles many modules in one process,
+// so macro-level state would be shared between them; per-module phase-1
+// definitions cannot be.  Every generated identifier comes out of a single
+// expansion of this one macro, so they share an introduction scope, refer to
+// each other with no name surgery, and cannot be captured by user code.
+//
+// All syntax templates live here.  A template built in a phase-0 helper module
+// loses its bindings on the way out of a phase-1 macro -- `'def x = 1'`
+// written there and returned from a macro reports `def: unbound identifier` --
+// so `expand.rhm` and `elab.rhm` analyse, and this module emits.
+
+import:
+  rhombus/meta open
+  rhombus/hol/qc as _hol_qc
+  rhombus/hol/frontend/surface_space!meta:
+    expose:
+      hol_expr_meta
+  meta:
+    rhombus/hol/htype open
+    rhombus/hol/frontend/expand as expand
+    rhombus/hol/frontend/elab as elab
+
+export:
+  module_block
+  check_property
+
+meta:
+  // Any literal from this module will do as a lexical context: what matters is
+  // that all the generated identifiers share one, and that the expander's
+  // introduction scope lands on them alike.
+  def id_ctx :: Syntax = 'hol_state'
+
+  fun st(n :: Int) :: Syntax:
+    Syntax.make_id("_hol_st" ++ to_string(n), id_ctx)
+
+  // A term rebuilt with this module's context.
+  //
+  // Needed for the terms of a module path emitted into the `hol_theory`
+  // submodule: that submodule's language is plain `rhombus`, and a term
+  // carrying the user's `rhombus/hol` context cannot reach the implicit import
+  // forms there -- a string path fails looking for `#%literal`.  Only the
+  // datum matters for a module path, so rebuilding it loses nothing.
+  fun recontext(t :: Syntax) :: Syntax:
+    Syntax.make(Syntax.unwrap(t), id_ctx)
+
+  // -- datatypes -------------------------------------------------------------
+
+  // `class.together` so that a datatype can refer to itself, and an
+  // `interface` rather than a base class as the sum: an interface carries no
+  // fields and imposes no field order on the variants.
+  //
+  // Field annotations are dropped -- that is the type erasure.  Rhombus has no
+  // parametric polymorphism, so `List(?a)` has nothing to erase *to*, and the
+  // logical side has already checked the types.
+  fun emit_type(name :: Syntax, ctors :: List) :: Syntax:
+    let [variant, ...] = ctors.map(fun (c :: List): emit_variant(name, c))
+    'class.together:
+       interface $name
+       $variant
+       ...'
+
+  fun emit_variant(iface :: Syntax, c :: List) :: Syntax:
+    let [cname, fields] = c
+    let fs :~ List = fields
+    let [f, ...] = fs
+    'class $cname($f, ...):
+       implements $iface'
+
+  // -- generators and shrinkers ----------------------------------------------
+  //
+  // Emitted alongside a datatype, from the same declaration, so that
+  // `check_property` has something to draw values from.  They are ordinary
+  // Rhombus functions over the emitted classes -- the property is checked by
+  // running the real code, which is the whole point of doing it at runtime.
+  //
+  // They reach `check_property` through `qc.rhm`'s registry rather than
+  // through a name it has to guess: `type` registers its generator and
+  // shrinker under the type's own name as an ordinary run-time effect, when
+  // the type's own module is instantiated.  That happens automatically for a
+  // datatype declared in another module too, since instantiating an import
+  // runs its top-level effects before this module's own body -- no export of
+  // the generator or shrinker is needed, because nothing outside this file
+  // ever refers to one by name.
+  //
+  // A name has to travel as a plain string, not a `Symbol`: a symbol written
+  // `#'foo` cannot appear inside a syntax template, the quote would close it.
+
+  fun type_name_str(n :: Symbol) :: Syntax:
+    Syntax.make(to_string(n), id_ctx)
+
+  fun param_gen_id(p :: Symbol) :: Syntax:
+    Syntax.make_id("_hol_g_" ++ to_string(p), id_ctx)
+
+  // A generator expression for a type: a function from a size to a value.
+  fun gen_expr(ty) :: Syntax:
+    match ty
+    | TyVar(a): param_gen_id(a)
+    | TyApp(n, args):
+        let nm = type_name_str(n)
+        let [sub, ...] = args.map(fun (t): gen_expr(t))
+        // Parenthesised: a `fun ...:` block cannot sit in application position
+        // or before a comma without one.
+        '(fun (_hol_s): _hol_qc.lookup_gen($nm)(_hol_s, $sub, ...))'
+
+  fun shrink_expr(ty, at :: Syntax) :: Syntax:
+    match ty
+    | TyApp(n, _): '_hol_qc.lookup_shrink($(type_name_str(n)))'
+    | ~else:
+        error(~who: #'check_property,
+              "cannot shrink a value of variable type",
+              error.val(~label: "in", to_string(at)))
+
+  fun emit_generator(name :: Syntax, params :: List, ctors :: List) :: Syntax:
+    let nm = type_name_str(Syntax.unwrap(name))
+    let [pg, ...] = params.map(fun (p :: Symbol): param_gen_id(p))
+    let base = ctors.filter(~keep: fun (c :: List): !(c[2] :~ Boolean))
+    let [b, ...] = base.map(ctor_builder)
+    let [a, ...] = ctors.map(ctor_builder)
+    let build = 'fun (_hol_sz, $pg, ...):
+                   _hol_qc.pick(_hol_sz, [$b, ...], [$a, ...])'
+    '_hol_qc.register_gen($nm, $build)'
+
+  // `[ctor_id, [field_type, ...], recursive?]`
+  fun ctor_builder(c :: List) :: Syntax:
+    let cname = c[0] :~ Syntax
+    let ftys :~ List = c[1]
+    let [arg, ...] = ftys.map(fun (t): '$(gen_expr(t))(_hol_sz - 1)')
+    'fun (): $cname($arg, ...)'
+
+  fun emit_shrinker(name :: Syntax, ctors :: List) :: Syntax:
+    let nm = type_name_str(Syntax.unwrap(name))
+    let [clause, ...] = ctors.map(fun (c :: List): shrink_clause(name, c))
+    let build = 'fun (_hol_v):
+                   match _hol_v
+                   | $clause
+                   | ...'
+    '_hol_qc.register_shrink($nm, $build)'
+
+  // The classic shrink for an algebraic value: its recursive subterms.
+  fun shrink_clause(tname :: Syntax, c :: List) :: Syntax:
+    let cname = c[0] :~ Syntax
+    let ftys :~ List = c[1]
+    let n = ftys.length()
+    let vs = for List (i in List.iota(n)):
+               Syntax.make_id("_hol_f" ++ to_string(i), id_ctx)
+    let [v, ...] = vs
+    let keep = for values(acc :~ List = []) (t in ftys, vv in vs):
+                 (if same_type_name(t, tname) | acc ++ [vv] | acc)
+    let [k, ...] = keep
+    '$cname($v, ...): [$k, ...]'
+
+  fun same_type_name(ty, tname :: Syntax) :: Boolean:
+    match ty
+    | TyApp(n, _): n == Syntax.unwrap(tname)
+    | ~else: #false
+
+  // -- check_property --------------------------------------------------------
+  //
+  // `check_property` is a genuine, independently bound macro rather than a
+  // form `#%module_block` recognises by scanning.  It can do this because,
+  // unlike `type`/`function`/`theorem`, it never touches the theory chain --
+  // `driver.rhm` has no step for it at all, since a property is checked by
+  // running the emitted code, and its value is the outcome.  With nothing to
+  // thread, there is nothing standing between it and being an ordinary macro,
+  // usable directly or from within a macro of the user's own.
+
+  fun emit_property_from(name :: Syntax, samples, binders :: List,
+                         body :: Syntax, size, at :: Syntax) :: Syntax:
+    let [v, ...] = binders.map(fun (b :: List): b[0] :~ Syntax)
+    let [g, ...] = binders.map(fun (b :: List): gen_expr(b[1]))
+    let [sh, ...] = binders.map(fun (b :: List): shrink_expr(b[1], at))
+    let prop = 'fun ($v, ...):
+                  $body'
+    let count = Syntax.make(samples, id_ctx)
+    let sz = Syntax.make(size, id_ctx)
+    // `check_property` imports `qc` for itself, as `_hol_qc` -- the same
+    // spelling `gen_expr`/`shrink_expr` write, and this is what makes the two
+    // resolve to the same binding.  `check_property` is a separate macro
+    // expansion from `type`'s, so an identifier introduced by one is never the
+    // same binding as the same spelling introduced by the other; what makes
+    // this pair line up is that both the import and the references it
+    // supports are produced as part of *this one* expansion, regardless of
+    // which file's function assembled them.
+    'import: rhombus/hol/qc as _hol_qc
+     def $name:
+       _hol_qc.run(Syntax.unwrap('$name'),
+                   ~samples: $count,
+                   ~size: $sz,
+                   ~gens: [$g, ...],
+                   ~shrinks: [$sh, ...],
+                   ~prop: $prop)'
+
+  // -- functions -------------------------------------------------------------
+
+  // The executable meaning: the surface code with its annotations removed.
+  //
+  // Not a second translation that could drift from the logical one.  The
+  // surface *is* Rhombus; the only difference is the types.  What makes
+  // Rhombus's first-match `match` agree with the unordered clausal equations is
+  // the exhaustiveness and non-overlap `recdef.rhm` checks before installing
+  // anything.
+  fun emit_function(name :: Syntax, params :: List, body :: Syntax) :: Syntax:
+    match elab.body_clauses(body)
+    | #false:
+        let [p, ...] = params
+        'fun $name($p, ...):
+           $body'
+    | cs :: List:
+        // The clausal declaration form emits Rhombus's own multi-case `fun`,
+        // which is what it was written to look like.  Its patterns are the
+        // clause's patterns verbatim, so the first matching clause wins on
+        // both sides -- the same reading the decision tree gives them.
+        let alts = for List (c in cs): emit_clause(name, params.length(), c)
+        let [a, ...] = alts
+        'fun
+         | $a
+         | ...'
+
+  fun emit_clause(name :: Syntax, arity :: Int, c :: Syntax) :: Syntax:
+    let (row, body) = elab.row_parts(c, arity)
+    let [p, ...] = row
+    '$name($p, ...): $body'
+
+  // -- rule control ----------------------------------------------------------
+
+  // `disable_rules` / `enable_rules` emit no run-time code and one
+  // compile-time state step, like every other declaration here.  This used to
+  // return two values where `emit_one` wants three (run-time forms,
+  // compile-time forms, counter), so *any* module using either form failed to
+  // expand -- the forms were documented, reachable from the grammar, and
+  // untested, so nothing said so.
+  fun rule_step(d :: expand.Decl, n :: Int, cur :: Syntax, nxt :: Syntax,
+                on :: Boolean) :: values(List.of(Syntax), List.of(Syntax), Int):
+    let [names] = d.parts
+    let ns :~ List = names
+    let [nm, ...] = ns
+    let flag = (if on | '#true' | '#false')
+    values([], ['(~rules $cur $nxt [$flag] [$nm, ...])'], n + 1)
+
+  // -- HOL surface parsing ---------------------------------------------------
+
+  fun parse_core_encoding(stx :: Syntax) :: Syntax:
+    try:
+      let '$(parsed :: hol_expr_meta.Parsed)' = stx
+      hol_expr_meta.unpack(parsed)
+      ~catch e :: Exn.Fail:
+        (if e.message.contains("unbound HOL expression operator")
+         | syntax_meta.error("unexpected text after an expression", stx)
+         | throw e)
+
+  fun parse_function_expression(stx :: Syntax) :: Syntax:
+    try:
+      parse_core_encoding(stx)
+      ~catch e :: Exn.Fail:
+        (if e.message.contains("hol_expr_meta.Parsed")
+             && e.message.contains("annotation")
+         | syntax_meta.error(
+             "this version admits only variables, named applications, `if`, "
+               ++ "`cond`, and notation with both runtime and logic meanings in a function body",
+             stx)
+         | throw e)
+
+  fun symbol_id(n :: Symbol) :: Syntax:
+    Syntax.make_id(to_string(n), id_ctx)
+
+
+  fun binder_encoding(param :: Syntax) :: Syntax:
+    match param
+    | '$(name :: Identifier) :: $ty ...':
+        '(core_binder $name ($ty ...))'.relocate_span([param])
+    | ~else: syntax_meta.error("a parameter needs a name and a type", param)
+
+  fun pattern_encoding(pat :: Syntax) :: Syntax:
+    match pat
+    | '_': '(core_pat_wildcard)'.relocate(pat)
+    | '$(name :: Identifier)($arg, ...)':
+        let [a, ...] = [arg, ...].map(pattern_encoding)
+        '(core_pat_ctor $name [$a, ...])'.relocate_span([pat])
+    | '$(name :: Identifier)':
+        '(core_pat_var $name)'.relocate(pat)
+    | ~else: syntax_meta.error("malformed pattern", pat)
+
+  fun match_clause_encoding(clause :: Syntax) :: Syntax:
+    match clause
+    | '$pat ...: $body; ...':
+        let p = pattern_encoding('$pat ...')
+        let b = function_body_encoding('$body; ...')
+        '(core_match_clause $p $b)'.relocate_span([clause])
+    | ~else: syntax_meta.error("malformed match clause", clause)
+
+  fun row_encoding(row :: Syntax, arity :: Int) :: Syntax:
+    let (patterns, body) = elab.row_parts(row, arity)
+    let [p, ...] = patterns.map(pattern_encoding)
+    let b = function_body_encoding(body)
+    '(core_row [$p, ...] $b)'.relocate_span([row])
+
+  fun function_body_encoding(body :: Syntax) :: Syntax:
+    match body
+    | '#%hol_clauses: $row; ...':
+        syntax_meta.error("internal function row needs an arity", body)
+    | 'match $(name :: Identifier)
+       | $clause
+       | ...':
+        let [c, ...] = [clause, ...].map(match_clause_encoding)
+        '(core_body_match $name [$c, ...])'.relocate_span([body])
+    | 'let $(name :: Identifier) = $rhs ...
+       $more; ...':
+        let init = parse_function_expression('$rhs ...')
+        let tail = function_body_encoding('$more; ...')
+        '(core_body_let $name $init $tail)'.relocate_span([body])
+    | ~else:
+        let expr = parse_function_expression(body)
+        '(core_body_expr $expr)'.relocate_span([body])
+
+  fun function_encoding(form :: Syntax) :: Syntax:
+    let [name, params, result_type, measure_stx, body] = elab.function_parts(form)
+    let ps :~ List = params
+    let [param, ...] = ps.map(fun (p :: Syntax): binder_encoding(p))
+    let measure:
+      match measure_stx
+      | #false: Syntax.make(#false, id_ctx)
+      | m: parse_function_expression(m :~ Syntax)
+    let body_core:
+      match elab.body_clauses(body :~ Syntax)
+      | #false: function_body_encoding(body :~ Syntax)
+      | rows:
+          let [row, ...] = (rows :~ List).map(
+                             fun (r :: Syntax): row_encoding(r, ps.length()))
+          '(core_body_rows [$row, ...])'.relocate_span([body :~ Syntax])
+    '(core_function $name [$param, ...] ($(result_type :~ Syntax)) $measure $body_core)'.relocate_span([form])
+  fun option_symbol_stx(v) :: Syntax:
+    match v
+    | #false: Syntax.make(#false, id_ctx)
+    | n: symbol_id(n :~ Symbol)
+
+  fun option_int_stx(v) :: Syntax:
+    match v
+    | #false: Syntax.make(#false, id_ctx)
+    | n: Syntax.make(n, id_ctx)
+
+  fun tactic_encoding(tactic :: maybe(List.of(Syntax)), at :: Syntax) :: Syntax:
+    let tactic_stx:
+      match tactic
+      | #false: #false
+      | groups:
+          let [g, ...] = groups :~ List
+          '$g; ...'
+    let [induct, using_names, do_not_names, in_theory_names, case_stxs,
+         witness_stxs, search_steps] = elab.parse_tactic(tactic_stx)
+    let induct_stx = option_symbol_stx(induct)
+    let [u, ...] = (using_names :~ List).map(fun (n): symbol_id(n :~ Symbol))
+    let [d, ...] = (do_not_names :~ List).map(fun (n): symbol_id(n :~ Symbol))
+    let [r, ...] = (in_theory_names :~ List).map(fun (n): symbol_id(n :~ Symbol))
+    let [c, ...] = (case_stxs :~ List).map(
+                      fun (s): parse_core_encoding(s :~ Syntax))
+    let [w, ...] = (witness_stxs :~ List).map(
+                      fun (s): parse_core_encoding(s :~ Syntax))
+    let steps_stx = option_int_stx(search_steps)
+    '(core_tactic $induct_stx [$u, ...] [$d, ...] [$r, ...] [$c, ...] [$w, ...] $steps_stx)'.relocate_span([at])
+
+  fun box_group(g :: Syntax) :: Syntax:
+    '(hol_group: $g)'
+
+  fun unbox_group(box :: Syntax) :: Syntax:
+    match box
+    | '(hol_group: $g; ...)': '$g; ...'
+    | ~else: syntax_meta.error("internal malformed expansion group", box)
+
+  fun render_step(step :: Syntax) :: List.of(Syntax):
+    let step = step.replace_scopes(id_ctx)
+    match step
+    | '(~import $alias [$term, ...])':
+        let [t, ...] = [term, ...]
+        let path = '$t ...'
+        ['import: $path!hol_theory as $alias']
+    | '(~adopt $cur $nxt $alias [$at])':
+        ['def $nxt = _hol_driver.adopt($cur, $(alias).theory, '$at')']
+    | '(~type $cur $nxt [$form] [$at])':
+        ['def $nxt = _hol_driver.add_type($cur, '$form', '$at')']
+    | '(~function $cur $nxt [$core] [$at])':
+        ['def $nxt:
+           let spec = try:
+                        _hol_surface.decode_function('$core')
+                        ~catch e :: Exn.Fail:
+                          _hol_driver.hol_reraise(e, '$at')
+           _hol_driver.add_function($cur, spec, '$at')']
+    | '(~axiomatic $cur $nxt [$core] [$at])':
+        ['def $nxt:
+           let spec = try:
+                        _hol_surface.decode_function('$core')
+                        ~catch e :: Exn.Fail:
+                          _hol_driver.hol_reraise(e, '$at')
+           _hol_driver.add_axiomatic_function($cur, spec, '$at')']
+    | '(~theorem $cur $nxt [$name] [$attr, ...] [$core] [$tactic] [$at])':
+        ['def $nxt:
+           let statement = try:
+                            _hol_surface.decode_prop('$core')
+                            ~catch e :: Exn.Fail:
+                              _hol_driver.hol_reraise(e, '$at')
+           let proof = try:
+                         _hol_surface.decode_tactic('$tactic')
+                         ~catch e :: Exn.Fail:
+                           _hol_driver.hol_reraise(e, '$at')
+           _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
+                                   [Syntax.unwrap('$attr'), ...],
+                                   statement, proof, '$at')']
+    | '(~rules $cur $nxt [$flag] [$name, ...])':
+        ['def $nxt = _hol_driver.set_rules($cur, $flag, [Syntax.unwrap('$name'), ...])']
+    | ~else: syntax_meta.error("internal malformed logical step", step)
+
+  // -- diagnostics -----------------------------------------------------------
+
+  // `raise-syntax-error` reports the location of the syntax object it is
+  // given, and a *group* built by a template carries the template's location,
+  // not the user's.  The head term still carries the user's.
+  fun head_term(form :: Syntax) :: Syntax:
+    match form
+    | '$head $_ ...': head
+    | ~else: form
+
+  // -- one declaration -------------------------------------------------------
+
+  // Two outputs, because they go to two places: the runtime forms stay in the
+  // module, and the chain steps go into the `hol_theory` submodule.  Nothing
+  // in the runtime half ever refers to the chain, which is what makes the
+  // split possible.
+  fun emit_one(d :: expand.Decl, n :: Int)
+       :: values(List.of(Syntax), List.of(Syntax), Int):
+    let cur = st(n)
+    let nxt = st(n + 1)
+    match d.kind
+    | #'other: values([d.form], [], n)
+    | #'import:
+        // The import itself is passed through untouched.  When it names
+        // theories, the submodule imports their theories too and adopts them,
+        // one step per theory, in the order written.
+        let [paths] = d.parts
+        let at = head_term(d.form)
+        let (chain, n2):
+          for values(acc :~ List = [], k = n) (terms in (paths :~ List)):
+            let alias = Syntax.make_id("_hol_used" ++ to_string(k), id_ctx)
+            // Reassembled here, not in `expand.rhm`: see the note there.
+            //
+            // Rebuilt with this module's context as well.  The submodule's
+            // language is plain `rhombus`, and a term carrying the user's
+            // `rhombus/hol` context cannot find the implicit import forms
+            // there -- a string path fails on `#%literal`.  The datum is all
+            // that matters for a module path.
+            let [t, ...] = (terms :~ List).map(recontext)
+            values(acc ++ ['(~import $alias [$t, ...])',
+                           '(~adopt $(st(k)) $(st(k + 1)) $alias [$at])'],
+                   k + 1)
+        values([d.form], chain, n2)
+    | #'type:
+        let [name, ctors, params, gen] = d.parts
+        let at = head_term(d.form)
+        let form = d.form
+        values([emit_type(name, ctors :~ List),
+                emit_generator(name, params :~ List, gen :~ List),
+                emit_shrinker(name, gen :~ List)],
+               ['(~type $cur $nxt [$form] [$at])'],
+               n + 1)
+    | #'function:
+        let [name, params, body] = d.parts
+        let at = head_term(d.form)
+        let form = d.form
+        let core = function_encoding(form)
+        values([emit_function(name, params :~ List, body)],
+               ['(~function $cur $nxt [$core] [$at])'],
+               n + 1)
+    | #'axiomatic_function:
+        // Identical runtime code; the logical step is the one that differs.
+        let [name, params, body] = d.parts
+        let at = head_term(d.form)
+        let form = d.form
+        let core = function_encoding(form)
+        values([emit_function(name, params :~ List, body)],
+               ['(~axiomatic $cur $nxt [$core] [$at])'],
+               n + 1)
+    | #'theorem:
+        // Enforestation happens now, while preceding declaration/import
+        // bindings are in scope. The generated theory step receives decoded
+        // CoreExpr/CoreTactic values, never the proposition's raw syntax.
+        let [name, attrs, stmt, tactic] = d.parts
+        let at = head_term(d.form)
+        let gs :~ List = stmt
+        let [g, ...] = gs
+        let core = parse_core_encoding('$g; ...')
+        let tactic_core = tactic_encoding(tactic, at)
+        let as_ :~ List = attrs
+        let [a, ...] = as_
+        values([],
+               ['(~theorem $cur $nxt [$name] [$a, ...] [$core] [$tactic_core] [$at])'],
+               n + 1)
+    | #'disable_rules: rule_step(d, n, cur, nxt, #false)
+    | #'enable_rules: rule_step(d, n, cur, nxt, #true)
+
+
+// `check_property` is a genuine, independently bound macro, not a form
+// `#%module_block` recognises by scanning -- see the note by
+// `emit_property_from` above for why it alone can be one.  Because it is
+// bound, `#%module_block`'s generic pass-through (the `#'other` case in
+// `emit_one`) is what reaches it: Rhombus's own expansion discovers this
+// binding exactly as it would for `fun` or `class`, including when the use
+// arrives via a macro of the user's own.
+defn.macro 'check_property $rest ...':
+  let whole = 'check_property $rest ...'
+  let [name, samples, binders, body, size] = elab.check_property_shape(whole)
+  emit_property_from(name :~ Syntax, samples, binders :~ List,
+                     body :~ Syntax, size, whole)
+
+// One declaration per expansion. Emitting the current declaration before the
+// recursive macro call lets imports and operator definitions establish their
+// bindings before the next HOL expression is enforested. Logical steps remain
+// boxed syntax until the source tail is empty.
+meta:
+  fun continue_theorem(n :: Syntax, step_boxes :: List, name :: Syntax,
+                       attrs :: List, core :: Syntax,
+                       tactic :: maybe(List.of(Syntax)),
+                       rest :: List.of(Syntax)) :: Syntax:
+    let step_n = Syntax.unwrap(n)
+    let cur = st(step_n)
+    let nxt = st(step_n + 1)
+    let tactic_core = tactic_encoding(tactic, name)
+    let [a, ...] = attrs
+    let chain = '(~theorem $cur $nxt [$name] [$a, ...] [$core] [$tactic_core] [$name])'
+    let prior = step_boxes.map(unbox_group)
+    let [sb, ...] = (prior ++ [chain]).map(box_group)
+    let [f, ...] = rest
+    let next_n = Syntax.make(step_n + 1, id_ctx)
+    'hol_expand($next_n, [$sb, ...]):
+       $f
+       ...'
+
+decl.macro
+| 'hol_expand($(n :: Int), [$step_box, ...]):
+     theorem $(attr :: Keyword) ... $(name :: Identifier):
+       $(stmt :: hol_expr_meta.Parsed)
+     proof:
+       $tactic; ...
+     $rest; ...':
+    continue_theorem(n, [step_box, ...], name, [attr, ...],
+                     hol_expr_meta.unpack(stmt), [tactic, ...], [rest, ...])
+| 'hol_expand($(n :: Int), [$step_box, ...]):
+     theorem $(attr :: Keyword) ... $(name :: Identifier):
+       $(stmt :: hol_expr_meta.Parsed)
+     $rest; ...':
+    continue_theorem(n, [step_box, ...], name, [attr, ...],
+                     hol_expr_meta.unpack(stmt), #false, [rest, ...])
+| 'hol_expand($(n :: Int), [$step_box, ...]): $form; ...':
+    let steps = [step_box, ...].map(unbox_group)
+    let forms = [form, ...]
+    let (next, rest) = expand.plan_next(forms)
+    match next
+    | #false:
+        let final = st(Syntax.unwrap(n))
+        let rendered:
+          for values(acc :~ List = []) (encoded in steps):
+            acc ++ render_step(encoded)
+        let [step, ...] = rendered
+        '«
+           module hol_theory ~lang rhombus:
+             import: rhombus/hol/frontend/driver as _hol_driver
+             import: rhombus/hol/frontend/surface_core as _hol_surface
+             export: theory
+             def $(st(0)) = _hol_driver.initial_state()
+             $step
+             ...
+             def theory = $final
+         »'
+    | d:
+        let (runtime, chain, n2) = emit_one(d :~ expand.Decl,
+                                            Syntax.unwrap(n))
+        let [r, ...] = runtime
+        let [sb, ...] = (steps ++ chain).map(box_group)
+        let [f, ...] = rest
+        let next_n = Syntax.make(n2, id_ctx)
+        '«
+           $r
+           ...
+           hol_expand($next_n, [$sb, ...]):
+             $f
+             ...
+         »'
+
+// Every `#lang rhombus/hol` module carries its final logical state in a
+// `hol_theory` submodule. The trampoline emits that submodule only after every
+// source declaration has been expanded in order.
+decl.macro 'module_block: $form; ...':
+  '#%module_block:
+     hol_expand(0, []):
+       $form
+       ...'

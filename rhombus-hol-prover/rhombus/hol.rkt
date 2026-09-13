@@ -8,9 +8,9 @@
 
 import:
   rhombus/meta open
-  "hol/module_block.rhm" as mb
-  "hol/surface_space.rhm" open
-  "hol/surface_notation.rhm" open
+  "hol/frontend/module_block.rhm" as mb
+  "hol/frontend/surface_space.rhm" open
+  "hol/frontend/surface_notation.rhm" open
 
 module reader ~lang rhombus/reader:
   ~lang: "hol.rkt"

@@ -113,7 +113,7 @@ the transitive closure of a direct-child predicate spelled with the
 datatype's own discriminators and selectors, so neither the closure nor the
 child predicate is a recursive definition and neither needs a recursion
 theorem. The equations then follow from the closure's induction principle
-(@tt{rhombus/hol/tclosure}).
+(@tt{rhombus/hol/recursion/tclosure}).
 
 @section{What is postulated beyond that}
 
@@ -134,7 +134,7 @@ broken before --- fails at the declaration that did it, naming it.
 not. A non-recursive one --- any number of constructors, fields and type
 parameters --- is built as a sum of products of @tt{unit} over its field
 types. A @emph{self-recursive} one is carved out of the labelled trees over
-@tt{num} (@tt{rhombus/hol/treerep}, @tt{rhombus/hol/datatype_rec}): its
+@tt{num} (@tt{rhombus/hol/datatype/treerep}, @tt{rhombus/hol/datatype/datatype_rec}): its
 representation is the least set of trees closed under its constructors, cut
 out by @tt{new_basic_type_definition}, and its injectivity, distinctness,
 exhaustiveness, induction, discriminators, selectors and destructor

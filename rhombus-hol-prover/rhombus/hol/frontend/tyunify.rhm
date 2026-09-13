@@ -1,0 +1,101 @@
+#lang rhombus/static
+
+// Full type unification with an occurs check.
+//
+// The kernel never unifies -- every kernel rule either checks a type against
+// a theory (`check_type`) or one-way matches a generic type against a used
+// instance (`type_match`). Full two-way unification is an elaborator
+// convenience: `elab.rhm` uses it to solve for the type variables of a
+// constant or datatype occurrence from context, before the result is checked
+// by the kernel exactly like anything else. Living here rather than in
+// `rhombus-hol-kernel/.../htype.rhm` keeps the kernel's public surface to
+// only what the ten primitive rules need.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/effect/core open
+  rhombus/hol/effect/syntax open
+  rhombus/hol/effect/state open
+  rhombus/hol/effect/fail open
+
+export:
+  type_unify
+
+class.together:
+  class UnifyError():
+    nonfinal
+
+  class OccursCheck(variable :: Symbol, value :: HType):
+    extends UnifyError
+
+  class TypeMismatch(left :: HType, right :: HType):
+    extends UnifyError
+
+// Follow substitutions through variables. The lookup is deliberately an
+// effect request: recursive unification never receives an explicit
+// substitution parameter.
+fun resolve(t :: HType) :: Computation:
+  match t
+  | TyVar(n):
+      effect:
+        let substitution :: Map.of(Symbol, HType) <- get()
+        match substitution.get(n, #false)
+        | #false: return t
+        | next: resolve(next)
+  | ~else: return t
+
+fun bind_variable(name :: Symbol, value :: HType) :: Computation:
+  effect:
+    let substitution :: Map.of(Symbol, HType) <- get()
+    let value = type_subst(substitution, value)
+    cond
+    | value is_a TyVar && (value :~ TyVar).name == name:
+        return #void
+    | type_occurs(name, value):
+        fail(OccursCheck(name, value))
+    | ~else:
+        effect:
+          let _ <- put(substitution ++ {name: value})
+          return #void
+
+// The pilot's internal API: state is the substitution and semantic failure is
+// an explicit `UnifyError`. It has no public caller yet; `type_unify` below
+// installs the handlers and preserves the existing result contract.
+fun unify(a :: HType, b :: HType) :: Computation:
+  fun unify_arguments(left :: List.of(HType), right :: List.of(HType))
+      :: Computation:
+    match left
+    | []:
+        match right
+        | []: return #void
+        | ~else: fail(TypeMismatch(a, b))
+    | List.cons(first, rest):
+        match right
+        | List.cons(other, others):
+            effect:
+              let _ <- unify(first, other)
+              unify_arguments(rest, others)
+        | ~else: fail(TypeMismatch(a, b))
+  fun after_left(left :: HType) :: Computation:
+    fun after_right(right :: HType) :: Computation:
+      match left
+      | TyVar(name): bind_variable(name, right)
+      | TyApp(left_name, left_args):
+          match right
+          | TyVar(name): bind_variable(name, left)
+          | TyApp(right_name, right_args) when left_name == right_name:
+              unify_arguments(left_args, right_args)
+          | ~else: fail(TypeMismatch(left, right))
+    effect:
+      let right :: HType <- resolve(b)
+      after_right(right)
+  effect:
+    let left :: HType <- resolve(a)
+    after_left(left)
+
+fun type_unify(a :: HType, b :: HType, initial :: Map.of(Symbol, HType))
+     :: maybe(Map.of(Symbol, HType)):
+  match run_fail(handle_state(unify(a, b), initial))
+  | Pure(StateResult(_, substitution)): substitution
+  | Failed(_): #false
+  | ~else: error(~who: #'type_unify, "internal error: unhandled effect")

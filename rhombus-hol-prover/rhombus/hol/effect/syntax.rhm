@@ -11,10 +11,102 @@ import:
 export:
   effect
   return
+  reader_effect
+  state_effect
+  failure_effect
 
 macro 'return $value':
   'pure($value)'
 
+
+class_clause.macro 'reader_effect':
+  'class Ask():
+     extends EffectOperation
+   class Local(transform :: Function, body :: Computation):
+     extends EffectOperation
+
+   fun ask() :: Computation:
+     perform(Ask())
+   fun local(transform :: Function, body :: Computation) :: Computation:
+     perform(Local(transform, body))
+   fun handle(environment, computation :: Computation) :: Computation:
+     recur loop (current :: Computation = computation,
+                 current_env = environment):
+       match current
+       | Pure(_): current
+       | Request(operation, resume):
+           match operation
+           | Ask(): loop(resume(current_env), current_env)
+           | Local(transform, body):
+               bind(handle(transform(current_env), body),
+                    fun (value): loop(resume(value), current_env))
+           | ~else:
+               Request(operation,
+                       fun (value): loop(resume(value), current_env))
+   export:
+     ask
+     local
+     handle'
+
+class_clause.macro 'state_effect':
+  'class Get():
+     extends EffectOperation
+   class Put(value):
+     extends EffectOperation
+   class Modify(transform :: Function):
+     extends EffectOperation
+   class Result(value, state)
+
+   fun get() :: Computation:
+     perform(Get())
+   fun put(value) :: Computation:
+     perform(Put(value))
+   fun modify(transform :: Function) :: Computation:
+     perform(Modify(transform))
+   fun handle(initial, computation :: Computation) :: Computation:
+     recur loop (current :: Computation = computation,
+                 state = initial):
+       match current
+       | Pure(value): Pure(Result(value, state))
+       | Request(operation, resume):
+           match operation
+           | Get(): loop(resume(state), state)
+           | Put(value): loop(resume(value), value)
+           | Modify(transform):
+               let next = transform(state)
+               loop(resume(#void), next)
+           | ~else:
+               Request(operation,
+                       fun (value): loop(resume(value), state))
+   export:
+     Result
+     get
+     put
+     modify
+     handle'
+
+class_clause.macro 'failure_effect':
+  'class Fail(reason):
+     extends EffectOperation
+   class Failed(reason):
+     extends Computation
+
+   fun fail(reason) :: Computation:
+     perform(Fail(reason))
+   fun handle(computation :: Computation) :: Computation:
+     match computation
+     | Pure(_): computation
+     | Failed(_): computation
+     | Request(operation, resume):
+         match operation
+         | Fail(reason): Failed(reason)
+         | ~else:
+             Request(operation,
+                     fun (value): handle(resume(value)))
+   export:
+     Failed
+     fail
+     handle'
 meta:
   // `Block` retains its colon wrapper, so lowering first extracts the raw
   // groups and later rebuilds a scoped block at each generated continuation.

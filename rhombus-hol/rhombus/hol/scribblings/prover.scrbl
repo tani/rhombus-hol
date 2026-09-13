@@ -154,5 +154,5 @@ attach a typed trace event to each generated subgoal; the orchestration layer
 scopes those events while constructing the proof tree, and only a failed
 @tt{Residue} retains them. Terms and symbols are converted to display strings
 only when the residue message is rendered. Proof-tree execution is likewise a
-scoped scheduler capability, with deterministic sequential execution as the
+scoped executor capability, with deterministic sequential execution as the
 default policy.

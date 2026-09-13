@@ -35,7 +35,7 @@ import:
   rhombus/hol/logic/taut open
   rhombus/hol/prover/context open
   rhombus/hol/prover/stage open
-  rhombus/hol/prover/search/scheduler open
+  rhombus/hol/prover/proof/executor open
   rhombus/hol/prover/trace open
   rhombus/hol/effect/core open
   rhombus/hol/effect/syntax open
@@ -170,7 +170,7 @@ fun prove_goal_impl(g :: Goal,
 // what the source called them.  Without `names` the prover invents its own,
 // which is fine for a machine-generated goal and unhelpful for a human one.
 // The public entry point installs the proof environment, search policy,
-// scheduler, trace, and shared resource budget. `prove_impl` and everything
+// executor, trace, and shared resource budget. `prove_impl` and everything
 // beneath it only request capabilities; nested work cannot reset the allowance
 // or silently choose an execution strategy.
 class ProofResult(proved :: maybe(Thm), node :: ProofNode)
@@ -182,15 +182,15 @@ fun prove(ctx :: Context, statement :: Term,
           ~cases: cases :: List.of(Term) = [],
           ~witnesses: witnesses :: List.of(Term) = [],
           ~limits: limits :: SearchLimits = SearchLimits(),
-          ~scheduler: scheduler :: Scheduler = sequential_scheduler())
+          ~executor: executor :: ProofExecutor = sequential_executor())
      :: values(maybe(Thm), ProofNode):
   let result :~ ProofResult:
     SearchBudget.run(
       limits,
       run_proof_scope(
         ctx, scope,
-        Scheduler.handle(
-          scheduler.run_tree,
+        ProofExecutor.handle(
+          executor.run,
           Trace.handle(
             prove_impl(statement, ~names: names, ~induct: hint,
                        ~cases: cases, ~witnesses: witnesses)))))
@@ -227,8 +227,8 @@ fun prove_impl(statement :: Term,
                     | ~else: #false)
     let node <- apply_witnesses(witnesses, cases, mk_goal([], matrix),
                                 hint_var)
-    let scheduled <- Scheduler.solve(node)
-    match scheduled
+    let executed <- ProofExecutor.execute(node)
+    match executed
     | #false: return ProofResult(#false, node)
     | th :~ Thm:
         let closed = GENL(thy, vars, th)

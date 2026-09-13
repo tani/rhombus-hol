@@ -7,6 +7,15 @@ import:
   rhombus/hol/effect/fail open
   rhombus/hol/effect/reader open
 
+class TestUnhandled(value):
+  extends EffectOperation
+
+class TestInner(value):
+  extends EffectOperation
+
+class TestOuter():
+  extends EffectOperation
+
 fun pure_value(computation :: Computation):
   match computation
   | Pure(value): value
@@ -56,17 +65,29 @@ check:
   [result.value, result.state]
   ~is [5, 6]
 
-// Identity handling preserves a request rather than inventing a policy.
-check handle(perform(#'unhandled, 17), fun (_operation, _payload, _resume): #false) ~matches Request(#'unhandled, 17, _)
+// Identity handling preserves a typed request rather than inventing a policy.
+check:
+  handle(perform(TestUnhandled(17)),
+         fun (_operation, _resume): #false)
+  ~matches Request(TestUnhandled(17), _)
 
-// A handler can resume a computation, and nested handlers see the residual
-// operation after the inner handler has removed only the operation it owns.
+// A handler can resume a computation, and an enclosing handler sees the typed
+// residual operation that the inner handler deliberately forwards.
+def nested_subject:
+  effect:
+    let value <- perform(TestInner(40))
+    let _ <- perform(TestOuter())
+    return value
 def nested:
-  handle(handle(perform(#'inner, 40),
-                fun (operation, payload, resume):
-                  if operation == #'inner | resume(payload + 1) | #false),
-         fun (operation, _payload, _resume):
-           if operation == #'outer | return 0 | #false)
+  handle(handle(nested_subject,
+                fun (operation, resume):
+                  match operation
+                  | TestInner(value): resume(value + 1)
+                  | ~else: #false),
+         fun (operation, resume):
+           match operation
+           | TestOuter(): resume(#void)
+           | ~else: #false)
 check pure_value(nested) ~is 41
 
 // Reader scopes an immutable environment and restores it after `local`.
@@ -104,9 +125,9 @@ def failed_state_program:
     let _ <- put(9)
     let _ <- fail(#'unify_mismatch)
     put(10)
-check handle_state(failed_state_program, 0) ~matches Request(#'failure, #'unify_mismatch, _)
+check handle_state(failed_state_program, 0) ~matches Request(Failure(#'unify_mismatch), _)
 check run_fail(handle_state(failed_state_program, 0)) ~matches Failed(#'unify_mismatch)
 
 // Completing State with another operation left over is rejected instead of
 // silently applying an ambient handler.
-check run_state(perform(#'unhandled, #void), 0) ~throws "unhandled effect"
+check run_state(perform(TestUnhandled(#void)), 0) ~throws "unhandled effect"

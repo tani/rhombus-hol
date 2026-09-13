@@ -1,9 +1,12 @@
 #lang rhombus/static
 
-// A small, explicit free computation.  Domain modules construct requests with
-// `perform`; handlers interpret only the operations they own and forward the
-// rest.  Keeping continuations as data fields makes the control boundary
-// inspectable and avoids putting any machinery in the trusted kernel.
+// A small, explicit free computation. Domain modules define typed operation
+// variants under `EffectOperation`; handlers interpret only the variants they
+// own and forward every other request. Keeping continuations as data fields
+// makes the control boundary inspectable and keeps machinery out of the kernel.
+
+class EffectOperation():
+  nonfinal
 
 class.together:
   class Computation():
@@ -12,10 +15,11 @@ class.together:
   class Pure(value):
     extends Computation
 
-  class Request(operation :: Symbol, payload, resume :: Function):
+  class Request(operation :: EffectOperation, resume :: Function):
     extends Computation
 
 export:
+  EffectOperation
   Computation
   Pure
   Request
@@ -28,27 +32,26 @@ export:
 fun pure(value) :: Computation:
   Pure(value)
 
-fun perform(operation :: Symbol, payload) :: Computation:
-  Request(operation, payload, fun (value): Pure(value))
+fun perform(operation :: EffectOperation) :: Computation:
+  Request(operation, fun (value): Pure(value))
 
 fun bind(computation :: Computation, next :: Function) :: Computation:
   match computation
   | Pure(value): next(value)
-  | Request(operation, payload, resume):
-      Request(operation, payload,
-              fun (value): bind(resume(value), next))
+  | Request(operation, resume):
+      Request(operation, fun (value): bind(resume(value), next))
 
 fun map(computation :: Computation, f :: Function) :: Computation:
   bind(computation, fun (value): pure(f(value)))
 
-// `handler` receives an operation, payload, and a handled resumption.  It
-// returns `#false` to forward the request unchanged, or a computation to
-// interpret it.  Forwarding is what allows independent handlers to compose.
+// `handler` receives a typed operation and a handled resumption. It returns
+// `#false` to forward the request unchanged, or a computation to interpret it.
+// Forwarding is what allows independently defined operation classes to compose.
 fun handle(computation :: Computation, handler :: Function) :: Computation:
   match computation
   | Pure(_): computation
-  | Request(operation, payload, resume):
+  | Request(operation, resume):
       let handled_resume = fun (value): handle(resume(value), handler)
-      match handler(operation, payload, handled_resume)
-      | #false: Request(operation, payload, handled_resume)
+      match handler(operation, handled_resume)
+      | #false: Request(operation, handled_resume)
       | result: result :~ Computation

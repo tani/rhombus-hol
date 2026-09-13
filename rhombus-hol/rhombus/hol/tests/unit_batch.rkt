@@ -10,6 +10,7 @@
 ;; fixture and integration tests in this collection.
 (for ([name (in-list '("htype.rhm"
                        "term.rhm"
+                       "effect.rhm"
                        "tyunify.rhm"
                        "order.rhm"
                        "conv.rhm"

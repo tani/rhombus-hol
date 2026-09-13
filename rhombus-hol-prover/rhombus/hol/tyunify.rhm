@@ -13,49 +13,89 @@
 
 import:
   rhombus/hol/htype open
+  "effect/core.rhm" open
+  "effect/syntax.rhm" open
+  "effect/state.rhm" open
+  "effect/fail.rhm" open
 
 export:
   type_unify
 
-// One-way matching: extend `acc` so that `type_subst(result, pat) == t`.
-fun resolve(t :: HType, s :: Map.of(Symbol, HType)) :: HType:
+class.together:
+  class UnifyError():
+    nonfinal
+
+  class OccursCheck(variable :: Symbol, value :: HType):
+    extends UnifyError
+
+  class TypeMismatch(left :: HType, right :: HType):
+    extends UnifyError
+
+// Follow substitutions through variables. The lookup is deliberately an
+// effect request: recursive unification never receives an explicit
+// substitution parameter.
+fun resolve(t :: HType) :: Computation:
   match t
   | TyVar(n):
-      match s.get(n, #false)
-      | #false: t
-      | t2: resolve(t2, s)
-  | ~else: t
+      effect:
+        let substitution :: Map.of(Symbol, HType) <- get()
+        match substitution.get(n, #false)
+        | #false: return t
+        | next: resolve(next)
+  | ~else: return t
 
-fun bind(n :: Symbol, t :: HType, s :: Map.of(Symbol, HType))
-     :: maybe(Map.of(Symbol, HType)):
-  cond
-  | t is_a TyVar && (t :~ TyVar).name == n: s
-  | type_occurs(n, type_subst(s, t)): #false
-  | ~else: s ++ { n: t }
+fun bind_variable(name :: Symbol, value :: HType) :: Computation:
+  effect:
+    let substitution :: Map.of(Symbol, HType) <- get()
+    let value = type_subst(substitution, value)
+    cond
+    | value is_a TyVar && (value :~ TyVar).name == name:
+        return #void
+    | type_occurs(name, value):
+        fail(OccursCheck(name, value))
+    | ~else:
+        effect:
+          let _ <- put(substitution ++ {name: value})
+          return #void
 
-// Full unification with occurs check.  Used only by the elaborator; the
-// kernel never unifies, it only checks and matches.
-fun type_unify(a :: HType, b :: HType, acc :: Map.of(Symbol, HType))
+// The pilot's internal API: state is the substitution and semantic failure is
+// an explicit `UnifyError`. It has no public caller yet; `type_unify` below
+// installs the handlers and preserves the existing result contract.
+fun unify(a :: HType, b :: HType) :: Computation:
+  fun unify_arguments(left :: List.of(HType), right :: List.of(HType))
+      :: Computation:
+    match left
+    | []:
+        match right
+        | []: return #void
+        | ~else: fail(TypeMismatch(a, b))
+    | List.cons(first, rest):
+        match right
+        | List.cons(other, others):
+            effect:
+              let _ <- unify(first, other)
+              unify_arguments(rest, others)
+        | ~else: fail(TypeMismatch(a, b))
+  fun after_left(left :: HType) :: Computation:
+    fun after_right(right :: HType) :: Computation:
+      match left
+      | TyVar(name): bind_variable(name, right)
+      | TyApp(left_name, left_args):
+          match right
+          | TyVar(name): bind_variable(name, left)
+          | TyApp(right_name, right_args) when left_name == right_name:
+              unify_arguments(left_args, right_args)
+          | ~else: fail(TypeMismatch(left, right))
+    effect:
+      let right :: HType <- resolve(b)
+      after_right(right)
+  effect:
+    let left :: HType <- resolve(a)
+    after_left(left)
+
+fun type_unify(a :: HType, b :: HType, initial :: Map.of(Symbol, HType))
      :: maybe(Map.of(Symbol, HType)):
-  fun go(a :: HType, b :: HType, s :: Map.of(Symbol, HType))
-       :: maybe(Map.of(Symbol, HType)):
-    let a = resolve(a, s)
-    let b = resolve(b, s)
-    match a
-    | TyVar(n): bind(n, b, s)
-    | TyApp(na, aargs):
-        match b
-        | TyVar(m): bind(m, a, s)
-        | TyApp(nb, bargs) when na == nb && aargs.length() == bargs.length():
-            recur loop (xs = aargs, ys = bargs, s = s):
-              match xs
-              | []: s
-              | List.cons(x, xrest):
-                  match ys
-                  | List.cons(y, yrest):
-                      match go(x, y, s)
-                      | #false: #false
-                      | s2: loop(xrest, yrest, s2)
-                  | ~else: #false
-        | ~else: #false
-  go(a, b, acc)
+  match run_fail(handle_state(unify(a, b), initial))
+  | Pure(StateResult(_, substitution)): substitution
+  | Failed(_): #false
+  | ~else: error(~who: #'type_unify, "internal error: unhandled effect")

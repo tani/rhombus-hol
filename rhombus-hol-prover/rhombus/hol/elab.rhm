@@ -26,6 +26,9 @@ import:
   "surface_core.rhm" open
   "bool.rhm" open
   "tyunify.rhm" open
+  "effect/core.rhm" open
+  "effect/syntax.rhm" open
+  "effect/reader.rhm" open
 
 export:
   parse_type_decl
@@ -359,6 +362,13 @@ export:
   elaborate_function_decl
   core_type_vars
   parse_tactic
+  PEnv
+  elaborate_effect
+  parse_type_effect
+  run_type_elaboration
+  infer_core
+  check_core
+  run_elaboration
 
 // `self_name` and `self` are the definition being elaborated, so that a
 // recursive call resolves before the constant exists in the theory.  In
@@ -423,65 +433,131 @@ fun specialize_call_args(fty :: HType, args :: List.of(Term)) :: List.of(Term):
               | theta: inst_type(theta :~ Map, arg)
         loop(range, more, acc ++ [arg2])
 
-fun core_apply(env :: PEnv, func :: CoreExpr,
-               args :: List.of(CoreExpr), at :: Syntax) :: Term:
-  let terms = args.map(fun (a :: CoreExpr): elaborate(env, a))
-  match func
-  | CoreRef(n, ref_at):
-      match env.vars.get(n, #false)
-      | #false:
-          cond
-          | n == env.self_name:
-              list_mk_comb(env.self :~ Term,
-                           specialize_call_args(type_of(env.self :~ Term), terms))
-          | ~else:
-              let cty = core_const_instance(env, n, terms, ref_at)
-              list_mk_comb(mk_const(n, cty),
-                           specialize_call_args(cty, terms))
-      | v:
-          list_mk_comb(v, specialize_call_args(type_of(v), terms))
-  | ~else:
-      let f = elaborate(env, func)
-      list_mk_comb(f, specialize_call_args(type_of(f), terms))
 
-fun elaborate_binders(env :: PEnv, binders :: List.of(CoreBinder),
-                      body :: CoreExpr, is_forall :: Boolean) :: Term:
-  let vars = for List (b in binders):
-               let b :~ CoreBinder = b
-               mk_var(b.name, parse_type(b.type_stx, env.tyvars))
-  let vars2 = for values(m :~ Map = env.vars) (v in vars):
-                m ++ {(v :~ FVar).name: v :~ Term}
-  let inner = elaborate(sub_env(env, vars2), body)
-  let build = (if is_forall | mk_forall | mk_exists)
-  for values(acc :~ Term = inner) (v in vars.reverse()): build(v, acc)
+// Effectful CoreExpr elaboration is the Reader-facing domain algebra. Every
+// expression entry point below uses it; function clauses enter through
+// `run_elaboration` with their explicit local binding map.
+fun elaborate_arguments_effect(args :: List.of(CoreExpr)) :: Computation:
+  recur loop (remaining :~ List = args, terms :~ List = []):
+    match remaining
+    | []: return terms
+    | List.cons(first, rest):
+        effect:
+          let term :: Term <- elaborate_effect(first :~ CoreExpr)
+          loop(rest, terms ++ [term])
 
-fun elaborate(env :: PEnv, expr :: CoreExpr) :: Term:
+fun core_apply_effect(func :: CoreExpr, args :: List.of(CoreExpr),
+                      at :: Syntax) :: Computation:
+  fun apply_terms(terms :: List.of(Term)) :: Computation:
+    effect:
+      let env :: PEnv <- ask()
+      match func
+      | CoreRef(name, ref_at):
+          match env.vars.get(name, #false)
+          | #false:
+              cond
+              | name == env.self_name:
+                  return list_mk_comb(
+                    env.self :~ Term,
+                    specialize_call_args(type_of(env.self :~ Term), terms))
+              | ~else:
+                  let cty = core_const_instance(env, name, terms, ref_at)
+                  return list_mk_comb(
+                    mk_const(name, cty), specialize_call_args(cty, terms))
+          | value:
+              return list_mk_comb(
+                value, specialize_call_args(type_of(value), terms))
+      | ~else:
+          effect:
+            let head :: Term <- elaborate_effect(func)
+            return list_mk_comb(
+              head, specialize_call_args(type_of(head), terms))
+  effect:
+    let terms :: List.of(Term) <- elaborate_arguments_effect(args)
+    apply_terms(terms)
+
+fun elaborate_binders_effect(binders :: List.of(CoreBinder), body :: CoreExpr,
+                             is_forall :: Boolean) :: Computation:
+  fun elaborate_in(env :: PEnv) :: Computation:
+    let vars = for List (binder in binders):
+                 let binder :~ CoreBinder = binder
+                 mk_var(binder.name, parse_type(binder.type_stx, env.tyvars))
+    let vars2 = for values(bindings :~ Map = env.vars) (variable in vars):
+                  bindings ++ {(variable :~ FVar).name: variable :~ Term}
+    fun close(inner :: Term) :: Computation:
+      let build = (if is_forall | mk_forall | mk_exists)
+      return for values(term :~ Term = inner) (variable in vars.reverse()):
+               build(variable, term)
+    effect:
+      let inner :: Term <- local(fun (_): sub_env(env, vars2),
+                                 elaborate_effect(body))
+      close(inner)
+  effect:
+    let env :: PEnv <- ask()
+    elaborate_in(env)
+
+fun elaborate_if_effect(condition_expr :: CoreExpr, then_expr :: CoreExpr,
+                        else_expr :: CoreExpr, at :: Syntax) :: Computation:
+  effect:
+    let condition :: Term <- elaborate_effect(condition_expr)
+    let env :: PEnv <- ask()
+    unless type_of(condition) == bool
+    | syntax_error(env.who, "the condition of an `if` must be a Boolean", at)
+    let then_term :: Term <- elaborate_effect(then_expr)
+    let else_term :: Term <- elaborate_effect(else_expr)
+    unless type_of(then_term) == type_of(else_term)
+    | syntax_error(env.who,
+                   "the two branches of an `if` have different types",
+                   at)
+    return mk_cond(condition, then_term, else_term)
+
+fun elaborate_effect(expr :: CoreExpr) :: Computation:
   match expr
-  | CoreRef(name, at): core_lookup(env, name, at)
-  | CoreCall(func, args, at): core_apply(env, func, args, at)
-  | CoreIf(cond_expr, then_expr, else_expr, at):
-      let cond_term = elaborate(env, cond_expr)
-      unless type_of(cond_term) == bool
-      | syntax_error(env.who,
-                     "the condition of an `if` must be a Boolean",
-                     at)
-      let then_term = elaborate(env, then_expr)
-      let else_term = elaborate(env, else_expr)
-      unless type_of(then_term) == type_of(else_term)
-      | syntax_error(env.who,
-                     "the two branches of an `if` have different types",
-                     at)
-      mk_cond(cond_term, then_term, else_term)
+  | CoreRef(name, at):
+      effect:
+        let env :: PEnv <- ask()
+        return core_lookup(env, name, at)
+  | CoreCall(func, args, at): core_apply_effect(func, args, at)
+  | CoreIf(condition_expr, then_expr, else_expr, at):
+      elaborate_if_effect(condition_expr, then_expr, else_expr, at)
   | CoreForall(binders, body, _):
-      elaborate_binders(env, binders, body, #true)
+      elaborate_binders_effect(binders, body, #true)
   | CoreExists(binders, body, _):
-      elaborate_binders(env, binders, body, #false)
-  | ~else: error(~who: #'elaborate, "unknown CoreExpr variant")
+      elaborate_binders_effect(binders, body, #false)
+  | ~else: error(~who: #'elaborate_effect, "unknown CoreExpr variant")
+
+// Domain operations expose inference and checking without leaking Reader,
+// State, or Fail into callers. `type_unify` installs its State/Fail handlers
+// locally while Reader remains ambient to this expression computation.
+fun infer_core(expr :: CoreExpr) :: Computation:
+  elaborate_effect(expr)
+
+fun check_core(expr :: CoreExpr, expected :: HType) :: Computation:
+  effect:
+    let term :: Term <- infer_core(expr)
+    unless type_of(term) == expected
+    | error(~who: #'check_core, "expression has an unexpected type")
+    return term
+
+fun run_elaboration(env :: PEnv, expr :: CoreExpr) :: Term:
+  match run_reader(infer_core(expr), env)
+  | Pure(term): term :~ Term
+  | ~else: error(~who: #'run_elaboration, "internal error: unhandled effect")
+
+fun parse_type_effect(stx :: Syntax) :: Computation:
+  effect:
+    let env :: PEnv <- ask()
+    return parse_type(stx, env.tyvars)
+
+fun run_type_elaboration(env :: PEnv, stx :: Syntax) :: HType:
+  match run_reader(parse_type_effect(stx), env)
+  | Pure(ty): ty :~ HType
+  | ~else: error(~who: #'run_type_elaboration, "internal error: unhandled effect")
 
 fun parse_core_prop(thy :: Theory, tyvars :: List.of(Symbol),
                     vars :: Map.of(Symbol, Term),
                     expr :: CoreExpr) :: Term:
-  elaborate(PEnv(thy, tyvars, vars, #'prop, #false, #false), expr)
+  run_elaboration(PEnv(thy, tyvars, vars, #'prop, #false, #false), expr)
 
 fun append_unique(base :: List.of(Symbol),
                   more :: List.of(Symbol)) :: List.of(Symbol):
@@ -575,9 +651,7 @@ fun core_parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
         acc ++ core_parse_clause(thy, self_name, self, pats, v, env,
                                  clause, at)
   | CoreBodyLet(name, init, tail, _):
-      let value = elaborate(PEnv(thy, [], env, #'function,
-                                 self_name, self),
-                            init)
+      let value = run_elaboration(PEnv(thy, [], env, #'function, self_name, self), init)
       let env2 = env ++ {name: value}
       let clauses = core_parse_body(thy, self_name, self, pats, env2,
                                     tail, at)
@@ -587,9 +661,7 @@ fun core_parse_body(thy :: Theory, self_name :: Symbol, self :: Term,
         DefClause(clause.pats, eval_core_term(core),
                   eval_core_obligations(core))
   | CoreBodyExpr(expr, _):
-      let value = elaborate(PEnv(thy, [], env, #'function,
-                                 self_name, self),
-                            expr)
+      let value = run_elaboration(PEnv(thy, [], env, #'function, self_name, self), expr)
       [DefClause(pats, value, [value])]
   | ~else: error(~who: #'function, "unknown CoreFunBody variant")
 
@@ -661,9 +733,7 @@ fun elaborate_function_decl(thy :: Theory,
     match spec.measure
     | #false: #false
     | expr:
-        let value = elaborate(PEnv(thy, tyvars, env0, #'function,
-                                   #false, #false),
-                              expr :~ CoreExpr)
+        let value = run_elaboration(PEnv(thy, tyvars, env0, #'function, #false, #false), expr :~ CoreExpr)
         list_mk_abs(pvars, value)
   let clauses0 = core_parse_body(thy, spec.name, self,
                                  pvars.map(fun (v :: FVar): v :~ Term),

@@ -1,0 +1,110 @@
+#lang rhombus/static
+
+// Domain-specific waterfall stage algebra. A Stage is intentionally not a
+// generic effect interface: its observable contract is Goal -> maybe(Step).
+// Reader supplies the immutable Context while a handler runs the stage.
+
+import:
+  rhombus/hol/term open
+  "../goal.rhm" open
+  "../effect/core.rhm" open
+  "../effect/syntax.rhm" open
+  "../effect/reader.rhm" open
+  "../simp.rhm" open
+  "../destruct.rhm" open
+  "../fertilize.rhm" open
+  "../general.rhm" open
+  "../datatype.rhm" open
+  "../irrelevance.rhm" open
+  "../induct.rhm" open
+  "context.rhm" open
+
+export:
+  Stage
+  standard_stages
+  induction_stage
+  run_stage
+  first_success
+
+class Stage(name :: Symbol, apply :: Function)
+
+fun simplify_stage() :: Stage:
+  fun apply(goal :: Goal) :: Computation:
+    effect:
+      let ctx :: Context <- ask()
+      return simplify_goal(ctx.thy, ctx.db, goal)
+  Stage(#'simplify, apply)
+
+fun eliminate_stage() :: Stage:
+  fun apply(goal :: Goal) :: Computation:
+    effect:
+      let ctx :: Context <- ask()
+      return eliminate_goal(ctx.thy, ctx.dts, goal)
+  Stage(#'eliminate, apply)
+
+fun fertilize_stage() :: Stage:
+  fun apply(goal :: Goal) :: Computation:
+    effect:
+      let ctx :: Context <- ask()
+      return fertilize_goal(ctx.thy, goal)
+  Stage(#'fertilize, apply)
+
+fun generalize_stage() :: Stage:
+  fun apply(goal :: Goal) :: Computation:
+    effect:
+      let ctx :: Context <- ask()
+      return generalize_goal(ctx.thy, ctx.db, ctx.ctors, goal)
+  Stage(#'generalize, apply)
+
+fun irrelevance_stage() :: Stage:
+  fun apply(goal :: Goal) :: Computation:
+    effect:
+      let _ctx :: Context <- ask()
+      return eliminate_irrelevance_goal(goal)
+  Stage(#'irrelevance, apply)
+
+fun induction_stage(hint :: maybe(FVar)) :: Stage:
+  fun apply(goal :: Goal) :: Computation:
+    effect:
+      let ctx :: Context <- ask()
+      let candidates = (cond
+                        | hint: [hint]
+                        | ~else: candidate_vars(ctx.funs, ctx.dts, goal))
+      recur choose (remaining :~ List = candidates):
+        match remaining
+        | []: return #false
+        | List.cons(variable, rest):
+            let variable :~ FVar = variable
+            match inductive_type_name(variable)
+            | #false: choose(rest)
+            | type_name:
+                match ctx.dts.get(type_name, #false)
+                | #false: choose(rest)
+                | datatype_thms:
+                    return induction_step(ctx.thy,
+                                          datatype_thms :~ DatatypeThms,
+                                          variable, goal)
+  Stage(#'induct, apply)
+
+fun standard_stages() :: List.of(Stage):
+  [simplify_stage(), eliminate_stage(), fertilize_stage(), generalize_stage(),
+   irrelevance_stage()]
+
+fun run_stage(ctx :: Context, stage :: Stage, goal :: Goal) :: maybe(Step):
+  match run_reader(stage.apply(goal), ctx)
+  | Pure(result): result
+  | ~else: error(~who: #'run_stage, "internal error: unhandled effect")
+
+fun first_success(ctx :: Context, do_not :: Set.of(Symbol),
+                  stages :: List.of(Stage), goal :: Goal) :: maybe(Step):
+  recur loop (remaining :~ List = stages):
+    match remaining
+    | []: #false
+    | List.cons(candidate, rest):
+        let candidate :~ Stage = candidate
+        cond
+        | do_not.contains(candidate.name): loop(rest)
+        | ~else:
+            match run_stage(ctx, candidate, goal)
+            | #false: loop(rest)
+            | step: step

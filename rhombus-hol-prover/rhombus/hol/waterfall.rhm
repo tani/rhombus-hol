@@ -31,17 +31,11 @@ import:
   "bool.rhm" open
   "search_limits.rhm" open
   "drule.rhm" open
-  "datatype.rhm" open
-  "recdef.rhm" open
-  "ruledb.rhm" open
   "goal.rhm" open
-  "simp.rhm" open
-  "destruct.rhm" open
-  "fertilize.rhm" open
-  "general.rhm" open
-  "irrelevance.rhm" open
-  "induct.rhm" open
   "taut.rhm" open
+  "prover/context.rhm" open
+  "prover/stage.rhm" open
+  "search/scheduler.rhm" open
 
 export:
   Context
@@ -55,37 +49,6 @@ export:
   strip_forall_all
   SearchLimits
 
-class Context(thy :: Theory,
-              db :: RuleDB,
-              dts :: Map.of(Symbol, DatatypeThms),
-              funs :: Map.of(Symbol, FunInfo),
-              // every constructor of every known datatype; generalization
-              // needs it to know what not to hide behind a variable
-              ctors :: Set.of(Symbol))
-
-fun mk_context(thy :: Theory,
-               ~rules: db :: RuleDB = empty_db,
-               ~datatypes: dts :: Map.of(Symbol, DatatypeThms) = {},
-               ~functions: funs :: Map.of(Symbol, FunInfo) = {}) :: Context:
-  let ctors = for values(acc :~ Set = Set()) ((_, dtms) in dts):
-                for values(a :~ Set = acc) (c in (dtms :~ DatatypeThms).spec.ctors):
-                  a ++ {(c :~ Ctor).name}
-  Context(thy, db, dts, funs, ctors)
-
-// Context updates preserve indexes not affected by the declaration. In
-// particular, adding a function does not rebuild the constructor set.
-fun context_with_rules(ctx :: Context, db :: RuleDB) :: Context:
-  Context(ctx.thy, db, ctx.dts, ctx.funs, ctx.ctors)
-
-fun context_add_datatype(ctx :: Context, thy :: Theory, db :: RuleDB,
-                         name :: Symbol, thms :: DatatypeThms) :: Context:
-  let ctors = for values(acc :~ Set = ctx.ctors) (c in thms.spec.ctors):
-               acc ++ {(c :~ Ctor).name}
-  Context(thy, db, ctx.dts ++ {name: thms}, ctx.funs, ctors)
-
-fun context_add_function(ctx :: Context, thy :: Theory, db :: RuleDB,
-                         name :: Symbol, info :: FunInfo) :: Context:
-  Context(thy, db, ctx.dts, ctx.funs ++ {name: info}, ctx.ctors)
 
 // How long a chain of nested inductions the driver will follow.
 //
@@ -112,36 +75,6 @@ fun context_add_function(ctx :: Context, thy :: Theory, db :: RuleDB,
 // is what that claim rests on.
 def max_induction_path = 6
 
-fun stage_simplify(ctx :: Context, g :: Goal) :: maybe(Step):
-  simplify_goal(ctx.thy, ctx.db, g)
-
-fun stage_eliminate(ctx :: Context, g :: Goal) :: maybe(Step):
-  eliminate_goal(ctx.thy, ctx.dts, g)
-
-fun stage_fertilize(ctx :: Context, g :: Goal) :: maybe(Step):
-  fertilize_goal(ctx.thy, g)
-
-fun stage_generalize(ctx :: Context, g :: Goal) :: maybe(Step):
-  generalize_goal(ctx.thy, ctx.db, ctx.ctors, g)
-
-fun stage_irrelevance(ctx :: Context, g :: Goal) :: maybe(Step):
-  eliminate_irrelevance_goal(g)
-
-fun stage_induct(ctx :: Context, g :: Goal, hint :: maybe(FVar)) :: maybe(Step):
-  let vs = (cond
-            | hint: [hint]
-            | ~else: candidate_vars(ctx.funs, ctx.dts, g))
-  recur loop (vs :~ List = vs):
-    match vs
-    | []: #false
-    | List.cons(v, rest):
-        let v :~ FVar = v
-        match inductive_type_name(v)
-        | #false: loop(rest)
-        | tyname:
-            match ctx.dts.get(tyname, #false)
-            | #false: loop(rest)
-            | dtms: induction_step(ctx.thy, dtms :~ DatatypeThms, v, g)
 
 // The recognised `~do_not:` stage names -- see `elab.rhm`'s `parse_tactic`.
 def stage_names :: Set = {#'simplify, #'eliminate, #'fertilize, #'generalize,
@@ -154,16 +87,6 @@ fun check_do_not(do_not :: Set.of(Symbol)) :: Void:
             error.val(~label: "name", n),
             error.val(~label: "understood", to_string(stage_names)))
 
-// A stage named in `do_not` is skipped as if it never applied -- the pipeline
-// falls through to the next one, exactly like an ordinary `#false`.  This can
-// only make a proof fail where it would otherwise have succeeded: skipping a
-// stage never changes what a `Step` is allowed to justify, only whether the
-// driver tries producing one.
-fun stage(do_not :: Set.of(Symbol), name :: Symbol,
-          thunk :: Function.of_arity(0)) :: maybe(Step):
-  cond
-  | do_not.contains(name): #false
-  | ~else: thunk()
 
 // `hint` forces the first induction variable; deeper inductions always choose
 // for themselves.
@@ -194,33 +117,18 @@ fun prove_goal_impl(ctx :: Context, g :: Goal,
     spend_search_step(#'waterfall)
     fun descend(st :: Step, next :: List) :: ProofNode:
       Derived(st, st.subgoals.map(fun (s :: Goal): go(s, next, #false)))
-    // `#false` first in every one of these: `:~` is an assertion, not a
-    // test, so a `Step`-annotated clause placed first would swallow `#false`.
-    match stage(do_not, #'simplify, fun (): stage_simplify(ctx, g))
+    match first_success(ctx, do_not, standard_stages(), g)
     | #false:
-        match stage(do_not, #'eliminate, fun (): stage_eliminate(ctx, g))
-        | #false:
-            match stage(do_not, #'fertilize, fun (): stage_fertilize(ctx, g))
-            | #false:
-                match stage(do_not, #'generalize, fun (): stage_generalize(ctx, g))
-                | #false:
-                    match stage(do_not, #'irrelevance,
-                                fun (): stage_irrelevance(ctx, g))
-                    | #false:
-                        let key = [g.asms, g.concl]
-                        cond
-                        | inducted.length() >= max_induction_path: Open(g)
-                        | inducted.contains(key): Open(g)
-                        | do_not.contains(#'induct): Open(g)
-                        | ~else:
-                            match stage_induct(ctx, g, hint)
-                            | #false: Open(g)
-                            | st: descend(st :~ Step, inducted ++ [key])
-                    | st: descend(st :~ Step, inducted)
-                | st: descend(st :~ Step, inducted)
-            | st: descend(st :~ Step, inducted)
-        | st: descend(st :~ Step, inducted)
-    | st: descend(st :~ Step, inducted)
+        let key = [g.asms, g.concl]
+        cond
+        | inducted.length() >= max_induction_path: Open(g)
+        | inducted.contains(key): Open(g)
+        | do_not.contains(#'induct): Open(g)
+        | ~else:
+            match run_stage(ctx, induction_stage(hint), g)
+            | #false: Open(g)
+            | step: descend(step :~ Step, inducted ++ [key])
+    | step: descend(step :~ Step, inducted)
   go(g, [], hint)
 
 // Prove a closed proposition.  Leading universal quantifiers are stripped
@@ -281,7 +189,7 @@ fun prove_impl(ctx :: Context, statement :: Term,
                             (if (v :~ FVar).name == hint | v | loop(rest))
                   | ~else: #false)
   let node = apply_witnesses(ctx, witnesses, cases, mk_goal([], matrix), hint_var, do_not)
-  match run(node)
+  match run_with_scheduler(sequential_scheduler(), node)
   | #false: values(#false, node)
   | th :~ Thm:
       let closed = GENL(thy, vars, th)

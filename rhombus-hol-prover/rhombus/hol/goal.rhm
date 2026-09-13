@@ -27,6 +27,8 @@ import:
   rhombus/hol/term open
   rhombus/hol/kernel open
   rhombus/hol/printer open
+  "proof/node.rhm" open
+  "proof/run.rhm" open
 
 export:
   Goal
@@ -42,24 +44,6 @@ export:
   is_closed
   show_goal
 
-class Goal(asms :: List.of(Term),
-           concl :: Term,
-           // one line per stage that touched this goal, oldest first; this is
-           // what turns a stuck residue into an actionable message
-           trail :: List.of(String))
-
-class Step(subgoals :: List.of(Goal),
-           justify :: (List.of(Thm) -> Thm))
-
-class.together:
-  class ProofNode():
-    nonfinal
-  class Proved(thm :: Thm):
-    extends ProofNode
-  class Derived(step :: Step, kids :: List.of(ProofNode)):
-    extends ProofNode
-  class Open(goal :: Goal):
-    extends ProofNode
 
 fun mk_goal(asms :: List.of(Term), concl :: Term) :: Goal:
   Goal(asms, concl, [])
@@ -67,32 +51,16 @@ fun mk_goal(asms :: List.of(Term), concl :: Term) :: Goal:
 fun note(g :: Goal, line :~ String) :: Goal:
   Goal(g.asms, g.concl, g.trail ++ [line])
 
-// `#false` when any leaf is still open.
-fun run(n :: ProofNode) :: maybe(Thm):
-  match n
-  | Proved(th): th
-  | Open(_): #false
-  | Derived(step, kids):
-      recur loop (ks :~ List = kids, acc :~ List = []):
-        match ks
-        | []: step.justify(acc)
-        | List.cons(k, rest):
-            match run(k :~ ProofNode)
-            | #false: #false
-            | th: loop(rest, acc ++ [th])
+// Compatibility entry points. Proof execution itself lives in
+// `proof/run.rhm`; callers importing `goal.rhm` retain their API.
+fun run(node :: ProofNode) :: maybe(Thm):
+  execute(node)
 
-fun is_closed(n :: ProofNode) :: Boolean:
-  match n
-  | Proved(_): #true
-  | Open(_): #false
-  | Derived(_, kids): for all (k in kids): is_closed(k)
+fun is_closed(node :: ProofNode) :: Boolean:
+  closed(node)
 
-fun residues(n :: ProofNode) :: List.of(Goal):
-  match n
-  | Proved(_): []
-  | Open(g): [g]
-  | Derived(_, kids):
-      for values(acc :~ List = []) (k in kids): acc ++ residues(k)
+fun residues(node :: ProofNode) :: List.of(Goal):
+  collect_residues(node)
 
 fun show_goal(g :: Goal) :~ String:
   let steps = g.trail.map(fun (l :~ String): "    " ++ l)

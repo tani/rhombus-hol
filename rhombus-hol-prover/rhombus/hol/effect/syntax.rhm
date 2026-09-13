@@ -1,0 +1,71 @@
+#lang rhombus/static
+
+// `effect:` is the surface syntax for a free `Computation`: `<-` sequences a
+// request, ordinary clauses stay in the continuation, and `return` lifts the
+// final plain value. Handlers remain explicit; this syntax never installs one.
+
+import:
+  rhombus/meta open
+  "core.rhm" open
+
+export:
+  effect
+  return
+
+macro 'return $value':
+  'pure($value)'
+
+meta:
+  // `Block` retains its colon wrapper, so lowering first extracts the raw
+  // groups and later rebuilds a scoped block at each generated continuation.
+  fun make_block(groups :: List, context :: Syntax) :: Syntax:
+    Syntax.make([#'block] ++ groups, context)
+
+  fun clause_syntax(group, context :: Syntax) :: Syntax:
+    match group
+    | List.cons(#'group, terms): Syntax.make_group(terms, context)
+    | ~else:
+        syntax_meta.error("internal malformed effect clause", context)
+
+  // Expand the unprocessed tail through `effect:` and retain the resulting
+  // groups, so typed and untyped binds share exactly one continuation path.
+  fun lower_tail(groups :: List, context :: Syntax) :: List:
+    let source = make_block(groups, context)
+    let lowered = 'effect $source'
+    lowered.unwrap_sequence()
+
+  fun continuation_block(groups :: List, context :: Syntax) :: Syntax:
+    make_block(lower_tail(groups, context), context)
+
+  fun lower_effect(groups :: List, context :: Syntax) :: Syntax:
+    match groups
+    | []:
+        syntax_meta.error("an effect block needs a final computation", context)
+    | List.cons(group, rest):
+        let clause = clause_syntax(group, context)
+        match clause
+        | 'let $(name :: Identifier) :: $type ... <- $(computation :: Group)':
+            let continuation = continuation_block(rest, context)
+            'bind($computation, fun ($name :: $type ...) $continuation)'
+        | 'let $(name :: Identifier) <- $(computation :: Group)':
+            let continuation = continuation_block(rest, context)
+            'bind($computation, fun ($name) $continuation)'
+        | 'return $(value :: Group)':
+            unless rest == []
+            | syntax_meta.error("`return` must be the final effect clause",
+                                clause)
+            'pure($value)'
+        | ~else:
+            cond
+            | rest == []:
+                let final_block = make_block([group], context)
+                'block $final_block'
+            | ~else:
+                let content = make_block([group] ++ lower_tail(rest, context),
+                                         context)
+                'block $content'
+
+expr.macro 'effect: $(body :: Block)':
+  match body.unwrap_all()
+  | List.cons(#'block, groups): lower_effect(groups, body)
+  | ~else: syntax_meta.error("internal malformed effect block", body)

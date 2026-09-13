@@ -1,0 +1,54 @@
+#lang rhombus/static
+
+// A small, explicit free computation.  Domain modules construct requests with
+// `perform`; handlers interpret only the operations they own and forward the
+// rest.  Keeping continuations as data fields makes the control boundary
+// inspectable and avoids putting any machinery in the trusted kernel.
+
+class.together:
+  class Computation():
+    nonfinal
+
+  class Pure(value):
+    extends Computation
+
+  class Request(operation :: Symbol, payload, resume :: Function):
+    extends Computation
+
+export:
+  Computation
+  Pure
+  Request
+  pure
+  perform
+  bind
+  map
+  handle
+
+fun pure(value) :: Computation:
+  Pure(value)
+
+fun perform(operation :: Symbol, payload) :: Computation:
+  Request(operation, payload, fun (value): Pure(value))
+
+fun bind(computation :: Computation, next :: Function) :: Computation:
+  match computation
+  | Pure(value): next(value)
+  | Request(operation, payload, resume):
+      Request(operation, payload,
+              fun (value): bind(resume(value), next))
+
+fun map(computation :: Computation, f :: Function) :: Computation:
+  bind(computation, fun (value): pure(f(value)))
+
+// `handler` receives an operation, payload, and a handled resumption.  It
+// returns `#false` to forward the request unchanged, or a computation to
+// interpret it.  Forwarding is what allows independent handlers to compose.
+fun handle(computation :: Computation, handler :: Function) :: Computation:
+  match computation
+  | Pure(_): computation
+  | Request(operation, payload, resume):
+      let handled_resume = fun (value): handle(resume(value), handler)
+      match handler(operation, payload, handled_resume)
+      | #false: Request(operation, payload, handled_resume)
+      | result: result :~ Computation

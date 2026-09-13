@@ -1,0 +1,112 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/effect/core open
+  rhombus/hol/effect/syntax open
+  rhombus/hol/effect/state open
+  rhombus/hol/effect/fail open
+  rhombus/hol/effect/reader open
+
+fun pure_value(computation :: Computation):
+  match computation
+  | Pure(value): value
+
+  | ~else: error(~who: #'pure_value, "expected a completed computation")
+// `effect:` expands `<-` to `bind` and `return` to `pure`.
+check pure_value(return 17) ~is 17
+def effect_debug_subject:
+  effect:
+    let state :: Int <- get()
+    let doubled = state * 2
+    return doubled
+check:
+  let result = run_state(effect_debug_subject, 10)
+  [result.value, result.state]
+  ~is [20, 10]
+
+// `effect:` flattens multiple State requests while preserving their order.
+def effect_sequence_subject:
+  effect:
+    let start <- get()
+    let _ <- put(start + 3)
+    let finish <- get()
+    return finish
+check:
+  let result = run_state(effect_sequence_subject, 5)
+  [result.value, result.state]
+  ~is [8, 8]
+
+// A nested branch returns a computation; `return` keeps its pure branch in
+// the same effect algebra, while the other branch can continue sequencing.
+def effect_branch_subject:
+  effect:
+    let state <- get()
+    cond
+    | state == 0: return 99
+    | ~else:
+        effect:
+          let _ <- put(state + 1)
+          return state
+check:
+  let result = run_state(effect_branch_subject, 0)
+  [result.value, result.state]
+  ~is [99, 0]
+check:
+  let result = run_state(effect_branch_subject, 5)
+  [result.value, result.state]
+  ~is [5, 6]
+
+// Identity handling preserves a request rather than inventing a policy.
+check handle(perform(#'unhandled, 17), fun (_operation, _payload, _resume): #false) ~matches Request(#'unhandled, 17, _)
+
+// A handler can resume a computation, and nested handlers see the residual
+// operation after the inner handler has removed only the operation it owns.
+def nested:
+  handle(handle(perform(#'inner, 40),
+                fun (operation, payload, resume):
+                  if operation == #'inner | resume(payload + 1) | #false),
+         fun (operation, _payload, _resume):
+           if operation == #'outer | return 0 | #false)
+check pure_value(nested) ~is 41
+
+// Reader scopes an immutable environment and restores it after `local`.
+check pure_value(run_reader(ask(), 5)) ~is 5
+check pure_value(run_reader(effect:
+                               let _ <- local(fun (value): value + 1, ask())
+                               ask(),
+                            5)) ~is 5
+check pure_value(run_reader(local(fun (value): value + 1, ask()), 5)) ~is 6
+check run_state(handle_reader(get(), #'ctx), 7) ~matches StateResult(7, 7)
+
+// State requests are sequenced through an explicit handler.
+def state_program:
+  effect:
+    let old <- get()
+    let _ <- put(old + 2)
+    get()
+check:
+  let result = run_state(state_program, 5)
+  [result.value, result.state]
+  ~is [7, 7]
+def modified_state_program:
+  effect:
+    let _ <- modify(fun (value): value * 2)
+    get()
+check:
+  let result = run_state(modified_state_program, 6)
+  [result.value, result.state]
+  ~is [12, 12]
+
+// A handler forwards operations it does not own, so an enclosing failure
+// handler observes the failure and discards the continuation after it.
+def failed_state_program:
+  effect:
+    let _ <- put(9)
+    let _ <- fail(#'unify_mismatch)
+    put(10)
+check handle_state(failed_state_program, 0) ~matches Request(#'failure, #'unify_mismatch, _)
+check run_fail(handle_state(failed_state_program, 0)) ~matches Failed(#'unify_mismatch)
+
+// Completing State with another operation left over is rejected instead of
+// silently applying an ambient handler.
+check run_state(perform(#'unhandled, #void), 0) ~throws "unhandled effect"

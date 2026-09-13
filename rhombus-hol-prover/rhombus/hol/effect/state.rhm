@@ -1,0 +1,51 @@
+#lang rhombus/static
+
+import:
+  "core.rhm" open
+
+// State is a scoped capability. `handle_state` removes only State requests and
+// leaves all other effects available to an enclosing handler.
+
+class StateResult(value, state)
+
+export:
+  StateResult
+  get
+  put
+  modify
+  handle_state
+  run_state
+
+fun get() :: Computation:
+  perform(#'state_get, #void)
+
+fun put(value) :: Computation:
+  perform(#'state_put, value)
+
+fun modify(f :: Function) :: Computation:
+  perform(#'state_modify, f)
+
+fun handle_state(computation :: Computation, initial):
+  fun loop(computation :: Computation, state):
+    match computation
+    | Pure(value): pure(StateResult(value, state))
+    | Request(operation, payload, resume):
+        cond
+        | operation == #'state_get:
+            loop(resume(state), state)
+        | operation == #'state_put:
+            loop(resume(payload), payload)
+        | operation == #'state_modify:
+            let next_state = (payload :~ Function)(state)
+            loop(resume(#void), next_state)
+        | ~else:
+            Request(operation, payload,
+                    fun (value): loop(resume(value), state))
+  loop(computation, initial)
+
+// Use only when State is the last remaining effect.  Other requests are a
+// wiring error, not an implicit policy decision.
+fun run_state(computation :: Computation, initial) :: StateResult:
+  match handle_state(computation, initial)
+  | Pure(result): result :~ StateResult
+  | _: error(~who: #'run_state, "unhandled effect")

@@ -1,8 +1,8 @@
 #lang rhombus/static
 
 // Immutable declaration and proof capabilities. `Context` is durable module
-// state. `ProofContext` is created only under a Reader handler, so proof-local
-// rules and skipped stages cannot be installed in a `HolState` accidentally.
+// state. `ProofEnv` exposes only the logical environment and proof-local rules;
+// `SearchPolicy` separately exposes immutable search configuration.
 
 import:
   rhombus/hol/term open
@@ -10,13 +10,12 @@ import:
   rhombus/hol/datatype/datatype open
   rhombus/hol/recursion/recdef open
   rhombus/hol/logic/ruledb open
-  rhombus/hol/effect/core open
-  rhombus/hol/effect/syntax open
-  rhombus/hol/effect/reader open
+  rhombus/hol/effect/core as effect
 
 export:
   Context
-  ProofContext
+  ProofEnv
+  SearchPolicy
   RuleBinding
   RuleScope
   mk_context
@@ -33,9 +32,72 @@ class Context(thy :: Theory,
               // behind a fresh variable.
               ctors :: Set.of(Symbol))
 
-class ProofContext(base :: Context,
-                   db :: RuleDB,
-                   skipped_stages :: Set.of(Symbol))
+class ProofEnv(base :: Context,
+               db :: RuleDB):
+  class Ask():
+    extends effect.EffectOperation
+  class Local(transform :: Function, body :: effect.Computation):
+    extends effect.EffectOperation
+
+  fun ask() :: effect.Computation:
+    effect.perform(Ask())
+  fun local(transform :: Function,
+            body :: effect.Computation) :: effect.Computation:
+    effect.perform(Local(transform, body))
+  fun handle(environment,
+             computation :: effect.Computation) :: effect.Computation:
+    recur loop (current :: effect.Computation = computation,
+                current_env = environment):
+      match current
+      | effect.Pure(_): current
+      | effect.Request(operation, resume):
+          match operation
+          | Ask(): loop(resume(current_env), current_env)
+          | Local(transform, body):
+              effect.bind(
+                handle(transform(current_env), body),
+                fun (value): loop(resume(value), current_env))
+          | ~else:
+              effect.Request(
+                operation,
+                fun (value): loop(resume(value), current_env))
+  export:
+    ask
+    local
+    handle
+
+class SearchPolicy(skipped_stages :: Set.of(Symbol)):
+  class Ask():
+    extends effect.EffectOperation
+  class Local(transform :: Function, body :: effect.Computation):
+    extends effect.EffectOperation
+
+  fun ask() :: effect.Computation:
+    effect.perform(Ask())
+  fun local(transform :: Function,
+            body :: effect.Computation) :: effect.Computation:
+    effect.perform(Local(transform, body))
+  fun handle(policy,
+             computation :: effect.Computation) :: effect.Computation:
+    recur loop (current :: effect.Computation = computation,
+                current_policy = policy):
+      match current
+      | effect.Pure(_): current
+      | effect.Request(operation, resume):
+          match operation
+          | Ask(): loop(resume(current_policy), current_policy)
+          | Local(transform, body):
+              effect.bind(
+                handle(transform(current_policy), body),
+                fun (value): loop(resume(value), current_policy))
+          | ~else:
+              effect.Request(
+                operation,
+                fun (value): loop(resume(value), current_policy))
+  export:
+    ask
+    local
+    handle
 
 class RuleBinding(name :: Symbol, theorem :: Thm)
 
@@ -65,28 +127,20 @@ fun context_add_function(ctx :: Context, thy :: Theory, db :: RuleDB,
                          name :: Symbol, info :: FunInfo) :: Context:
   Context(thy, db, ctx.dts, ctx.funs ++ {name: info}, ctx.ctors)
 
-// Run `body` under a lexically bound proof environment. The durable `Context`
-// is never transformed: additions, enablement, disabling, and skipped stages
-// exist only in the `ProofContext` supplied to this computation.
+// Each nominal capability owns private operation classes and exports only its
+// semantic API through the class namespace.
+// Build proof-local rule state without changing the durable `Context`, then
+// install the logical environment and search policy as separate capabilities.
+// Other effects are deliberately forwarded to an outer public boundary.
 fun run_proof_scope(ctx :: Context, scope :: RuleScope,
-                    body :: Computation):
-  let scoped:
-    effect:
-      let proof_ctx :: ProofContext <- ask()
-      let db0 = for values(d :~ RuleDB = proof_ctx.db) (binding in scope.using):
-                  let binding :~ RuleBinding = binding
-                  add_thm(proof_ctx.base.thy, d,
-                          binding.name, binding.theorem)
-      let used_names = scope.using.map(
-                         fun (binding :: RuleBinding): binding.name)
-      let db1 = enable(db0, used_names)
-      let db2 = disable(db1, scope.disabled)
-      let scoped_context = ProofContext(
-                             proof_ctx.base, db2,
-                             proof_ctx.skipped_stages ++ scope.skipped_stages)
-      fun install_scoped_context(_):
-        scoped_context
-      local(install_scoped_context, body)
-  match run_reader(scoped, ProofContext(ctx, ctx.db, Set()))
-  | Pure(value): value
-  | ~else: error(~who: #'run_proof_scope, "internal error: unhandled effect")
+                    body :: effect.Computation) :: effect.Computation:
+  let db0 = for values(d :~ RuleDB = ctx.db) (binding in scope.using):
+              let binding :~ RuleBinding = binding
+              add_thm(ctx.thy, d, binding.name, binding.theorem)
+  let used_names = scope.using.map(
+                     fun (binding :: RuleBinding): binding.name)
+  let db1 = enable(db0, used_names)
+  let db2 = disable(db1, scope.disabled)
+  let environment = ProofEnv(ctx, db2)
+  let policy = SearchPolicy(scope.skipped_stages)
+  SearchPolicy.handle(policy, ProofEnv.handle(environment, body))

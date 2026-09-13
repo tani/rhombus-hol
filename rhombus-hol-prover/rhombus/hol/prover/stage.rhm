@@ -1,15 +1,14 @@
 #lang rhombus/static
 
 // Domain-specific waterfall stage algebra. A Stage is intentionally not a
-// generic effect interface: its observable contract is Goal -> maybe(Step).
-// Reader supplies the lexically scoped ProofContext while a handler runs a stage.
+// generic effect interface: its observable contract is Goal -> Computation.
+// Stages request only the proof environment capability they require.
 
 import:
   rhombus/hol/term open
   rhombus/hol/prover/goal open
   rhombus/hol/effect/core open
   rhombus/hol/effect/syntax open
-  rhombus/hol/effect/reader open
   rhombus/hol/prover/tactic/simp open
   rhombus/hol/prover/tactic/destruct open
   rhombus/hol/prover/tactic/fertilize open
@@ -31,45 +30,43 @@ class Stage(name :: Symbol, apply :: Function)
 fun simplify_stage() :: Stage:
   fun apply(goal :: Goal) :: Computation:
     effect:
-      let ctx :: ProofContext <- ask()
-      return simplify_goal(ctx.base.thy, ctx.db, goal)
+      let env :: ProofEnv <- ProofEnv.ask()
+      simplify_goal(env.base.thy, env.db, goal)
   Stage(#'simplify, apply)
 
 fun eliminate_stage() :: Stage:
   fun apply(goal :: Goal) :: Computation:
     effect:
-      let ctx :: ProofContext <- ask()
-      return eliminate_goal(ctx.base.thy, ctx.base.dts, goal)
+      let env :: ProofEnv <- ProofEnv.ask()
+      return eliminate_goal(env.base.thy, env.base.dts, goal)
   Stage(#'eliminate, apply)
 
 fun fertilize_stage() :: Stage:
   fun apply(goal :: Goal) :: Computation:
     effect:
-      let ctx :: ProofContext <- ask()
-      return fertilize_goal(ctx.base.thy, goal)
+      let env :: ProofEnv <- ProofEnv.ask()
+      return fertilize_goal(env.base.thy, goal)
   Stage(#'fertilize, apply)
 
 fun generalize_stage() :: Stage:
   fun apply(goal :: Goal) :: Computation:
     effect:
-      let ctx :: ProofContext <- ask()
-      return generalize_goal(ctx.base.thy, ctx.db, ctx.base.ctors, goal)
+      let env :: ProofEnv <- ProofEnv.ask()
+      return generalize_goal(env.base.thy, env.db, env.base.ctors, goal)
   Stage(#'generalize, apply)
 
 fun irrelevance_stage() :: Stage:
   fun apply(goal :: Goal) :: Computation:
-    effect:
-      let _ctx :: ProofContext <- ask()
-      return eliminate_irrelevance_goal(goal)
+    return eliminate_irrelevance_goal(goal)
   Stage(#'irrelevance, apply)
 
 fun induction_stage(hint :: maybe(FVar)) :: Stage:
   fun apply(goal :: Goal) :: Computation:
     effect:
-      let ctx :: ProofContext <- ask()
+      let env :: ProofEnv <- ProofEnv.ask()
       let candidates = (cond
                         | hint: [hint]
-                        | ~else: candidate_vars(ctx.base.funs, ctx.base.dts, goal))
+                        | ~else: candidate_vars(env.base.funs, env.base.dts, goal))
       recur choose (remaining :~ List = candidates):
         match remaining
         | []: return #false
@@ -78,10 +75,10 @@ fun induction_stage(hint :: maybe(FVar)) :: Stage:
             match inductive_type_name(variable)
             | #false: choose(rest)
             | type_name:
-                match ctx.base.dts.get(type_name, #false)
+                match env.base.dts.get(type_name, #false)
                 | #false: choose(rest)
                 | datatype_thms:
-                    return induction_step(ctx.base.thy,
+                    return induction_step(env.base.thy,
                                           datatype_thms :~ DatatypeThms,
                                           variable, goal)
   Stage(#'induct, apply)
@@ -90,21 +87,22 @@ fun standard_stages() :: List.of(Stage):
   [simplify_stage(), eliminate_stage(), fertilize_stage(), generalize_stage(),
    irrelevance_stage()]
 
-fun run_stage(ctx :: ProofContext, stage :: Stage, goal :: Goal) :: maybe(Step):
-  match run_reader(stage.apply(goal), ctx)
-  | Pure(result): result
-  | ~else: error(~who: #'run_stage, "internal error: unhandled effect")
+fun run_stage(stage :: Stage, goal :: Goal) :: Computation:
+  stage.apply(goal)
 
-fun first_success(ctx :: ProofContext,
-                  stages :: List.of(Stage), goal :: Goal) :: maybe(Step):
-  recur loop (remaining :~ List = stages):
-    match remaining
-    | []: #false
-    | List.cons(candidate, rest):
-        let candidate :~ Stage = candidate
-        cond
-        | ctx.skipped_stages.contains(candidate.name): loop(rest)
-        | ~else:
-            match run_stage(ctx, candidate, goal)
-            | #false: loop(rest)
-            | step: step
+fun first_success(stages :: List.of(Stage), goal :: Goal) :: Computation:
+  effect:
+    let policy :: SearchPolicy <- SearchPolicy.ask()
+    recur loop (remaining :~ List = stages):
+      match remaining
+      | []: return #false
+      | List.cons(candidate, rest):
+          let candidate :~ Stage = candidate
+          cond
+          | policy.skipped_stages.contains(candidate.name): loop(rest)
+          | ~else:
+              effect:
+                let result <- run_stage(candidate, goal)
+                match result
+                | #false: loop(rest)
+                | step: return step

@@ -15,8 +15,6 @@ import:
   rhombus/hol/htype open
   rhombus/hol/effect/core open
   rhombus/hol/effect/syntax open
-  rhombus/hol/effect/state open
-  rhombus/hol/effect/fail open
 
 export:
   type_unify
@@ -31,6 +29,68 @@ class.together:
   class TypeMismatch(left :: HType, right :: HType):
     extends UnifyError
 
+class Substitution():
+  class Get():
+    extends EffectOperation
+  class Put(value):
+    extends EffectOperation
+  class Modify(transform :: Function):
+    extends EffectOperation
+  class Result(value, substitution)
+
+  fun get() :: Computation:
+    perform(Get())
+  fun put(value) :: Computation:
+    perform(Put(value))
+  fun modify(transform :: Function) :: Computation:
+    perform(Modify(transform))
+  fun handle(initial, computation :: Computation) :: Computation:
+    recur loop (current :: Computation = computation,
+                substitution = initial):
+      match current
+      | Pure(value): Pure(Result(value, substitution))
+      | Request(operation, resume):
+          match operation
+          | Get():
+              loop(resume(substitution), substitution)
+          | Put(value):
+              loop(resume(value), value)
+          | Modify(transform):
+              let next = transform(substitution)
+              loop(resume(#void), next)
+          | ~else:
+              Request(operation,
+                      fun (value): loop(resume(value), substitution))
+  export:
+    Result
+    get
+    put
+    modify
+    handle
+
+class UnifyFailure():
+  class Fail(reason):
+    extends EffectOperation
+  class Failed(reason):
+    extends Computation
+
+  fun fail(reason) :: Computation:
+    perform(Fail(reason))
+  fun handle(computation :: Computation) :: Computation:
+    match computation
+    | Pure(_): computation
+    | Failed(_): computation
+    | Request(operation, resume):
+        match operation
+        | Fail(reason): Failed(reason)
+        | ~else:
+            Request(operation,
+                    fun (value): handle(resume(value)))
+  export:
+    Failed
+    fail
+    handle
+
 // Follow substitutions through variables. The lookup is deliberately an
 // effect request: recursive unification never receives an explicit
 // substitution parameter.
@@ -38,7 +98,7 @@ fun resolve(t :: HType) :: Computation:
   match t
   | TyVar(n):
       effect:
-        let substitution :: Map.of(Symbol, HType) <- get()
+        let substitution :: Map.of(Symbol, HType) <- Substitution.get()
         match substitution.get(n, #false)
         | #false: return t
         | next: resolve(next)
@@ -46,21 +106,21 @@ fun resolve(t :: HType) :: Computation:
 
 fun bind_variable(name :: Symbol, value :: HType) :: Computation:
   effect:
-    let substitution :: Map.of(Symbol, HType) <- get()
+    let substitution :: Map.of(Symbol, HType) <- Substitution.get()
     let value = type_subst(substitution, value)
     cond
     | value is_a TyVar && (value :~ TyVar).name == name:
         return #void
     | type_occurs(name, value):
-        fail(OccursCheck(name, value))
+        UnifyFailure.fail(OccursCheck(name, value))
     | ~else:
         effect:
-          let _ <- put(substitution ++ {name: value})
+          let _ <- Substitution.put(substitution ++ {name: value})
           return #void
 
-// The pilot's internal API: state is the substitution and semantic failure is
-// an explicit `UnifyError`. It has no public caller yet; `type_unify` below
-// installs the handlers and preserves the existing result contract.
+// Unification owns two nominal capabilities: substitution state and semantic
+// failure. `type_unify` installs both handlers and preserves the existing
+// result contract.
 fun unify(a :: HType, b :: HType) :: Computation:
   fun unify_arguments(left :: List.of(HType), right :: List.of(HType))
       :: Computation:
@@ -68,14 +128,14 @@ fun unify(a :: HType, b :: HType) :: Computation:
     | []:
         match right
         | []: return #void
-        | ~else: fail(TypeMismatch(a, b))
+        | ~else: UnifyFailure.fail(TypeMismatch(a, b))
     | List.cons(first, rest):
         match right
         | List.cons(other, others):
             effect:
               let _ <- unify(first, other)
               unify_arguments(rest, others)
-        | ~else: fail(TypeMismatch(a, b))
+        | ~else: UnifyFailure.fail(TypeMismatch(a, b))
   fun after_left(left :: HType) :: Computation:
     fun after_right(right :: HType) :: Computation:
       match left
@@ -85,7 +145,7 @@ fun unify(a :: HType, b :: HType) :: Computation:
           | TyVar(name): bind_variable(name, left)
           | TyApp(right_name, right_args) when left_name == right_name:
               unify_arguments(left_args, right_args)
-          | ~else: fail(TypeMismatch(left, right))
+          | ~else: UnifyFailure.fail(TypeMismatch(left, right))
     effect:
       let right :: HType <- resolve(b)
       after_right(right)
@@ -95,7 +155,7 @@ fun unify(a :: HType, b :: HType) :: Computation:
 
 fun type_unify(a :: HType, b :: HType, initial :: Map.of(Symbol, HType))
      :: maybe(Map.of(Symbol, HType)):
-  match run_fail(handle_state(unify(a, b), initial))
-  | Pure(StateResult(_, substitution)): substitution
-  | Failed(_): #false
+  match UnifyFailure.handle(Substitution.handle(initial, unify(a, b)))
+  | Pure(Substitution.Result(_, substitution)): substitution
+  | UnifyFailure.Failed(_): #false
   | ~else: error(~who: #'type_unify, "internal error: unhandled effect")

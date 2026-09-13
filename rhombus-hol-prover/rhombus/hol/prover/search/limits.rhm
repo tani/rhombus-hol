@@ -20,14 +20,15 @@
 // silently continue down a path whose search had been abandoned, and the
 // failure would surface somewhere else entirely.
 //
-// The `Box` here is not state that any theorem depends on.  It counts steps
-// within one call and is discarded; theorems remain what the kernel's rules
-// made them.
+// Accounting state is carried by the handler recursion. Search code receives
+// only the domain-specific permission to spend one step.
+
+import:
+  rhombus/hol/effect/core open
 
 export:
   SearchLimits
-  with_search_limits
-  spend_search_step
+  SearchBudget
 
 // One number, not two.  A depth limit would be redundant: every level of a
 // bounded traversal spends a step before it recurs, so the step count bounds
@@ -35,32 +36,41 @@ export:
 // to tune wrongly.
 class SearchLimits(steps :: NonnegInt = 200000)
 
-class SearchBudget(limits :: SearchLimits, remaining :: Box)
+class SearchBudget():
+  class Spend(who :: Symbol):
+    extends EffectOperation
 
-Parameter.def current_search_budget :: maybe(SearchBudget) = #false
+  fun spend(who :: Symbol) :: Computation:
+    perform(Spend(who))
 
-// Establish a budget, or join the one already running.  Joining is the whole
-// point: the outermost search owns the allowance and everything under it
-// spends from the same pot.
-fun with_search_limits(thunk :: Function.of_arity(0),
-                       ~limits: limits :: SearchLimits = SearchLimits()):
-  match current_search_budget()
-  | #false:
-      parameterize { current_search_budget: SearchBudget(limits,
-                                                         Box(limits.steps)) }:
-        thunk()
-  | _: thunk()
+  // Interpret only SearchBudget requests and forward every other capability.
+  // The remaining allowance is immutable state threaded through this handler.
+  fun handle(limits :: SearchLimits, computation :: Computation)
+      :: Computation:
+    recur loop (current :: Computation = computation,
+                remaining :: NonnegInt = limits.steps):
+      match current
+      | Pure(_): current
+      | Request(operation, resume):
+          match operation
+          | Spend(who):
+              when remaining == 0
+              | error(~who: who, "proof-search step limit exceeded",
+                      error.val(~label: "limit", limits.steps))
+              loop(resume(#void), remaining - 1)
+          | ~else:
+              Request(operation,
+                      fun (value): loop(resume(value), remaining))
 
-fun spend_search_step(who :: Symbol) :: Void:
-  match current_search_budget()
-  | #false:
-      // Not a resource failure: a caller reached search without opening a
-      // scope, which is a wiring mistake and should read as one.
-      error(~who: who, "internal error: proof search ran outside a resource scope")
-  | budget :: SearchBudget:
-      let left :: NonnegInt = budget.remaining.value
-      when left == 0
-      | error(~who: who, "proof-search step limit exceeded",
-              error.val(~label: "limit", budget.limits.steps))
-      budget.remaining.value := left - 1
+  // Use at a public boundary after every other required capability handler
+  // has been installed. Residual operations indicate a wiring error.
+  fun run(limits :: SearchLimits, computation :: Computation):
+    match handle(limits, computation)
+    | Pure(value): value
+    | _: error(~who: #'search_budget, "unhandled effect")
+
+  export:
+    spend
+    handle
+    run
 

@@ -17,6 +17,7 @@ import:
   rhombus/hol/prover/goal open
   rhombus/hol/prover/tactic/simp open
   rhombus/hol/prover/tactic/general open
+  rhombus/hol/prover/search/limits open
   "spec_prelude.rhm" open
 
 def P = prelude
@@ -109,7 +110,8 @@ check:
 check:
   // and so it does not match a different list
   let d = add_thm(thy, empty_db, #'asm, ASSUME(thy, mk_eq(len_(xs), n)))
-  [db_conv(d)(thy, len_(xs)) != #false, db_conv(d)(thy, len_(ys)) != #false]
+  [SearchBudget.run(SearchLimits(), db_conv(d)(thy, len_(xs))) != #false,
+   SearchBudget.run(SearchLimits(), db_conv(d)(thy, len_(ys))) != #false]
   ~is [#true, #false]
 check:
   let th = REFL(thy, len_(xs))
@@ -187,8 +189,8 @@ check:
   let comm = mk_forall_list([m, n], mk_eq(plus_(m, n), plus_(n, m)))
   let (t2, th) = new_axiom(thy, comm)
   let d = add_thm(t2, empty_db, #'plus_comm, th)
-  let down = db_conv(d)(t2, plus_(n, m))
-  let up = db_conv(d)(t2, plus_(m, n))
+  let down = SearchBudget.run(SearchLimits(), db_conv(d)(t2, plus_(n, m)))
+  let up = SearchBudget.run(SearchLimits(), db_conv(d)(t2, plus_(m, n)))
   [down != #false, up != #false]
   ~is [#true, #false]
 check:
@@ -204,21 +206,24 @@ check:
 // the first real theorem, by simplification alone
 // ==========================================================================
 
+fun run_simplify(g :: Goal):
+  SearchBudget.run(SearchLimits(), simplify_goal(thy, defs, g))
+
 check:
   let g = mk_goal([], mk_eq(app_(nil_n, ys), ys))
-  let st = simplify_goal(thy, defs, g) :~ Step
+  let st = run_simplify(g) :~ Step
   let th = st.justify([])
   [show(concl_of(th)), hyps_of(th), st.subgoals.length()]
   ~is ["app(nil, ys) === ys", [], 0]
 check:
   // and it really is a kernel theorem in the prelude's theory
   let g = mk_goal([], mk_eq(app_(nil_n, ys), ys))
-  let th = (simplify_goal(thy, defs, g) :~ Step).justify([])
+  let th = (run_simplify(g) :~ Step).justify([])
   descends(stamp_of(th), thy.stamp)
   ~is #true
 check:
   let g = mk_goal([], mk_eq(len_(cons_(n, nil_n)), ap1(P.succ, P.zero)))
-  let th = (simplify_goal(thy, defs, g) :~ Step).justify([])
+  let th = (run_simplify(g) :~ Step).justify([])
   show(concl_of(th))
   ~is "length(cons(n, nil)) === succ(zero)"
 
@@ -227,7 +232,7 @@ check:
 check:
   let ih = mk_eq(app_(xs, nil_n), xs)
   let g = mk_goal([ih], mk_eq(cons_(n, app_(xs, nil_n)), cons_(n, xs)))
-  let st = simplify_goal(thy, defs, g) :~ Step
+  let st = run_simplify(g) :~ Step
   let th = st.justify([])
   [show(concl_of(th)), st.subgoals.length(), hyps_of(th).length()]
   ~is ["cons(n, app(xs, nil)) === cons(n, xs)", 0, 1]
@@ -235,12 +240,12 @@ check:
 // a goal that only partly simplifies leaves a smaller goal behind
 check:
   let g = mk_goal([], mk_eq(app_(cons_(n, nil_n), ys), ys))
-  let st = simplify_goal(thy, defs, g) :~ Step
+  let st = run_simplify(g) :~ Step
   [st.subgoals.length(), show((st.subgoals[0] :~ Goal).concl)]
   ~is [1, "cons(n, ys) === ys"]
 check:
   let g = mk_goal([], mk_eq(app_(xs, ys), app_(xs, ys)))
-  simplify_goal(thy, defs, mk_goal([], mk_eq(xs, ys)))
+  run_simplify(mk_goal([], mk_eq(xs, ys)))
   ~is #false
 
 // ==========================================================================

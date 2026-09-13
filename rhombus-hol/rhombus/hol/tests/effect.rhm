@@ -3,9 +3,6 @@
 import:
   rhombus/hol/effect/core open
   rhombus/hol/effect/syntax open
-  rhombus/hol/effect/state open
-  rhombus/hol/effect/fail open
-  rhombus/hol/effect/reader open
 
 class TestUnhandled(value):
   extends EffectOperation
@@ -16,63 +13,145 @@ class TestInner(value):
 class TestOuter():
   extends EffectOperation
 
+class TestReaderA():
+  class Ask():
+    extends EffectOperation
+  class Local(transform :: Function, body :: Computation):
+    extends EffectOperation
+
+  fun ask() :: Computation:
+    perform(Ask())
+  fun local(transform :: Function, body :: Computation) :: Computation:
+    perform(Local(transform, body))
+  fun handle(environment, computation :: Computation) :: Computation:
+    recur loop (current :: Computation = computation,
+                current_env = environment):
+      match current
+      | Pure(_): current
+      | Request(operation, resume):
+          match operation
+          | Ask(): loop(resume(current_env), current_env)
+          | Local(transform, body):
+              bind(handle(transform(current_env), body),
+                   fun (value): loop(resume(value), current_env))
+          | ~else:
+              Request(operation,
+                      fun (value): loop(resume(value), current_env))
+  export:
+    ask
+    local
+    handle
+
+class TestReaderB():
+  class Ask():
+    extends EffectOperation
+
+  fun ask() :: Computation:
+    perform(Ask())
+  fun handle(environment, computation :: Computation) :: Computation:
+    recur loop (current :: Computation = computation):
+      match current
+      | Pure(_): current
+      | Request(operation, resume):
+          match operation
+          | Ask(): loop(resume(environment))
+          | ~else:
+              Request(operation, fun (value): loop(resume(value)))
+  export:
+    ask
+    handle
+
+class TestState():
+  class Get():
+    extends EffectOperation
+  class Put(value):
+    extends EffectOperation
+  class Modify(transform :: Function):
+    extends EffectOperation
+  class Result(value, state)
+
+  fun get() :: Computation:
+    perform(Get())
+  fun put(value) :: Computation:
+    perform(Put(value))
+  fun modify(transform :: Function) :: Computation:
+    perform(Modify(transform))
+  fun handle(initial, computation :: Computation) :: Computation:
+    recur loop (current :: Computation = computation,
+                state = initial):
+      match current
+      | Pure(value): Pure(Result(value, state))
+      | Request(operation, resume):
+          match operation
+          | Get(): loop(resume(state), state)
+          | Put(value): loop(resume(value), value)
+          | Modify(transform):
+              let next = transform(state)
+              loop(resume(#void), next)
+          | ~else:
+              Request(operation,
+                      fun (value): loop(resume(value), state))
+  export:
+    Result
+    get
+    put
+    modify
+    handle
+
+class TestFailure():
+  class Fail(reason):
+    extends EffectOperation
+  class Failed(reason):
+    extends Computation
+
+  fun fail(reason) :: Computation:
+    perform(Fail(reason))
+  fun handle(computation :: Computation) :: Computation:
+    match computation
+    | Pure(_): computation
+    | Failed(_): computation
+    | Request(operation, resume):
+        match operation
+        | Fail(reason): Failed(reason)
+        | ~else:
+            Request(operation,
+                    fun (value): handle(resume(value)))
+  export:
+    Failed
+    fail
+    handle
+
 fun pure_value(computation :: Computation):
   match computation
   | Pure(value): value
-
   | ~else: error(~who: #'pure_value, "expected a completed computation")
+
+fun state_result(initial, computation :: Computation) :: TestState.Result:
+  match TestState.handle(initial, computation)
+  | Pure(result): result :~ TestState.Result
+  | ~else: error(~who: #'state_result, "expected completed state computation")
+
 // `effect:` expands `<-` to `bind` and `return` to `pure`.
 check pure_value(return 17) ~is 17
-def effect_debug_subject:
-  effect:
-    let state :: Int <- get()
-    let doubled = state * 2
-    return doubled
-check:
-  let result = run_state(effect_debug_subject, 10)
-  [result.value, result.state]
-  ~is [20, 10]
 
-// `effect:` flattens multiple State requests while preserving their order.
 def effect_sequence_subject:
   effect:
-    let start <- get()
-    let _ <- put(start + 3)
-    let finish <- get()
-    return finish
+    let start <- TestState.get()
+    let _ <- TestState.put(start + 3)
+    let _ <- TestState.modify(fun (value): value * 2)
+    TestState.get()
 check:
-  let result = run_state(effect_sequence_subject, 5)
+  let result = state_result(5, effect_sequence_subject)
   [result.value, result.state]
-  ~is [8, 8]
+  ~is [16, 16]
 
-// A nested branch returns a computation; `return` keeps its pure branch in
-// the same effect algebra, while the other branch can continue sequencing.
-def effect_branch_subject:
-  effect:
-    let state <- get()
-    cond
-    | state == 0: return 99
-    | ~else:
-        effect:
-          let _ <- put(state + 1)
-          return state
-check:
-  let result = run_state(effect_branch_subject, 0)
-  [result.value, result.state]
-  ~is [99, 0]
-check:
-  let result = run_state(effect_branch_subject, 5)
-  [result.value, result.state]
-  ~is [5, 6]
-
-// Identity handling preserves a typed request rather than inventing a policy.
+// Identity handling preserves an operation rather than inventing a policy.
 check:
   handle(perform(TestUnhandled(17)),
          fun (_operation, _resume): #false)
   ~matches Request(TestUnhandled(17), _)
 
-// A handler can resume a computation, and an enclosing handler sees the typed
-// residual operation that the inner handler deliberately forwards.
+// An inner handler forwards operations owned by an enclosing handler.
 def nested_subject:
   effect:
     let value <- perform(TestInner(40))
@@ -90,44 +169,34 @@ def nested:
            | ~else: #false)
 check pure_value(nested) ~is 41
 
-// Reader scopes an immutable environment and restores it after `local`.
-check pure_value(run_reader(ask(), 5)) ~is 5
-check pure_value(run_reader(effect:
-                               let _ <- local(fun (value): value + 1, ask())
-                               ask(),
-                            5)) ~is 5
-check pure_value(run_reader(local(fun (value): value + 1, ask()), 5)) ~is 6
-check run_state(handle_reader(get(), #'ctx), 7) ~matches StateResult(7, 7)
-
-// State requests are sequenced through an explicit handler.
-def state_program:
+// Reader operation identity belongs to the capability, not a global family.
+def dual_reader_subject:
   effect:
-    let old <- get()
-    let _ <- put(old + 2)
-    get()
+    let a <- TestReaderA.ask()
+    let b <- TestReaderB.ask()
+    return [a, b]
 check:
-  let result = run_state(state_program, 5)
-  [result.value, result.state]
-  ~is [7, 7]
-def modified_state_program:
+  pure_value(TestReaderA.handle(5, TestReaderB.handle(8, dual_reader_subject)))
+  ~is [5, 8]
+
+// `local` changes one capability temporarily and restores its environment.
+def local_reader_subject:
   effect:
-    let _ <- modify(fun (value): value * 2)
-    get()
+    let inside <- TestReaderA.local(fun (value): value + 1,
+                                    TestReaderA.ask())
+    let outside <- TestReaderA.ask()
+    return [inside, outside]
+check pure_value(TestReaderA.handle(5, local_reader_subject)) ~is [6, 5]
+
+// State forwards a failure it does not own; the failure handler then aborts.
+def failed_state_subject:
+  effect:
+    let _ <- TestState.put(9)
+    let _ <- TestFailure.fail(#'unify_mismatch)
+    TestState.put(10)
 check:
-  let result = run_state(modified_state_program, 6)
-  [result.value, result.state]
-  ~is [12, 12]
-
-// A handler forwards operations it does not own, so an enclosing failure
-// handler observes the failure and discards the continuation after it.
-def failed_state_program:
-  effect:
-    let _ <- put(9)
-    let _ <- fail(#'unify_mismatch)
-    put(10)
-check handle_state(failed_state_program, 0) ~matches Request(Failure(#'unify_mismatch), _)
-check run_fail(handle_state(failed_state_program, 0)) ~matches Failed(#'unify_mismatch)
-
-// Completing State with another operation left over is rejected instead of
-// silently applying an ambient handler.
-check run_state(perform(TestUnhandled(#void)), 0) ~throws "unhandled effect"
+  TestState.handle(0, failed_state_subject)
+  ~matches Request(_, _)
+check:
+  TestFailure.handle(TestState.handle(0, failed_state_subject))
+  ~matches TestFailure.Failed(#'unify_mismatch)

@@ -88,7 +88,7 @@ actually recurse on --- the same information the termination checker produced,
 so the prover inducts the way the definitions recurse. @rhombus(induct(variable), ~datum)
 overrides the choice.
 
-Nested induction is bounded at depth two. That constant is not a tuning budget;
+Nested induction is bounded at depth six. That constant is not a tuning budget;
 it is what makes the driver a function rather than a search. Induction
 introduces fresh variables of the same type, so without a bound the prover
 would induct forever.
@@ -148,3 +148,11 @@ and those functions are composed only when every leaf is closed. The only
 theorems that exist are the ones the kernel made, so a bug in a stage can make
 the prover fail to find a proof, or find an unnecessary one, but cannot make it
 report a proof that does not exist.
+
+Logical @tt{Goal} values contain only assumptions and a conclusion. Stages
+attach a typed trace event to each generated subgoal; the orchestration layer
+scopes those events while constructing the proof tree, and only a failed
+@tt{Residue} retains them. Terms and symbols are converted to display strings
+only when the residue message is rendered. Proof-tree execution is likewise a
+scoped scheduler capability, with deterministic sequential execution as the
+default policy.

@@ -18,6 +18,8 @@ import:
   rhombus/hol/logic/ruledb open
   rhombus/hol/prover/search/limits open
   rhombus/meta open
+  rhombus/hol/effect/core open
+  rhombus/hol/effect/syntax open
 
 
 def nt = mk_tyapp(#'n, [])
@@ -48,12 +50,20 @@ check:
   outcome(db, a)
   ~is "raised: simplify: rewrite cycle detected"
 
-// -- a rule that grows its argument forever stops too ------------------------
+// -- an explicit limit applies to an effectful simplifier invocation ---------
 check:
   let db = add_thm(thy, empty_db, #'grow,
                    ASSUME(thy, mk_eq(a, mk_comb(h, a))))
-  let result = with_search_limits(fun (): outcome(db, a), ~limits: SearchLimits(32)) :~ String
-  result.substring(0, 6)
+  let run:
+    fun ():
+      try:
+        block:
+          let result = SearchBudget.run(
+                         SearchLimits(32),
+                         simp_conv_effect(db)(thy, a))
+          (if result | "rewritten" | "no rewrite")
+        ~catch e :: Exn.Fail: "raised"
+  run()
   ~is "raised"
 
 // -- and an ordinary rewrite is unaffected -----------------------------------
@@ -62,32 +72,44 @@ check:
   outcome(db, mk_comb(h, a))
   ~is "ok: h(a) === h(b)"
 
-// -- the budget is shared with nested searches -------------------------------
+// -- nested computations share one immutable handler state ------------------
 //
-// This is the property that makes the bound mean anything: discharging a
-// rewrite rule's side condition rewrites in turn, and if that inner search
-// opened a fresh allowance the limit would bound nothing.
-def counted = Box(0)
+// Composing computations must not install a new allowance. Eleven spends
+// across two nested calls therefore exhaust a ten-step budget.
+fun spend_steps(count :: NonnegInt) :: Computation:
+  recur loop (remaining :: NonnegInt = count):
+    cond
+    | remaining == 0: return count
+    | ~else:
+        effect:
+          let _ <- SearchBudget.spend(#'test)
+          loop(remaining - 1)
 
-fun drain():
-  // spend one here, then a nested scope spends until exhaustion; the nested
-  // scope must inherit what is left rather than start over
-  spend_search_step(#'test)
-  try:
-    block:
-      with_search_limits(fun ():
-                           recur loop (n = 0):
-                             spend_search_step(#'test)
-                             counted.value := n + 1
-                             loop(n + 1))
-      "no error"
-    ~catch e :: Exn.Fail: "raised"
+def nested_budget_subject:
+  effect:
+    let _ <- spend_steps(4)
+    spend_steps(7)
 
 check:
-  with_search_limits(drain, ~limits: SearchLimits(10))
-  ~is "raised"
-// nine left after the outer one, so the inner loop got nine and no more
-check counted.value ~is 9
+  SearchBudget.run(SearchLimits(10), spend_steps(10))
+  ~is 10
+check:
+  SearchBudget.run(SearchLimits(10), nested_budget_subject)
+  ~throws "proof-search step limit exceeded"
+
+// -- conditional rewriting spends from that same budget ---------------------
+//
+// `db_conv` itself requests no step. A zero allowance therefore reaches the
+// conditional rule, but discharging its reflexive premise must request budget
+// through the nested simplifier and fail.
+check:
+  let premise = mk_eq(a, a)
+  let target = mk_comb(h, a)
+  let (thy2, conditional) = new_axiom(
+                              thy, mk_imp(premise, mk_eq(target, b)))
+  let db = add_thm(thy2, empty_db, #'conditional, conditional)
+  SearchBudget.run(SearchLimits(0), db_conv(db)(thy2, target))
+  ~throws "proof-search step limit exceeded"
 
 // -- the budget is a proof option --------------------------------------------
 //

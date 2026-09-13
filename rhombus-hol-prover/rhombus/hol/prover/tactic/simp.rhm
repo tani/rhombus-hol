@@ -27,6 +27,9 @@ import:
   rhombus/hol/logic/drule open
   rhombus/hol/logic/ruledb open
   rhombus/hol/prover/goal open
+  rhombus/hol/prover/trace open
+  rhombus/hol/effect/core open
+  rhombus/hol/effect/syntax open
 
 export:
   with_assumptions
@@ -47,23 +50,30 @@ fun with_assumptions(thy :: Theory, db :: RuleDB,
 // Using all of them would let an assumption rewrite itself to `true`, which
 // discards it, and would let two assumptions rewrite each other without end.
 fun simplify_asms(thy :: Theory, db :: RuleDB,
-                  asms :: List.of(Term)) :: maybe(List.of(Thm)):
+                  asms :: List.of(Term)) :: Computation:
   recur loop (i = 0, seen :~ List = [], acc :~ List = [], changed = #false):
     cond
-    | i >= asms.length(): (if changed | acc | #false)
+    | i >= asms.length(): return (if changed | acc | #false)
     | ~else:
         let a = asms[i]
-        match simp_conv(with_assumptions(thy, db, seen))(thy, a)
-        | #false: loop(i + 1, seen ++ [a], acc ++ [REFL(thy, a)], changed)
-        | eq :~ Thm:
-            loop(i + 1, seen ++ [a], acc ++ [eq], changed || rhs_of(eq) != a)
+        effect:
+          let rewritten <- simp_conv_effect(
+                               with_assumptions(thy, db, seen))(thy, a)
+          match rewritten
+          | #false:
+              loop(i + 1, seen ++ [a], acc ++ [REFL(thy, a)], changed)
+          | eq :~ Thm:
+              loop(i + 1, seen ++ [a], acc ++ [eq],
+                   changed || rhs_of(eq) != a)
 
 // Keep binders and antecedents intact at simplification time. The induction
 // and generalization stages need that structure for termination obligations.
-fun simplify_goal(thy :: Theory, db :: RuleDB, g :: Goal) :: maybe(Step):
-  match simplify_asms(thy, db, g.asms)
-  | #false: simplify_concl(thy, db, g)
-  | eqs: rebuild_asms(thy, db, g, eqs :~ List)
+fun simplify_goal(thy :: Theory, db :: RuleDB, g :: Goal) :: Computation:
+  effect:
+    let eqs <- simplify_asms(thy, db, g.asms)
+    match eqs
+    | #false: simplify_concl(thy, db, g)
+    | eqs: return rebuild_asms(thy, db, g, eqs :~ List)
 
 // One assumption reduced to `false` closes the goal; otherwise the goal is
 // replaced by the one with reduced assumptions.
@@ -79,14 +89,14 @@ fun rebuild_asms(thy :: Theory, db :: RuleDB, g :: Goal,
     cond
     | i >= eqs.length():
         let asms2 = eqs.map(rhs_of)
-        let sub = note(Goal(asms2, g.concl, g.trail), "simplification")
+        let sub = Goal(asms2, g.concl)
         fun restore_assumptions(ths :: List.of(Thm)) :: Thm:
           for values(th :~ Thm = ths[0]) (bridge in bridges):
             PROVE_HYP(thy, bridge, th)
-        Step([sub], restore_assumptions)
+        Step([sub], restore_assumptions, [Simplified()])
     | rhs_of(eqs[i]) == tm_false:
         let contra = bridges[i]
-        Step([], fun (_ :: List.of(Thm)): CONTR(thy, g.concl, contra))
+        Step([], fun (_ :: List.of(Thm)): CONTR(thy, g.concl, contra), [])
     | ~else: find(i + 1)
 
 // Turn equality between functions into pointwise equality only after ordinary
@@ -102,27 +112,31 @@ fun extensionalize_concl(thy :: Theory, g :: Goal) :: maybe(Step):
           let (domain, _) = dest_fun(fty)
           let x = variant(g.asms ++ [g.concl], mk_var(#'x, domain))
           let pointwise = mk_eq(mk_comb(f, x), mk_comb(h, x))
-          let sub = note(Goal(g.asms, pointwise, g.trail), "function extensionality")
-          Step([sub], fun (ths :: List.of(Thm)): EXT(thy, x, ths[0]))
+          let sub = Goal(g.asms, pointwise)
+          Step([sub], fun (ths :: List.of(Thm)): EXT(thy, x, ths[0]),
+               [FunctionExtensionalized()])
   | ~else: #false
 
-fun simplify_concl(thy :: Theory, db :: RuleDB, g :: Goal) :: maybe(Step):
+fun simplify_concl(thy :: Theory, db :: RuleDB, g :: Goal) :: Computation:
   cond
   | g.concl == tm_true:
-      Step([], fun (_ :: List.of(Thm)): TRUTH(thy))
+      return Step([], fun (_ :: List.of(Thm)): TRUTH(thy), [])
   | ~else:
       let db2 = with_assumptions(thy, db, g.asms)
-      match simp_conv(db2)(thy, g.concl)
-      | #false: extensionalize_concl(thy, g)
-      | eqth :~ Thm:
-          let simplified = rhs_of(eqth)
-          cond
-          | simplified == g.concl: extensionalize_concl(thy, g)
-          | simplified == tm_true:
-              // `|- concl === true`, so the goal is closed outright.
-              Step([], fun (_ :: List.of(Thm)): EQT_ELIM(thy, eqth))
-          | ~else:
-              let sub = note(Goal(g.asms, simplified, g.trail), "simplification")
-              fun restore_conclusion(ths :: List.of(Thm)) :: Thm:
-                EQ_MP(SYM(thy, eqth), ths[0])
-              Step([sub], restore_conclusion)
+      effect:
+        let rewritten <- simp_conv_effect(db2)(thy, g.concl)
+        match rewritten
+        | #false: return extensionalize_concl(thy, g)
+        | eqth :~ Thm:
+            let simplified = rhs_of(eqth)
+            cond
+            | simplified == g.concl:
+                return extensionalize_concl(thy, g)
+            | simplified == tm_true:
+                // `|- concl === true`, so the goal is closed outright.
+                return Step([], fun (_ :: List.of(Thm)): EQT_ELIM(thy, eqth), [])
+            | ~else:
+                let sub = Goal(g.asms, simplified)
+                fun restore_conclusion(ths :: List.of(Thm)) :: Thm:
+                  EQ_MP(SYM(thy, eqth), ths[0])
+                return Step([sub], restore_conclusion, [Simplified()])

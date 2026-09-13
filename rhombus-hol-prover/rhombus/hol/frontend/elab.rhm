@@ -27,8 +27,8 @@ import:
   rhombus/hol/logic/bool open
   rhombus/hol/frontend/tyunify open
   rhombus/hol/effect/core open
+  rhombus/hol/effect/core as effect
   rhombus/hol/effect/syntax open
-  rhombus/hol/effect/reader open
 
 export:
   parse_type_decl
@@ -362,7 +362,7 @@ export:
   elaborate_function_decl
   core_type_vars
   parse_tactic
-  PEnv
+  ElabEnv
   elaborate_effect
   parse_type_effect
   run_type_elaboration
@@ -373,17 +373,46 @@ export:
 // `self_name` and `self` are the definition being elaborated, so that a
 // recursive call resolves before the constant exists in the theory.  In
 // `#'prop` mode there is no such definition and both are `#false`.
-class PEnv(thy :: Theory,
-           tyvars :: List.of(Symbol),
-           vars :: Map.of(Symbol, Term),
-           mode :: Symbol,
-           self_name :: maybe(Symbol),
-           self :: maybe(Term)):
+class ElabEnv(thy :: Theory,
+              tyvars :: List.of(Symbol),
+              vars :: Map.of(Symbol, Term),
+              mode :: Symbol,
+              self_name :: maybe(Symbol),
+              self :: maybe(Term)):
   property who :: Symbol: (if mode == #'prop | #'theorem | #'function)
+
+  class Ask():
+    extends EffectOperation
+  class Local(transform :: Function, body :: Computation):
+    extends EffectOperation
+
+  fun ask() :: Computation:
+    perform(Ask())
+  fun local(transform :: Function, body :: Computation) :: Computation:
+    perform(Local(transform, body))
+  fun handle(environment, computation :: Computation) :: Computation:
+    recur loop (current :: Computation = computation,
+                current_env = environment):
+      match current
+      | Pure(_): current
+      | Request(operation, resume):
+          match operation
+          | Ask(): loop(resume(current_env), current_env)
+          | Local(transform, body):
+              effect.bind(
+                handle(transform(current_env), body),
+                fun (value): loop(resume(value), current_env))
+          | ~else:
+              Request(operation,
+                      fun (value): loop(resume(value), current_env))
+  export:
+    ask
+    local
+    handle
 
 // -- CoreExpr elaboration ----------------------------------------------------
 
-fun core_const_instance(env :: PEnv, name :: Symbol,
+fun core_const_instance(env :: ElabEnv, name :: Symbol,
                         args :: List.of(Term), at :: Syntax) :: HType:
   let generic = (match const_type(env.thy, name)
                  | #false: syntax_error(env.who, "unknown constant", at)
@@ -405,7 +434,7 @@ fun core_const_instance(env :: PEnv, name :: Symbol,
                    at)
   | sub: type_subst(sub, gty)
 
-fun core_lookup(env :: PEnv, n :: Symbol, at :: Syntax) :: Term:
+fun core_lookup(env :: ElabEnv, n :: Symbol, at :: Syntax) :: Term:
   match env.vars.get(n, #false)
   | #false:
       cond
@@ -450,7 +479,7 @@ fun core_apply_effect(func :: CoreExpr, args :: List.of(CoreExpr),
                       at :: Syntax) :: Computation:
   fun apply_terms(terms :: List.of(Term)) :: Computation:
     effect:
-      let env :: PEnv <- ask()
+      let env :: ElabEnv <- ElabEnv.ask()
       match func
       | CoreRef(name, ref_at):
           match env.vars.get(name, #false)
@@ -478,7 +507,7 @@ fun core_apply_effect(func :: CoreExpr, args :: List.of(CoreExpr),
 
 fun elaborate_binders_effect(binders :: List.of(CoreBinder), body :: CoreExpr,
                              is_forall :: Boolean) :: Computation:
-  fun elaborate_in(env :: PEnv) :: Computation:
+  fun elaborate_in(env :: ElabEnv) :: Computation:
     let vars = for List (binder in binders):
                  let binder :~ CoreBinder = binder
                  mk_var(binder.name, parse_type(binder.type_stx, env.tyvars))
@@ -489,18 +518,18 @@ fun elaborate_binders_effect(binders :: List.of(CoreBinder), body :: CoreExpr,
       return for values(term :~ Term = inner) (variable in vars.reverse()):
                build(variable, term)
     effect:
-      let inner :: Term <- local(fun (_): sub_env(env, vars2),
-                                 elaborate_effect(body))
+      let inner :: Term <- ElabEnv.local(fun (_): sub_env(env, vars2),
+                                         elaborate_effect(body))
       close(inner)
   effect:
-    let env :: PEnv <- ask()
+    let env :: ElabEnv <- ElabEnv.ask()
     elaborate_in(env)
 
 fun elaborate_if_effect(condition_expr :: CoreExpr, then_expr :: CoreExpr,
                         else_expr :: CoreExpr, at :: Syntax) :: Computation:
   effect:
     let condition :: Term <- elaborate_effect(condition_expr)
-    let env :: PEnv <- ask()
+    let env :: ElabEnv <- ElabEnv.ask()
     unless type_of(condition) == bool
     | syntax_error(env.who, "the condition of an `if` must be a Boolean", at)
     let then_term :: Term <- elaborate_effect(then_expr)
@@ -515,7 +544,7 @@ fun elaborate_effect(expr :: CoreExpr) :: Computation:
   match expr
   | CoreRef(name, at):
       effect:
-        let env :: PEnv <- ask()
+        let env :: ElabEnv <- ElabEnv.ask()
         return core_lookup(env, name, at)
   | CoreCall(func, args, at): core_apply_effect(func, args, at)
   | CoreIf(condition_expr, then_expr, else_expr, at):
@@ -539,25 +568,25 @@ fun check_core(expr :: CoreExpr, expected :: HType) :: Computation:
     | error(~who: #'check_core, "expression has an unexpected type")
     return term
 
-fun run_elaboration(env :: PEnv, expr :: CoreExpr) :: Term:
-  match run_reader(infer_core(expr), env)
+fun run_elaboration(env :: ElabEnv, expr :: CoreExpr) :: Term:
+  match ElabEnv.handle(env, infer_core(expr))
   | Pure(term): term :~ Term
   | ~else: error(~who: #'run_elaboration, "internal error: unhandled effect")
 
 fun parse_type_effect(stx :: Syntax) :: Computation:
   effect:
-    let env :: PEnv <- ask()
+    let env :: ElabEnv <- ElabEnv.ask()
     return parse_type(stx, env.tyvars)
 
-fun run_type_elaboration(env :: PEnv, stx :: Syntax) :: HType:
-  match run_reader(parse_type_effect(stx), env)
+fun run_type_elaboration(env :: ElabEnv, stx :: Syntax) :: HType:
+  match ElabEnv.handle(env, parse_type_effect(stx))
   | Pure(ty): ty :~ HType
   | ~else: error(~who: #'run_type_elaboration, "internal error: unhandled effect")
 
 fun parse_core_prop(thy :: Theory, tyvars :: List.of(Symbol),
                     vars :: Map.of(Symbol, Term),
                     expr :: CoreExpr) :: Term:
-  run_elaboration(PEnv(thy, tyvars, vars, #'prop, #false, #false), expr)
+  run_elaboration(ElabEnv(thy, tyvars, vars, #'prop, #false, #false), expr)
 
 fun append_unique(base :: List.of(Symbol),
                   more :: List.of(Symbol)) :: List.of(Symbol):
@@ -644,11 +673,39 @@ class ClauseEnv(thy :: Theory,
                 self :: Term,
                 pats :: List.of(Term),
                 vars :: Map.of(Symbol, Term),
-                at :: Syntax)
+                at :: Syntax):
+  class Ask():
+    extends EffectOperation
+  class Local(transform :: Function, body :: Computation):
+    extends EffectOperation
+
+  fun ask() :: Computation:
+    perform(Ask())
+  fun local(transform :: Function, body :: Computation) :: Computation:
+    perform(Local(transform, body))
+  fun handle(environment, computation :: Computation) :: Computation:
+    recur loop (current :: Computation = computation,
+                current_env = environment):
+      match current
+      | Pure(_): current
+      | Request(operation, resume):
+          match operation
+          | Ask(): loop(resume(current_env), current_env)
+          | Local(transform, body):
+              effect.bind(
+                handle(transform(current_env), body),
+                fun (value): loop(resume(value), current_env))
+          | ~else:
+              Request(operation,
+                      fun (value): loop(resume(value), current_env))
+  export:
+    ask
+    local
+    handle
 
 fun core_parse_body(body :: CoreFunBody) :: Computation:
   effect:
-    let env :: ClauseEnv <- ask()
+    let env :: ClauseEnv <- ClauseEnv.ask()
     match body
     | CoreBodyRows(rows, _):
         core_clause_rows(rows)
@@ -658,14 +715,14 @@ fun core_parse_body(body :: CoreFunBody) :: Computation:
     | CoreBodyLet(name, init, tail, _):
         effect:
           let value = run_elaboration(
-                        PEnv(env.thy, [], env.vars, #'function,
-                             env.self_name, env.self),
+                        ElabEnv(env.thy, [], env.vars, #'function,
+                                env.self_name, env.self),
                         init)
           let vars2 = env.vars ++ {name: value}
           fun bind_let(_):
             ClauseEnv(env.thy, env.self_name, env.self, env.pats,
                       vars2, env.at)
-          let clauses :: List <- local(bind_let, core_parse_body(tail))
+          let clauses :: List <- ClauseEnv.local(bind_let, core_parse_body(tail))
           return for List (clause in clauses):
                    let clause :~ DefClause = clause
                    let core = EvalCoreLet(name, EvalCoreLeaf(value),
@@ -674,8 +731,8 @@ fun core_parse_body(body :: CoreFunBody) :: Computation:
                              eval_core_obligations(core))
     | CoreBodyExpr(expr, _):
         let value = run_elaboration(
-                      PEnv(env.thy, [], env.vars, #'function,
-                           env.self_name, env.self),
+                      ElabEnv(env.thy, [], env.vars, #'function,
+                              env.self_name, env.self),
                       expr)
         return [DefClause(env.pats, value, [value])]
     | ~else: error(~who: #'function, "unknown CoreFunBody variant")
@@ -694,7 +751,7 @@ fun core_parse_clauses(v :: FVar,
 fun core_parse_clause(v :: FVar,
                       clause :: CoreMatchClause) :: Computation:
   effect:
-    let env :: ClauseEnv <- ask()
+    let env :: ClauseEnv <- ClauseEnv.ask()
     match clause.pattern
     | CorePatWildcard(_):
         core_parse_body(clause.body)
@@ -707,7 +764,7 @@ fun core_parse_clause(v :: FVar,
           ClauseEnv(env.thy, env.self_name, env.self,
                     refine_pats(env.pats, v, pat :~ Term),
                     vars2, env.at)
-        local(bind_pattern, core_parse_body(clause.body))
+        ClauseEnv.local(bind_pattern, core_parse_body(clause.body))
     | ~else:
         syntax_error(#'function, "malformed match clause", clause.at)
 
@@ -722,7 +779,7 @@ fun core_clause_rows(rows :: List.of(CoreRow)) :: Computation:
 
 fun core_clause_row(row :: CoreRow) :: Computation:
   effect:
-    let env :: ClauseEnv <- ask()
+    let env :: ClauseEnv <- ClauseEnv.ask()
     unless row.patterns.length() == env.pats.length()
     | syntax_error(#'function,
                    "this clause has " ++ to_string(row.patterns.length())
@@ -745,7 +802,7 @@ fun core_clause_row(row :: CoreRow) :: Computation:
                  m ++ {(bv :~ FVar).name: bv :~ Term})
     fun bind_row(_):
       ClauseEnv(env.thy, env.self_name, env.self, pats2, vars2, env.at)
-    local(bind_row, core_parse_body(row.body))
+    ClauseEnv.local(bind_row, core_parse_body(row.body))
 
 fun elaborate_function_decl(thy :: Theory,
                             spec :: CoreFunctionSpec) :: FunSpec:
@@ -767,14 +824,14 @@ fun elaborate_function_decl(thy :: Theory,
     match spec.measure
     | #false: #false
     | expr:
-        let value = run_elaboration(PEnv(thy, tyvars, env0, #'function, #false, #false), expr :~ CoreExpr)
+        let value = run_elaboration(ElabEnv(thy, tyvars, env0, #'function, #false, #false), expr :~ CoreExpr)
         list_mk_abs(pvars, value)
   let clause_env = ClauseEnv(
                      thy, spec.name, self,
                      pvars.map(fun (v :: FVar): v :~ Term),
                      env0, spec.at)
   let clauses0 :~ List:
-    match run_reader(core_parse_body(spec.body), clause_env)
+    match ClauseEnv.handle(clause_env, core_parse_body(spec.body))
     | Pure(clauses): clauses :~ List
     | ~else:
         error(~who: #'elaborate_function_decl,
@@ -793,8 +850,8 @@ fun elaborate_function_decl(thy :: Theory,
                                   fun (o :: Term): inst_type(theta :~ Map, o)))
   FunSpec(spec.name, arg_tys, result_ty, clauses, measure)
 
-fun sub_env(env :: PEnv, vars :: Map.of(Symbol, Term)) :: PEnv:
-  PEnv(env.thy, env.tyvars, vars, env.mode, env.self_name, env.self)
+fun sub_env(env :: ElabEnv, vars :: Map.of(Symbol, Term)) :: ElabEnv:
+  ElabEnv(env.thy, env.tyvars, vars, env.mode, env.self_name, env.self)
 
 // ============================================================================
 // Tactics

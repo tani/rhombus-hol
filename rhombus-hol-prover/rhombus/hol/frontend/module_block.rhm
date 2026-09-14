@@ -37,7 +37,7 @@ import:
     rhombus/hol/frontend/expand as expand
     rhombus/hol/frontend/elab as elab
     rhombus/hol/frontend/driver open
-    rhombus/hol/frontend/operator open
+    rhombus/hol/frontend/dispatch open
     rhombus/hol/frontend/surface_core open
 export:
   module_block
@@ -54,7 +54,7 @@ meta:
   fun st(n :: Int) :: Syntax:
     Syntax.make_id("_hol_st" ++ to_string(n), id_ctx)
 
-  class RuntimeState(operators :: OperatorRegistry,
+  class RuntimeState(operators :: DispatchRegistry,
                      thy :: maybe(Theory),
                      constants :: Map.of(Symbol, HType),
                      pending_import :: maybe(List.of(Syntax)))
@@ -69,7 +69,7 @@ meta:
     match rb.#{syntax-property}(stx, runtime_state_key)
     | state :: RuntimeState: state
     | #false: initial_runtime_state
-    | ~else: error(~who: #'module_block, "invalid runtime operator state")
+    | ~else: error(~who: #'module_block, "invalid runtime dispatch state")
 
   fun carry_state(stx :: Syntax, state :: RuntimeState) :: Syntax:
     rb.#{syntax-property}(stx, runtime_state_key, state)
@@ -90,21 +90,14 @@ meta:
     | terms:
         let imported = imported_runtime_state(terms :~ List.of(Syntax))
         let with_families:
-          for values(registry :~ OperatorRegistry = imported.operators) ((_, family) in state.operators.families):
-            let family :~ OperatorFamily = family
-            match operator_family(registry, family.name)
-            | #false: add_operator_family(registry, family)
-            | existing:
-                unless (existing :~ OperatorFamily) == family
-                | error(~who: #'notation,
-                        "imported notation family conflicts with a local "
-                          ++ "declaration")
-                registry
-        let with_providers:
-          for values(registry :~ OperatorRegistry = with_families) (provider in state.operators.providers):
-            add_operator_provider(
-              registry, provider :~ OperatorProvider)
-        RuntimeState(with_providers, imported.thy, state.constants, #false)
+          for values(registry :~ DispatchRegistry = imported.operators) (
+                (_, family) in state.operators.families):
+            add_dispatch_family(registry, family :~ DispatchFamily)
+        let with_methods:
+          for values(registry :~ DispatchRegistry = with_families) (
+                method in state.operators.methods):
+            add_dispatch_method(registry, method :~ DispatchMethod)
+        RuntimeState(with_methods, imported.thy, state.constants, #false)
 
   fun defer_runtime_import(state :: RuntimeState,
                            terms :: List.of(Syntax)) :: RuntimeState:
@@ -120,69 +113,79 @@ meta:
         | thy: const_type(thy :~ Theory, name)
 
   fun runtime_add_family(state :: RuntimeState, name :: Symbol,
-                         operand_names :: List.of(Symbol),
-                         spelling :: String) :: RuntimeState:
+                         arity :: NonnegInt) :: RuntimeState:
     RuntimeState(
-      add_operator_family(
-        state.operators, OperatorFamily(name, operand_names, spelling)),
+      add_dispatch_family(
+        state.operators, DispatchFamily(name, arity)),
       state.thy, state.constants, state.pending_import)
 
-  fun operand_position(operand_names :: List.of(Symbol), name :: Symbol,
-                       at :: Syntax) :: NonnegInt:
+  fun dispatch_argument_position(argument_names :: List,
+                                 name :: Symbol,
+                                 at :: Syntax) :: NonnegInt:
     recur find (index = 0):
       cond
-      | index == operand_names.length():
+      | index == argument_names.length():
           syntax_meta.error(
-            "provider template uses an unknown notation operand `" ++ to_string(name)
-              ++ "`",
+            "implementation template uses an unknown dispatch argument `"
+              ++ to_string(name) ++ "`",
             at)
-      | operand_names[index] == name: index
+      | argument_names[index] == name: index
       | ~else: find(index + 1)
 
-  fun provider_layout(family :: OperatorFamily,
-                      template_arguments :: maybe(List.of(Symbol)),
-                      at :: Syntax)
-       :: values(List.of(NonnegInt), NonnegInt):
-    let order:
-      match template_arguments
-      | #false: List.iota(family.arity)
-      | arguments:
+  fun dispatch_argument_order(argument_names :: List,
+                              template_arguments :: maybe(List.of(Symbol)),
+                              at :: Syntax) :: List.of(NonnegInt):
+    let arity = argument_names.length()
+    match template_arguments
+    | #false: List.iota(arity)
+    | arguments:
+        when argument_names.contains(#false)
+        | syntax_meta.error(
+            "an implementation template needs named dispatch arguments", at)
+        let order:
           for List (argument in (arguments :~ List.of(Symbol))):
-            operand_position(family.operand_names, argument, at)
-    unless order.length() == family.arity
-    | syntax_meta.error(
-        "provider template must use every notation operand exactly once", at)
-    let seen:
-      for values(acc :~ Set = Set()) (position in order):
-        acc ++ {position}
-    unless seen.length() == family.arity
-    | syntax_meta.error(
-        "provider template must use every notation operand exactly once", at)
-    values(order, order[0])
+            dispatch_argument_position(argument_names, argument, at)
+        unless valid_argument_order(order, arity)
+        | syntax_meta.error(
+            "implementation template must use every dispatch argument "
+              ++ "exactly once",
+            at)
+        order
 
-  fun runtime_add_provider(state :: RuntimeState, family_name :: Symbol,
-                           carrier_stx :: Syntax, constant :: Symbol,
-                           template_arguments :: maybe(List.of(Symbol)),
-                           at :: Syntax)
-       :: values(RuntimeState, List.of(NonnegInt), NonnegInt):
-    let ready = (if operator_family(state.operators, family_name)
-                 | state
-                 | force_runtime_state(state))
-    let family:
-      match operator_family(ready.operators, family_name)
-      | #false: syntax_meta.error("notation family is not declared", at)
-      | f: f :~ OperatorFamily
-    let (order, dispatch_argument) = provider_layout(
-                                       family, template_arguments, at)
-    let provider = OperatorProvider(
-                     family_name,
-                     elab.parse_open_type(carrier_stx),
-                     constant, order, dispatch_argument)
-    values(
-      RuntimeState(add_operator_provider(ready.operators, provider),
-                   ready.thy, ready.constants, ready.pending_import),
-      order,
-      dispatch_argument)
+  fun runtime_add_method(
+        state :: RuntimeState, family_name :: Symbol,
+        argument_type_stxs :: List.of(Syntax),
+        result_type_stx :: maybe(Syntax),
+        constant :: Symbol, argument_order :: List.of(NonnegInt),
+        at :: Syntax) :: RuntimeState:
+    let ready = force_runtime_state(state)
+    let arity = argument_type_stxs.length()
+    let registry_with_family = add_dispatch_family(
+                                 ready.operators,
+                                 DispatchFamily(family_name, arity))
+    let argument_types = argument_type_stxs.map(elab.parse_open_type)
+    let result_type:
+      match result_type_stx
+      | #false: #false
+      | result_stx: elab.parse_open_type(result_stx :~ Syntax)
+    let constant_type:
+      match runtime_const_type(ready, constant)
+      | #false:
+          syntax_meta.error(
+            "implementation constant is not declared: "
+              ++ to_string(constant),
+            at)
+      | ty: ty :~ HType
+    let method:
+      try:
+        build_dispatch_method(
+          family_name, argument_types, result_type,
+          constant, constant_type, argument_order)
+        ~catch e :: Exn.Fail:
+          syntax_meta.error(e.message, at)
+    RuntimeState(
+      add_dispatch_method(registry_with_family, method),
+      ready.thy, ready.constants, ready.pending_import)
 
   fun runtime_add_function(state :: RuntimeState, form :: Syntax)
        :: RuntimeState:
@@ -381,17 +384,19 @@ meta:
     let [arg, ...] = args
     '$id($arg, ...)'
 
+
   fun runtime_peel(ty :: HType, arity :: NonnegInt)
        :: values(List.of(HType), HType):
-    recur loop (current = ty, remaining = arity, domains :~ List = []):
+    recur loop (current = ty, remaining = arity,
+                domains :~ List.of(HType) = []):
       cond
       | remaining == 0: values(domains, current)
       | is_fun(current):
           let (domain, range) = dest_fun(current)
           loop(range, remaining - 1, domains ++ [domain])
       | ~else:
-          error(~who: #'notation,
-                "provider constant has fewer arguments than its notation family")
+          error(~who: #'dispatch,
+                "constant has fewer arguments than required")
 
   fun runtime_fresh_type(ty :: HType) :: HType:
     let renaming:
@@ -399,15 +404,24 @@ meta:
         out ++ {v: mk_tyvar(Symbol.gen(to_string(v))) :~ HType}
     type_subst(renaming, ty)
 
-  fun runtime_needs_expected(expr :: CoreExpr) :: Boolean:
+  fun runtime_needs_expected(state :: RuntimeState,
+                             expr :: CoreExpr) :: Boolean:
+    fun every_arg(args :: List.of(CoreExpr)) :: Boolean:
+      args.length() == 0
+        || for values(all = #true) (arg in args):
+             all && runtime_needs_expected(state, arg :~ CoreExpr)
     match expr
     | CoreNumeral(_, _): #true
-    | CoreOperator(_, args, _):
-        recur loop (remaining :~ List = args):
-          match remaining
-          | []: args.length() > 0
-          | List.cons(arg, rest):
-              runtime_needs_expected(arg :~ CoreExpr) && loop(rest)
+    | CoreCall(CoreOverloadRef(_, _, _), args, _): every_arg(args)
+    | CoreCall(CoreRef(name, _), args, _) when dispatch_family(state.operators, name):
+        every_arg(args)
+    | CoreCall(_, args, _):
+        for values(found = #false) (arg in args):
+          found || runtime_needs_expected(state, arg :~ CoreExpr)
+    | CoreOverloadRef(_, _, _): #true
+    | CoreIf(_, then_expr, else_expr, _):
+        runtime_needs_expected(state, then_expr)
+          || runtime_needs_expected(state, else_expr)
     | ~else: #false
 
   fun runtime_numeral(value :: NonnegInt, expected :: HType,
@@ -439,115 +453,82 @@ meta:
             ++ type_to_string(expected),
           at)
 
-  fun runtime_surface_domain(domains :: List.of(HType),
-                             order :: List.of(NonnegInt),
-                             surface_index :: NonnegInt) :: HType:
-    recur find (constant_index = 0):
-      cond
-      | constant_index >= order.length():
-          error(~who: #'operator, "invalid provider argument order")
-      | order[constant_index] == surface_index: domains[constant_index]
-      | ~else: find(constant_index + 1)
-
-  fun runtime_provider_match(state :: RuntimeState,
-                             provider :: OperatorProvider,
-                             known :: List,
-                             arity :: PosInt,
-                             expected_result :: maybe(HType))
-       :: maybe(List):
-    match runtime_const_type(state, provider.constant)
-    | #false: #false
-    | generic:
-        let (domains, result) = runtime_peel(generic :~ HType, arity)
-        recur match_args (index = 0, theta :~ Map = {}):
-          cond
-          | index == known.length():
-              match expected_result
-              | #false: [theta, domains, result]
-              | expected:
-                  match type_match(result, expected :~ HType, theta)
-                  | #false: #false
-                  | next: [next, domains, result]
-          | ~else:
-              match known[index]
-              | #false: match_args(index + 1, theta)
-              | runtime:
-                  let domain = runtime_surface_domain(
-                                 domains, provider.argument_order, index)
-                  match type_match(domain,
-                                   (runtime :~ RuntimeExpr).ty,
-                                   theta)
-                  | #false: #false
-                  | next: match_args(index + 1, next :~ Map)
-
-  fun runtime_operator_expr(state :: RuntimeState,
+  fun runtime_dispatch_expr(state :: RuntimeState,
                             env :: Map.of(Symbol, HType),
                             family_name :: Symbol,
+                            display_name :: String,
                             args :: List.of(CoreExpr),
                             expected :: maybe(HType),
                             at :: Syntax) :: RuntimeExpr:
     let family:
-      match operator_family(state.operators, family_name)
+      match dispatch_family(state.operators, family_name)
       | #false:
           syntax_meta.error(
-            "unknown notation family " ++ to_string(family_name), at)
-      | value: value :~ OperatorFamily
+            "unknown dispatch family " ++ to_string(family_name), at)
+      | value: value :~ DispatchFamily
+    unless args.length() == family.arity
+    | syntax_meta.error(
+        "`" ++ display_name ++ "` expects "
+          ++ to_string(family.arity) ++ " arguments",
+        at)
     let known:
       for List (arg in args):
         let arg :~ CoreExpr = arg
-        (if runtime_needs_expected(arg)
+        (if runtime_needs_expected(state, arg)
          | #false
          | runtime_expr(state, env, arg, #false))
-    let matches:
-      for values(out :~ List = []) (provider in operator_candidates(state.operators, family_name)):
-        match runtime_provider_match(
-                state, provider :~ OperatorProvider, known,
-                family.arity, expected)
-        | #false: out
-        | instance: out ++ [[provider, instance]]
+    let argument_types:
+      known.map(
+        fun (value):
+          match value
+          | #false: #false
+          | runtime: (runtime :~ RuntimeExpr).ty)
+    let matches = resolve_dispatch(
+                    state.operators, family_name,
+                    argument_types, expected)
     when matches.length() == 0
     | syntax_meta.error(
-        "operator `" ++ family.spelling ++ "` has no applicable provider",
+        "`" ++ display_name ++ "` has no applicable dispatch",
         at)
     when matches.length() > 1
     | syntax_meta.error(
-        "operator `" ++ family.spelling ++ "` is ambiguous",
+        "`" ++ display_name ++ "` has ambiguous dispatch",
         at)
-    let chosen :~ List = matches[0]
-    let provider :~ OperatorProvider = chosen[0]
-    let instance :~ List = chosen[1]
-    let theta :~ Map = instance[0]
-    let domains :~ List.of(HType) = instance[1]
-    let result :~ HType = instance[2]
+    let resolution :~ DispatchResolution = matches[0]
+    let method = resolution.method
     let rendered:
       for List (arg in args, prior in known,
-                index in List.iota(args.length())):
+                expected_type in resolution.argument_types):
         match prior
-        | runtime :: RuntimeExpr: runtime
+        | runtime :: RuntimeExpr:
+            match type_unify(runtime.ty, expected_type, {})
+            | #false:
+                syntax_meta.error(
+                  "dispatch argument has an unexpected type", at)
+            | _:
+                RuntimeExpr(runtime.stx, expected_type)
         | #false:
             runtime_expr(
-              state, env, arg :~ CoreExpr,
-              type_subst(
-                theta,
-                runtime_surface_domain(
-                  domains, provider.argument_order, index)))
-    let ordered = provider.argument_order.map(
+              state, env, arg :~ CoreExpr, expected_type)
+    let ordered = method.argument_order.map(
                     fun (index):
                       (rendered[index] :~ RuntimeExpr).stx)
-    RuntimeExpr(runtime_call_syntax(provider.constant, ordered, at),
-                type_subst(theta, result))
+    RuntimeExpr(runtime_call_syntax(method.constant, ordered, at),
+                resolution.result_type)
 
-  fun needs_runtime_lowering(expr :: CoreExpr) :: Boolean:
+  fun needs_runtime_lowering(state :: RuntimeState,
+                             expr :: CoreExpr) :: Boolean:
     match expr
-    | CoreNumeral(_, _) || CoreOperator(_, _, _): #true
+    | CoreNumeral(_, _) || CoreOverloadRef(_, _, _): #true
+    | CoreCall(CoreRef(name, _), _, _) when dispatch_family(state.operators, name): #true
     | CoreCall(func, args, _):
-        needs_runtime_lowering(func)
+        needs_runtime_lowering(state, func)
           || for values(found = #false) (arg in args):
-               found || needs_runtime_lowering(arg :~ CoreExpr)
+               found || needs_runtime_lowering(state, arg :~ CoreExpr)
     | CoreIf(condition, then_expr, else_expr, _):
-        needs_runtime_lowering(condition)
-          || needs_runtime_lowering(then_expr)
-          || needs_runtime_lowering(else_expr)
+        needs_runtime_lowering(state, condition)
+          || needs_runtime_lowering(state, then_expr)
+          || needs_runtime_lowering(state, else_expr)
     | ~else: #false
 
   fun runtime_expr(state :: RuntimeState, env :: Map.of(Symbol, HType),
@@ -586,22 +567,30 @@ meta:
         | #false:
             syntax_meta.error("a numeral needs an expected numeric type", at)
         | wanted: runtime_numeral(value, wanted :~ HType, at)
-    | CoreOperator(family, args, at):
-        runtime_operator_expr(state, env, family, args, expected, at)
+    | CoreOverloadRef(_, _, at):
+        syntax_meta.error("an overloaded reference must be called", at)
     | CoreCall(func, args, at):
         match func
+        | CoreOverloadRef(family, display_name, _):
+            runtime_dispatch_expr(
+              state, env, family, display_name, args, expected, at)
+        | CoreRef(name, _) when !env.get(name, #false)
+                                  && !runtime_const_type(state, name)
+                                  && dispatch_family(state.operators, name):
+            runtime_dispatch_expr(
+              state, env, name, to_string(name), args, expected, at)
         | CoreRef(name, _) when name == #'eq && args.length() == 2:
             let left_core :~ CoreExpr = args[0]
             let right_core :~ CoreExpr = args[1]
             let (left, right):
               cond
-              | runtime_needs_expected(right_core)
-                  && !runtime_needs_expected(left_core):
+              | runtime_needs_expected(state, right_core)
+                  && !runtime_needs_expected(state, left_core):
                   let left = runtime_expr(state, env, left_core, #false)
                   values(left,
                          runtime_expr(state, env, right_core, left.ty))
-              | runtime_needs_expected(left_core)
-                  && !runtime_needs_expected(right_core):
+              | runtime_needs_expected(state, left_core)
+                  && !runtime_needs_expected(state, right_core):
                   let right = runtime_expr(state, env, right_core, #false)
                   values(runtime_expr(state, env, left_core, right.ty),
                          right)
@@ -644,7 +633,7 @@ meta:
                   unless is_fun(instantiated)
                   | syntax_meta.error("too many function arguments", at)
                   let (domain, range) = dest_fun(instantiated)
-                  let value = (if runtime_needs_expected(arg :~ CoreExpr)
+                  let value = (if runtime_needs_expected(state, arg :~ CoreExpr)
                                | runtime_expr(
                                    state, env, arg :~ CoreExpr, domain)
                                | runtime_expr(
@@ -768,21 +757,24 @@ meta:
     '$name($pattern_stx, ...): $result'
 
   // The executable half lowers the same CoreExpr tree as the logical half.
-  // Operator providers are therefore selected at expansion time from declared
-  // operand types; generated code contains only direct named calls.
-  fun body_needs_runtime_lowering(body :: CoreFunBody) :: Boolean:
+  // Dispatch methods are therefore selected at expansion time from declared
+  // argument and expected-result types; generated code contains only direct
+  // named calls.
+  fun body_needs_runtime_lowering(state :: RuntimeState,
+                                  body :: CoreFunBody) :: Boolean:
     match body
-    | CoreBodyExpr(expr, _): needs_runtime_lowering(expr)
+    | CoreBodyExpr(expr, _): needs_runtime_lowering(state, expr)
     | CoreBodyLet(_, init, tail, _):
-        needs_runtime_lowering(init)
-          || body_needs_runtime_lowering(tail)
+        needs_runtime_lowering(state, init)
+          || body_needs_runtime_lowering(state, tail)
     | CoreBodyMatch(_, clauses, _):
         for values(found = #false) (clause in clauses):
           found || body_needs_runtime_lowering(
-                     (clause :~ CoreMatchClause).body)
+                     state, (clause :~ CoreMatchClause).body)
     | CoreBodyRows(rows, _):
         for values(found = #false) (row in rows):
-          found || body_needs_runtime_lowering((row :~ CoreRow).body)
+          found || body_needs_runtime_lowering(
+                     state, (row :~ CoreRow).body)
     | ~else: #false
 
   fun emit_raw_function(name :: Syntax, parameter_names :: List.of(Syntax),
@@ -810,7 +802,7 @@ meta:
                     raw_body :: Syntax)
        :: Syntax:
     cond
-    | !body_needs_runtime_lowering(spec.body):
+    | !body_needs_runtime_lowering(state, spec.body):
         emit_raw_function(name, parameter_names, raw_body)
     | ~else:
         emit_lowered_function(spec, state, name, parameter_names)
@@ -1050,16 +1042,13 @@ meta:
                            _hol_driver.hol_reraise(e, '$at')
            _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
                                    statement, proof, '$at')']
-    | '(~operator_family $cur $nxt [$name] [$operand, ...] [$spelling] [$at])':
-        ['def $nxt:
-           let operands = [Syntax.unwrap('$operand'), ...]
-           _hol_driver.add_operator_family_decl(
-             $cur, Syntax.unwrap('$name'), operands, $spelling, '$at')']
-    | '(~operator_provider $cur $nxt [$family] [$carrier] [$constant] [$order, ...] [$dispatch] [$at])':
-        ['def $nxt = _hol_driver.add_operator_provider_decl(
-                       $cur, Syntax.unwrap('$family'), '$carrier',
-                       Syntax.unwrap('$constant'), [$order, ...], $dispatch,
-                       '$at')']
+    | '(~dispatch_family $cur $nxt [$name] [$arity] [$at])':
+        ['def $nxt = _hol_driver.add_dispatch_family_decl(
+                       $cur, Syntax.unwrap('$name'), $arity, '$at')']
+    | '(~dispatch_method $cur $nxt [$family] [$signature] [$constant] [$order, ...] [$at])':
+        ['def $nxt = _hol_driver.add_dispatch_method_encoded(
+                       $cur, Syntax.unwrap('$family'), '$signature',
+                       Syntax.unwrap('$constant'), [$order, ...], '$at')']
     | '(~rules $cur $nxt [$flag] [$name, ...])':
         ['def $nxt = _hol_driver.set_rules($cur, $flag, [Syntax.unwrap('$name'), ...])']
     | ~else: syntax_meta.error("internal malformed logical step", step)
@@ -1117,7 +1106,7 @@ meta:
         let core = function_encoding(form)
         let spec = decode_function(core)
         let registered_runtime = runtime_add_function(runtime_state, form)
-        let next_runtime = (if body_needs_runtime_lowering(spec.body)
+        let next_runtime = (if body_needs_runtime_lowering(registered_runtime, spec.body)
                             | force_runtime_state(registered_runtime)
                             | registered_runtime)
         values([emit_function(spec, next_runtime, name,
@@ -1131,7 +1120,7 @@ meta:
         let core = function_encoding(form)
         let spec = decode_function(core)
         let registered_runtime = runtime_add_function(runtime_state, form)
-        let next_runtime = (if body_needs_runtime_lowering(spec.body)
+        let next_runtime = (if body_needs_runtime_lowering(registered_runtime, spec.body)
                             | force_runtime_state(registered_runtime)
                             | registered_runtime)
         values([emit_function(spec, next_runtime, name,
@@ -1148,39 +1137,50 @@ meta:
         values([],
                ['(~theorem $cur $nxt [$name] [$core] [$tactic_core] [$at])'],
                n + 1, runtime_state)
-    | #'operator_family:
+    | #'dispatch_family:
         let [name, syntaxes, order, associativity,
-             operand_names, spelling] = d.parts
-        let spelling_stx = Syntax.make(spelling, id_ctx)
-        let [operand, ...] = (operand_names :~ List).map(
-                              fun (value): symbol_id(value :~ Symbol))
+             operand_names, _] = d.parts
         let notation_forms:
           for List (syntax_spec in (syntaxes :~ List)):
             operator_notation_form(
               name, syntax_spec :~ List, order :~ Syntax,
               associativity :~ Symbol)
         let at = head_term(d.form)
+        let arity = (operand_names :~ List).length()
+        let arity_stx = Syntax.make(arity, id_ctx)
         values(notation_forms,
-               ['(~operator_family $cur $nxt [$name] [$operand, ...] [$spelling_stx] [$at])'],
+               ['(~dispatch_family $cur $nxt [$name] [$arity_stx] [$at])'],
                n + 1,
                runtime_add_family(
-                 runtime_state, Syntax.unwrap(name),
-                 operand_names :~ List.of(Symbol), spelling))
-    | #'operator_provider:
-        let [family, carrier, constant, template_arguments] = d.parts
+                 runtime_state, Syntax.unwrap(name), arity))
+    | #'dispatch_method:
+        let [family, argument_names, argument_types,
+             result_type, constant, template_arguments] = d.parts
         let at = head_term(d.form)
-        let (next_runtime, positions, dispatch) = runtime_add_provider(
-                                                    runtime_state,
-                                                    Syntax.unwrap(family),
-                                                    carrier :~ Syntax,
-                                                    Syntax.unwrap(constant),
-                                                    template_arguments,
-                                                    at)
-        let dispatch_stx = Syntax.make(dispatch, id_ctx)
+        let names:
+          for List (name in (argument_names :~ List)):
+            match name
+            | #false: #false
+            | name_stx: Syntax.unwrap(name_stx :~ Syntax)
+        let positions = dispatch_argument_order(
+                          names, template_arguments, at)
+        let next_runtime = runtime_add_method(
+                             runtime_state,
+                             Syntax.unwrap(family),
+                             argument_types :~ List.of(Syntax),
+                             result_type :~ maybe(Syntax),
+                             Syntax.unwrap(constant),
+                             positions, at)
+        let [argument_type, ...] = argument_types :~ List.of(Syntax)
+        let result_stx = (if result_type
+                          | result_type :~ Syntax
+                          | Syntax.make(#false, id_ctx))
+        let signature:
+          '(dispatch_signature [$argument_type, ...] [$result_stx])'
         let [position, ...] = positions.map(
                               fun (value): Syntax.make(value, id_ctx))
         values([],
-               ['(~operator_provider $cur $nxt [$family] [$carrier] [$constant] [$position, ...] [$dispatch_stx] [$at])'],
+               ['(~dispatch_method $cur $nxt [$family] [$signature] [$constant] [$position, ...] [$at])'],
                n + 1, next_runtime)
     | #'disable_rules:
         let (forms, chain, n2) = rule_step(d, n, cur, nxt, #false)

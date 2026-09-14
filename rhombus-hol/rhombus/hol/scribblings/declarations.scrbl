@@ -5,10 +5,11 @@
 These are the forms that @rhombuslangname(rhombus/hol) gives a logical reading.
 Anything else in a module body is ordinary Rhombus.
 
-The declarations that change the current theory are recognised by the
-language's module-block expander and must appear directly in the module body.
-They cannot appear inside a @rhombus(block), inside a @rhombus(fun) body, or
-in the expansion of a user-written macro.
+The declarations that change the current theory, including
+@rhombus(dispatch, ~datum), are recognised by the language's module-block
+expander and must appear directly in the module body. They cannot appear
+inside a @rhombus(block), inside a @rhombus(fun) body, or in the expansion of
+a user-written macro.
 
 @rhombus(notation, ~datum) and @rhombus(check_property, ~datum) are genuine
 bound macros. Notation definitions are expanded one declaration at a time, so
@@ -190,7 +191,7 @@ notation (x <&> y):
   ~order: hol_conjunction
 }
 
-A named pattern introduces a statically overloaded notation family:
+A named pattern introduces notation for a static dispatch family:
 
 @verbatim{
 notation Add (left + right):
@@ -199,22 +200,24 @@ notation Add (left + right):
 }
 
 The fixed form uses @rhombus(~logic) and @rhombus(~runtime) as described above.
-The named form instead receives interpretations from declarations selected by
-operand type. Rhombus's ordinary @rhombus(operator) declaration remains
-runtime-only and is not assigned a logical meaning.
+The named form only binds syntax. A separate @rhombus(dispatch, ~datum)
+declaration supplies type-directed meanings. Rhombus's ordinary
+@rhombus(operator) declaration remains runtime-only and is not assigned a
+logical meaning.
 
 Both notation forms use a named @tt{hol_*} order; there is no numeric
 precedence hook or parser table to modify.
 
-@section{Named overloaded notations}
+@section{Static dispatch}
 
 The standard notation families are @tt{Add}, @tt{Subtract}, @tt{Negate},
 @tt{Multiply}, @tt{Power}, @tt{Less}, @tt{LessEqual}, @tt{Greater},
 @tt{GreaterEqual}, @tt{Append}, @tt{Membership}, @tt{Union}, and
-@tt{Intersection}. Importing a theory imports its interpretation registry
-together with its constants and theorems.
+@tt{Intersection}. Importing a theory imports its dispatch registry together
+with its constants and theorems. Dispatch is also available for ordinary
+function names such as @tt{map}; it is not restricted to operator notation.
 
-The standard interpretation set is:
+The standard method set is:
 
 @itemlist(
   @item{@tt{Nat}: addition, subtraction, multiplication, power, and all four
@@ -227,8 +230,7 @@ The standard interpretation set is:
         intersection.}
 )
 
-A named pattern and its type-specific interpretations use the same declaration
-head:
+A notation declaration and its methods use distinct declaration heads:
 
 @verbatim{
 notation CustomAdd (left <+> right):
@@ -236,11 +238,10 @@ notation CustomAdd (left <+> right):
   ~order: hol_addition
   ~associativity: ~left
 
-notation CustomAdd for Nat:
-  nat_add
+dispatch CustomAdd(Nat, Nat) = nat_add
 }
 
-The header pattern binds the first spelling in the HOL expression space.
+The notation pattern binds the first spelling in the HOL expression space.
 Additional @rhombus(syntax, ~datum) clauses bind aliases. Pattern shape
 determines arity and whether the spelling is infix or prefix. All aliases must
 use the same operand names and fixity. Infix declarations require
@@ -250,35 +251,68 @@ use the same operand names and fixity. Infix declarations require
 notation Negate (- value):
   ~order: hol_prefix_arithmetic
 
-notation Negate for Integer:
-  int_negate
+dispatch Negate(Integer) = int_negate
 }
 
-An interpretation is canonical for its family and carrier; a duplicate
-declaration is an error instead of an order-dependent winner. Resolution uses
-the statically known operand and result types. No applicable interpretation
-means a compile error listing the available candidates; more than one is an
-ambiguity. Generated executable functions contain a direct call to the
-selected constant, not a runtime type test.
+A method declares the complete argument tuple, not a distinguished carrier.
+Every argument and the expected result type participate in first-order
+unification. Method signatures for one family must not overlap; an overlap is
+rejected when the method is registered instead of creating an
+order-dependent winner. No applicable method is a compile error listing the
+available candidates. Generated executable functions and logical terms
+contain a direct call to the selected constant, not a runtime type test.
 
-A bare constant is shorthand for passing the named pattern's operands in
-canonical order. When its parameter order differs, write a call template using
-the pattern's operand names:
+The accepted method forms are:
+
+@verbatim{
+dispatch Family(ArgumentType, ...) = constant
+dispatch Family(ArgumentType, ...) :: ResultType = constant
+
+dispatch Family(name :: ArgumentType, ...):
+  constant(name, ...)
+}
+
+The result annotation is optional when the implementation constant determines
+it. Dispatch declarations create ordinary named families as needed, so no
+notation declaration is required:
+
+@verbatim{
+dispatch map(Function(?a, ?b), List(?a)) = list_map
+dispatch empty() = list_empty
+
+function mapped_empty(f :: Function(Nat, Nat)) :: List(Nat):
+  map(f, empty())
+}
+
+The outer expected @tt{List(Nat)} result selects @tt{map}'s method; its selected
+argument signature then supplies the expected type that selects @tt{empty}.
+
+A bare implementation constant receives arguments in signature order. When
+its parameter order differs, name the signature arguments and write a call
+template:
 
 @verbatim{
 notation Membership (element in collection):
   ~order: hol_relation
   ~associativity: ~none
 
-notation Membership for Function(?a, Boolean):
+dispatch Membership(
+  element :: ?a,
+  collection :: Function(?a, Boolean)
+):
   set_member(collection, element)
 
-notation Greater for Integer:
+dispatch Greater(
+  left :: Integer,
+  right :: Integer
+):
   int_lt(right, left)
 }
 
 Thus @tt{x in s} lowers to @tt{set_member(s, x)}, while @tt{x > y} lowers to
-@tt{int_lt(y, x)}. A template must use every family operand exactly once.
+@tt{int_lt(y, x)}. A template must use every dispatch argument exactly once.
+Zero-argument families may use the expected result type for contextual
+selection, so nested calls such as @tt{map(f, empty())} resolve statically.
 
 @section{@rhombus(theorem, ~datum) and @rhombus(proof, ~datum)}
 

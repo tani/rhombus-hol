@@ -39,7 +39,7 @@ import:
   rhombus/hol/recursion/stepfn open
   rhombus/hol/frontend/surface_core open
   rhombus/hol/frontend/elab as elab
-  rhombus/hol/frontend/operator open
+  rhombus/hol/frontend/dispatch open
 
 export:
   hol_reraise
@@ -49,8 +49,9 @@ export:
   add_function
   add_axiomatic_function
   add_theorem
-  add_operator_family_decl
-  add_operator_provider_decl
+  add_dispatch_family_decl
+  add_dispatch_method_decl
+  add_dispatch_method_encoded
   set_rules
   adopt
 
@@ -89,7 +90,7 @@ class HolState(ctx :: Context,
                thms :: Map.of(Symbol, Thm),
                // Surface capabilities are import-scoped elaboration metadata.
                // They never enter Theory or the theorem database.
-               operators :: OperatorRegistry,
+               operators :: DispatchRegistry,
                // `wfrec_rel`'s definition (`wfrec.rhm`'s `build_wfrec_rel`),
                // installed exactly once at the very start of the session so
                // every structurally derived `function` can share it.
@@ -107,7 +108,7 @@ def initial_context:
   mk_context(thy, ~rules: db)
 
 fun initial_state() :: HolState:
-  HolState(initial_context, {}, standard_operator_registry(), wfrec_base_def())
+  HolState(initial_context, {}, standard_dispatch_registry(), wfrec_base_def())
 
 // The prover context for the state as it currently stands.
 fun state_context(st :: HolState) :: Context:
@@ -413,75 +414,76 @@ fun add_theorem(st :: HolState, name :: Symbol,
                   "prover returned a result that does not prove this theorem source",
                   at)
       HolState(st.ctx, st.thms ++ {name: th}, st.operators, st.wfrec_def)
-// -- surface operator capabilities -----------------------------------------
+// -- static dispatch metadata ----------------------------------------------
 
-fun add_operator_family_decl(st :: HolState, name :: Symbol,
-                             operand_names :: List.of(Symbol),
-                             spelling :: String,
+fun add_dispatch_family_decl(st :: HolState, name :: Symbol,
+                             arity :: NonnegInt,
                              at :: Syntax) :: HolState:
   let registry = try:
-                   add_operator_family(
-                     st.operators,
-                     OperatorFamily(name, operand_names, spelling))
+                   add_dispatch_family(
+                     st.operators, DispatchFamily(name, arity))
                    ~catch e :: Exn.Fail: hol_reraise(e, at)
   HolState(st.ctx, st.thms, registry, st.wfrec_def)
 
-fun provider_domains(st :: HolState, constant :: Symbol, arity :: PosInt,
-                     at :: Syntax) :: List.of(HType):
-  let generic:
+fun add_dispatch_method_decl(
+      st :: HolState, family_name :: Symbol,
+      argument_type_stxs :: List.of(Syntax),
+      result_type_stx :: maybe(Syntax),
+      constant :: Symbol, argument_order :: List.of(NonnegInt),
+      at :: Syntax) :: HolState:
+  let arity = argument_type_stxs.length()
+  let registry_with_family:
+    try:
+      add_dispatch_family(st.operators, DispatchFamily(family_name, arity))
+      ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let argument_types:
+    argument_type_stxs.map(
+      fun (type_stx):
+        try:
+          elab.parse_open_type(type_stx)
+          ~catch e :: Exn.Fail: hol_reraise(e, at))
+  let result_type:
+    match result_type_stx
+    | #false: #false
+    | result_stx:
+        try:
+          elab.parse_open_type(result_stx :~ Syntax)
+          ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let constant_type:
     match const_type(st.ctx.thy, constant)
     | #false:
-        hol_error(#'notation,
-                  "provider constant is not declared: " ++ to_string(constant),
+        hol_error(#'dispatch,
+                  "implementation constant is not declared: "
+                    ++ to_string(constant),
                   at)
     | ty: ty :~ HType
-  recur peel (ty = generic, remaining = arity, domains :~ List = []):
-    cond
-    | remaining == 0: domains
-    | is_fun(ty):
-        let (domain, range) = dest_fun(ty)
-        peel(range, remaining - 1, domains ++ [domain])
-    | ~else:
-        hol_error(#'notation,
-                  "provider constant has fewer arguments than its notation family",
-                  at)
-
-fun add_operator_provider_decl(
-      st :: HolState, family_name :: Symbol, carrier_stx :: Syntax,
-      constant :: Symbol, argument_order :: maybe(List.of(NonnegInt)),
-      dispatch_argument :: NonnegInt, at :: Syntax) :: HolState:
-  let family = operator_family(st.operators, family_name)
-  unless family
-  | hol_error(#'notation,
-              "notation family is not declared: " ++ to_string(family_name),
-              at)
-  let family :~ OperatorFamily = family
-  let carrier = try:
-                  elab.parse_open_type(carrier_stx)
-                  ~catch e :: Exn.Fail: hol_reraise(e, at)
-  let order :~ List.of(NonnegInt):
-    match argument_order
-    | #false: List.iota(family.arity)
-    | positions: positions :~ List.of(NonnegInt)
-  let domains = provider_domains(st, constant, family.arity, at)
-  let provider = OperatorProvider(family_name, carrier, constant,
-                                  order, dispatch_argument)
-  // Registration validates the permutation and canonical uniqueness. The
-  // selected dispatch domain must be the declared carrier.
-  let registry = try:
-                   let checked = add_operator_provider(st.operators, provider)
-                   let constant_index:
-                     recur find (index = 0):
-                       cond
-                       | order[index] == dispatch_argument: index
-                       | ~else: find(index + 1)
-                   unless domains[constant_index] == carrier
-                   | error(~who: #'notation,
-                           "declared carrier does not match the provider "
-                             ++ "constant's dispatch argument")
-                   checked
-                   ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let method:
+    try:
+      build_dispatch_method(
+        family_name, argument_types, result_type,
+        constant, constant_type, argument_order)
+      ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let registry:
+    try:
+      add_dispatch_method(registry_with_family, method)
+      ~catch e :: Exn.Fail: hol_reraise(e, at)
   HolState(st.ctx, st.thms, registry, st.wfrec_def)
+
+fun add_dispatch_method_encoded(
+      st :: HolState, family_name :: Symbol,
+      signature :: Syntax,
+      constant :: Symbol, argument_order :: List.of(NonnegInt),
+      at :: Syntax) :: HolState:
+  match signature
+  | '(dispatch_signature [$argument_type, ...] [$result_type])':
+      let result = (if Syntax.unwrap(result_type) == #false
+                    | #false
+                    | result_type)
+      add_dispatch_method_decl(
+        st, family_name, [argument_type, ...],
+        result, constant, argument_order, at)
+  | ~else:
+      hol_error(#'dispatch, "internal malformed dispatch signature", at)
 
 
 // -- adopting an imported theory ----------------------------------------------

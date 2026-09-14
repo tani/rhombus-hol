@@ -1,0 +1,300 @@
+#lang rhombus/static
+
+// Static full-signature dispatch metadata. This layer is outside `Theory`:
+// families and methods guide elaboration, but the kernel receives only the
+// selected constant application.
+
+import:
+  rhombus/hol/htype open
+
+export:
+  DispatchFamily
+  DispatchMethod
+  DispatchRegistry
+  DispatchResolution
+  standard_dispatch_registry
+  add_dispatch_family
+  add_dispatch_method
+  valid_argument_order
+  build_dispatch_method
+  dispatch_family
+  dispatch_candidates
+  normalize_type
+  unify_type
+  resolve_dispatch
+
+class DispatchFamily(name :: Symbol, arity :: NonnegInt)
+
+class DispatchMethod(family :: Symbol,
+                     argument_types :: List.of(HType),
+                     result_type :: HType,
+                     constant :: Symbol,
+                     argument_order :: List.of(NonnegInt))
+
+class DispatchRegistry(families :: Map.of(Symbol, DispatchFamily),
+                       methods :: List.of(DispatchMethod))
+
+class DispatchResolution(method :: DispatchMethod,
+                         substitution :: Map.of(Symbol, HType),
+                         argument_types :: List.of(HType),
+                         result_type :: HType)
+
+fun standard_dispatch_registry() :: DispatchRegistry:
+  let families = [
+    DispatchFamily(#'Add, 2),
+    DispatchFamily(#'Subtract, 2),
+    DispatchFamily(#'Negate, 1),
+    DispatchFamily(#'Multiply, 2),
+    DispatchFamily(#'Power, 2),
+    DispatchFamily(#'Less, 2),
+    DispatchFamily(#'LessEqual, 2),
+    DispatchFamily(#'Greater, 2),
+    DispatchFamily(#'GreaterEqual, 2),
+    DispatchFamily(#'Append, 2),
+    DispatchFamily(#'Membership, 2),
+    DispatchFamily(#'Union, 2),
+    DispatchFamily(#'Intersection, 2)
+  ]
+  DispatchRegistry(
+    for values(out :~ Map = {}) (family in families):
+      out ++ {(family :~ DispatchFamily).name: family},
+    [])
+
+fun dispatch_family(registry :: DispatchRegistry,
+                    name :: Symbol) :: maybe(DispatchFamily):
+  registry.families.get(name, #false)
+
+fun add_dispatch_family(registry :: DispatchRegistry,
+                        family :: DispatchFamily) :: DispatchRegistry:
+  match registry.families.get(family.name, #false)
+  | #false:
+      DispatchRegistry(registry.families ++ {family.name: family},
+                       registry.methods)
+  | existing:
+      unless (existing :~ DispatchFamily).arity == family.arity
+      | error(~who: #'dispatch,
+              "dispatch family conflicts with an existing arity",
+              error.val(~label: "family", family.name))
+      registry
+
+fun valid_argument_order(order :: List.of(NonnegInt), arity :: NonnegInt)
+     :: Boolean:
+  recur loop (remaining :~ List = order, seen :~ Set = Set()):
+    match remaining
+    | []: seen.length() == arity
+    | List.cons(position, rest):
+        position < arity
+          && !(position in seen)
+          && loop(rest, seen ++ {position})
+
+fun normalize_type(theta :: Map.of(Symbol, HType), ty :: HType) :: HType:
+  match ty
+  | TyVar(name):
+      match theta.get(name, #false)
+      | #false: ty
+      | replacement: normalize_type(theta, replacement :~ HType)
+  | TyApp(name, args):
+      mk_tyapp(name, args.map(fun (arg): normalize_type(theta, arg)))
+
+fun unify_type(left :: HType, right :: HType,
+               theta :: Map.of(Symbol, HType)) :: maybe(Map.of(Symbol, HType)):
+  let a = normalize_type(theta, left)
+  let b = normalize_type(theta, right)
+  cond
+  | a == b: theta
+  | a is_a TyVar:
+      let TyVar(name) = a
+      (if type_occurs(name, b)
+       | #false
+       | theta ++ {name: b})
+  | b is_a TyVar:
+      let TyVar(name) = b
+      (if type_occurs(name, a)
+       | #false
+       | theta ++ {name: a})
+  | ~else:
+      match a
+      | TyApp(name, args):
+          match b
+          | TyApp(other, other_args) when name == other
+                                            && args.length() == other_args.length():
+              recur loop (xs = args, ys = other_args, current = theta):
+                match xs
+                | []: current
+                | List.cons(x, more_x):
+                    match ys
+                    | List.cons(y, more_y):
+                        match unify_type(x, y, current)
+                        | #false: #false
+                        | next: loop(more_x, more_y, next :~ Map)
+                    | ~else: #false
+          | ~else: #false
+      | ~else: #false
+
+fun fresh_type(ty :: HType) :: HType:
+  let renaming:
+    for values(out :~ Map = {}) (name in type_vars(ty)):
+      out ++ {name: mk_tyvar(Symbol.gen(to_string(name))) :~ HType}
+  type_subst(renaming, ty)
+
+fun build_dispatch_method(
+      family :: Symbol,
+      argument_types :: List.of(HType),
+      declared_result :: maybe(HType),
+      constant :: Symbol,
+      constant_type :: HType,
+      argument_order :: List.of(NonnegInt)) :: DispatchMethod:
+  let arity = argument_types.length()
+  unless valid_argument_order(argument_order, arity)
+  | error(~who: #'dispatch,
+          "implementation arguments must use every dispatch argument "
+            ++ "exactly once")
+  let (domains, raw_result):
+    recur peel (current = fresh_type(constant_type),
+                remaining = arity,
+                out :~ List.of(HType) = []):
+      cond
+      | remaining == 0: values(out, current)
+      | is_fun(current):
+          let (domain, range) = dest_fun(current)
+          peel(range, remaining - 1, out ++ [domain])
+      | ~else:
+          error(~who: #'dispatch,
+                "implementation constant has fewer arguments than "
+                  ++ "the dispatch signature")
+  let domains :~ List.of(HType) = domains
+  let raw_result :~ HType = raw_result
+  let theta:
+    recur match_domains (index = 0, current :~ Map = {}):
+      cond
+      | index == arity: current
+      | ~else:
+          match unify_type(domains[index],
+                           argument_types[argument_order[index]],
+                           current)
+          | #false:
+              error(~who: #'dispatch,
+                    "dispatch signature does not match the "
+                      ++ "implementation constant")
+          | next: match_domains(index + 1, next :~ Map)
+  let final_theta:
+    match declared_result
+    | #false: theta
+    | expected:
+        match unify_type(raw_result, expected :~ HType, theta)
+        | #false:
+            error(~who: #'dispatch,
+                  "dispatch result type does not match the "
+                    ++ "implementation constant")
+        | next: next :~ Map
+  DispatchMethod(
+    family,
+    argument_types.map(
+      fun (ty): normalize_type(final_theta, ty)),
+    normalize_type(final_theta, raw_result),
+    constant,
+    argument_order)
+
+fun fresh_signature(method :: DispatchMethod)
+     :: values(List.of(HType), HType):
+  let variables:
+    for values(out :~ List.of(Symbol) = []) (
+          ty in method.argument_types ++ [method.result_type]):
+      for values(inner :~ List.of(Symbol) = out) (name in type_vars(ty)):
+        (if inner.contains(name) | inner | inner ++ [name])
+  let renaming:
+    for values(out :~ Map = {}) (name in variables):
+      out ++ {name: mk_tyvar(Symbol.gen(to_string(name))) :~ HType}
+  values(method.argument_types.map(fun (ty): type_subst(renaming, ty)),
+         type_subst(renaming, method.result_type))
+
+fun methods_overlap(left :: DispatchMethod, right :: DispatchMethod)
+     :: Boolean:
+  let (left_args, left_result) = fresh_signature(left)
+  let (right_args, right_result) = fresh_signature(right)
+  recur loop (xs = left_args ++ [left_result],
+              ys = right_args ++ [right_result],
+              theta :~ Map = {}):
+    match xs
+    | []: #true
+    | List.cons(x, more_x):
+        match ys
+        | List.cons(y, more_y):
+            match unify_type(x, y, theta)
+            | #false: #false
+            | next: loop(more_x, more_y, next :~ Map)
+        | ~else: #false
+
+fun add_dispatch_method(registry :: DispatchRegistry,
+                        method :: DispatchMethod) :: DispatchRegistry:
+  let family = dispatch_family(registry, method.family)
+  unless family
+  | error(~who: #'dispatch,
+          "dispatch family is not declared",
+          error.val(~label: "family", method.family))
+  let family :~ DispatchFamily = family
+  unless method.argument_types.length() == family.arity
+  | error(~who: #'dispatch,
+          "dispatch signature has the wrong arity")
+  unless valid_argument_order(method.argument_order, family.arity)
+  | error(~who: #'dispatch,
+          "implementation argument order must be a permutation")
+  for (existing in registry.methods):
+    let existing :~ DispatchMethod = existing
+    when existing.family == method.family
+           && methods_overlap(existing, method)
+    | error(~who: #'dispatch,
+            "dispatch method overlaps an existing method",
+            error.val(~label: "family", method.family))
+  DispatchRegistry(registry.families,
+                   registry.methods ++ [method])
+
+fun dispatch_candidates(registry :: DispatchRegistry,
+                        family :: Symbol) :: List.of(DispatchMethod):
+  for values(out :~ List = []) (method in registry.methods):
+    (if (method :~ DispatchMethod).family == family
+     | out ++ [method]
+     | out)
+
+fun resolve_method(method :: DispatchMethod,
+                   argument_types :: List,
+                   expected_result :: maybe(HType))
+     :: maybe(DispatchResolution):
+  let (patterns, result_pattern) = fresh_signature(method)
+  unless patterns.length() == argument_types.length()
+  | #false
+  recur match_arguments (index = 0, theta :~ Map = {}):
+    cond
+    | index == argument_types.length():
+        let final_theta:
+          match expected_result
+          | #false: theta
+          | expected:
+              match unify_type(result_pattern, expected :~ HType, theta)
+              | #false: #false
+              | next: next :~ Map
+        if final_theta
+        | DispatchResolution(
+            method,
+            final_theta :~ Map,
+            patterns.map(
+              fun (ty): normalize_type(final_theta :~ Map, ty)),
+            normalize_type(final_theta :~ Map, result_pattern))
+        | #false
+    | ~else:
+        match argument_types[index]
+        | #false: match_arguments(index + 1, theta)
+        | actual:
+            match unify_type(patterns[index], actual :~ HType, theta)
+            | #false: #false
+            | next: match_arguments(index + 1, next :~ Map)
+
+fun resolve_dispatch(registry :: DispatchRegistry,
+                     family :: Symbol,
+                     argument_types :: List,
+                     expected_result :: maybe(HType) = #false)
+     :: List.of(DispatchResolution):
+  for values(out :~ List = []) (method in dispatch_candidates(registry, family)):
+    match resolve_method(method, argument_types, expected_result)
+    | #false: out
+    | resolution: out ++ [resolution]

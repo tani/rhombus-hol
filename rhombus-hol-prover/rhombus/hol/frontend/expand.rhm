@@ -38,7 +38,7 @@ class Decl(kind :: Symbol,
 def declaration_heads :: List.of(Symbol) = [#'type, #'function,
                                             #'axiomatic_function,
                                             #'theorem, #'proof,
-                                            #'notation,
+                                            #'notation, #'dispatch,
                                             #'disable_rules, #'enable_rules,
                                             #'import]
 
@@ -108,6 +108,8 @@ fun plan_one(form :: Syntax) :: Decl:
       Decl(#'axiomatic_function, form, [name, params, body])
   | #'notation:
       notation_decl(form)
+  | #'dispatch:
+      dispatch_decl(form)
   | #'proof:
       syntax_error_here(#'proof, "a `proof:` with no `theorem` before it", form)
   | #'import:
@@ -204,31 +206,71 @@ fun overloaded_notation_decl(name :: Syntax, shape :: Syntax,
   unless order
   | syntax_error_here(#'notation, "a notation needs a `~order` option", form)
   let assoc = (if associativity | associativity | #'none)
-  Decl(#'operator_family, form,
+  Decl(#'dispatch_family, form,
        [name, syntaxes, order, assoc, operand_names, first[2]])
 
-fun notation_provider_decl(form :: Syntax) :: Decl:
+fun dispatch_argument(arg :: Syntax, named :: Boolean,
+                      form :: Syntax) :: List:
+  match arg
+  | '$(name :: Identifier) :: $ty ...':
+      unless named
+      | syntax_error_here(
+          #'dispatch,
+          "the `=` form takes types without argument names",
+          form)
+      [name, '$ty ...']
+  | ~else:
+      when named
+      | syntax_error_here(
+          #'dispatch,
+          "a template dispatch argument needs `name :: Type`",
+          arg)
+      [#false, arg]
+
+fun dispatch_parts(family :: Syntax, args :: List.of(Syntax),
+                   result_type, constant :: Syntax,
+                   template_arguments, named :: Boolean,
+                   form :: Syntax) :: Decl:
+  let parsed = args.map(
+                 fun (arg): dispatch_argument(arg, named, form))
+  Decl(#'dispatch_method, form,
+       [family,
+        parsed.map(fun (part): (part :~ List)[0]),
+        parsed.map(fun (part): (part :~ List)[1]),
+        result_type,
+        constant,
+        template_arguments])
+
+fun dispatch_decl(form :: Syntax) :: Decl:
   match form
-  | 'notation $(family :: Identifier) for $carrier ...:
-       $(constant :: Identifier)($(argument :: Identifier), ...)':
-      Decl(#'operator_provider, form,
-           [family, '$carrier ...', constant,
-            [Syntax.unwrap(argument), ...]])
-  | 'notation $(family :: Identifier) for $carrier ...:
-       $(constant :: Identifier)':
-      Decl(#'operator_provider, form,
-           [family, '$carrier ...', constant, #false])
+  | 'dispatch $(family :: Identifier)($arg, ...)
+       :: $result_type ... = $(constant :: Identifier)':
+      dispatch_parts(family, [arg, ...], '$result_type ...',
+                     constant, #false, #false, form)
+  | 'dispatch $(family :: Identifier)($arg, ...)
+       = $(constant :: Identifier)':
+      dispatch_parts(family, [arg, ...], #false,
+                     constant, #false, #false, form)
+  | 'dispatch $(family :: Identifier)($arg, ...)
+       :: $result_type ...:
+       $(constant :: Identifier)($(template :: Identifier), ...)':
+      dispatch_parts(
+        family, [arg, ...], '$result_type ...', constant,
+        [Syntax.unwrap(template), ...], #true, form)
+  | 'dispatch $(family :: Identifier)($arg, ...):
+       $(constant :: Identifier)($(template :: Identifier), ...)':
+      dispatch_parts(
+        family, [arg, ...], #false, constant,
+        [Syntax.unwrap(template), ...], #true, form)
   | ~else:
       syntax_error_here(
-        #'notation,
-        "expected `notation Name for Type: function` or a function call "
-          ++ "using the notation operand names",
+        #'dispatch,
+        "expected `dispatch Name(Type, ...) = constant` or a named "
+          ++ "signature with an implementation template",
         form)
 
 fun notation_decl(form :: Syntax) :: Decl:
   match form
-  | 'notation $_ for $_ ...: $_ ...':
-      notation_provider_decl(form)
   | 'notation $(name :: Identifier) $shape: $clause; ...':
       overloaded_notation_decl(name, shape, [clause, ...], form)
   | 'notation ($_ ...): $clause; ...':
@@ -236,8 +278,7 @@ fun notation_decl(form :: Syntax) :: Decl:
   | ~else:
       syntax_error_here(
         #'notation,
-        "expected `notation (pattern):`, `notation Name (pattern):`, "
-          ++ "or `notation Name for Type:`",
+        "expected `notation (pattern):` or `notation Name (pattern):`",
         form)
 
 

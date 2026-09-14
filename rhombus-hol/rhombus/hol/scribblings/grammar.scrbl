@@ -70,11 +70,12 @@ The built-in operators mean in the logic what they mean in Rhombus:
 @rhombus(#true) and @rhombus(#false) are the truth values, @rhombus(!) is
 negation, @rhombus(&&) and @rhombus(||) are conjunction and disjunction, and
 @rhombus(==) is equality at any type. Arithmetic, append, membership and set
-operators are resolved statically through named notation interpretations
-imported with the current theory. There is no runtime type switch and no
-implicit numeric coercion: the operands must select one canonical
-interpretation. A fixed @rhombus(notation, ~datum) declaration with both
-@rhombus(~runtime) and @rhombus(~logic) adds a spelling with both meanings.
+operators are resolved statically through dispatch methods imported with the
+current theory. There is no runtime type switch and no implicit numeric
+coercion: the complete argument tuple and, when available, the expected result
+type must select one non-overlapping method. A fixed
+@rhombus(notation, ~datum) declaration with both @rhombus(~runtime) and
+@rhombus(~logic) adds a spelling with both meanings.
 An ordinary Rhombus operator and runtime-only notation have no logical meaning
 and are rejected in a @rhombus(function); logic-only notation is rejected
 because no executable operator exists.
@@ -86,11 +87,11 @@ because every function in this grammar is total.
 Anything outside the grammar is a compile error that names the offending
 expression. String literals, @rhombus(block), ordinary runtime-only operators,
 runtime-only notation, and logic-only notation are outside it. A bare numeral
-is also rejected when its numeric type cannot be determined from an operator,
-function domain, or checked result.
-The lexical form @tt{-1} is the same registered unary-negation operator
+is also rejected when its numeric type cannot be determined from a dispatch
+argument, function domain, or checked result.
+The lexical form @tt{-1} is the same registered unary-negation notation
 applied to the nonnegative numeral @tt{1}; it therefore requires an expected
-type with a @tt{Negate} provider.
+type with a @tt{Negate} dispatch method.
 
 @subsection{Local definitions}
 
@@ -249,5 +250,7 @@ A quantifier extends as far to the right as it can, so
 
 quantifies over the whole conjunction.
 
-These levels are also the printer's. A goal the prover could not close is
-printed with them, so a residue reads back as the proposition it came from.
+These levels govern frontend notation-aware rendering. The kernel printer is
+canonical and prints dispatched constants as applications such as
+@tt{nat_add(x, y)}; the frontend surface printer reconstructs notation only
+when it is given explicit dispatch and notation tables.

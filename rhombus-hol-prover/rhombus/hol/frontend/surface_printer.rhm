@@ -1,0 +1,92 @@
+#lang rhombus/static
+
+// Frontend rendering layered over the kernel's canonical printer. Notation
+// tables are explicit inputs; the kernel never imports or stores them.
+
+import:
+  rhombus/hol/term open
+  rhombus/hol/printer as canonical
+  "dispatch.rhm" open
+
+export:
+  SurfaceNotation
+  standard_surface_notations
+  show_surface
+
+class SurfaceNotation(family :: Symbol,
+                      spelling :: String,
+                      precedence :: Int,
+                      associativity :: Symbol,
+                      prefix :: Boolean)
+
+fun standard_surface_notations() :: Map.of(Symbol, SurfaceNotation):
+  let entries = [
+    SurfaceNotation(#'Add, "+", 80, #'left, #false),
+    SurfaceNotation(#'Subtract, "-", 80, #'left, #false),
+    SurfaceNotation(#'Negate, "-", 90, #'right, #true),
+    SurfaceNotation(#'Multiply, "*", 85, #'left, #false),
+    SurfaceNotation(#'Power, "**", 95, #'right, #false),
+    SurfaceNotation(#'Less, "<", 75, #'none, #false),
+    SurfaceNotation(#'LessEqual, "<=", 75, #'none, #false),
+    SurfaceNotation(#'Greater, ">", 75, #'none, #false),
+    SurfaceNotation(#'GreaterEqual, ">=", 75, #'none, #false),
+    SurfaceNotation(#'Append, "++", 78, #'right, #false),
+    SurfaceNotation(#'Membership, "in", 75, #'none, #false),
+    SurfaceNotation(#'Union, "union", 76, #'left, #false),
+    SurfaceNotation(#'Intersection, "intersect", 77, #'left, #false)
+  ]
+  for values(out :~ Map = {}) (entry in entries):
+    let entry :~ SurfaceNotation = entry
+    out ++ {entry.family: entry}
+
+fun show_surface(registry :: DispatchRegistry,
+                 notations :: Map.of(Symbol, SurfaceNotation),
+                 term :: Term) :: String:
+  fun parenthesize(text :: String, have :: Int, want :: Int) :: String:
+    if have < want | "(" ++ text ++ ")" | text
+  fun surface_arguments(method :: DispatchMethod,
+                        implementation_args :: List.of(Term)) :: List.of(Term):
+    for List (surface_index in 0 .. method.argument_order.length()):
+      recur locate (implementation_index = 0):
+        cond
+        | method.argument_order[implementation_index] == surface_index:
+            implementation_args[implementation_index]
+        | ~else: locate(implementation_index + 1)
+  fun method_for(name :: Symbol, arity :: NonnegInt)
+       :: maybe(DispatchMethod):
+    for values(found :~ maybe(DispatchMethod) = #false) (method in registry.methods):
+      let method :~ DispatchMethod = method
+      (if !found
+             && method.constant == name
+             && method.argument_types.length() == arity
+             && notations.get(method.family, #false)
+       | method
+       | found)
+  fun render(value :: Term, want :: Int) :: String:
+    let (head, args) = strip_comb(value)
+    match head
+    | Const(name, _):
+        match method_for(name, args.length())
+        | method :: DispatchMethod:
+            let notation :~ SurfaceNotation = notations[method.family]
+            let ordered = surface_arguments(method, args)
+            cond
+            | notation.prefix && ordered.length() == 1:
+                parenthesize(
+                  notation.spelling ++ render(ordered[0], notation.precedence),
+                  notation.precedence, want)
+            | !notation.prefix && ordered.length() == 2:
+                let left_want = (if notation.associativity == #'left
+                                 | notation.precedence
+                                 | notation.precedence + 1)
+                let right_want = (if notation.associativity == #'right
+                                  | notation.precedence
+                                  | notation.precedence + 1)
+                parenthesize(
+                  render(ordered[0], left_want) ++ " " ++ notation.spelling
+                    ++ " " ++ render(ordered[1], right_want),
+                  notation.precedence, want)
+            | ~else: canonical.show(value)
+        | #false: canonical.show(value)
+    | ~else: canonical.show(value)
+  render(term, 0)

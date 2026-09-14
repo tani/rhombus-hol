@@ -26,7 +26,7 @@ import:
   rhombus/hol/frontend/surface_core open
   rhombus/hol/logic/bool open
   rhombus/hol/frontend/tyunify open
-  rhombus/hol/frontend/operator open
+  rhombus/hol/frontend/dispatch open
   rhombus/hol/effect/core open
   rhombus/hol/effect/core as effect
   rhombus/hol/effect/syntax open
@@ -384,7 +384,7 @@ class ElabEnv(thy :: Theory,
               mode :: Symbol,
               self_name :: maybe(Symbol),
               self :: maybe(Term),
-              operators :: OperatorRegistry = standard_operator_registry()):
+              operators :: DispatchRegistry = standard_dispatch_registry()):
   property who :: Symbol: (if mode == #'prop | #'theorem | #'function)
 
   reader_effect
@@ -455,26 +455,28 @@ fun elaborate_arguments_effect(args :: List.of(CoreExpr)) :: Computation:
           loop(rest, terms ++ [term])
 fun elaborate_equality_arguments_effect(args :: List.of(CoreExpr))
      :: Computation:
-  match args
-  | [left, right]:
-      cond
-      | requires_expected_type(right):
-          effect:
-            let left_term :: Term <- infer_core(left)
-            let right_term :: Term <- check_core(right, type_of(left_term))
-            return [left_term, right_term]
-      | requires_expected_type(left):
-          effect:
-            let right_term :: Term <- infer_core(right)
-            let left_term :: Term <- check_core(left, type_of(right_term))
-            return [left_term, right_term]
-      | ~else: elaborate_arguments_effect(args)
-  | ~else: elaborate_arguments_effect(args)
+  effect:
+    let env :: ElabEnv <- ElabEnv.ask()
+    match args
+    | [left, right]:
+        cond
+        | requires_expected_type(right, env.operators):
+            effect:
+              let left_term :: Term <- infer_core(left)
+              let right_term :: Term <- check_core(right, type_of(left_term))
+              return [left_term, right_term]
+        | requires_expected_type(left, env.operators):
+            effect:
+              let right_term :: Term <- infer_core(right)
+              let left_term :: Term <- check_core(left, type_of(right_term))
+              return [left_term, right_term]
+        | ~else: elaborate_arguments_effect(args)
+    | ~else: elaborate_arguments_effect(args)
 fun core_location(expr :: CoreExpr) :: Syntax:
   match expr
   | CoreRef(_, at): at
   | CoreCall(_, _, at): at
-  | CoreOperator(_, _, at): at
+  | CoreOverloadRef(_, _, at): at
   | CoreNumeral(_, at): at
   | CoreIf(_, _, _, at): at
   | CoreForall(_, _, at): at
@@ -517,7 +519,8 @@ fun elaborate_typed_arguments_effect(func :: CoreRef,
                          core_location(arg :~ CoreExpr))
           let (domain, range) = dest_fun(instantiated)
           effect:
-            let term :: Term <- (if requires_expected_type(arg :~ CoreExpr)
+            let term :: Term <- (if requires_expected_type(
+                                      arg :~ CoreExpr, env.operators)
                                  | check_core(arg, domain)
                                  | infer_core(arg))
             let next:
@@ -561,65 +564,63 @@ fun core_apply_effect(func :: CoreExpr, args :: List.of(CoreExpr),
             let head :: Term <- elaborate_effect(func)
             return list_mk_comb(
               head, specialize_call_args(type_of(head), terms))
-  effect:
-    let terms :: List.of(Term) <- (match func
-                                   | CoreRef(name, _) when name == #'eq:
-                                       elaborate_equality_arguments_effect(args)
-                                   | CoreRef(_, _) when arguments_require_expected(args):
-                                       elaborate_typed_arguments_effect(
-                                         func :~ CoreRef, args)
-                                   | ~else: elaborate_arguments_effect(args))
-    apply_terms(terms)
-fun elaborate_non_numerals_effect(args :: List.of(CoreExpr)) :: Computation:
-  recur loop (remaining :~ List = args, terms :~ List = []):
-    match remaining
-    | []: return terms
-    | List.cons(first, rest):
-        match first
-        | CoreNumeral(_, _): loop(rest, terms ++ [#false])
+  fun argument_effect() :: Computation:
+    match func
+    | CoreRef(name, _) when name == #'eq:
+        elaborate_equality_arguments_effect(args)
+    | CoreRef(_, _) when arguments_require_expected(args):
+        elaborate_typed_arguments_effect(func :~ CoreRef, args)
+    | ~else: elaborate_arguments_effect(args)
+  match func
+  | CoreOverloadRef(family, display_name, _):
+      elaborate_dispatch_effect(family, display_name, args, at)
+  | CoreRef(name, ref_at):
+      effect:
+        let env :: ElabEnv <- ElabEnv.ask()
+        let overloaded = !env.vars.get(name, #false)
+                           && name != env.self_name
+                           && !const_type(env.thy, name)
+                           && dispatch_family(env.operators, name)
+        cond
+        | overloaded:
+            effect:
+              let term :: Term <- elaborate_dispatch_effect(name, to_string(name), args, at)
+              return term
         | ~else:
             effect:
-              let term :: Term <- elaborate_effect(first :~ CoreExpr)
-              loop(rest, terms ++ [term])
+              let terms :: List.of(Term) <- argument_effect()
+              apply_terms(terms)
+  | ~else:
+      effect:
+        let terms :: List.of(Term) <- argument_effect()
+        apply_terms(terms)
+fun elaborate_non_numerals_effect(args :: List.of(CoreExpr)) :: Computation:
+  effect:
+    let env :: ElabEnv <- ElabEnv.ask()
+    recur loop (remaining :~ List = args, terms :~ List = []):
+      match remaining
+      | []: return terms
+      | List.cons(first, rest):
+          cond
+          | requires_expected_type(first :~ CoreExpr, env.operators):
+              loop(rest, terms ++ [#false])
+          | ~else:
+              effect:
+                let term :: Term <- elaborate_effect(first :~ CoreExpr)
+                loop(rest, terms ++ [term])
 
-fun surface_domain(domains :: List.of(HType),
-                   order :: List.of(NonnegInt),
-                   surface_index :: NonnegInt) :: HType:
-  recur find (constant_index = 0):
-    cond
-    | constant_index >= order.length():
-        error(~who: #'operator, "internal invalid provider argument order")
-    | order[constant_index] == surface_index: domains[constant_index]
-    | ~else: find(constant_index + 1)
+fun dispatch_signature(method :: DispatchMethod) :: String:
+  String.join(method.argument_types.map(type_to_string), " * ")
+    ++ " -> " ++ type_to_string(method.result_type)
+    ++ " via " ++ to_string(method.constant)
 
-fun provider_match(env :: ElabEnv, provider :: OperatorProvider,
-                   known :: List, arity :: PosInt,
-                   expected_result :: maybe(HType) = #false)
-     :: maybe(List):
-  let generic = const_type(env.thy, provider.constant)
-  match generic
-  | #false: #false
-  | generic:
-      let (domains, result) = peel_fun(generic :~ HType, arity)
-      recur match_args (index = 0, theta :~ Map = {}):
-        cond
-        | index == known.length():
-            match expected_result
-            | #false: [theta, domains, result]
-            | expected:
-                match type_match(result, expected :~ HType, theta)
-                | #false: #false
-                | next: [next, domains, result]
-        | ~else:
-            match known[index]
-            | #false: match_args(index + 1, theta)
-            | term:
-                let expected = surface_domain(domains,
-                                              provider.argument_order,
-                                              index)
-                match type_match(expected, type_of(term :~ Term), theta)
-                | #false: #false
-                | next: match_args(index + 1, next :~ Map)
+fun specialize_dispatch_term(term :: Term, expected :: HType) :: Term:
+  cond
+  | type_of(term) == expected: term
+  | ~else:
+      match type_match(type_of(term), expected, {})
+      | #false: term
+      | theta: inst_type(theta :~ Map, term)
 
 fun numeral_apply(env :: ElabEnv, name :: Symbol,
                   args :: List.of(Term), at :: Syntax) :: Term:
@@ -650,95 +651,80 @@ fun elaborate_numeral(env :: ElabEnv, value :: NonnegInt,
                      ++ type_to_string(expected),
                    at)
 
-fun operator_signature(env :: ElabEnv,
-                       provider :: OperatorProvider,
-                       family :: OperatorFamily) :: String:
-  match const_type(env.thy, provider.constant)
-  | #false:
-      type_to_string(provider.carrier)
-        ++ " via " ++ to_string(provider.constant)
-  | ty:
-      let (domains, result) = peel_fun(ty :~ HType, family.arity)
-      let surface_domains:
-        for List (index in 0 .. family.arity):
-          type_to_string(
-            surface_domain(domains, provider.argument_order, index))
-      String.join(surface_domains, " * ")
-        ++ " -> " ++ type_to_string(result)
-        ++ " via " ++ to_string(provider.constant)
-
-fun elaborate_operator_effect(family_name :: Symbol,
+fun elaborate_dispatch_effect(family_name :: Symbol,
+                              display_name :: String,
                               args :: List.of(CoreExpr),
                               at :: Syntax,
                               ~expected: expected_result :: maybe(HType) = #false)
      :: Computation:
   effect:
     let env :: ElabEnv <- ElabEnv.ask()
-    let family = operator_family(env.operators, family_name)
+    let family = dispatch_family(env.operators, family_name)
     unless family
     | syntax_error(env.who,
-                   "unknown notation family " ++ to_string(family_name),
+                   "unknown dispatch family " ++ to_string(family_name),
                    at)
-    let family :~ OperatorFamily = family
+    let family :~ DispatchFamily = family
     unless args.length() == family.arity
     | syntax_error(env.who,
-                   "operator `" ++ family.spelling ++ "` expects "
-                     ++ to_string(family.arity) ++ " operands",
+                   "`" ++ display_name ++ "` expects "
+                     ++ to_string(family.arity) ++ " arguments",
                    at)
     let known :: List <- elaborate_non_numerals_effect(args)
-    let matches:
-      for values(out :~ List = []) (provider in operator_candidates(env.operators, family_name)):
-        match provider_match(env, provider :~ OperatorProvider,
-                             known, family.arity, expected_result)
-        | #false: out
-        | instance: out ++ [[provider, instance]]
+    let argument_types:
+      known.map(
+        fun (term):
+          match term
+          | #false: #false
+          | value: type_of(value :~ Term))
+    let matches = resolve_dispatch(
+                    env.operators, family_name,
+                    argument_types, expected_result)
     when matches.length() == 0
-    | let available = operator_candidates(env.operators, family_name)
-      let signatures = available.map(
-                         fun (provider :: OperatorProvider):
-                           operator_signature(env, provider, family))
+    | let signatures = dispatch_candidates(env.operators, family_name).map(
+                         fun (method :: DispatchMethod):
+                           dispatch_signature(method))
       syntax_error(
         env.who,
-        "operator `" ++ family.spelling ++ "` has no applicable provider"
+        "`" ++ display_name ++ "` has no applicable dispatch"
           ++ (if signatures.length() == 0
               | ""
-              | "\navailable providers:\n  "
+              | "\navailable methods:\n  "
                   ++ String.join(signatures, "\n  ")),
         at)
     when matches.length() > 1
     | let candidates = matches.map(
-                         fun (entry :: List):
-                           operator_signature(
-                             env, entry[0] :~ OperatorProvider, family))
+                         fun (resolution :: DispatchResolution):
+                           dispatch_signature(resolution.method))
       syntax_error(env.who,
-                   "operator `" ++ family.spelling ++ "` is ambiguous"
+                   "`" ++ display_name ++ "` has ambiguous dispatch"
                      ++ "\ncandidates:\n  "
                      ++ String.join(candidates, "\n  "),
                    at)
-    let chosen :~ List = matches[0]
-    let provider :~ OperatorProvider = chosen[0]
-    let instance :~ List = chosen[1]
-    let theta :~ Map = instance[0]
-    let domains :~ List.of(HType) = instance[1]
-    let terms:
-      for List (arg in args, maybe_term in known, index in List.iota(args.length())):
-        match maybe_term
-        | #false:
-            match arg
-            | CoreNumeral(value, numeral_at):
-                elaborate_numeral(
-                  env, value,
-                  type_subst(
-                    theta,
-                    surface_domain(domains, provider.argument_order, index)),
-                  numeral_at)
-            | ~else:
-                error(~who: #'operator,
-                      "internal missing elaborated operator operand")
-        | term: term
-    let ordered = provider.argument_order.map(
+    let resolution :~ DispatchResolution = matches[0]
+    let method = resolution.method
+    fun finish(index :: NonnegInt,
+               out :: List.of(Term)) :: Computation:
+      cond
+      | index == args.length(): return out
+      | ~else:
+          match known[index]
+          | #false:
+              effect:
+                let term :: Term <- check_core(
+                                     args[index] :~ CoreExpr,
+                                     resolution.argument_types[index])
+                finish(index + 1, out ++ [term])
+          | term:
+              finish(
+                index + 1,
+                out ++ [specialize_dispatch_term(
+                          term :~ Term,
+                          resolution.argument_types[index])])
+    let terms :: List.of(Term) <- finish(0, [])
+    let ordered = method.argument_order.map(
                     fun (index): terms[index] :~ Term)
-    return numeral_apply(env, provider.constant, ordered, at)
+    return numeral_apply(env, method.constant, ordered, at)
 
 
 fun elaborate_binders_effect(binders :: List.of(CoreBinder), body :: CoreExpr,
@@ -783,8 +769,10 @@ fun elaborate_effect(expr :: CoreExpr) :: Computation:
         let env :: ElabEnv <- ElabEnv.ask()
         return core_lookup(env, name, at)
   | CoreCall(func, args, at): core_apply_effect(func, args, at)
-  | CoreOperator(family, args, at):
-      elaborate_operator_effect(family, args, at)
+  | CoreOverloadRef(_, _, at):
+      effect:
+        let env :: ElabEnv <- ElabEnv.ask()
+        syntax_error(env.who, "an overloaded reference must be called", at)
   | CoreNumeral(_, at):
       effect:
         let env :: ElabEnv <- ElabEnv.ask()
@@ -805,18 +793,29 @@ fun elaborate_effect(expr :: CoreExpr) :: Computation:
 fun infer_core(expr :: CoreExpr) :: Computation:
   elaborate_effect(expr)
 
-fun requires_expected_type(expr :: CoreExpr) :: Boolean:
+fun requires_expected_type(
+      expr :: CoreExpr,
+      operators :: maybe(DispatchRegistry) = #false) :: Boolean:
+  fun any_arg(args :: List.of(CoreExpr)) :: Boolean:
+    for values(found = #false) (arg in args):
+      found || requires_expected_type(arg :~ CoreExpr, operators)
+  fun every_arg(args :: List.of(CoreExpr)) :: Boolean:
+    args.length() == 0
+      || for values(all = #true) (arg in args):
+           all && requires_expected_type(arg :~ CoreExpr, operators)
   match expr
   | CoreNumeral(_, _): #true
-  | CoreOperator(_, args, _):
-      recur loop (remaining :~ List = args):
-        match remaining
-        | []: args.length() > 0
-        | List.cons(arg, rest):
-            requires_expected_type(arg :~ CoreExpr) && loop(rest)
+  | CoreCall(CoreOverloadRef(_, _, _), args, _): every_arg(args)
+  | CoreCall(CoreRef(name, _), args, _):
+      (if operators
+            && dispatch_family(operators :~ DispatchRegistry, name) != #false
+       | args.length() == 0 || any_arg(args)
+       | any_arg(args))
+  | CoreCall(_, args, _): any_arg(args)
+  | CoreOverloadRef(_, _, _): #true
   | CoreIf(_, then_expr, else_expr, _):
-      requires_expected_type(then_expr)
-        || requires_expected_type(else_expr)
+      requires_expected_type(then_expr, operators)
+        || requires_expected_type(else_expr, operators)
   | ~else: #false
 
 fun check_core(expr :: CoreExpr, expected :: HType) :: Computation:
@@ -825,8 +824,33 @@ fun check_core(expr :: CoreExpr, expected :: HType) :: Computation:
       effect:
         let env :: ElabEnv <- ElabEnv.ask()
         return elaborate_numeral(env, value, expected, at)
-  | CoreOperator(family, args, at):
-      elaborate_operator_effect(family, args, at, ~expected: expected)
+  | CoreCall(CoreOverloadRef(family, display_name, _), args, at):
+      elaborate_dispatch_effect(
+        family, display_name, args, at, ~expected: expected)
+  | CoreCall(CoreRef(name, ref_at), args, at):
+      effect:
+        let env :: ElabEnv <- ElabEnv.ask()
+        let overloaded = !env.vars.get(name, #false)
+                           && name != env.self_name
+                           && !const_type(env.thy, name)
+                           && dispatch_family(env.operators, name)
+        cond
+        | overloaded:
+            effect:
+              let term :: Term <- elaborate_dispatch_effect(name, to_string(name), args, at, ~expected: expected)
+              return term
+        | ~else:
+            effect:
+              let term :: Term <- infer_core(expr)
+              match type_match(type_of(term), expected, {})
+              | theta: return inst_type(theta :~ Map, term)
+              | #false:
+                  error(~who: #'check_core,
+                        "expression has an unexpected type")
+  | CoreOverloadRef(_, _, at):
+      effect:
+        let env :: ElabEnv <- ElabEnv.ask()
+        syntax_error(env.who, "an overloaded reference must be called", at)
   | CoreIf(condition_expr, then_expr, else_expr, at):
       effect:
         let condition :: Term <- infer_core(condition_expr)
@@ -874,7 +898,7 @@ fun run_type_elaboration(env :: ElabEnv, stx :: Syntax) :: HType:
 fun parse_core_prop(thy :: Theory, tyvars :: List.of(Symbol),
                     vars :: Map.of(Symbol, Term),
                     expr :: CoreExpr,
-                    ~operators: operators :: OperatorRegistry = standard_operator_registry()) :: Term:
+                    ~operators: operators :: DispatchRegistry = standard_dispatch_registry()) :: Term:
   run_elaboration(ElabEnv(thy, tyvars, vars, #'prop, #false, #false,
                           operators), expr)
 
@@ -897,9 +921,7 @@ fun core_type_vars(expr :: CoreExpr) :: List.of(Symbol):
                     append_unique(core_type_vars(t), core_type_vars(e)))
   | CoreForall(bs, body, _):
       append_unique(binders_vars(bs), core_type_vars(body))
-  | CoreOperator(_, args, _):
-      for values(acc :~ List = []) (a in args):
-        append_unique(acc, core_type_vars(a))
+  | CoreOverloadRef(_, _, _): []
   | CoreNumeral(_, _): []
   | CoreExists(bs, body, _):
       append_unique(binders_vars(bs), core_type_vars(body))
@@ -914,7 +936,7 @@ fun leading_core_binder_names(expr :: CoreExpr) :: List.of(Symbol):
 
 fun elaborate_theorem_statement(
       thy :: Theory, expr :: CoreExpr,
-      ~operators: operators :: OperatorRegistry = standard_operator_registry())
+      ~operators: operators :: DispatchRegistry = standard_dispatch_registry())
      :: values(Term, List.of(Symbol)):
   let tyvars = core_type_vars(expr)
   values(parse_core_prop(thy, tyvars, {}, expr, ~operators: operators),
@@ -971,7 +993,7 @@ class ClauseEnv(thy :: Theory,
                 vars :: Map.of(Symbol, Term),
                 at :: Syntax,
                 result_type :: HType,
-                operators :: OperatorRegistry):
+                operators :: DispatchRegistry):
   reader_effect
 
 fun core_parse_body(body :: CoreFunBody) :: Computation:
@@ -1004,7 +1026,7 @@ fun core_parse_body(body :: CoreFunBody) :: Computation:
         let elab_env = ElabEnv(
                          env.thy, [], env.vars, #'function,
                          env.self_name, env.self, env.operators)
-        let value = (if requires_expected_type(expr)
+        let value = (if requires_expected_type(expr, env.operators)
                      | run_checked_elaboration(
                          elab_env, expr, env.result_type)
                      | run_elaboration(elab_env, expr))
@@ -1081,7 +1103,7 @@ fun core_clause_row(row :: CoreRow) :: Computation:
 
 fun elaborate_function_decl(
       thy :: Theory, spec :: CoreFunctionSpec,
-      ~operators: operators :: OperatorRegistry = standard_operator_registry())
+      ~operators: operators :: DispatchRegistry = standard_dispatch_registry())
      :: FunSpec:
   let tyvars = spec_type_vars(spec)
   let bindings:

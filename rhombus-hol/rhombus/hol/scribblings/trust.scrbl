@@ -285,8 +285,11 @@ Beyond the termination restrictions in @secref("termination"):
 
  @item{The function body grammar has named applications, @rhombus(if),
   @rhombus(cond), local @rhombus(let), matching, Booleans, type-directed
-  nonnegative numerals, and registered operators. It has no lambdas,
-  effects, implicit numeric coercions, or arbitrary runtime expressions.}
+  nonnegative numerals, and statically dispatched calls and notation.
+  Dispatch is resolved before kernel terms or executable code are produced;
+  neither layer contains a runtime dispatch mechanism. The grammar has no
+  lambdas, effects, implicit numeric coercions, or arbitrary runtime
+  expressions.}
 
  @item{Proof search is bounded, but a rule that does not make progress is
   still admitted. @rhombus(mk_rule)'s conditions catch a variable left-hand

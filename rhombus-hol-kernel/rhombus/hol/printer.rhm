@@ -1,11 +1,10 @@
 #lang rhombus/static
 
-// Rendering terms back into the surface syntax the user wrote.
+// Canonical rendering of kernel terms.
 //
-// This is not a debugging aid -- it is the front half of the stuck-residue
-// error message, which is the single highest-value piece of UX in the system.
-// A residue the user cannot read is a residue they cannot act on, so terms
-// print as Rhombus/HOL source, not as HOL Light's `!x. P x /\ Q x`.
+// This module knows only primitive HOL constants. Frontend notation and
+// dispatch declarations are deliberately absent: a kernel term is rendered
+// identically regardless of which surface language produced it.
 //
 // Terms are locally nameless, so binders carry no names and the printer has to
 // invent them.  It keeps a stack of names, innermost first: `BVar(i)` prints
@@ -107,37 +106,6 @@ fun strip_quants(n :: Symbol, t :: Term, env :: Env)
         let env2 = push(env, nm)
         loop(body, env2, acc ++ [decl(nm, aty)])
     | ~else: values(acc, t, env)
-// Canonical reverse lookup for the standard provider constants.  The fourth
-// field records constants whose kernel argument order differs from the
-// surface order (membership).
-fun standard_binop(n :: Symbol) :: maybe(List):
-  cond
-  | n == #'nat_add || n == #'int_add || n == #'rational_add:
-      ["+", prec_add, #'left, #false]
-  | n == #'nat_sub || n == #'int_subtract || n == #'rational_subtract:
-      ["-", prec_add, #'left, #false]
-  | n == #'nat_mul || n == #'int_multiply || n == #'rational_multiply:
-      ["*", prec_multiply, #'left, #false]
-  | n == #'nat_pow: ["**", prec_power, #'right, #false]
-  | n == #'nat_lt || n == #'int_lt || n == #'rational_lt:
-      ["<", prec_relation, #'none, #false]
-  | n == #'nat_le || n == #'int_le || n == #'rational_le:
-      ["<=", prec_relation, #'none, #false]
-  | n == #'nat_gt: [">", prec_relation, #'none, #false]
-  | n == #'nat_ge: [">=", prec_relation, #'none, #false]
-  | n == #'list_append || n == #'string_append:
-      ["++", prec_append, #'right, #false]
-  | n == #'set_member: ["in", prec_relation, #'none, #true]
-  | n == #'set_union || n == #'relation_union:
-      ["union", prec_union, #'left, #false]
-  | n == #'set_intersection || n == #'relation_intersection:
-      ["intersect", prec_intersection, #'left, #false]
-  | ~else: #false
-
-fun standard_prefix(n :: Symbol) :: maybe(List):
-  cond
-  | n == #'int_negate || n == #'rational_negate: ["-", prec_prefix]
-  | ~else: #false
 
 fun pp_infix(a :: Term, word :~ String, b :: Term, precedence :: Int,
              association :: Symbol, want :: Int, trailing :: Boolean,
@@ -185,15 +153,6 @@ fun pp_app(t :: Term, want :: Int, trailing :: Boolean, env :: Env) :~ String:
     // so each one is both unconstrained and trailing.
     "(" ++ String.join(args.map(fun (a): pp(a, 0, #true, env)), ", ") ++ ")"
   match as_binop(t)
-  | [n, a, b] when standard_binop(n):
-      let spec :~ List = standard_binop(n)
-      let word :~ String = spec[0]
-      let precedence :~ Int = spec[1]
-      let association :~ Symbol = spec[2]
-      let swap :~ Boolean = spec[3]
-      let left :~ Term = if swap | b | a
-      let right :~ Term = if swap | a | b
-      pp_infix(left, word, right, precedence, association, want, trailing, env)
   | [n, a, b] when n == c_eq:
       // Equality at type `bool` is if-and-only-if, and reads much better
       // spelled that way in a residue.
@@ -221,11 +180,6 @@ fun pp_app(t :: Term, want :: Int, trailing :: Boolean, env :: Env) :~ String:
             prec_or, want)
   | ~else:
       match t
-      | Comb(Const(n, _), a) when standard_prefix(n):
-          let spec :~ List = standard_prefix(n)
-          let word :~ String = spec[0]
-          let precedence :~ Int = spec[1]
-          paren(word ++ pp(a, precedence, trailing, env), precedence, want)
       | Comb(Const(n, _), a) when n == c_neg:
           // `not` binds looser than `===`, so `not a === b` is unambiguous --
           // but it does not *read* that way.  Parenthesize any operand that is
@@ -244,7 +198,7 @@ fun pp_app(t :: Term, want :: Int, trailing :: Boolean, env :: Env) :~ String:
               // An applied lambda or other compound head: parenthesize it.
               "(" ++ pp(head, 0, #true, env) ++ ")" ++ args_of(args)
 
-// The term as Rhombus/HOL surface syntax.
+// The term as canonical HOL syntax.
 fun show(t :: Term) :~ String:
   pp(t, 0, #true, initial_env(t))
 

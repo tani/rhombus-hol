@@ -30,12 +30,10 @@ import:
   meta:
     lib("racket/base.rkt") as rb
     rhombus/hol/htype open
-    rhombus/hol/kernel open
     rhombus/hol/frontend/tyunify open
     rhombus/hol/datatype/datatype open
     rhombus/hol/frontend/expand as expand
     rhombus/hol/frontend/elab as elab
-    rhombus/hol/frontend/driver open
     rhombus/hol/frontend/dispatch open
     rhombus/hol/frontend/surface_state open
     rhombus/hol/frontend/type/constructor open
@@ -57,18 +55,17 @@ meta:
   fun st(n :: Int) :: Syntax:
     Syntax.make_id("_hol_st" ++ to_string(n), id_ctx)
 
-  // Expansion-local wrapper around the importable surface state. The fallback
-  // theory is needed only for kernel primitives and legacy theory modules.
+  // Expansion-local wrapper around importable surface metadata. Imports stay
+  // deferred until a state-dependent declaration actually needs them.
   class SurfaceContext(surface :: SurfaceState,
-                       fallback_theory :: maybe(Theory),
                        pending_imports :: List.of(List.of(Syntax)))
 
   def surface_state_key = #'rhombus_hol_surface_state
   def initial_surface_context:
-    let base = initial_state()
     SurfaceContext(
-      SurfaceState(base.operators, {}, base.type_constructors),
-      base.ctx.thy, [])
+      SurfaceState(standard_dispatch_registry(), {},
+                   standard_type_constructor_registry()),
+      [])
 
   fun state_on(stx :: Syntax) :: SurfaceContext:
     match rb.#{syntax-property}(stx, surface_state_key)
@@ -85,21 +82,10 @@ meta:
       match ModulePath.maybe('$t ...')
       | #false: error(~who: #'import, "invalid imported theory path")
       | p: p :~ ModulePath
-    let surface_path = path.add(ModulePath('self ! hol_surface'))
-    fun load_surface() :: SurfaceContext:
-      let imported = Evaluator.instantiate(surface_path, #'state)
-      let imported :~ SurfaceState = imported
-      SurfaceContext(imported, initial_surface_context.fallback_theory, [])
-    fun load_legacy_theory() :: SurfaceContext:
-      let imported = Evaluator.instantiate(
-                       path.add(ModulePath('self ! hol_theory')), #'theory)
-      let imported :~ HolState = imported
-      SurfaceContext(
-        SurfaceState(imported.operators, {}, imported.type_constructors),
-        imported.ctx.thy, [])
-    if Evaluator.module_is_declared(surface_path, ~load: #true)
-    | load_surface()
-    | load_legacy_theory()
+    let imported = Evaluator.instantiate(
+                     path.add(ModulePath('self ! hol_surface')), #'state)
+    let imported :~ SurfaceState = imported
+    SurfaceContext(imported, [])
 
   fun force_surface_context(context :: SurfaceContext) :: SurfaceContext:
     for values(current :~ SurfaceContext = context) (
@@ -107,22 +93,15 @@ meta:
       let imported = imported_surface_context(terms :~ List.of(Syntax))
       SurfaceContext(
         merge_surface_states(imported.surface, current.surface),
-        imported.fallback_theory,
         [])
 
   fun defer_surface_import(context :: SurfaceContext,
                            terms :: List.of(Syntax)) :: SurfaceContext:
-    SurfaceContext(context.surface, context.fallback_theory,
-                   context.pending_imports ++ [terms])
+    SurfaceContext(context.surface, context.pending_imports ++ [terms])
 
   fun surface_const_type(context :: SurfaceContext, name :: Symbol)
        :: maybe(HType):
-    match context.surface.constants.get(name, #false)
-    | ty :: HType: ty
-    | #false:
-        match context.fallback_theory
-        | #false: #false
-        | thy: const_type(thy :~ Theory, name)
+    context.surface.constants.get(name, #false)
 
 
   fun dispatch_argument_position(argument_names :: List,
@@ -201,7 +180,6 @@ meta:
         add_dispatch_method(registry_with_function, method),
         ready.surface.constants,
         ready.surface.type_constructors),
-      ready.fallback_theory,
       ready.pending_imports)
 
   fun surface_add_function(context :: SurfaceContext, form :: Syntax)
@@ -228,7 +206,6 @@ meta:
         ready.surface.operators,
         ready.surface.constants ++ {Syntax.unwrap(name): full_type},
         ready.surface.type_constructors),
-      ready.fallback_theory,
       ready.pending_imports)
 
   fun surface_add_type(context :: SurfaceContext, spec :: DatatypeSpec)
@@ -243,7 +220,6 @@ meta:
                               spec.name, spec.params)
     SurfaceContext(
       SurfaceState(ready.surface.operators, additions, type_constructors),
-      ready.fallback_theory,
       ready.pending_imports)
 
   fun surface_symbol_expr(name :: Symbol) :: Syntax:

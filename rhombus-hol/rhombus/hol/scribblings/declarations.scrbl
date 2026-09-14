@@ -26,7 +26,8 @@ type Id.of(?tyvar, ...)
 | ctor
 | ...
 
-ctor = CtorId()
+ctor = CtorId
+     | CtorId()
      | CtorId(field :: Type, ...)
 }
 
@@ -34,6 +35,12 @@ Declares an @deftech{algebraic datatype}. A type variable is written
 @rhombus(?a). A parameterized declaration binds @tt{Id.of}; the bare
 @tt{Id} remains a constructor namespace and cannot be used as a type without
 its arguments. Nullary datatypes continue to use their bare identifier.
+The declaration head may end in @tt{:}; this is the block form of the same
+declaration. A nullary constructor declaration may likewise omit its empty
+parentheses. Thus @tt{type Nat: | zero} and @tt{type Nat | zero()} declare the
+same datatype shape. The omission applies to the constructor declaration;
+expressions and patterns in this manual use the explicit call form
+@tt{zero()}.
 
 @rhombusblock(
   type List.of(?a)
@@ -87,11 +94,13 @@ expression.
     | Cons(x, rest): Cons(x, app(rest, ys))
 )
 
-Logically each clause becomes one equation, universally closed over the
+Logically each winning clause becomes one equation, universally closed over the
 clause's variables, and each equation enters the rewriter. Before any of that
-the definition must pass three checks: the clauses must cover every case, no
-two may overlap, and the recursion must be shown to terminate
-(@secref("termination")).
+the definition must pass three checks: the clauses must cover every case, every
+clause must win for at least one argument shape after earlier clauses take
+priority, and the recursion must be shown to terminate
+(@secref("termination")). Clauses may overlap; matching is ordered and the
+earliest matching clause wins in both the logical and executable readings.
 The compiler prepares that checked clause matrix once. An ordinary
 @rhombus(function, ~datum) defines a non-recursive matrix directly or derives
 its recursive equations from the selected well-founded order; the explicit
@@ -508,9 +517,10 @@ not only when the derivation would have failed. A form whose meaning depended
 on which recursion schemes this version happens to handle is the thing having
 two forms is for.
 
-Termination, exhaustiveness and non-overlap are still checked, because those
-are what make postulating the equations a conservative extension; see
-@secref("termination"). What is skipped is the proof.
+Termination, exhaustiveness, and reachability under ordered matching are still
+checked, because those are what make postulating the resulting winning
+equations a conservative extension; see @secref("termination"). What is
+skipped is the proof.
 
 @rhombus(function, ~datum) refuses a definition whose recursion it cannot
 build a well-founded order for, so an ordinary declaration never extends the

@@ -8,9 +8,10 @@ Rhombus/HOL is a theorem prover embedded in Rhombus: an LCF-style
 higher-order-logic kernel with an ACL2-style automatic prover on top. A module
 written in @rhombuslangname(rhombus/hol) is an ordinary Rhombus module that may
 also contain logical declarations, and those declarations have two readings at
-once. A datatype is a set of axioms @emph{and} a set of Rhombus classes; a
-function definition is a set of equations @emph{and} a Rhombus function; a
-theorem is a claim that is proved while the module compiles.
+once. A datatype is a derived logical datatype @emph{and} a set of Rhombus
+classes; a function definition is a derived set of equations @emph{and} a
+Rhombus function; a theorem is a claim that is proved while the module
+compiles.
 
 @rhombusblock(
   #,(@hash_lang()) #,(@rhombuslangname(rhombus/hol))

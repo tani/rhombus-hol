@@ -188,8 +188,9 @@ equation it registered is hypothesis-free and belongs to that theory.
 grammar and a different contract: it postulates its equations rather than
 deriving them, and it does so unconditionally --- a declaration written that
 way assumes its equations even if the derivation would have succeeded.
-Termination, exhaustiveness and non-overlap are still checked, which is what
-makes the postulation a conservative extension; see @secref("termination").
+Termination, exhaustiveness, and reachability under ordered matching are still
+checked, which is what makes postulating the resulting winning equations a
+conservative extension; see @secref("termination").
 It is a separate word so that a reader scanning a module can see which
 declarations extended the theory by assumption without having to know which
 recursion schemes this version happens to handle.

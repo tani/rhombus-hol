@@ -42,9 +42,9 @@ body = expr                        the value of the body
      | match Id | clause | ...     on a parameter or a pattern variable
 
 expr = Id                          a parameter, pattern variable or local
-     | Id(expr, ...)               a constructor, or a declared function
+     | Id(expr, ...)               a constructor, function or named primitive
      | NonnegativeInteger          an expected Nat, Integer, or Rational
-     | #true | #false
+     | #true | #false | true | false
      | !expr
      | expr && expr
      | expr || expr
@@ -59,9 +59,15 @@ expr = Id                          a parameter, pattern variable or local
      | expr intersect expr
      | expr < expr | expr <= expr | expr > expr | expr >= expr
      | if expr | expr | expr
+     | cond-expr
      | expr reflected-op expr
      | expr registered-op expr
      | (expr)
+
+cond-expr = cond
+            | expr: expr
+            | ...
+            | ~else: expr
 
 clause = CtorId(Id, ...): body
        | CtorId: body
@@ -74,6 +80,21 @@ row = (pattern, ...): body      on the declaration, one per argument
 expression: a @rhombus(let) is a statement followed by the rest of the body,
 and there is no @rhombus(let) inside the operand of a @rhombus(&&). That is
 not a notational choice --- it is what the elaborator accepts.
+
+@rhombus(cond) tests its guards from top to bottom and returns the body of the
+first true guard. A final @rhombus(~else) clause is mandatory and must be last:
+
+@rhombusblock(
+  function pick(b :: Boolean, x :: Nat, y :: Nat) :: Nat:
+    cond
+    | b: x
+    | ~else: y
+)
+
+Both the executable and logical readings lower this form to right-nested
+@rhombus(if) expressions. Guards and clause results are expressions, not full
+bodies, so a clause cannot contain a local @rhombus(let) or
+@rhombus(match).
 
 The built-in operators mean in the logic what they mean in Rhombus:
 @rhombus(#true) and @rhombus(#false) are the truth values, @rhombus(!) is
@@ -211,9 +232,15 @@ prop = expr
      | forall (Id :: Type, ...): prop
      | exists (Id :: Type, ...): prop
      | if prop | prop | prop
+     | cond-prop
      | prop logical-op prop
      | prop reflected-op prop
      | (prop)
+
+cond-prop = cond
+            | prop: prop
+            | ...
+            | ~else: prop
 }
 
 A proposition is never emitted as Rhombus, so it uses the logical spellings:
@@ -221,6 +248,44 @@ A proposition is never emitted as Rhombus, so it uses the logical spellings:
 and @tt{<=>} for equivalence. (Equality and equivalence are the same relation;
 the two spellings differ only in precedence, so that an equivalence between
 equations reads without parentheses.)
+
+The same @rhombus(cond) form is available in a proposition, with proposition
+guards and results and the same mandatory final @rhombus(~else). Since
+@rhombus(quickcheck) uses this proposition grammar, it accepts
+@rhombus(cond) when every branch has an executable reading.
+
+@subsection{Named logical constants}
+
+The initial theory exposes the canonical names of its logical constants to HOL
+name resolution. The named and operator forms below denote the same constants:
+
+@verbatim{
+true, false                       Boolean values (#true, #false)
+eq(x, y)                          equality (==, ===, <=>)
+imp(p, q)                         implication (==>)
+conj(p, q), disj(p, q)            conjunction and disjunction (&&/and, ||/or)
+neg(p)                            negation (!, not)
+exists1(predicate)                unique existence
+select(predicate)                 choice
+wf(relation)                      well-foundedness
+}
+
+Their types are @tt{eq :: ?a -> ?a -> Boolean},
+@tt{imp, conj, disj :: Boolean -> Boolean -> Boolean},
+@tt{neg :: Boolean -> Boolean},
+@tt{exists1 :: (?a -> Boolean) -> Boolean},
+@tt{select :: (?a -> Boolean) -> ?a}, and
+@tt{wf :: (?a -> ?a -> Boolean) -> Boolean}.
+
+@tt{true}, @tt{false}, @tt{eq}, @tt{conj}, @tt{disj}, and @tt{neg} have both
+logical and executable readings, so they may appear in a
+@rhombus(function) body or executable @rhombus(quickcheck) property.
+@tt{imp}, @tt{exists1}, @tt{select}, and @tt{wf} are logic-only named
+applications. Use them in theorem statements and proof terms, not in a
+@rhombus(function) or @rhombus(quickcheck). Universal quantification,
+existential quantification, and conditionals use the dedicated
+@rhombus(forall), @rhombus(exists), @rhombus(if), and @rhombus(cond) forms
+instead of calls to their kernel constants.
 
 @subsection{Precedence}
 

@@ -250,12 +250,10 @@ Beyond the termination restrictions in @secref("termination"):
   is a matrix that leaves a constructor uncovered: ordering is a way to
   write a fallback, not a way to skip totality.
 
-  A definition's equations are stated at the shapes each clause wins at,
-  which is what makes an overlapping matrix consistent at all --- postulating
-  a catch-all as written, beside the specific clause that precedes it, would
-  equate their two right-hand sides. Both installers agree on this, so a
-  definition means the same thing whether its equations were derived or
-  postulated.}
+  A definition's equations are stated only at the shapes each clause wins at.
+  This keeps an ordered catch-all from also asserting an equation at a shape
+  handled by an earlier clause, preserving the executable definition's
+  earliest-match meaning.}
 
  @item{An import of a theory must precede the module's own declarations, and
   several must be given in dependency order. Two theories neither of which

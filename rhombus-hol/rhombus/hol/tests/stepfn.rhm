@@ -46,12 +46,8 @@ def list_spec:
 fun setup(base :: Theory, spec :: DatatypeSpec)
      :: values(Theory, DatatypeThms, FunInfo, Thm):
   let (thy0, thms) = datatype_axioms(base, spec)
-  let rel_spec = subterm_spec(spec) :~ FunSpec
-  let prepared = prepare_function(thy0, rel_spec, {spec.name: spec})
-  let (thy1, eqs) = derive_subterm_relation(thy0, spec, thms)
-  let info = FunInfo(rel_spec, mk_const(rel_spec.name, fun_type(rel_spec)),
-                     eqs, prepared.recursion)
-  values(thy1, thms, info, wfrec_base_def())
+  let (thy, info) = derive_subterm_relation(thy0, spec, thms)
+  values(thy, thms, info, wfrec_base_def())
 
 // `length`'s result type is `Nat`, so its theory needs both datatypes --
 // `Nat` declared first (plain, no subterm relation needed by `length`
@@ -77,20 +73,13 @@ fun specs_of(dts :: Map.of(Symbol, DatatypeThms)) :: Map.of(Symbol, DatatypeSpec
   for values(out :~ Map = {}) ((name, thms) in dts):
     out ++ {name: (thms :~ DatatypeThms).spec}
 
-fun plan_of(prepared :: PreparedFunction,
-            dts :: Map.of(Symbol, DatatypeThms),
-            funs :: Map.of(Symbol, FunInfo)) :: DerivationPlan:
-  match plan_derivation(prepared, dts, funs)
-  | Derivable(plan): plan
-  | NotDerivable(f): error(~who: #'test, describe_failure(f))
-
 def length_spec:
   FunSpec(#'length, [list_ty], nat_ty,
           [DefClause([nil_ctor], zero_ctor),
            DefClause([list_mk_comb(cons_ctor, [x_var, rest_var])],
                      mk_comb(succ_ctor, mk_comb(length_ph, rest_var)))])
 def length_prepared = prepare_function(thy_l, length_spec, specs_of(all_thms))
-def length_plan = plan_of(length_prepared, all_thms, all_funs)
+def length_plan = plan_derivation(length_prepared, all_thms, all_funs)
 
 check length_prepared.recursion ~matches StructuralRecursion([0], [0], _)
 check length_plan.order ~matches ColumnOrder(0, _)
@@ -136,7 +125,7 @@ def cp_spec:
                                     list_mk_comb(cons_ctor, [y_var, rest_var])])],
                      mk_comb(succ_ctor, mk_comb(cp_ph, rest_var)))])
 def cp_prepared = prepare_function(thy_l, cp_spec, specs_of(all_thms))
-def cp_plan = plan_of(cp_prepared, all_thms, all_funs)
+def cp_plan = plan_derivation(cp_prepared, all_thms, all_funs)
 
 check cp_prepared.recursion ~matches StructuralRecursion([0], [0], _)
 check cp_plan.order ~matches ColumnOrder(0, _)
@@ -169,7 +158,7 @@ def double_spec:
            DefClause([mk_comb(succ_ctor, k_var)],
                      mk_comb(succ_ctor, mk_comb(succ_ctor, mk_comb(double_ph, k_var))))])
 def double_prepared = prepare_function(thy_n, double_spec, specs_of(nat_only_thms))
-def double_plan = plan_of(double_prepared, nat_only_thms, nat_only_funs)
+def double_plan = plan_derivation(double_prepared, nat_only_thms, nat_only_funs)
 
 check double_prepared.recursion ~matches StructuralRecursion([0], [0], _)
 check double_plan.order ~matches ColumnOrder(0, _)
@@ -201,7 +190,7 @@ def app_spec:
                                   [x_var,
                                    list_mk_comb(app_ph, [rest_var, ys_var])]))])
 def app_prepared = prepare_function(thy_l, app_spec, specs_of(all_thms))
-def app_plan = plan_of(app_prepared, all_thms, all_funs)
+def app_plan = plan_derivation(app_prepared, all_thms, all_funs)
 
 check app_prepared.recursion ~matches StructuralRecursion([0], [0], _)
 // The first column shrinks at the one recursive call; the second does not.
@@ -236,16 +225,11 @@ def drop_spec:
                       list_mk_comb(cons_ctor, [x_var, rest_var])],
                      list_mk_comb(drop_ph, [k_var, rest_var]))])
 // `thy_l` has `List_lt` but not `Nat_lt`, and `drop` descends in `Nat`.
-def drop_nat_spec = subterm_spec(nat_spec) :~ FunSpec
-def drop_nat_prepared = prepare_function(thy_l, drop_nat_spec, {#'Nat: nat_spec})
-def (thy_nl, drop_nat_eqs) = derive_subterm_relation(thy_l, nat_spec, nat_base_thms)
-def drop_nat_tlt_info:
-  FunInfo(drop_nat_spec,
-          mk_const(drop_nat_spec.name, fun_type(drop_nat_spec)),
-          drop_nat_eqs, drop_nat_prepared.recursion)
+def (thy_nl, drop_nat_tlt_info):
+  derive_subterm_relation(thy_l, nat_spec, nat_base_thms)
 def drop_funs = all_funs ++ {#'Nat_lt: drop_nat_tlt_info}
 def drop_prepared = prepare_function(thy_nl, drop_spec, specs_of(all_thms))
-def drop_plan = plan_of(drop_prepared, all_thms, drop_funs)
+def drop_plan = plan_derivation(drop_prepared, all_thms, drop_funs)
 
 check drop_prepared.recursion ~matches StructuralRecursion([0], [0, 1], _)
 check drop_plan.order ~matches ColumnOrder(0, _)
@@ -309,7 +293,7 @@ def lex_spec:
 // Still no single descending column: that is what makes it the lexicographic
 // case rather than an ordinary structural one.
 def lex_prepared = prepare_function(thy_n, lex_spec, specs_of(nat_only_thms))
-def lex_plan = plan_of(lex_prepared, nat_only_thms, nat_only_funs)
+def lex_plan = plan_derivation(lex_prepared, nat_only_thms, nat_only_funs)
 
 check lex_prepared.recursion ~matches StructuralRecursion([0, 1], [0, 1], _)
 check lex_plan.order ~matches LexOrder([0, 1], _)
@@ -347,21 +331,8 @@ def cnt_prepared:
   prepare_function(thy_measure, cnt_spec, specs_of(nat_only_thms),
                    ~measure: Measure(cnt_spec.measure :~ Term,
                                      fake_measure_discharge))
-def cnt_plan = plan_of(cnt_prepared, nat_only_thms, nat_only_funs)
+def cnt_plan = plan_derivation(cnt_prepared, nat_only_thms, nat_only_funs)
 
 check cnt_prepared.recursion ~matches MeasuredRecursion(nat_ty, [0], _, [_])
 check cnt_plan.order ~matches MeasureOrder(_)
 
-// A measure result without an installed subterm relation stays at the
-// axiomatic boundary; planning gives a precise reason rather than retrying
-// tree construction or termination analysis.
-check:
-  let bool_measure = mk_abs(mk_var(#'n, nat_ty), tm_true)
-  let bool_spec = FunSpec(#'cntb, [nat_ty], nat_ty,
-                          cnt_spec.clauses, bool_measure)
-  let bool_prepared = PreparedFunction(
-    bool_spec,
-    DTLeaf(0, []),
-    MeasuredRecursion(type_of(tm_true), [0], [], []))
-  plan_derivation(bool_prepared, nat_only_thms, nat_only_funs)
-  ~matches NotDerivable(MeasureNotOrdered(_))

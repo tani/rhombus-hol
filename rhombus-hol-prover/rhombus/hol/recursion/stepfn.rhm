@@ -59,11 +59,7 @@ export:
   LexOrder
   MeasureOrder
   DerivationPlan
-  Derivable
-  NotDerivable
-  MeasureNotOrdered
   plan_derivation
-  describe_failure
   install_structural_function
 
 class.together:
@@ -87,98 +83,71 @@ class DerivationPlan(
   // Every datatype type the decision tree switches on.
   switch_types :: List.of(HType))
 
-class.together:
-  class DeriveFailure():
-    nonfinal
+fun cannot_derive(reason :: String):
+  error(
+    ~who: #'function,
+    "the termination analysis succeeded, but this version has no "
+      ++ "proof-producing definition compiler for this recursion scheme: "
+      ++ reason)
 
-  class NoArguments():
-    extends DeriveFailure
+fun missing_subterm_reason(tys :: List.of(HType)) :: String:
+  "the order would have to compare in "
+    ++ String.join(tys.map(fun (ty :: HType): type_to_string(ty)), ", ")
+    ++ ", which "
+    ++ (if tys.length() == 1
+        | "is not a recursive datatype"
+        | "are not recursive datatypes")
+    ++ " declared here, so there is no subterm relation to descend in"
 
-  class SwitchNotDatatype(ty :: HType):
-    extends DeriveFailure
-
-  class MeasureNotOrdered(ty :: HType):
-    extends DeriveFailure
-
-  class NoInstalledOrder(types :: List.of(HType)):
-    extends DeriveFailure
-
-  class NoOrder():
-    extends DeriveFailure
-
-class.together:
-  class DerivationDecision():
-    nonfinal
-
-  class Derivable(plan :: DerivationPlan):
-    extends DerivationDecision
-
-  class NotDerivable(reason :: DeriveFailure):
-    extends DerivationDecision
-
-// Resolve the only derivation decision once. The plan carries the exact
-// well-founded order and equations installation requires, so no later phase
-// searches clauses or recomputes the order.
+// Build the derivation plan once. It carries the exact well-founded order and
+// equations installation requires, so no later phase searches clauses or
+// recomputes the order. Unsupported schemes are errors, not an alternate
+// planning result.
 fun plan_derivation(prepared :: PreparedFunction,
                     dts :: Map.of(Symbol, DatatypeThms),
                     funs :: Map.of(Symbol, FunInfo))
-     :: DerivationDecision:
+     :: DerivationPlan:
   let spec = prepared.spec
   let switches = switch_types(prepared.tree)
-  cond
-  | spec.arg_types.length() == 0: NotDerivable(NoArguments())
-  | ~else:
-      match first_non_datatype(switches, dts)
-      | ty :: HType: NotDerivable(SwitchNotDatatype(ty))
-      | ~else:
-          match prepared.recursion
-          | NoRecursion(): NotDerivable(NoOrder())
-          | StructuralRecursion(columns, _, _):
-              let tys = for List (k in columns): spec.arg_types[k] :~ HType
-              match first_non_datatype(tys, dts)
-              | ty :: HType: NotDerivable(MeasureNotOrdered(ty))
-              | ~else:
-                  match missing_subterm_types(funs, tys)
-                  | []:
-                      let recursion_order:
-                        match columns
-                        | [k]: ColumnOrder(k, spec.arg_types[k])
-                        | ~else: LexOrder(columns, tys)
-                      let plan = DerivationPlan(prepared, recursion_order, subterm_equations(funs, tys), switches)
-                      Derivable(plan)
-                  | missing:
-                      NotDerivable(NoInstalledOrder(missing :~ List))
-          | MeasuredRecursion(ty, _, _, _):
-              cond
-              | !datatype_instance(dts, ty):
-                  NotDerivable(MeasureNotOrdered(ty))
-              | ~else:
-                  match missing_subterm_types(funs, [ty]):
-                  | []:
-                      let plan = DerivationPlan(prepared, MeasureOrder(ty), subterm_equations(funs, [ty]), switches)
-                      Derivable(plan)
-                  | missing:
-                      NotDerivable(NoInstalledOrder(missing :~ List))
-
-fun describe_failure(f :: DeriveFailure) :: String:
-  match f
-  | NoArguments(): "the definition takes no arguments"
-  | SwitchNotDatatype(ty):
-      "a matched position has type " ++ type_to_string(ty)
-        ++ ", which is not an instance of a datatype declared here"
-  | MeasureNotOrdered(ty):
-      "the order compares in " ++ type_to_string(ty)
-        ++ ", which is not an instance of a datatype declared here"
-  | NoInstalledOrder(tys):
-      "the order would have to compare in "
-        ++ String.join(tys.map(fun (ty :: HType): type_to_string(ty)), ", ")
-        ++ ", which "
-        ++ (if tys.length() == 1
-            | "is not a recursive datatype"
-            | "are not recursive datatypes")
-        ++ " declared here, so there is no subterm relation to descend in"
-  | NoOrder(): "no derivation order is needed for a non-recursive definition"
-  | ~else: "the derivation does not apply"
+  when spec.arg_types.length() == 0
+  | cannot_derive("the definition takes no arguments")
+  match first_non_datatype(switches, dts)
+  | ty :: HType:
+      cannot_derive(
+        "a matched position has type " ++ type_to_string(ty)
+          ++ ", which is not an instance of a datatype declared here")
+  | ~else: #void
+  let (order0, tys0):
+    match prepared.recursion
+    | NoRecursion():
+        cannot_derive(
+          "no derivation order is needed for a non-recursive definition")
+    | StructuralRecursion(columns, _, _):
+        let tys = for List (k in columns): spec.arg_types[k] :~ HType
+        match first_non_datatype(tys, dts)
+        | ty :: HType:
+            cannot_derive(
+              "the order compares in " ++ type_to_string(ty)
+                ++ ", which is not an instance of a datatype declared here")
+        | ~else:
+            let order:
+              match columns
+              | [k]: ColumnOrder(k, spec.arg_types[k])
+              | ~else: LexOrder(columns, tys)
+            values(order, tys)
+    | MeasuredRecursion(ty, _, _, _):
+        unless datatype_instance(dts, ty)
+        | cannot_derive(
+            "the order compares in " ++ type_to_string(ty)
+              ++ ", which is not an instance of a datatype declared here")
+        values(MeasureOrder(ty), [ty])
+  let order :~ RecursionOrder = order0
+  let tys :~ List.of(HType) = tys0
+  match missing_subterm_types(funs, tys)
+  | []:
+      DerivationPlan(prepared, order, subterm_equations(funs, tys), switches)
+  | missing:
+      cannot_derive(missing_subterm_reason(missing :~ List.of(HType)))
 
 fun switch_types(tree :: DecisionTree) :: List.of(HType):
   fun add(acc :: List.of(HType), ty :: HType) :: List.of(HType):

@@ -189,45 +189,39 @@ meta:
         ready.surface.type_constructors),
       ready.pending_imports)
 
-  fun surface_add_function(context :: SurfaceContext, form :: Syntax)
+  fun surface_add_function(context :: SurfaceContext,
+                           spec :: CoreFunctionSpec)
        :: SurfaceContext:
     let ready = force_surface_context(context)
-    let [name, params, result_type, _] = elab.function_parts(form)
-    let ps :~ List = params
     let result = type_parser.parse_open_type(
-                   result_type :~ Syntax,
+                   spec.result_type,
                    ready.surface.type_constructors)
-    let domains = ps.map(
-                    fun (param :: Syntax):
-                      match param
-                      | '$_ :: $ty ...':
-                          type_parser.parse_open_type(
-                            '$ty ...', ready.surface.type_constructors)
-                      | ~else:
-                          error(~who: #'function,
-                                "a parameter needs a type"))
+    let domains = spec.params.map(
+                    fun (binder :: CoreBinder):
+                      type_parser.parse_open_type(
+                        binder.type_stx,
+                        ready.surface.type_constructors))
     let full_type = for values(ty :~ HType = result) (domain in domains.reverse()):
                       mk_fun(domain :~ HType, ty)
     SurfaceContext(
       SurfaceState(
         ready.surface.operators,
-        ready.surface.constants ++ {Syntax.unwrap(name): full_type},
+        ready.surface.constants ++ {spec.name: full_type},
         ready.surface.type_constructors),
-      ready.pending_imports)
+      [])
 
   fun surface_add_datatype(context :: SurfaceContext, spec :: DatatypeSpec)
        :: SurfaceContext:
-    let ready = force_surface_context(context)
     let additions:
-      for values(out :~ Map = ready.surface.constants) (ctor in spec.ctors):
+      for values(out :~ Map = context.surface.constants) (ctor in spec.ctors):
         let ctor :~ Ctor = ctor
         out ++ {ctor.name: ctor_type(spec, ctor)}
     let type_constructors = add_declared_type_constructor(
-                              ready.surface.type_constructors,
+                              context.surface.type_constructors,
                               spec.name, spec.params)
     SurfaceContext(
-      SurfaceState(ready.surface.operators, additions, type_constructors),
-      ready.pending_imports)
+      SurfaceState(context.surface.operators, additions, type_constructors),
+      context.pending_imports)
 
   fun surface_symbol_expr(name :: Symbol) :: Syntax:
     let text = Syntax.make(to_string(name), id_ctx)
@@ -847,8 +841,7 @@ meta:
   // named calls.
 
   fun emit_function(spec :: CoreFunctionSpec, state :: SurfaceContext,
-                    name :: Syntax,
-                    parameter_names :: List.of(Syntax)) :: Syntax:
+                    name :: Syntax) :: Syntax:
     parameterize { runtime_context: name }:
       let parameter_types = spec.params.map(
                               fun (binder :: CoreBinder):
@@ -873,11 +866,9 @@ meta:
            | $alternative
            | ...'
       | body:
-          let [parameter, ...] = parameter_names.map(
-                                   fun (parameter):
-                                     source_id(
-                                       Syntax.unwrap(parameter :~ Syntax),
-                                       parameter :~ Syntax))
+          let [parameter, ...] = spec.params.map(
+                                   fun (binder :: CoreBinder):
+                                     source_id(binder.name, binder.at))
           let result = runtime_body(state, env, body, result_type)
           'fun $name($parameter, ...):
              $result'
@@ -961,7 +952,8 @@ meta:
         '(core_body_expr $expr)'.relocate_span([body])
 
   fun function_encoding(form :: Syntax,
-                        measure_stx :: maybe(Syntax)) :: Syntax:
+                        measure_stx :: maybe(Syntax))
+       :: values(Syntax, Syntax):
     let [name, params, result_type, body] = elab.function_parts(form)
     let ps :~ List = params
     let [param, ...] = ps.map(fun (p :: Syntax): binder_encoding(p))
@@ -976,7 +968,9 @@ meta:
           let [row, ...] = (rows :~ List).map(
                              fun (r :: Syntax): row_encoding(r, ps.length()))
           '(core_body_rows [$row, ...])'.relocate_span([body :~ Syntax])
-    '(core_function $name [$param, ...] ($(result_type :~ Syntax)) $measure $body_core)'.relocate_span([form])
+    let core:
+      '(core_function $name [$param, ...] ($(result_type :~ Syntax)) $measure $body_core)'.relocate_span([form])
+    values(core, name)
   fun option_symbol_stx(v) :: Syntax:
     match v
     | #false: Syntax.make(#false, id_ctx)
@@ -1082,7 +1076,6 @@ meta:
     let cur = st(n)
     let nxt = st(n + 1)
     match d.kind
-    | #'other: values([d.form], [], n, runtime_state)
     | #'import:
         let [paths] = d.parts
         let at = head_term(d.form)
@@ -1121,15 +1114,14 @@ meta:
                n + 1,
                surface_add_datatype(ready, spec))
     | #'function:
-        let [name, params, measure] = d.parts
+        let [measure] = d.parts
         let at = head_term(d.form)
         let form = d.form
-        let core = function_encoding(form, measure :~ maybe(Syntax))
+        let (core, name) = function_encoding(
+                             form, measure :~ maybe(Syntax))
         let spec = decode_function(core)
-        let registered_runtime = surface_add_function(runtime_state, form)
-        let next_runtime = force_surface_context(registered_runtime)
-        values([emit_function(spec, next_runtime, name,
-                              params :~ List.of(Syntax))],
+        let next_runtime = surface_add_function(runtime_state, spec)
+        values([emit_function(spec, next_runtime, name)],
                ['(~function $cur $nxt [$core] [$at])'],
                n + 1, next_runtime)
     | #'theorem:
@@ -1186,9 +1178,24 @@ meta:
     unless rb.#{syntax-local-context}() == #'module
     | syntax_meta.error("allowed only in a module body", at)
 
-  fun declaration_expansion(forms :: List.of(Syntax)) :: Syntax:
+  fun emit_planned_declaration(d :: expand.Decl) :: Syntax:
     let box = current_expansion_box()
     let state = box.value :~ ExpansionState
+    let (runtime, chain, next_index, surface) = emit_one(
+                                                   d, state.next_index,
+                                                   state.surface)
+    let steps_rev:
+      for values(acc :~ List.of(Syntax) = state.steps_rev) (step in chain):
+        List.cons(step :~ Syntax, acc)
+    box.value := ExpansionState(
+                   next_index :~ NonnegInt, surface, steps_rev)
+    let [runtime_form, ...] = runtime
+    '«
+       $runtime_form
+       ...
+     »'
+
+  fun declaration_expansion(forms :: List.of(Syntax)) :: Syntax:
     let (planned, rest) = expand.plan_next(forms)
     match planned
     | #false:
@@ -1197,23 +1204,7 @@ meta:
         unless rest == []
         | syntax_meta.error("internal unconsumed HOL declaration tail",
                             rest[0])
-        let d = d :~ expand.Decl
-        when d.kind == #'other
-        | syntax_meta.error("internal non-HOL declaration", d.form)
-        let (runtime, chain, next_index, surface) = emit_one(
-                                                       d, state.next_index,
-                                                       state.surface)
-        let steps_rev:
-          for values(acc :~ List.of(Syntax) = state.steps_rev) (
-                step in chain):
-            List.cons(step :~ Syntax, acc)
-        box.value := ExpansionState(
-                       next_index :~ NonnegInt, surface, steps_rev)
-        let [runtime_form, ...] = runtime
-        '«
-           $runtime_form
-           ...
-         »'
+        emit_planned_declaration(d :~ expand.Decl)
 
   fun quickcheck_expansion(name :: Syntax, opts :: List.of(Syntax),
                            core :: Syntax, at :: Syntax) :: Syntax:
@@ -1258,9 +1249,8 @@ meta:
         unless d.kind == expected_kind
         | syntax_meta.error("internal wrong HOL sequence declaration",
                             d.form)
-        let consumed = forms.take(forms.length() - rest.length())
         let [tail, ...] = rest
-        values(declaration_expansion(consumed), '$tail; ...')
+        values(emit_planned_declaration(d), '$tail; ...')
 
 decl.macro 'hol_finalize':
   finish_expansion()

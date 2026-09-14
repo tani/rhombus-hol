@@ -25,16 +25,15 @@ own spellings wherever a construct exists on both sides ---
 @rhombus(#true), @rhombus(!), @rhombus(&&), @rhombus(||), @rhombus(==) and
 @rhombus(if) --- while logic-only constructs use spellings such as
 @rhombus(===, ~datum), @rhombus(and, ~datum) and @rhombus(forall, ~datum).
-User-defined operators use the same Rhombus case syntax. An ordinary
-@rhombus(operator, ~datum) keeps its ordinary Rhombus meaning;
-@tt{operator.logic} binds the spelling in the HOL expression space; and
-@tt{operator.reflect} binds it in both spaces. Each dotted form ends in one
-function name, and every HOL operator use lowers to a normal call of that
-function.
+User-defined @rhombus(notation, ~datum) follows Rhombus operator case syntax
+and binds a spelling only in the HOL expression space. Each use lowers to a
+normal call of the declaration's final function name. An ordinary
+@rhombus(operator, ~datum) remains an ordinary Rhombus declaration and is
+independent of HOL notation.
 
 Dispatch is function overloading during elaboration, not a logical feature.
 @rhombus(dispatch, ~datum) adds a typed clause to a callable name; direct calls
-and operators targeting that name use the same resolver. A successful call
+and notation targeting that name use the same resolver. A successful call
 lowers directly to the selected constant. The resulting kernel term contains
 no dispatch node, and generated executable code performs no runtime type test.
 

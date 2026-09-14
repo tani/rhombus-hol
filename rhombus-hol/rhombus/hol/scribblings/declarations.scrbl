@@ -11,9 +11,8 @@ expander and must appear directly in the module body. They cannot appear
 inside a @rhombus(block), inside a @rhombus(fun) body, or in the expansion of
 a user-written macro.
 
-@tt{operator.logic} and @tt{operator.reflect} are bound macros. Each
-operator definition is visible while the following logical declaration is
-enforested.
+@rhombus(notation, ~datum) is a bound macro. Each notation definition is
+visible while the following logical declaration is enforested.
 
 @section{@rhombus(type, ~datum)}
 
@@ -116,48 +115,27 @@ run-time meaning.
 not descend structurally. It is checked only when no structural descent can be
 found, so a measure on a definition that already descends is not examined.
 
-@section(~tag: "surface-operators"){Operators}
+@section(~tag: "notation"){HOL notation}
 
 @verbatim{
-operator left op right:
-  ordinary-operator-body
-
-operator.logic left op right:
-  operator-option
-  ...
-  FunctionName
-
-operator.reflect left op right:
+notation left op right:
   operator-option
   ...
   FunctionName
 }
 
-@rhombuslangname(rhombus/hol) retains Rhombus's ordinary
-@rhombus(operator, ~datum) form and adds @tt{operator.logic} and
-@tt{operator.reflect}. All three use Rhombus operator case syntax: operands
-and the operator appear directly in the declaration head, and prefix, infix,
+@rhombus(notation, ~datum) adds an operator spelling to the HOL expression
+space. It follows Rhombus @rhombus(operator, ~datum) case syntax: operands and
+the operator appear directly in the declaration head, and prefix, infix,
 postfix, immediate @tt{|} cases, and named groups of cases are accepted.
-
-An ordinary @rhombus(operator, ~datum) has exactly its Rhombus meaning. It
-creates an operator in the ordinary expression space and has no HOL binding.
-The two dotted forms create operators in the HOL expression space. Their
-operands must be identifiers; precedence options precede exactly one final
+Operands must be identifiers. Precedence options precede exactly one final
 function name.
 
-@itemlist(
-  @item{@tt{operator.logic} creates only the HOL-space operator binding. Each
-        use lowers to a normal call of the final function name, with operands
-        in source order. It does not create an ordinary Rhombus operator.}
-  @item{@tt{operator.reflect} creates both the ordinary and HOL-space
-        bindings. Both readings call the same final function name, so the
-        declaration does not duplicate the operation's implementation.}
-)
-
-For example, a proof-only spelling needs only a HOL-space binding:
+Each notation use lowers to a normal call of that function, with operands in
+source order:
 
 @rhombusblock(
-  operator.logic left <&> right:
+  notation left <&> right:
     ~order: hol_conjunction
     conj
 
@@ -165,13 +143,12 @@ For example, a proof-only spelling needs only a HOL-space binding:
     true <&> true
 )
 
-A reflected spelling is also available to ordinary Rhombus code:
-
-@rhombusblock(
-  operator.reflect left <&&> right:
-    ~order: hol_conjunction
-    conj
-)
+The notation itself has no ordinary Rhombus binding. It can nevertheless
+appear in a @rhombus(function) body when its target function has an executable
+reading: the logical and executable halves lower the same Core call. Outside a
+logical declaration, use the target function directly. If ordinary Rhombus
+code also needs the operator spelling, declare a separate ordinary
+@rhombus(operator, ~datum); the two expression spaces remain explicit.
 
 The precedence options are the ones accepted by Rhombus
 @rhombus(operator, ~datum), including @rhombus(~order),
@@ -193,7 +170,7 @@ operators at each order.
 Multiple fixities of one operator can share options:
 
 @rhombusblock(
-  operator.logic <~>:
+  notation <~>:
     ~order: hol_conjunction
   | <~> value:
       neg
@@ -204,35 +181,39 @@ Multiple fixities of one operator can share options:
 Different spellings use separate, symmetric declarations:
 
 @rhombusblock(
-  operator.logic left <+> right:
+  notation left <+> right:
     ~order: hol_addition
     custom_add
 
-  operator.logic a <++> b:
+  notation a <++> b:
     ~order: hol_addition
     custom_add
 )
 
-Operator definitions take effect before the following declaration is
-enforested. Exporting and importing a reflected operator brings both its
-ordinary and HOL-space bindings:
+Notation definitions take effect before the following declaration is
+enforested. Export the HOL-space binding explicitly:
 
 @rhombusblock(
-  export: both <&&>
+  export:
+    only_space hol_expr:
+      <&>
 )
+
+Importing that module with @rhombus(open) makes the notation available to
+following @rhombus(function) and @rhombus(theorem) declarations.
 
 @section{Function dispatch}
 
 @rhombus(dispatch, ~datum) adds an overload clause to a callable function
 name. No separate registration form or operator-specific dispatch form is
-needed. A direct call and an operator targeting the same name are resolved
+needed. A direct call and notation targeting the same name are resolved
 identically.
 
 @verbatim{
 dispatch add(Nat, Nat) = nat_add
 dispatch add(Integer, Integer) = int_add
 
-operator.logic left <+> right:
+notation left <+> right:
   ~order: hol_addition
   add
 }
@@ -299,7 +280,7 @@ its parameter order differs, name the signature arguments and write a call
 template:
 
 @verbatim{
-operator.logic element in collection:
+notation element in collection:
   ~order: hol_relation
   member
 

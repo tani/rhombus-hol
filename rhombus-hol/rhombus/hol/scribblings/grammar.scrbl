@@ -60,8 +60,7 @@ expr = Id                          a parameter, pattern variable or local
      | expr < expr | expr <= expr | expr > expr | expr >= expr
      | if expr | expr | expr
      | cond-expr
-     | expr operator.logic-op expr
-     | expr operator.reflect-op expr
+     | expr notation-op expr
      | (expr)
 
 cond-expr = cond
@@ -109,12 +108,11 @@ type switch and no implicit numeric coercion: the complete argument tuple and,
 when available, the expected result type must select one non-overlapping
 clause.
 
-@tt{operator.logic} adds a spelling to the HOL expression space;
-@tt{operator.reflect} adds the same spelling to both the HOL and ordinary
-Rhombus expression spaces. Both lower their HOL use to a normal call of the
-final function name. A logic-space operator can therefore occur in a logical
-@rhombus(function) when its target has an executable reading, even though the
-operator itself is not bound in ordinary Rhombus code.
+@rhombus(notation, ~datum) adds a spelling to the HOL expression space. Each
+use lowers to a normal call of the declaration's final function name. It can
+therefore occur in a logical @rhombus(function) when that function has an
+executable reading, even though the notation itself is not bound in ordinary
+Rhombus code.
 
 @rhombus(&&) and @rhombus(||) short-circuit when the module runs, while the
 logical @tt{and} and @tt{or} are strict. Nothing can tell the difference,
@@ -238,8 +236,7 @@ prop = expr
      | exists (Id :: Type, ...): prop
      | if prop | prop | prop
      | cond-prop
-     | prop operator.logic-op prop
-     | prop operator.reflect-op prop
+     | prop notation-op prop
      | (prop)
 
 cond-prop = cond
@@ -329,7 +326,7 @@ A quantifier extends as far to the right as it can, so
 
 quantifies over the whole conjunction.
 
-These levels govern frontend operator-aware rendering. The kernel printer is
+These levels govern frontend notation-aware rendering. The kernel printer is
 canonical and prints selected implementation constants as applications such
-as @tt{nat_add(x, y)}; the frontend surface printer reconstructs operators
-only when it is given explicit dispatch and operator tables.
+as @tt{nat_add(x, y)}; the frontend surface printer reconstructs notation only
+when it is given explicit dispatch and notation tables.

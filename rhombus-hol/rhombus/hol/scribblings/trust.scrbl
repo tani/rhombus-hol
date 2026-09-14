@@ -286,7 +286,7 @@ Beyond the termination restrictions in @secref("termination"):
 
  @item{The function body grammar has named applications, @rhombus(if),
   @rhombus(cond), local @rhombus(let), matching, Booleans, type-directed
-  nonnegative numerals, and HOL-space operators. Overloaded function calls are
+  nonnegative numerals, and HOL notation. Overloaded function calls are
   resolved before kernel terms or executable code are produced; neither layer
   contains a runtime dispatch mechanism. The grammar has no lambdas, effects,
   implicit numeric coercions, or arbitrary runtime expressions.}

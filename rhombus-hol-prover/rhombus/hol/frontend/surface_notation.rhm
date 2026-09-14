@@ -8,16 +8,16 @@ import:
       hol_expr_meta
 
 export:
-  hol_operator
+  notation
 
 meta:
-  fun operator_error(message :: String, at :: Syntax):
+  fun notation_error(message :: String, at :: Syntax):
     syntax_meta.error(message, at)
 
   // `[head, operands, operator, fixity]`. Like Rhombus `operator`, a
   // two-identifier case is prefix; postfix identifier operators are therefore
   // intentionally unavailable without an operator token to disambiguate them.
-  fun operator_pattern(head :: Syntax) :: List:
+  fun notation_pattern(head :: Syntax) :: List:
     match head
     | '$(left :: Identifier) $(op :: Name) $(right :: Identifier)':
         [head, [left, right], op, #'infix]
@@ -26,8 +26,8 @@ meta:
     | '$(operand :: Identifier) $(op :: Operator)':
         [head, [operand], op, #'postfix]
     | ~else:
-        operator_error(
-          "expected a prefix, infix, or postfix operator case with identifier operands",
+        notation_error(
+          "expected a prefix, infix, or postfix notation case with identifier operands",
           head)
 
   fun keyword_clause(clause :: Syntax) :: Boolean:
@@ -35,14 +35,14 @@ meta:
     | '$(keyword :: Keyword) $_ ...; ...': #true
     | ~else: #false
 
-  fun validate_operator_option(option :: Syntax):
+  fun validate_notation_option(option :: Syntax):
     match option
     | '~associativity: ~left'
         || '~associativity: ~right'
         || '~associativity: ~none':
         #void
     | '~associativity: $_ ...':
-        operator_error(
+        notation_error(
           "`~associativity` must be `~left`, `~right`, or `~none`",
           option)
     | ~else: #void
@@ -51,72 +51,37 @@ meta:
     match clause
     | '$(target :: Identifier)': target
     | ~else:
-        operator_error("an operator implementation must be one function name",
+        notation_error("a notation implementation must be one function name",
                        clause)
 
   // `[pattern_info, options, target]`.
-  fun parse_operator_case(head :: Syntax,
+  fun parse_notation_case(head :: Syntax,
                           shared :: List.of(Syntax),
                           body :: List.of(Syntax)) :: List:
     when body.length() == 0
-    | operator_error("an operator case needs a final function implementation", head)
+    | notation_error(
+        "a notation case needs a final function implementation", head)
     for (option in shared):
       unless keyword_clause(option)
-      | operator_error(
-          "a shared operator block can contain precedence options only",
+      | notation_error(
+          "a shared notation block can contain precedence options only",
           option)
-      validate_operator_option(option)
+      validate_notation_option(option)
     let options = body.take(body.length() - 1)
     when keyword_clause(body.last)
     | when for any (clause in options): !keyword_clause(clause)
-      | operator_error("an operator implementation must be final", body.last)
-      operator_error(
-        "an operator case needs a final function implementation",
-        head)
+      | notation_error(
+          "a notation implementation must be final", body.last)
+      notation_error(
+        "a notation case needs a final function implementation", head)
     let target = implementation_target(body.last)
     for (option in options):
       unless keyword_clause(option)
-      | operator_error(
-          "only precedence options may precede an operator implementation",
+      | notation_error(
+          "only precedence options may precede a notation implementation",
           option)
-      validate_operator_option(option)
-    [operator_pattern(head), shared ++ options, target]
-
-  fun reflected_runtime_body(target :: Syntax,
-                             operands :: List.of(Syntax)) :: Syntax:
-    let name = Syntax.unwrap(target)
-    cond
-    | name == #'conj && operands.length() == 2:
-        let left = operands[0]
-        let right = operands[1]
-        '$left && $right'
-    | name == #'disj && operands.length() == 2:
-        let left = operands[0]
-        let right = operands[1]
-        '$left || $right'
-    | name == #'eq && operands.length() == 2:
-        let left = operands[0]
-        let right = operands[1]
-        '$left == $right'
-    | name == #'neg && operands.length() == 1:
-        let operand = operands[0]
-        '! $operand'
-    | ~else:
-        let [operand, ...] = operands
-        '$target($operand, ...)'
-
-  fun runtime_case(parsed :: List) :: Syntax:
-    let pattern_info :~ List = parsed[0]
-    let options :~ List.of(Syntax) = parsed[1]
-    let target :~ Syntax = parsed[2]
-    let head :~ Syntax = pattern_info[0]
-    let operands :~ List.of(Syntax) = pattern_info[1]
-    let body = reflected_runtime_body(target, operands)
-    let [option, ...] = options
-    '$head:
-       $option
-       ...
-       $body'
+      validate_notation_option(option)
+    [notation_pattern(head), shared ++ options, target]
 
   fun hol_case(parsed :: List) :: Syntax:
     let pattern_info :~ List = parsed[0]
@@ -175,13 +140,7 @@ meta:
                Syntax.make_id("both", operand),
                ~track: operand)
          »'
-    | ~else: operator_error("internal unknown operator fixity", op)
-
-  fun grouped_runtime(cases :: List.of(Syntax)) :: Syntax:
-    let [case, ...] = cases
-    'operator
-     | $case
-     | ...'
+    | ~else: notation_error("internal unknown notation fixity", op)
 
   fun grouped_hol(cases :: List.of(Syntax)) :: Syntax:
     let [case, ...] = cases
@@ -189,87 +148,41 @@ meta:
      | $case
      | ...'
 
-  fun expand_operator(shared :: List.of(Syntax),
+  fun expand_notation(shared :: List.of(Syntax),
                       heads :: List.of(Syntax),
                       bodies :: List.of(List.of(Syntax)),
-                      reflected :: Boolean,
                       declared_name :: maybe(Syntax) = #false) :: Syntax:
     let parsed:
       for List (head in heads, body in bodies):
-        let one = parse_operator_case(head, shared, body)
+        let one = parse_notation_case(head, shared, body)
         match declared_name
         | #false: one
         | name:
             let pattern_info :~ List = one[0]
             let op :~ Syntax = pattern_info[2]
             unless to_string(op) == to_string(name :~ Syntax)
-            | operator_error(
-                "every case in a named operator must use the declared operator name",
+            | notation_error(
+                "every case in a named notation must use the declared operator name",
                 head)
             one
-    let hol_cases = parsed.map(fun (one): hol_case(one :~ List))
-    let forms = (if reflected
-                 | [grouped_runtime(
-                      parsed.map(fun (one): runtime_case(one :~ List)))]
-                 | [])
-                  ++ [grouped_hol(hol_cases)]
-    let [form, ...] = forms
-    '«
-       $form
-       ...
-     »'
+    grouped_hol(parsed.map(fun (one): hol_case(one :~ List)))
 
 
 defn.macro
-| 'logic_operator $(name :: Name): $shared; ...
+| 'notation $(name :: Name): $shared; ...
    | $(head :: Sequence): $body; ...
    | ...':
-    expand_operator([shared, ...],
+    expand_notation([shared, ...],
                     [head, ...],
                     [[body, ...], ...],
-                    #false,
                     name)
-| 'logic_operator
+| 'notation
    | $(head :: Sequence): $body; ...
    | ...':
-    expand_operator([], [head, ...], [[body, ...], ...], #false)
-| 'logic_operator $(head :: Sequence): $body; ...':
-    expand_operator([], [head], [[body, ...]], #false)
-| 'logic_operator $rest ...':
+    expand_notation([], [head, ...], [[body, ...], ...])
+| 'notation $(head :: Sequence): $body; ...':
+    expand_notation([], [head], [[body, ...]])
+| 'notation $rest ...':
     syntax_meta.error(
-      "expected an operator-style `operator.logic` case or `|` cases",
+      "expected an operator-style `notation` case or `|` cases",
       '$rest ...')
-
-
-defn.macro
-| 'reflect_operator $(name :: Name): $shared; ...
-   | $(head :: Sequence): $body; ...
-   | ...':
-    expand_operator([shared, ...],
-                    [head, ...],
-                    [[body, ...], ...],
-                    #true,
-                    name)
-| 'reflect_operator
-   | $(head :: Sequence): $body; ...
-   | ...':
-    expand_operator([], [head, ...], [[body, ...], ...], #true)
-| 'reflect_operator $(head :: Sequence): $body; ...':
-    expand_operator([], [head], [[body, ...]], #true)
-| 'reflect_operator $rest ...':
-    syntax_meta.error(
-      "expected an operator-style `operator.reflect` case or `|` cases",
-      '$rest ...')
-
-
-defn.macro
-| 'hol_operator $(dot :: Operator) $(mode :: Identifier) $rest ...':
-    cond
-    | to_string(dot) == "." && Syntax.unwrap(mode) == #'logic:
-        'logic_operator $rest ...'
-    | to_string(dot) == "." && Syntax.unwrap(mode) == #'reflect:
-        'reflect_operator $rest ...'
-    | ~else:
-        'operator $dot $mode $rest ...'
-| 'hol_operator $rest ...':
-    'operator $rest ...'

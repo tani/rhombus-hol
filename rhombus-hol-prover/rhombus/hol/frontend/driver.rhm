@@ -39,7 +39,7 @@ import:
   rhombus/hol/recursion/stepfn open
   rhombus/hol/frontend/surface_core open
   rhombus/hol/frontend/elab as elab
-  rhombus/hol/frontend/dispatch open
+  rhombus/hol/frontend/overload open
   rhombus/hol/frontend/type/registry open
   rhombus/hol/frontend/type/parse as type_parser
   rhombus/hol/frontend/type/print open
@@ -48,12 +48,11 @@ export:
   hol_reraise
   HolState
   initial_state
-  add_type
+  add_datatype
   add_function
   add_axiomatic_function
   add_theorem
-  add_dispatch_method_encoded
-  set_rules
+  add_overload_method_encoded
   adopt
 
 // Failures reported from here happen while the user's module is being visited
@@ -91,7 +90,7 @@ class HolState(ctx :: Context,
                thms :: Map.of(Symbol, Thm),
                // Surface capabilities are import-scoped elaboration metadata.
                // They never enter Theory or the theorem database.
-               operators :: DispatchRegistry,
+               operators :: OverloadRegistry,
                type_constructors :: TypeConstructorRegistry,
                // `wfrec_rel`'s definition (`wfrec.rhm`'s `build_wfrec_rel`),
                // installed exactly once at the very start of the session so
@@ -110,13 +109,13 @@ def initial_context:
   mk_context(thy, ~rules: db)
 
 fun initial_state() :: HolState:
-  HolState(initial_context, {}, standard_dispatch_registry(),
+  HolState(initial_context, {}, standard_overload_registry(),
            standard_type_constructor_registry(), wfrec_base_def())
 
-// -- type --------------------------------------------------------------------
+// -- datatype ----------------------------------------------------------------
 
-fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
-  let spec = type_parser.parse_type_decl(form, st.type_constructors)
+fun add_datatype(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
+  let spec = type_parser.parse_datatype_decl(form, st.type_constructors)
   let type_constructors = add_declared_type_constructor(
                             st.type_constructors, spec.name, spec.params)
   // Non-recursive specs (no self-recursive fields) get a genuinely derived
@@ -138,7 +137,7 @@ fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
                             build_recursive_datatype_thms(
                               st.ctx.thy, spec, infinity_base_ind()))
                        ~catch e :: Exn.Fail: hol_reraise(e, at)
-  require_no_new_axioms(#'type, st.ctx.thy, thy2, spec.name, at)
+  require_no_new_axioms(#'datatype, st.ctx.thy, thy2, spec.name, at)
   // Every equation the datatype brings -- injectivity, distinctness,
   // discriminators, selectors -- goes straight into the rule database, which
   // is what makes `match`-defined functions simplify.
@@ -154,10 +153,8 @@ fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
 // `T_child` is a non-recursive predicate over the discriminators and
 // selectors, `T_lt` is its transitive closure, and the constructor equations
 // are proved from those two definitions (`subterm.rhm`). This replaces the
-// former clausal postulation. The equations join the rule database under their
-// own name, so
-// `disable_rules [Nat_lt]` reaches them without touching the datatype's own
-// rules.
+// former clausal postulation. The equations join the rule database under the
+// relation's own name.
 fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
                          at :: Syntax) :: HolState:
   match subterm_spec(spec)
@@ -165,7 +162,7 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
   | fs:
       let fs :~ FunSpec = fs
       when const_type(st.ctx.thy, fs.name) != #false
-      | hol_error(#'type,
+      | hol_error(#'datatype,
                   "the name of this datatype's subterm relation, "
                     ++ to_string(fs.name)
                     ++ ", is already taken",
@@ -174,8 +171,8 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
       let (thy2, equations) = try:
                                 derive_subterm_relation(st.ctx.thy, spec, dt)
                                 ~catch e :: Exn.Fail: hol_reraise(e, at)
-      require_no_new_axioms(#'type, st.ctx.thy, thy2, fs.name, at)
-      require_closed_theorems(#'type, thy2, fs.name, equations, at)
+      require_no_new_axioms(#'datatype, st.ctx.thy, thy2, fs.name, at)
+      require_closed_theorems(#'datatype, thy2, fs.name, equations, at)
       let self = mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol):
                                                        mk_tyvar(p) :~ HType))
       let info = FunInfo(fs, mk_const(fs.name, mk_fun(self, mk_fun(self, bool))),
@@ -256,7 +253,7 @@ fun install_declared_function(st :: HolState, core :: CoreFunctionSpec,
 // claim is checked at each one rather than resting on the reader following
 // the construction.  It costs a length comparison.
 //
-// This is the check that prevents `type` declarations from quietly gaining a
+// This is the check that prevents `datatype` declarations from quietly gaining a
 // postulating fallback. The compiler enforces the claim instead of leaving it
 // to a comment.
 fun require_no_new_axioms(who :: Symbol, before :: Theory, after :: Theory,
@@ -421,10 +418,10 @@ fun add_theorem(st :: HolState, name :: Symbol,
                   at)
       HolState(st.ctx, st.thms ++ {name: th}, st.operators,
                st.type_constructors, st.wfrec_def)
-// -- static dispatch metadata ----------------------------------------------
+// -- static overload metadata ----------------------------------------------
 
 
-fun add_dispatch_method_decl(
+fun add_overload_method_decl(
       st :: HolState, function_name :: Symbol,
       argument_type_stxs :: List.of(Syntax),
       result_type_stx :: maybe(Syntax),
@@ -433,7 +430,7 @@ fun add_dispatch_method_decl(
   let arity = argument_type_stxs.length()
   let registry_with_function:
     try:
-      ensure_dispatch_function(st.operators, function_name, arity)
+      ensure_overload_function(st.operators, function_name, arity)
       ~catch e :: Exn.Fail: hol_reraise(e, at)
   let argument_types:
     argument_type_stxs.map(
@@ -452,38 +449,38 @@ fun add_dispatch_method_decl(
   let constant_type:
     match const_type(st.ctx.thy, constant)
     | #false:
-        hol_error(#'dispatch,
+        hol_error(#'overload,
                   "implementation constant is not declared: "
                     ++ to_string(constant),
                   at)
     | ty: ty :~ HType
   let method:
     try:
-      build_dispatch_method(
+      build_overload_method(
         function_name, argument_types, result_type,
         constant, constant_type, argument_order)
       ~catch e :: Exn.Fail: hol_reraise(e, at)
   let registry:
     try:
-      add_dispatch_method(registry_with_function, method)
+      add_overload_method(registry_with_function, method)
       ~catch e :: Exn.Fail: hol_reraise(e, at)
   HolState(st.ctx, st.thms, registry, st.type_constructors, st.wfrec_def)
 
-fun add_dispatch_method_encoded(
+fun add_overload_method_encoded(
       st :: HolState, function_name :: Symbol,
       signature :: Syntax,
       constant :: Symbol, argument_order :: List.of(NonnegInt),
       at :: Syntax) :: HolState:
   match signature
-  | '(dispatch_signature [$argument_type, ...] [$result_type])':
+  | '(overload_signature [$argument_type, ...] [$result_type])':
       let result = (if Syntax.unwrap(result_type) == #false
                     | #false
                     | result_type)
-      add_dispatch_method_decl(
+      add_overload_method_decl(
         st, function_name, [argument_type, ...],
         result, constant, argument_order, at)
   | ~else:
-      hol_error(#'dispatch, "internal malformed dispatch signature", at)
+      hol_error(#'overload, "internal malformed overload signature", at)
 
 
 // -- adopting an imported theory ----------------------------------------------
@@ -510,20 +507,7 @@ fun adopt(st :: HolState, imported :: HolState, at :: Syntax) :: HolState:
                 ++ "theory must come before the module's own declarations, "
                 ++ "and several of them must be given in dependency order",
               at)
-  // A rule switched off before the import stays off after it.
-  let off = for values(acc :~ List = []) (n in st.ctx.db.disabled): acc ++ [n]
-  let ctx = context_with_rules(imported.ctx,
-                               disable(imported.ctx.db, off))
-  HolState(ctx, imported.thms, imported.operators,
-           imported.type_constructors, imported.wfrec_def)
-
-// -- rule control ------------------------------------------------------------
-
-fun set_rules(st :: HolState, on :: Boolean,
-              names :: List.of(Symbol)) :: HolState:
-  let db2 = (if on | enable(st.ctx.db, names) | disable(st.ctx.db, names))
-  HolState(context_with_rules(st.ctx, db2), st.thms, st.operators,
-           st.type_constructors, st.wfrec_def)
+  imported
 
 fun datatype_rules(thms :: DatatypeThms) :: List.of(Thm):
   let inj = for values(acc :~ List = []) ((_, th) in thms.injectivity): acc ++ [th]

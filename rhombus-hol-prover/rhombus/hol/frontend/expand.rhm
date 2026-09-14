@@ -10,9 +10,8 @@
 // from a phase-1 macro reports `def: unbound identifier`.
 //
 // Keeping recognition separate also keeps it testable as an ordinary phase-0
-// function, which matters: the tricky parts -- pairing a `theorem` with an
-// optional following `proof:`, and descending into `disable_rules` blocks --
-// live here.
+// function, which matters: pairing theorem, function, and axiomatic-function
+// declarations with optional following `proof:` blocks all live here.
 
 import:
   rhombus/hol/frontend/elab as elab
@@ -30,12 +29,10 @@ class Decl(kind :: Symbol,
 
 // The heads this language claims.  Anything else is passed through untouched,
 // so ordinary Rhombus definitions keep working.
-def declaration_heads :: List.of(Symbol) = [#'type, #'function,
+def declaration_heads :: List.of(Symbol) = [#'datatype, #'function,
                                             #'axiomatic_function,
                                             #'theorem, #'proof,
-                                            #'dispatch,
-                                            #'disable_rules, #'enable_rules,
-                                            #'import]
+                                            #'overload, #'import]
 
 fun head_of(form :: Syntax) :: maybe(Symbol):
   match form
@@ -53,16 +50,22 @@ fun plan_next(forms :: List.of(Syntax))
   | []: values(#false, [])
   | List.cons(form, rest):
       match theorem_parts(form)
-      | #false: values(plan_one(form), rest)
+      | #false:
+          match head_of(form)
+          | #'function: plan_function(#'function, form, rest)
+          | #'axiomatic_function:
+              plan_function(#'axiomatic_function, form, rest)
+          | ~else: values(plan_one(form), rest)
       | [name, stmt]:
           match rest
-          | List.cons(nxt, more) when proof_tactic(nxt) != #false:
-              values(Decl(#'theorem, form,
-                          [name, stmt, proof_tactic(nxt)]),
-                     more)
+          | List.cons(nxt, more):
+              match proof_groups(nxt)
+              | #false:
+                  values(Decl(#'theorem, form, [name, stmt, #false]), rest)
+              | groups:
+                  values(Decl(#'theorem, form, [name, stmt, groups]), more)
           | ~else:
-              values(Decl(#'theorem, form, [name, stmt, #false]),
-                     rest)
+              values(Decl(#'theorem, form, [name, stmt, #false]), rest)
 
 
 // `theorem name: <prop>`, or `#false` if this is not one.
@@ -71,75 +74,72 @@ fun theorem_parts(form :: Syntax) :: maybe(List):
   | 'theorem $(name :: Identifier): $g; ...': [name, [g, ...]]
   | ~else: #false
 
-fun proof_tactic(form :: Syntax) :: maybe(List.of(Syntax)):
+fun proof_groups(form :: Syntax) :: maybe(List.of(Syntax)):
   match form
   | 'proof: $g; ...': [g, ...]
   | ~else: #false
 
+fun plan_function(kind :: Symbol, form :: Syntax,
+                  rest :: List.of(Syntax))
+     :: values(Decl, List.of(Syntax)):
+  let [name, params] = elab.function_decl_shape(form)
+  match rest
+  | List.cons(nxt, more):
+      match proof_groups(nxt)
+      | #false: values(Decl(kind, form, [name, params, #false]), rest)
+      | groups:
+          let measure = elab.function_proof_measure(
+                          groups :~ List.of(Syntax), nxt)
+          values(Decl(kind, form, [name, params, measure]), more)
+  | ~else:
+      values(Decl(kind, form, [name, params, #false]), rest)
+
 fun plan_one(form :: Syntax) :: Decl:
   match head_of(form)
-  | #'type:
+  | #'datatype:
       // Runtime identifiers are captured here; registry-dependent type
       // elaboration happens in `module_block.rhm` with the current state.
-      let [name, constructors] = type_parser.type_decl_shape(form)
-      Decl(#'type, form, [name, constructors])
-  | #'function:
-      // `function` says the definition is meant to be logical, so a body
-      // outside the grammar is an error naming the offending expression --
-      // not a silent pass-through.  Ordinary Rhombus `fun` is untouched.
-      let [name, params, body] = elab.function_decl_shape(form)
-      Decl(#'function, form, [name, params, body])
-  | #'axiomatic_function:
-      // Same grammar, different contract: this one is allowed to postulate
-      // its equations, and `function` is not.  See `driver.rhm`.
-      let [name, params, body] = elab.function_decl_shape(form)
-      Decl(#'axiomatic_function, form, [name, params, body])
-  | #'dispatch:
-      dispatch_decl(form)
+      let [name, constructors] = type_parser.datatype_decl_shape(form)
+      Decl(#'datatype, form, [name, constructors])
+  | #'overload:
+      overload_decl(form)
   | #'proof:
-      syntax_error_here(#'proof, "a `proof:` with no `theorem` before it", form)
+      syntax_error_here(
+        #'proof,
+        "a `proof:` must immediately follow a `theorem`, `function`, or `axiomatic_function` declaration",
+        form)
   | #'import:
       // An ordinary Rhombus import, with one extra reading: if what it names
       // is a theory, its logic is adopted as well as its values.  The import
       // itself is passed through untouched -- this only looks at it.
       Decl(#'import, form, [theory_paths(form)])
-  | #'disable_rules: rule_control(#'disable_rules, form)
-  | #'enable_rules: rule_control(#'enable_rules, form)
   | ~else: Decl(#'other, form, [])
 
-fun rule_control(kind :: Symbol, form :: Syntax) :: Decl:
-  match form
-  | 'disable_rules [$(n :: Identifier), ...]': Decl(kind, form, [[n, ...]])
-  | 'enable_rules [$(n :: Identifier), ...]': Decl(kind, form, [[n, ...]])
-  | ~else:
-      syntax_error_here(kind, "expected a bracketed list of rule names", form)
-
-
-fun dispatch_argument(arg :: Syntax, named :: Boolean,
+fun overload_argument(arg :: Syntax, named :: Boolean,
                       form :: Syntax) :: List:
   match arg
   | '$(name :: Identifier) :: $ty ...':
       unless named
       | syntax_error_here(
-          #'dispatch,
+          #'overload,
           "a bare implementation constant takes types without argument names",
           form)
       [name, '$ty ...']
   | ~else:
       when named
       | syntax_error_here(
-          #'dispatch,
-          "a template dispatch argument needs `name :: Type`",
+          #'overload,
+          "a template overload argument needs `name :: Type`",
           arg)
       [#false, arg]
 
-fun dispatch_parts(function_name :: Syntax, args :: List.of(Syntax),
+fun overload_parts(function_name :: Syntax, args :: List.of(Syntax),
                    result_type, constant :: Syntax,
                    template_arguments, named :: Boolean,
                    form :: Syntax) :: Decl:
   let parsed = args.map(
-                 fun (arg): dispatch_argument(arg, named, form))
-  Decl(#'dispatch_method, form,
+                 fun (arg): overload_argument(arg, named, form))
+  Decl(#'overload_method, form,
        [function_name,
         parsed.map(fun (part): (part :~ List)[0]),
         parsed.map(fun (part): (part :~ List)[1]),
@@ -147,31 +147,31 @@ fun dispatch_parts(function_name :: Syntax, args :: List.of(Syntax),
         constant,
         template_arguments])
 
-fun dispatch_decl(form :: Syntax) :: Decl:
+fun overload_decl(form :: Syntax) :: Decl:
   match form
-  | 'dispatch $(function_name :: Identifier)($arg, ...)
+  | 'overload $(function_name :: Identifier)($arg, ...)
        :: $result_type ... = $(constant :: Identifier)($(template :: Identifier), ...)':
-      dispatch_parts(
+      overload_parts(
         function_name, [arg, ...], '$result_type ...', constant,
         [Syntax.unwrap(template), ...], #true, form)
-  | 'dispatch $(function_name :: Identifier)($arg, ...)
+  | 'overload $(function_name :: Identifier)($arg, ...)
        = $(constant :: Identifier)($(template :: Identifier), ...)':
-      dispatch_parts(
+      overload_parts(
         function_name, [arg, ...], #false, constant,
         [Syntax.unwrap(template), ...], #true, form)
-  | 'dispatch $(function_name :: Identifier)($arg, ...)
+  | 'overload $(function_name :: Identifier)($arg, ...)
        :: $result_type ... = $(constant :: Identifier)':
-      dispatch_parts(function_name, [arg, ...], '$result_type ...',
+      overload_parts(function_name, [arg, ...], '$result_type ...',
                      constant, #false, #false, form)
-  | 'dispatch $(function_name :: Identifier)($arg, ...)
+  | 'overload $(function_name :: Identifier)($arg, ...)
        = $(constant :: Identifier)':
-      dispatch_parts(function_name, [arg, ...], #false,
+      overload_parts(function_name, [arg, ...], #false,
                      constant, #false, #false, form)
   | ~else:
       syntax_error_here(
-        #'dispatch,
-        "expected `dispatch function(Type, ...) = implementation` or "
-          ++ "`dispatch function(arg :: Type, ...) = implementation(arg, ...)`",
+        #'overload,
+        "expected `overload function(Type, ...) = implementation` or "
+          ++ "`overload function(arg :: Type, ...) = implementation(arg, ...)`",
         form)
 
 fun syntax_error_here(who :: Symbol, message :: String, at :: Syntax):

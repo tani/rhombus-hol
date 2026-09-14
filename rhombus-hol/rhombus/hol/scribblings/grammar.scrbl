@@ -17,12 +17,12 @@ Type variables are written @rhombus(?a), @rhombus(?b) and so on. A function is
 implicitly polymorphic in every type variable it mentions; there is no
 @tt{forall} at the type level to write.
 
-Parameterized type declarations bind a constructor namespace: for example,
-@tt{type List.of(?a)} binds @tt{List.of}, and an instance is written
-@tt{List.of(Nat)}. The bare name @tt{List} is not a type, because its argument
-is missing. Function arrows associate to the right, so @tt{A -> B -> C} means
-@tt{A -> (B -> C)}; write @tt{(A -> B) -> C} when the domain is itself a
-function.
+Parameterized datatype declarations bind a constructor namespace: for
+example, @tt{datatype List.of(?a)} binds @tt{List.of}, and an instance is
+written @tt{List.of(Nat)}. The bare name @tt{List} is not a type, because its
+argument is missing. Function arrows associate to the right, so
+@tt{A -> B -> C} means @tt{A -> (B -> C)}; write
+@tt{(A -> B) -> C} when the domain is itself a function.
 
 @rhombus(Boolean) is spelled as Rhombus spells it. A function's annotations are
 erased on the way to the executable half, but the conditions of its
@@ -329,4 +329,4 @@ quantifies over the whole conjunction.
 These levels govern frontend notation-aware rendering. The kernel printer is
 canonical and prints selected implementation constants as applications such
 as @tt{nat_add(x, y)}; the frontend surface printer reconstructs notation only
-when it is given explicit dispatch and notation tables.
+when it is given explicit overload and notation tables.

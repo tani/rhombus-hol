@@ -26,7 +26,7 @@ import:
   rhombus/hol/frontend/surface_core open
   rhombus/hol/logic/bool open
   rhombus/hol/frontend/tyunify open
-  rhombus/hol/frontend/dispatch open
+  rhombus/hol/frontend/overload open
   rhombus/hol/frontend/type/registry open
   rhombus/hol/frontend/type/parse open
   rhombus/hol/frontend/type/print open
@@ -65,14 +65,14 @@ fun syntax_error(who :: Symbol, message :: String, at :: Syntax):
 export:
   function_decl_shape
   function_parts
+  function_proof_measure
   body_clauses
   row_parts
 
-// A declaration split into its parts: `[name, [param, ...], result_type,
-// measure_or_false, body]`.  One matcher, used by both halves -- the executable
-// code generator wants the names and the body, the logical elaborator wants the
-// types and the measure, and neither should re-parse the declaration for
-// itself.
+// A declaration split into its parts:
+// `[name, [param, ...], result_type, body]`. One matcher is used by both the
+// executable code generator and the logical elaborator so neither re-parses
+// the declaration independently.
 //
 // Raises, with the offending syntax, when the declaration is not one this
 // version can admit.
@@ -82,37 +82,43 @@ export:
 fun function_parts(stx :: Syntax) :: List:
   match stx
   | 'function $(name :: Identifier)($param, ...) $rest ...':
-      let [rty, measure, body] = split_signature('$rest ...', stx)
-      [name, [param, ...], rty, measure, body]
+      let [rty, body] = split_signature('$rest ...', stx)
+      [name, [param, ...], rty, body]
   | 'axiomatic_function $(name :: Identifier)($param, ...) $rest ...':
-      let [rty, measure, body] = split_signature('$rest ...', stx)
-      [name, [param, ...], rty, measure, body]
+      let [rty, body] = split_signature('$rest ...', stx)
+      [name, [param, ...], rty, body]
   | ~else:
       syntax_error(#'function,
                    "expected `function name(param :: Type, ...) :: Type: body`",
                    stx)
 
-// `:: Type: body`, or `:: Type ~measure(e): body`, or the clausal form
-// `:: Type | (pat, ...): body | ...` -- see `clause_rows`.  The clausal form
+// `:: Type: body`, or the clausal form
+// `:: Type | (pat, ...): body | ...` -- see `clause_rows`. The clausal form
 // is returned as a body of the same shape everything downstream already
 // reads, so only `parse_body` and the emitter have to know about it.
 fun split_signature(rest :: Syntax, at :: Syntax) :: List:
   match rest
-  | ':: $ty ... ~measure($m): $body; ...': ['$ty ...', m, '$body; ...']
-  | ':: $ty ...: $body; ...': ['$ty ...', #false, '$body; ...']
+  | ':: $ty ... ~measure($m): $body; ...':
+      syntax_error(
+        #'function,
+        "`~measure(...)` must be written in an adjacent `proof:` block as `~measure: expression`",
+        m)
   | ':: $ty ... ~measure($m)
      | $c
-     | ...': ['$ty ...', m, clause_body([c, ...])]
+     | ...':
+      syntax_error(
+        #'function,
+        "`~measure(...)` must be written in an adjacent `proof:` block as `~measure: expression`",
+        m)
+  | ':: $ty ...: $body; ...': ['$ty ...', '$body; ...']
   | ':: $ty ...
      | $c
-     | ...': ['$ty ...', #false, clause_body([c, ...])]
+     | ...': ['$ty ...', clause_body([c, ...])]
   | ~else:
       syntax_error(#'function, "a function needs a result type", at)
 
-// The clausal form's body, tagged so `parse_body` can tell it from an
-// ordinary expression body.  Keeping it a `Syntax` rather than a separate
-// field means `function_parts`, `fun_signature` and the measure path are
-// untouched.
+// The clausal form's body is tagged so `parse_body` can distinguish it from
+// an ordinary expression body without adding a second body field.
 fun clause_body(cs :: List.of(Syntax)) :: Syntax:
   let [c, ...] = cs
   '#%hol_clauses:
@@ -126,11 +132,11 @@ fun body_clauses(body :: Syntax) :: maybe(List.of(Syntax)):
   | '#%hol_clauses: $c; ...': [c, ...]
   | ~else: #false
 
-// `[name, [param, ...], body]`, the executable half's view.
+// `[name, [param, ...]]`, the executable half's binding view.
 fun function_decl_shape(stx :: Syntax) :: List:
-  let [name, params, _, _, body] = function_parts(stx)
+  let [name, params, _, _] = function_parts(stx)
   let ps :~ List = params
-  [name, ps.map(param_name), body]
+  [name, ps.map(param_name)]
 
 fun param_name(p :: Syntax) :: Syntax:
   match p
@@ -138,6 +144,34 @@ fun param_name(p :: Syntax) :: Syntax:
   | ~else:
       syntax_error(#'function,
                    "a parameter needs a name and a type", p)
+
+// A function proof currently supplies exactly one termination measure. Keeping
+// this parser separate from theorem tactics makes options context-sensitive:
+// theorem hints cannot silently become function hints or vice versa.
+fun function_proof_measure(groups :: List.of(Syntax), at :: Syntax) :: Syntax:
+  recur loop (remaining :~ List = groups,
+              measure :~ maybe(Syntax) = #false):
+    match remaining
+    | []:
+        match measure
+        | #false:
+            syntax_error(
+              #'proof,
+              "a function proof needs one `~measure: expression` option",
+              at)
+        | value: value :~ Syntax
+    | List.cons(group, rest):
+        let rest :~ List = rest
+        match group
+        | '~measure: $expr':
+            match measure
+            | #false: loop(rest, expr)
+            | ~else:
+                syntax_error(#'proof, "duplicate `~measure` option", group)
+        | '~measure: $more; ...':
+            syntax_error(#'proof, "`~measure` expects one expression", group)
+        | ~else:
+            syntax_error(#'proof, "unknown function proof option", group)
 
 
 
@@ -273,7 +307,7 @@ class ElabEnv(thy :: Theory,
               mode :: Symbol,
               self_name :: maybe(Symbol),
               self :: maybe(Term),
-              operators :: DispatchRegistry = standard_dispatch_registry(),
+              operators :: OverloadRegistry = standard_overload_registry(),
               type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry()):
   property who :: Symbol: (if mode == #'prop | #'theorem | #'function)
 
@@ -467,11 +501,11 @@ fun core_apply_effect(func :: CoreExpr, args :: List.of(CoreExpr),
         let overloaded = !env.vars.get(name, #false)
                            && name != env.self_name
                            && !const_type(env.thy, name)
-                           && dispatch_arity(env.operators, name) != #false
+                           && overload_arity(env.operators, name) != #false
         cond
         | overloaded:
             effect:
-              let term :: Term <- elaborate_dispatch_effect(name, args, at)
+              let term :: Term <- elaborate_overload_effect(name, args, at)
               return term
         | ~else:
             effect:
@@ -496,7 +530,7 @@ fun elaborate_non_numerals_effect(args :: List.of(CoreExpr)) :: Computation:
                 let term :: Term <- elaborate_effect(first :~ CoreExpr)
                 loop(rest, terms ++ [term])
 
-fun dispatch_signature(method :: DispatchMethod,
+fun overload_signature(method :: OverloadMethod,
                        registry :: TypeConstructorRegistry) :: String:
   String.join(
     method.argument_types.map(
@@ -505,7 +539,7 @@ fun dispatch_signature(method :: DispatchMethod,
     ++ " -> " ++ type_to_surface_string(registry, method.result_type)
     ++ " via " ++ to_string(method.constant)
 
-fun specialize_dispatch_term(term :: Term, expected :: HType) :: Term:
+fun specialize_overload_term(term :: Term, expected :: HType) :: Term:
   cond
   | type_of(term) == expected: term
   | ~else:
@@ -543,17 +577,17 @@ fun elaborate_numeral(env :: ElabEnv, value :: NonnegInt,
           ++ type_to_surface_string(env.type_constructors, expected),
         at)
 
-fun elaborate_dispatch_effect(function_name :: Symbol,
+fun elaborate_overload_effect(function_name :: Symbol,
                               args :: List.of(CoreExpr),
                               at :: Syntax,
                               ~expected: expected_result :: maybe(HType) = #false)
      :: Computation:
   effect:
     let env :: ElabEnv <- ElabEnv.ask()
-    let arity = dispatch_arity(env.operators, function_name)
+    let arity = overload_arity(env.operators, function_name)
     unless arity
     | syntax_error(env.who,
-                   "unknown dispatch function " ++ to_string(function_name),
+                   "unknown overload function " ++ to_string(function_name),
                    at)
     let arity :~ NonnegInt = arity
     unless args.length() == arity
@@ -568,16 +602,16 @@ fun elaborate_dispatch_effect(function_name :: Symbol,
           match term
           | #false: #false
           | value: type_of(value :~ Term))
-    let matches = resolve_dispatch(
+    let matches = resolve_overload(
                     env.operators, function_name,
                     argument_types, expected_result)
     when matches.length() == 0
-    | let signatures = dispatch_candidates(env.operators, function_name).map(
-                         fun (method :: DispatchMethod):
-                           dispatch_signature(method, env.type_constructors))
+    | let signatures = overload_candidates(env.operators, function_name).map(
+                         fun (method :: OverloadMethod):
+                           overload_signature(method, env.type_constructors))
       syntax_error(
         env.who,
-        "`" ++ to_string(function_name) ++ "` has no applicable dispatch"
+        "`" ++ to_string(function_name) ++ "` has no applicable overload"
           ++ (if signatures.length() == 0
               | ""
               | "\navailable methods:\n  "
@@ -585,15 +619,15 @@ fun elaborate_dispatch_effect(function_name :: Symbol,
         at)
     when matches.length() > 1
     | let signatures = matches.map(
-                         fun (resolution :: DispatchResolution):
-                           dispatch_signature(
+                         fun (resolution :: OverloadResolution):
+                           overload_signature(
                              resolution.method, env.type_constructors))
       syntax_error(env.who,
-                   "`" ++ to_string(function_name) ++ "` has ambiguous dispatch"
+                   "`" ++ to_string(function_name) ++ "` has ambiguous overload"
                      ++ "\ncandidates:\n  "
                      ++ String.join(signatures, "\n  "),
                    at)
-    let resolution :~ DispatchResolution = matches[0]
+    let resolution :~ OverloadResolution = matches[0]
     let method = resolution.method
     fun finish(index :: NonnegInt,
                out :: List.of(Term)) :: Computation:
@@ -610,7 +644,7 @@ fun elaborate_dispatch_effect(function_name :: Symbol,
           | term:
               finish(
                 index + 1,
-                out ++ [specialize_dispatch_term(
+                out ++ [specialize_overload_term(
                           term :~ Term,
                           resolution.argument_types[index])])
     let terms :: List.of(Term) <- finish(0, [])
@@ -685,7 +719,7 @@ fun infer_core(expr :: CoreExpr) :: Computation:
 
 fun requires_expected_type(
       expr :: CoreExpr,
-      operators :: maybe(DispatchRegistry) = #false) :: Boolean:
+      operators :: maybe(OverloadRegistry) = #false) :: Boolean:
   fun any_arg(args :: List.of(CoreExpr)) :: Boolean:
     for values(found = #false) (arg in args):
       found || requires_expected_type(arg :~ CoreExpr, operators)
@@ -697,7 +731,7 @@ fun requires_expected_type(
   | CoreNumeral(_, _): #true
   | CoreCall(CoreRef(name, _), args, _):
       (if operators
-            && dispatch_arity(operators :~ DispatchRegistry, name) != #false
+            && overload_arity(operators :~ OverloadRegistry, name) != #false
        | args.length() == 0 || any_arg(args)
        | any_arg(args))
   | CoreCall(_, args, _): any_arg(args)
@@ -718,11 +752,11 @@ fun check_core(expr :: CoreExpr, expected :: HType) :: Computation:
         let overloaded = !env.vars.get(name, #false)
                            && name != env.self_name
                            && !const_type(env.thy, name)
-                           && dispatch_arity(env.operators, name) != #false
+                           && overload_arity(env.operators, name) != #false
         cond
         | overloaded:
             effect:
-              let term :: Term <- elaborate_dispatch_effect(name, args, at, ~expected: expected)
+              let term :: Term <- elaborate_overload_effect(name, args, at, ~expected: expected)
               return term
         | ~else:
             effect:
@@ -779,7 +813,7 @@ fun run_type_elaboration(env :: ElabEnv, stx :: Syntax) :: HType:
 fun parse_core_prop(
       thy :: Theory, tyvars :: List.of(Symbol),
       vars :: Map.of(Symbol, Term), expr :: CoreExpr,
-      ~operators: operators :: DispatchRegistry = standard_dispatch_registry(),
+      ~operators: operators :: OverloadRegistry = standard_overload_registry(),
       ~type_constructors: type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry())
      :: Term:
   run_elaboration(ElabEnv(thy, tyvars, vars, #'prop, #false, #false,
@@ -818,7 +852,7 @@ fun leading_core_binder_names(expr :: CoreExpr) :: List.of(Symbol):
 
 fun elaborate_theorem_statement(
       thy :: Theory, expr :: CoreExpr,
-      ~operators: operators :: DispatchRegistry = standard_dispatch_registry(),
+      ~operators: operators :: OverloadRegistry = standard_overload_registry(),
       ~type_constructors: type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry())
      :: values(Term, List.of(Symbol)):
   let tyvars = core_type_vars(expr)
@@ -878,7 +912,7 @@ class ClauseEnv(thy :: Theory,
                 vars :: Map.of(Symbol, Term),
                 at :: Syntax,
                 result_type :: HType,
-                operators :: DispatchRegistry,
+                operators :: OverloadRegistry,
                 type_constructors :: TypeConstructorRegistry):
   reader_effect
 
@@ -993,7 +1027,7 @@ fun core_clause_row(row :: CoreRow) :: Computation:
 
 fun elaborate_function_decl(
       thy :: Theory, spec :: CoreFunctionSpec,
-      ~operators: operators :: DispatchRegistry = standard_dispatch_registry(),
+      ~operators: operators :: OverloadRegistry = standard_overload_registry(),
       ~type_constructors: type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry())
      :: FunSpec:
   let tyvars = spec_type_vars(spec)
@@ -1063,8 +1097,7 @@ fun sub_env(env :: ElabEnv, vars :: Map.of(Symbol, Term)) :: ElabEnv:
 // names are `simplify`, `eliminate`, `fertilize`, `generalize`, `irrelevance`
 // and `induct`; see `waterfall.rhm`'s pipeline comment.
 //
-// `~disable` removes rules from this proof only, layered on top of module-level
-// `disable_rules`/`enable_rules` declarations. `~use` enables named theorem
+// `~disable` removes rules from this proof only. `~use` enables named theorem
 // rules for this proof only. `~split` splits the goal on Boolean terms before
 // the waterfall; `~choose` supplies existential candidates.
 //

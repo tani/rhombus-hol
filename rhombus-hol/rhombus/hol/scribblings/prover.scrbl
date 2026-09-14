@@ -126,9 +126,8 @@ The things to reach for, in order: prove the missing theorem and select it with
 wrong variable; give @rhombus(~use: [lemma]) when an existing theorem is
 needed here; give
 @rhombus(~disable: [rule]) --- ACL2's @tt{:in-theory (disable ...)} ---
-to turn off a named rewrite rule for this proof only, layered on top of whatever
-a module-level @rhombus(disable_rules, ~datum) already turned off, on the
-occasion an enabled rule is firing where it should not; give
+to turn off a named rewrite rule for this proof when an enabled rule is firing
+where it should not; give
 @rhombus(~split: proposition) --- ACL2's @tt{:cases} --- when the goal
 turns on a Boolean term (typically an application of an uninterpreted or
 externally-supplied predicate) that no other stage can resolve, to split on it

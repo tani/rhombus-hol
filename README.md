@@ -8,7 +8,7 @@ executable Rhombus code.
 ```rhombus
 #lang rhombus/hol
 
-type List.of(?a)
+datatype List.of(?a)
 | Nil()
 | Cons(head :: ?a, tail :: List.of(?a))
 

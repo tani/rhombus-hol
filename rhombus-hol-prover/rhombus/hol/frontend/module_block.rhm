@@ -34,7 +34,7 @@ import:
     rhombus/hol/datatype/datatype open
     rhombus/hol/frontend/expand as expand
     rhombus/hol/frontend/elab as elab
-    rhombus/hol/frontend/dispatch open
+    rhombus/hol/frontend/overload open
     rhombus/hol/frontend/surface_state open
     rhombus/hol/frontend/type/constructor open
     rhombus/hol/frontend/type/registry open
@@ -63,7 +63,7 @@ meta:
   def surface_state_key = #'rhombus_hol_surface_state
   def initial_surface_context:
     SurfaceContext(
-      SurfaceState(standard_dispatch_registry(), {},
+      SurfaceState(standard_overload_registry(), {},
                    standard_type_constructor_registry()),
       [])
 
@@ -104,20 +104,20 @@ meta:
     context.surface.constants.get(name, #false)
 
 
-  fun dispatch_argument_position(argument_names :: List,
+  fun overload_argument_position(argument_names :: List,
                                  name :: Symbol,
                                  at :: Syntax) :: NonnegInt:
     recur find (index = 0):
       cond
       | index == argument_names.length():
           syntax_meta.error(
-            "implementation template uses an unknown dispatch argument `"
+            "implementation template uses an unknown overload argument `"
               ++ to_string(name) ++ "`",
             at)
       | argument_names[index] == name: index
       | ~else: find(index + 1)
 
-  fun dispatch_argument_order(argument_names :: List,
+  fun overload_argument_order(argument_names :: List,
                               template_arguments :: maybe(List.of(Symbol)),
                               at :: Syntax) :: List.of(NonnegInt):
     let arity = argument_names.length()
@@ -126,13 +126,13 @@ meta:
     | arguments:
         when argument_names.contains(#false)
         | syntax_meta.error(
-            "an implementation template needs named dispatch arguments", at)
+            "an implementation template needs named overload arguments", at)
         let order:
           for List (argument in (arguments :~ List.of(Symbol))):
-            dispatch_argument_position(argument_names, argument, at)
+            overload_argument_position(argument_names, argument, at)
         unless valid_argument_order(order, arity)
         | syntax_meta.error(
-            "implementation template must use every dispatch argument "
+            "implementation template must use every overload argument "
               ++ "exactly once",
             at)
         order
@@ -145,7 +145,7 @@ meta:
         at :: Syntax) :: SurfaceContext:
     let ready = force_surface_context(context)
     let arity = argument_type_stxs.length()
-    let registry_with_function = ensure_dispatch_function(
+    let registry_with_function = ensure_overload_function(
                                    ready.surface.operators,
                                    function_name, arity)
     let argument_types = argument_type_stxs.map(
@@ -170,14 +170,14 @@ meta:
       | ty: ty :~ HType
     let method:
       try:
-        build_dispatch_method(
+        build_overload_method(
           function_name, argument_types, result_type,
           constant, constant_type, argument_order)
         ~catch e :: Exn.Fail:
           syntax_meta.error(e.message, at)
     SurfaceContext(
       SurfaceState(
-        add_dispatch_method(registry_with_function, method),
+        add_overload_method(registry_with_function, method),
         ready.surface.constants,
         ready.surface.type_constructors),
       ready.pending_imports)
@@ -185,7 +185,7 @@ meta:
   fun surface_add_function(context :: SurfaceContext, form :: Syntax)
        :: SurfaceContext:
     let ready = force_surface_context(context)
-    let [name, params, result_type, _, _] = elab.function_parts(form)
+    let [name, params, result_type, _] = elab.function_parts(form)
     let ps :~ List = params
     let result = type_parser.parse_open_type(
                    result_type :~ Syntax,
@@ -208,7 +208,7 @@ meta:
         ready.surface.type_constructors),
       ready.pending_imports)
 
-  fun surface_add_type(context :: SurfaceContext, spec :: DatatypeSpec)
+  fun surface_add_datatype(context :: SurfaceContext, spec :: DatatypeSpec)
        :: SurfaceContext:
     let ready = force_surface_context(context)
     let additions:
@@ -234,16 +234,16 @@ meta:
         let [arg, ...] = args.map(surface_type_expr)
         'mk_tyapp($(surface_symbol_expr(name)), [$arg, ...])'
 
-  fun surface_dispatch_expr(name :: Symbol, arity :: NonnegInt) :: Syntax:
+  fun surface_overload_expr(name :: Symbol, arity :: NonnegInt) :: Syntax:
     let arity_stx = Syntax.make(arity, id_ctx)
     '[$(surface_symbol_expr(name)), $arity_stx]'
 
-  fun surface_method_expr(method :: DispatchMethod) :: Syntax:
+  fun surface_method_expr(method :: OverloadMethod) :: Syntax:
     let [argument_type, ...] = method.argument_types.map(surface_type_expr)
     let result_type = surface_type_expr(method.result_type)
     let [position, ...] = method.argument_order.map(
                             fun (value): Syntax.make(value, id_ctx))
-    'DispatchMethod(
+    'OverloadMethod(
        $(surface_symbol_expr(method.function)),
        [$argument_type, ...],
        $result_type,
@@ -267,11 +267,11 @@ meta:
     let ready = force_surface_context(context).surface
     let function_exprs:
       for values(out :~ List = []) ((name, arity) in ready.operators.arities):
-        out ++ [surface_dispatch_expr(name, arity :~ NonnegInt)]
-    let [dispatch_function, ...] = function_exprs
+        out ++ [surface_overload_expr(name, arity :~ NonnegInt)]
+    let [overload_function, ...] = function_exprs
     let [method, ...] = ready.operators.methods.map(
                           fun (value):
-                            surface_method_expr(value :~ DispatchMethod))
+                            surface_method_expr(value :~ OverloadMethod))
     let constant_exprs:
       for values(out :~ List = []) ((name, ty) in ready.constants):
         out ++ [surface_constant_expr(name, ty :~ HType)]
@@ -285,12 +285,12 @@ meta:
     'module hol_surface ~lang rhombus:
        import:
          rhombus/hol/htype open
-         rhombus/hol/frontend/dispatch open
+         rhombus/hol/frontend/overload open
          rhombus/hol/frontend/surface_state open
          rhombus/hol/frontend/type/constructor open
        export: state
        def state = make_surface_state(
-                     [$dispatch_function, ...],
+                     [$overload_function, ...],
                      [$method, ...],
                      [$constant, ...],
                      [$type_constructor, ...])'
@@ -336,7 +336,7 @@ meta:
   // over the emitted classes; checking runs the real executable code.
   //
   // They reach `quickcheck` through `qc.rhm`'s registry rather than through a
-  // guessed identifier. `type` registers its generator and shrinker under the
+  // guessed identifier. `datatype` registers its generator and shrinker under the
   // type's own name when its module is instantiated. No generated helper needs
   // to be exported.
   //
@@ -494,7 +494,7 @@ meta:
           let (domain, range) = dest_fun(current)
           loop(range, remaining - 1, domains ++ [domain])
       | ~else:
-          error(~who: #'dispatch,
+          error(~who: #'overload,
                 "constant has fewer arguments than required")
 
   fun runtime_fresh_type(ty :: HType) :: HType:
@@ -511,7 +511,7 @@ meta:
              all && runtime_needs_expected(state, arg :~ CoreExpr)
     match expr
     | CoreNumeral(_, _): #true
-    | CoreCall(CoreRef(name, _), args, _) when dispatch_arity(state.surface.operators, name) != #false:
+    | CoreCall(CoreRef(name, _), args, _) when overload_arity(state.surface.operators, name) != #false:
         every_arg(args)
     | CoreCall(_, args, _):
         for values(found = #false) (arg in args):
@@ -551,16 +551,16 @@ meta:
                  state.surface.type_constructors, expected),
           at)
 
-  fun runtime_dispatch_expr(state :: SurfaceContext,
+  fun runtime_overload_expr(state :: SurfaceContext,
                             env :: Map.of(Symbol, HType),
                             function_name :: Symbol,
                             args :: List.of(CoreExpr),
                             expected :: maybe(HType),
                             at :: Syntax) :: RuntimeExpr:
-    let arity = dispatch_arity(state.surface.operators, function_name)
+    let arity = overload_arity(state.surface.operators, function_name)
     unless arity
     | syntax_meta.error(
-        "unknown dispatch function " ++ to_string(function_name), at)
+        "unknown overload function " ++ to_string(function_name), at)
     let arity :~ NonnegInt = arity
     unless args.length() == arity
     | syntax_meta.error(
@@ -579,18 +579,18 @@ meta:
           match value
           | #false: #false
           | runtime: (runtime :~ RuntimeExpr).ty)
-    let matches = resolve_dispatch(
+    let matches = resolve_overload(
                     state.surface.operators, function_name,
                     argument_types, expected)
     when matches.length() == 0
     | syntax_meta.error(
-        "`" ++ to_string(function_name) ++ "` has no applicable dispatch",
+        "`" ++ to_string(function_name) ++ "` has no applicable overload",
         at)
     when matches.length() > 1
     | syntax_meta.error(
-        "`" ++ to_string(function_name) ++ "` has ambiguous dispatch",
+        "`" ++ to_string(function_name) ++ "` has ambiguous overload",
         at)
-    let resolution :~ DispatchResolution = matches[0]
+    let resolution :~ OverloadResolution = matches[0]
     let method = resolution.method
     let rendered:
       for List (arg in args, prior in known,
@@ -600,7 +600,7 @@ meta:
             match type_unify(runtime.ty, expected_type, {})
             | #false:
                 syntax_meta.error(
-                  "dispatch argument has an unexpected type", at)
+                  "overload argument has an unexpected type", at)
             | _:
                 RuntimeExpr(runtime.stx, expected_type)
         | #false:
@@ -654,8 +654,8 @@ meta:
         match func
         | CoreRef(name, _) when !env.get(name, #false)
                                   && !surface_const_type(state, name)
-                                  && dispatch_arity(state.surface.operators, name) != #false:
-            runtime_dispatch_expr(
+                                  && overload_arity(state.surface.operators, name) != #false:
+            runtime_overload_expr(
               state, env, name, args, expected, at)
         | CoreRef(name, _) when name == #'eq && args.length() == 2:
             let left_core :~ CoreExpr = args[0]
@@ -835,7 +835,7 @@ meta:
     '$name($pattern_stx, ...): $result'
 
   // The executable half lowers the same CoreExpr tree as the logical half.
-  // Dispatch methods are therefore selected at expansion time from declared
+  // Overload methods are therefore selected at expansion time from declared
   // argument and expected-result types; generated code contains only direct
   // named calls.
 
@@ -870,22 +870,6 @@ meta:
           let result = runtime_body(state, env, body, result_type)
           'fun $name($parameter, ...):
              $result'
-
-  // -- rule control ----------------------------------------------------------
-
-  // `disable_rules` / `enable_rules` emit no run-time code and one
-  // compile-time state step, like every other declaration here.  This used to
-  // return two values where `emit_one` wants three (run-time forms,
-  // compile-time forms, counter), so *any* module using either form failed to
-  // expand -- the forms were documented, reachable from the grammar, and
-  // untested, so nothing said so.
-  fun rule_step(d :: expand.Decl, n :: Int, cur :: Syntax, nxt :: Syntax,
-                on :: Boolean) :: values(List.of(Syntax), List.of(Syntax), Int):
-    let [names] = d.parts
-    let ns :~ List = names
-    let [nm, ...] = ns
-    let flag = (if on | '#true' | '#false')
-    values([], ['(~rules $cur $nxt [$flag] [$nm, ...])'], n + 1)
 
   // -- HOL surface parsing ---------------------------------------------------
 
@@ -962,8 +946,9 @@ meta:
         let expr = parse_function_expression(body)
         '(core_body_expr $expr)'.relocate_span([body])
 
-  fun function_encoding(form :: Syntax) :: Syntax:
-    let [name, params, result_type, measure_stx, body] = elab.function_parts(form)
+  fun function_encoding(form :: Syntax,
+                        measure_stx :: maybe(Syntax)) :: Syntax:
+    let [name, params, result_type, body] = elab.function_parts(form)
     let ps :~ List = params
     let [param, ...] = ps.map(fun (p :: Syntax): binder_encoding(p))
     let measure:
@@ -1028,8 +1013,8 @@ meta:
         ['import: $path!hol_theory as $alias']
     | '(~adopt $cur $nxt $alias [$at])':
         ['def $nxt = _hol_driver.adopt($cur, $(alias).theory, '$at')']
-    | '(~type $cur $nxt [$form] [$at])':
-        ['def $nxt = _hol_driver.add_type($cur, '$form', '$at')']
+    | '(~datatype $cur $nxt [$form] [$at])':
+        ['def $nxt = _hol_driver.add_datatype($cur, '$form', '$at')']
     | '(~function $cur $nxt [$core] [$at])':
         ['def $nxt:
            let spec = try:
@@ -1056,12 +1041,10 @@ meta:
                            _hol_driver.hol_reraise(e, '$at')
            _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
                                    statement, proof, '$at')']
-    | '(~dispatch_method $cur $nxt [$function_name] [$signature] [$constant] [$order, ...] [$at])':
-        ['def $nxt = _hol_driver.add_dispatch_method_encoded(
+    | '(~overload_method $cur $nxt [$function_name] [$signature] [$constant] [$order, ...] [$at])':
+        ['def $nxt = _hol_driver.add_overload_method_encoded(
                        $cur, Syntax.unwrap('$function_name'), '$signature',
                        Syntax.unwrap('$constant'), [$order, ...], '$at')']
-    | '(~rules $cur $nxt [$flag] [$name, ...])':
-        ['def $nxt = _hol_driver.set_rules($cur, $flag, [Syntax.unwrap('$name'), ...])']
     | ~else: syntax_meta.error("internal malformed logical step", step)
 
   // -- diagnostics -----------------------------------------------------------
@@ -1100,12 +1083,12 @@ meta:
           for values(state :~ SurfaceContext = runtime_state) (terms in (paths :~ List)):
             defer_surface_import(state, terms :~ List.of(Syntax))
         values([d.form], chain, n2, next_runtime)
-    | #'type:
+    | #'datatype:
         let [name, ctors] = d.parts
         let at = head_term(d.form)
         let form = d.form
         let ready = force_surface_context(runtime_state)
-        let spec = type_parser.parse_type_decl(
+        let spec = type_parser.parse_datatype_decl(
                      form, ready.surface.type_constructors)
         let self = mk_tyapp(
                      spec.name,
@@ -1120,14 +1103,14 @@ meta:
         values([emit_type(name, ctors :~ List),
                 emit_generator(name, spec.params, gen),
                 emit_shrinker(name, gen)],
-               ['(~type $cur $nxt [$form] [$at])'],
+               ['(~datatype $cur $nxt [$form] [$at])'],
                n + 1,
-               surface_add_type(ready, spec))
+               surface_add_datatype(ready, spec))
     | #'function:
-        let [name, params, body] = d.parts
+        let [name, params, measure] = d.parts
         let at = head_term(d.form)
         let form = d.form
-        let core = function_encoding(form)
+        let core = function_encoding(form, measure :~ maybe(Syntax))
         let spec = decode_function(core)
         let registered_runtime = surface_add_function(runtime_state, form)
         let next_runtime = force_surface_context(registered_runtime)
@@ -1136,10 +1119,10 @@ meta:
                ['(~function $cur $nxt [$core] [$at])'],
                n + 1, next_runtime)
     | #'axiomatic_function:
-        let [name, params, body] = d.parts
+        let [name, params, measure] = d.parts
         let at = head_term(d.form)
         let form = d.form
-        let core = function_encoding(form)
+        let core = function_encoding(form, measure :~ maybe(Syntax))
         let spec = decode_function(core)
         let registered_runtime = surface_add_function(runtime_state, form)
         let next_runtime = force_surface_context(registered_runtime)
@@ -1157,7 +1140,7 @@ meta:
         values([],
                ['(~theorem $cur $nxt [$name] [$core] [$tactic_core] [$at])'],
                n + 1, runtime_state)
-    | #'dispatch_method:
+    | #'overload_method:
         let [function_name, argument_names, argument_types,
              result_type, constant, template_arguments] = d.parts
         let at = head_term(d.form)
@@ -1166,7 +1149,7 @@ meta:
             match name
             | #false: #false
             | name_stx: Syntax.unwrap(name_stx :~ Syntax)
-        let positions = dispatch_argument_order(
+        let positions = overload_argument_order(
                           names, template_arguments, at)
         let next_runtime = surface_add_method(
                              runtime_state,
@@ -1180,20 +1163,12 @@ meta:
                           | result_type :~ Syntax
                           | Syntax.make(#false, id_ctx))
         let signature:
-          '(dispatch_signature [$argument_type, ...] [$result_stx])'
+          '(overload_signature [$argument_type, ...] [$result_stx])'
         let [position, ...] = positions.map(
                               fun (value): Syntax.make(value, id_ctx))
         values([],
-               ['(~dispatch_method $cur $nxt [$function_name] [$signature] [$constant] [$position, ...] [$at])'],
+               ['(~overload_method $cur $nxt [$function_name] [$signature] [$constant] [$position, ...] [$at])'],
                n + 1, next_runtime)
-    | #'disable_rules:
-        let (forms, chain, n2) = rule_step(d, n, cur, nxt, #false)
-        values(forms, chain, n2, runtime_state)
-    | #'enable_rules:
-        let (forms, chain, n2) = rule_step(d, n, cur, nxt, #true)
-        values(forms, chain, n2, runtime_state)
-
-
 
 // One declaration per expansion. Emitting the current declaration before the
 // recursive macro call lets imports and operator definitions establish their

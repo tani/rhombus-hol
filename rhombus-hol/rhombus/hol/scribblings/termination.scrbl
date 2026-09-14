@@ -59,11 +59,14 @@ to the original pattern. Fields of other types do not count.
 
 @section{Measures}
 
-When no order exists, the author may supply one with @rhombus(~measure).
+When no structural order exists, an adjacent @rhombus(proof, ~datum) block may
+supply one with @tt{~measure: expression}.
 
 @rhombusblock(
-  function down(n :: Nat) :: Nat ~measure(n):
+  function down(n :: Nat) :: Nat:
     if nul(n) | zero() | succ(down(pred_of(n)))
+  proof:
+    ~measure: n
 )
 
 The recursion here is on a computed argument, not on a field of a pattern, so
@@ -86,8 +89,8 @@ what a measure is for.
 If an obligation cannot be discharged, the definition is a compile error
 carrying the obligation and the goals that were left over.
 
-A measure is examined only when no structural order was found. Putting
-@rhombus(~measure) on a definition that already descends structurally is
+A measure is examined only when no structural order was found. Adding a
+@tt{~measure:} option to a definition that already descends structurally is
 therefore harmless but also unchecked --- the structural argument is complete
 on its own.
 
@@ -98,7 +101,7 @@ well-founded. Every recursive datatype declaration generates its
 @deftech{subterm relation}, named by appending @tt{_lt} to the type's name:
 
 @rhombusblock(
-  type Nat
+  datatype Nat
   | zero()
   | succ(pred :: Nat)
 )
@@ -134,9 +137,9 @@ chain would be an infinitely deep term, and induction says there are none.
 That is why a measure must land in a declared datatype. A measure into
 @rhombus(Boolean), or into any type with no subterm relation, is rejected.
 
-The relation's equations are in the rewriter under its own name, so
-@rhombus(disable_rules [Nat_lt]) reaches them without touching the datatype's
-other rules.
+The relation's equations are in the rewriter under its own name, so a proof can
+suppress them with @rhombus(~disable: [Nat_lt]) without touching the
+datatype's other rules.
 
 @section{What is not supported}
 

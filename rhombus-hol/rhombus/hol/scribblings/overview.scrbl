@@ -31,11 +31,11 @@ normal call of the declaration's final function name. An ordinary
 @rhombus(operator, ~datum) remains an ordinary Rhombus declaration and is
 independent of HOL notation.
 
-Dispatch is function overloading during elaboration, not a logical feature.
-@rhombus(dispatch, ~datum) adds a typed clause to a callable name; direct calls
+Function overloading is resolved during elaboration, not by the logic.
+@rhombus(overload, ~datum) adds a typed clause to a callable name; direct calls
 and notation targeting that name use the same resolver. A successful call
 lowers directly to the selected constant. The resulting kernel term contains
-no dispatch node, and generated executable code performs no runtime type test.
+no overload node, and generated executable code performs no runtime type test.
 
 @section{When things happen}
 
@@ -80,7 +80,7 @@ Remaining goal,
     app
     rev
 
-  type List.of(?a)
+  datatype List.of(?a)
   | Nil()
   | Cons(head :: ?a, tail :: List.of(?a))
 

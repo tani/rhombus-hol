@@ -1,6 +1,6 @@
 #lang rhombus/static
 
-// Static function-overload metadata. This layer is outside `Theory`: dispatch
+// Static function-overload metadata. This layer is outside `Theory`: overload
 // declarations extend callable names, but the kernel receives only the
 // selected constant application.
 
@@ -8,32 +8,32 @@ import:
   rhombus/hol/htype open
 
 export:
-  DispatchMethod
-  DispatchRegistry
-  DispatchResolution
-  standard_dispatch_registry
-  ensure_dispatch_function
-  add_dispatch_method
+  OverloadMethod
+  OverloadRegistry
+  OverloadResolution
+  standard_overload_registry
+  ensure_overload_function
+  add_overload_method
   valid_argument_order
-  build_dispatch_method
-  dispatch_arity
-  dispatch_candidates
-  resolve_dispatch
+  build_overload_method
+  overload_arity
+  overload_candidates
+  resolve_overload
 
-class DispatchMethod(function :: Symbol,
+class OverloadMethod(function :: Symbol,
                      argument_types :: List.of(HType),
                      result_type :: HType,
                      constant :: Symbol,
                      argument_order :: List.of(NonnegInt))
 
-class DispatchRegistry(arities :: Map.of(Symbol, NonnegInt),
-                       methods :: List.of(DispatchMethod))
+class OverloadRegistry(arities :: Map.of(Symbol, NonnegInt),
+                       methods :: List.of(OverloadMethod))
 
-class DispatchResolution(method :: DispatchMethod,
+class OverloadResolution(method :: OverloadMethod,
                          argument_types :: List.of(HType),
                          result_type :: HType)
 
-fun standard_dispatch_registry() :: DispatchRegistry:
+fun standard_overload_registry() :: OverloadRegistry:
   let functions = [
     [#'add, 2],
     [#'subtract, 2],
@@ -49,27 +49,27 @@ fun standard_dispatch_registry() :: DispatchRegistry:
     [#'union, 2],
     [#'intersection, 2]
   ]
-  DispatchRegistry(
+  OverloadRegistry(
     for values(out :~ Map = {}) (entry in functions):
       let [name :: Symbol, arity :: NonnegInt] = entry :~ List
       out ++ {name: arity},
     [])
 
-fun dispatch_arity(registry :: DispatchRegistry,
+fun overload_arity(registry :: OverloadRegistry,
                    name :: Symbol) :: maybe(NonnegInt):
   registry.arities.get(name, #false)
 
-fun ensure_dispatch_function(registry :: DispatchRegistry,
+fun ensure_overload_function(registry :: OverloadRegistry,
                              name :: Symbol,
-                             arity :: NonnegInt) :: DispatchRegistry:
+                             arity :: NonnegInt) :: OverloadRegistry:
   match registry.arities.get(name, #false)
   | #false:
-      DispatchRegistry(registry.arities ++ {name: arity},
+      OverloadRegistry(registry.arities ++ {name: arity},
                        registry.methods)
   | existing:
       unless (existing :~ NonnegInt) == arity
-      | error(~who: #'dispatch,
-              "dispatch function conflicts with an existing arity",
+      | error(~who: #'overload,
+              "overload function conflicts with an existing arity",
               error.val(~label: "function", name))
       registry
 fun valid_argument_order(order :: List.of(NonnegInt), arity :: NonnegInt)
@@ -132,17 +132,17 @@ fun fresh_type(ty :: HType) :: HType:
       out ++ {name: mk_tyvar(Symbol.gen(to_string(name))) :~ HType}
   type_subst(renaming, ty)
 
-fun build_dispatch_method(
+fun build_overload_method(
       function :: Symbol,
       argument_types :: List.of(HType),
       declared_result :: maybe(HType),
       constant :: Symbol,
       constant_type :: HType,
-      argument_order :: List.of(NonnegInt)) :: DispatchMethod:
+      argument_order :: List.of(NonnegInt)) :: OverloadMethod:
   let arity = argument_types.length()
   unless valid_argument_order(argument_order, arity)
-  | error(~who: #'dispatch,
-          "implementation arguments must use every dispatch argument "
+  | error(~who: #'overload,
+          "implementation arguments must use every overload argument "
             ++ "exactly once")
   let (domains, raw_result):
     recur peel (current = fresh_type(constant_type),
@@ -154,9 +154,9 @@ fun build_dispatch_method(
           let (domain, range) = dest_fun(current)
           peel(range, remaining - 1, out ++ [domain])
       | ~else:
-          error(~who: #'dispatch,
+          error(~who: #'overload,
                 "implementation constant has fewer arguments than "
-                  ++ "the dispatch signature")
+                  ++ "the overload signature")
   let domains :~ List.of(HType) = domains
   let raw_result :~ HType = raw_result
   let theta:
@@ -168,8 +168,8 @@ fun build_dispatch_method(
                            argument_types[argument_order[index]],
                            current)
           | #false:
-              error(~who: #'dispatch,
-                    "dispatch signature does not match the "
+              error(~who: #'overload,
+                    "overload signature does not match the "
                       ++ "implementation constant")
           | next: match_domains(index + 1, next :~ Map)
   let final_theta:
@@ -178,11 +178,11 @@ fun build_dispatch_method(
     | expected:
         match unify_type(raw_result, expected :~ HType, theta)
         | #false:
-            error(~who: #'dispatch,
-                  "dispatch result type does not match the "
+            error(~who: #'overload,
+                  "overload result type does not match the "
                     ++ "implementation constant")
         | next: next :~ Map
-  DispatchMethod(
+  OverloadMethod(
     function,
     argument_types.map(
       fun (ty): normalize_type(final_theta, ty)),
@@ -190,7 +190,7 @@ fun build_dispatch_method(
     constant,
     argument_order)
 
-fun fresh_signature(method :: DispatchMethod)
+fun fresh_signature(method :: OverloadMethod)
      :: values(List.of(HType), HType):
   let variables:
     for values(out :~ List.of(Symbol) = []) (
@@ -203,7 +203,7 @@ fun fresh_signature(method :: DispatchMethod)
   values(method.argument_types.map(fun (ty): type_subst(renaming, ty)),
          type_subst(renaming, method.result_type))
 
-fun methods_overlap(left :: DispatchMethod, right :: DispatchMethod)
+fun methods_overlap(left :: OverloadMethod, right :: OverloadMethod)
      :: Boolean:
   let (left_args, left_result) = fresh_signature(left)
   let (right_args, right_result) = fresh_signature(right)
@@ -220,41 +220,41 @@ fun methods_overlap(left :: DispatchMethod, right :: DispatchMethod)
             | next: loop(more_x, more_y, next :~ Map)
         | ~else: #false
 
-fun add_dispatch_method(registry :: DispatchRegistry,
-                        method :: DispatchMethod) :: DispatchRegistry:
-  let arity = dispatch_arity(registry, method.function)
+fun add_overload_method(registry :: OverloadRegistry,
+                        method :: OverloadMethod) :: OverloadRegistry:
+  let arity = overload_arity(registry, method.function)
   unless arity
-  | error(~who: #'dispatch,
-          "dispatch function is not declared",
+  | error(~who: #'overload,
+          "overload function is not declared",
           error.val(~label: "function", method.function))
   let arity :~ NonnegInt = arity
   unless method.argument_types.length() == arity
-  | error(~who: #'dispatch,
-          "dispatch signature has the wrong arity")
+  | error(~who: #'overload,
+          "overload signature has the wrong arity")
   unless valid_argument_order(method.argument_order, arity)
-  | error(~who: #'dispatch,
+  | error(~who: #'overload,
           "implementation argument order must be a permutation")
   for (existing in registry.methods):
-    let existing :~ DispatchMethod = existing
+    let existing :~ OverloadMethod = existing
     when existing.function == method.function
            && methods_overlap(existing, method)
-    | error(~who: #'dispatch,
-            "dispatch method overlaps an existing method",
+    | error(~who: #'overload,
+            "overload method overlaps an existing method",
             error.val(~label: "function", method.function))
-  DispatchRegistry(registry.arities,
+  OverloadRegistry(registry.arities,
                    registry.methods ++ [method])
 
-fun dispatch_candidates(registry :: DispatchRegistry,
-                        function :: Symbol) :: List.of(DispatchMethod):
+fun overload_candidates(registry :: OverloadRegistry,
+                        function :: Symbol) :: List.of(OverloadMethod):
   for values(out :~ List = []) (method in registry.methods):
-    (if (method :~ DispatchMethod).function == function
+    (if (method :~ OverloadMethod).function == function
      | out ++ [method]
      | out)
 
-fun resolve_method(method :: DispatchMethod,
+fun resolve_method(method :: OverloadMethod,
                    argument_types :: List,
                    expected_result :: maybe(HType))
-     :: maybe(DispatchResolution):
+     :: maybe(OverloadResolution):
   let (patterns, result_pattern) = fresh_signature(method)
   unless patterns.length() == argument_types.length()
   | #false
@@ -269,7 +269,7 @@ fun resolve_method(method :: DispatchMethod,
               | #false: #false
               | next: next :~ Map
         if final_theta
-        | DispatchResolution(
+        | OverloadResolution(
             method,
             patterns.map(
               fun (ty): normalize_type(final_theta :~ Map, ty)),
@@ -283,12 +283,12 @@ fun resolve_method(method :: DispatchMethod,
             | #false: #false
             | next: match_arguments(index + 1, next :~ Map)
 
-fun resolve_dispatch(registry :: DispatchRegistry,
+fun resolve_overload(registry :: OverloadRegistry,
                      function :: Symbol,
                      argument_types :: List,
                      expected_result :: maybe(HType) = #false)
-     :: List.of(DispatchResolution):
-  for values(out :~ List = []) (method in dispatch_candidates(registry, function)):
+     :: List.of(OverloadResolution):
+  for values(out :~ List = []) (method in overload_candidates(registry, function)):
     match resolve_method(method, argument_types, expected_result)
     | #false: out
     | resolution: out ++ [resolution]

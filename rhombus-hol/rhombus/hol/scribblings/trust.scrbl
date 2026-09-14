@@ -130,10 +130,11 @@ declaration otherwise. So "derived" is an invariant rather than a claim: a
 path that quietly began postulating --- which is a way this has actually
 broken before --- fails at the declaration that did it, naming it.
 
-@bold{Datatypes.} A @rhombus(type, ~datum) is @emph{derived}, recursive or
-not. A non-recursive one --- any number of constructors, fields and type
-parameters --- is built as a sum of products of @tt{unit} over its field
-types. A @emph{self-recursive} one is carved out of the labelled trees over
+@bold{Datatypes.} A @rhombus(datatype, ~datum) declaration is @emph{derived},
+whether recursive or not. A non-recursive one --- any number of constructors,
+fields and type parameters --- is built as a sum of products of @tt{unit} over
+its field types. A @emph{self-recursive} one is carved out of the labelled
+trees over
 @tt{num} (@tt{rhombus/hol/datatype/treerep}, @tt{rhombus/hol/datatype/datatype_rec}): its
 representation is the least set of trees closed under its constructors, cut
 out by @tt{new_basic_type_definition}, and its injectivity, distinctness,
@@ -288,7 +289,7 @@ Beyond the termination restrictions in @secref("termination"):
   @rhombus(cond), local @rhombus(let), matching, Booleans, type-directed
   nonnegative numerals, and HOL notation. Overloaded function calls are
   resolved before kernel terms or executable code are produced; neither layer
-  contains a runtime dispatch mechanism. The grammar has no lambdas, effects,
+  contains a runtime overload mechanism. The grammar has no lambdas, effects,
   implicit numeric coercions, or arbitrary runtime expressions.}
 
  @item{Proof search is bounded, but a rule that does not make progress is

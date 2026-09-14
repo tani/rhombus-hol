@@ -6,7 +6,7 @@ These are the forms that @rhombuslangname(rhombus/hol) gives a logical reading.
 Anything else in a module body is ordinary Rhombus.
 
 The declarations that change the current theory, including
-@rhombus(dispatch, ~datum), are recognised by the language's module-block
+@rhombus(overload, ~datum), are recognised by the language's module-block
 expander and must appear directly in the module body. They cannot appear
 inside a @rhombus(block), inside a @rhombus(fun) body, or in the expansion of
 a user-written macro.
@@ -14,14 +14,14 @@ a user-written macro.
 @rhombus(notation, ~datum) is a bound macro. Each notation definition is
 visible while the following logical declaration is enforested.
 
-@section{@rhombus(type, ~datum)}
+@section{@rhombus(datatype, ~datum)}
 
 @verbatim{
-type Id
+datatype Id
 | ctor
 | ...
 
-type Id.of(?tyvar, ...)
+datatype Id.of(?tyvar, ...)
 | ctor
 | ...
 
@@ -36,13 +36,13 @@ Declares an @deftech{algebraic datatype}. A type variable is written
 its arguments. Nullary datatypes continue to use their bare identifier.
 The declaration head may end in @tt{:}; this is the block form of the same
 declaration. A nullary constructor declaration may likewise omit its empty
-parentheses. Thus @tt{type Nat: | zero} and @tt{type Nat | zero()} declare the
-same datatype shape. The omission applies to the constructor declaration;
-expressions and patterns in this manual use the explicit call form
-@tt{zero()}.
+parentheses. Thus @tt{datatype Nat: | zero} and
+@tt{datatype Nat | zero()} declare the same datatype shape. The omission
+applies to the constructor declaration; expressions and patterns in this
+manual use the explicit call form @tt{zero()}.
 
 @rhombusblock(
-  type List.of(?a)
+  datatype List.of(?a)
   | Nil()
   | Cons(head :: ?a, tail :: List.of(?a))
 )
@@ -77,9 +77,8 @@ rather than being assumed into existence.
 @verbatim{
 function Id(arg :: Type, ...) :: Type:
   body
-
-function Id(arg :: Type, ...) :: Type ~measure(expr):
-  body
+proof:
+  ~measure: expr
 }
 
 Declares a total, terminating function. The body must be in the grammar of
@@ -111,8 +110,9 @@ Executably it emits a Rhombus @rhombus(fun) with the type annotations erased.
 The erasure is why the annotations may mention type variables that have no
 run-time meaning.
 
-@rhombus(~measure) supplies a termination argument for a definition that does
-not descend structurally. It is checked only when no structural descent can be
+An optional adjacent @rhombus(proof, ~datum) block supplies a termination
+argument through @tt{~measure: expression} for a definition that does not
+descend structurally. It is checked only when no structural descent can be
 found, so a measure on a definition that already descends is not examined.
 
 @section(~tag: "notation"){HOL notation}
@@ -202,16 +202,16 @@ enforested. Export the HOL-space binding explicitly:
 Importing that module with @rhombus(open) makes the notation available to
 following @rhombus(function) and @rhombus(theorem) declarations.
 
-@section{Function dispatch}
+@section{Function overloading}
 
-@rhombus(dispatch, ~datum) adds an overload clause to a callable function
-name. No separate registration form or operator-specific dispatch form is
+@rhombus(overload, ~datum) adds an overload clause to a callable function
+name. No separate registration form or operator-specific overload form is
 needed. A direct call and notation targeting the same name are resolved
 identically.
 
 @verbatim{
-dispatch add(Nat, Nat) = nat_add
-dispatch add(Integer, Integer) = int_add
+overload add(Nat, Nat) = nat_add
+overload add(Integer, Integer) = int_add
 
 notation left <+> right:
   ~order: hol_addition
@@ -222,7 +222,7 @@ Here @tt{x + y} lowers to the same named call as @tt{add(x, y)}. The ordinary
 elaborator sees the call, checks whether @tt{add} has overload clauses, and
 selects a clause from the argument types and, when available, the expected
 result type. A successful call becomes a direct call to the selected
-implementation constant. Kernel terms contain no dispatch node, and generated
+implementation constant. Kernel terms contain no overload node, and generated
 executable code performs no runtime type test.
 
 The standard overloaded function names are @tt{add}, @tt{subtract},
@@ -253,19 +253,19 @@ No applicable clause is a compile error listing the available candidates.
 The accepted forms are:
 
 @verbatim{
-dispatch function_name(ArgumentType, ...) = constant
-dispatch function_name(ArgumentType, ...) :: ResultType = constant
+overload function_name(ArgumentType, ...) = constant
+overload function_name(ArgumentType, ...) :: ResultType = constant
 
-dispatch function_name(name :: ArgumentType, ...) = constant(name, ...)
+overload function_name(name :: ArgumentType, ...) = constant(name, ...)
 }
 
 The result annotation is optional when the implementation constant determines
-it. The first @rhombus(dispatch, ~datum) clause establishes a callable
+it. The first @rhombus(overload, ~datum) clause establishes a callable
 function name; no separate declaration is required:
 
 @verbatim{
-dispatch map(?a -> ?b, List.of(?a)) = list_map
-dispatch empty() = list_empty
+overload map(?a -> ?b, List.of(?a)) = list_map
+overload empty() = list_empty
 
 function mapped_empty(f :: Nat -> Nat) :: List.of(Nat):
   map(f, empty())
@@ -284,19 +284,19 @@ notation element in collection:
   ~order: hol_relation
   member
 
-dispatch member(
+overload member(
   element :: ?a,
   collection :: ?a -> Boolean
 ) = set_member(collection, element)
 
-dispatch greater(
+overload greater(
   left :: Integer,
   right :: Integer
 ) = int_lt(right, left)
 }
 
 Thus @tt{x in s} lowers to @tt{set_member(s, x)}, while @tt{x > y} lowers to
-@tt{int_lt(y, x)}. A template must use every dispatch argument exactly once.
+@tt{int_lt(y, x)}. A template must use every overload argument exactly once.
 Zero-argument overloaded functions may use the expected result type for
 contextual selection, so nested calls such as @tt{map(f, empty())} resolve
 statically.
@@ -347,42 +347,13 @@ once. @rhombus(~split) adds a Boolean case split; repeat it for each
 proposition. @rhombus(~choose) supplies one existential candidate and may
 repeat. @rhombus(~use) names theorems to enable for this proof only, which is
 useful when a lemma is too aggressive to leave in the rewriter permanently.
-@rhombus(~disable) names rules to disable for this proof only, on top of
-whatever a module-level @rhombus(disable_rules, ~datum) already disabled.
+@rhombus(~disable) names rules to disable for this proof only.
 @rhombus(~skip) names waterfall stages --- @tt{simplify}, @tt{eliminate},
 @tt{fertilize}, @tt{generalize}, @tt{irrelevance}, @tt{induct} --- to skip
 for this proof only; see @secref("prover"). @rhombus(~limit) sets this
 proof's nonnegative search-step ceiling and may appear once. The list options
 may repeat and append their values in source order. None of the options
 change what the prover is allowed to conclude, only what it tries.
-
-@section{@rhombus(disable_rules, ~datum) and @rhombus(enable_rules, ~datum)}
-
-@verbatim{
-disable_rules [Id, ...]
-enable_rules [Id, ...]
-}
-
-Switch rewrite rules off and on for the declarations that follow. The names are
-those of theorems, of functions (which names all of that function's equations
-at once), of datatypes, of a datatype's subterm relation, and of the two
-built-in groups @rhombus(propositional, ~datum) and
-@rhombus(conditional, ~datum).
-
-@rhombusblock(
-  disable_rules [app]
-
-  theorem about_app_without_unfolding_it:
-    forall (xs :: List.of(?a)): app(xs, Nil()) === app(xs, Nil())
-
-  enable_rules [app]
-)
-
-The usual reason is to keep a proof from unfolding something --- to reason
-about a function through its proved properties rather than its equations --- or
-to park a lemma that is useful in one place and too aggressive everywhere else.
-For the latter, @rhombus(use, ~datum) on a single proof is usually better than
-disabling the rule around it.
 
 @section(~tag: "importing"){Importing a theory}
 
@@ -468,7 +439,7 @@ under the type's own name. The registry works through transitive imports; the
 datatype need not be declared in the quickcheck's own module.
 
 The proposition must have an executable reading. Function calls, conditionals,
-Boolean connectives, equality, numerals, and statically dispatched calls are
+Boolean connectives, equality, numerals, and statically overloaded calls are
 lowered through the same runtime path used by a declared
 @rhombus(function, ~datum). Logic-only constants and existential
 quantification are rejected.

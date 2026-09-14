@@ -22,7 +22,7 @@ successful proof stable when an unrelated theorem is added elsewhere.
 The goal is rewritten to a normal form with every enabled rule: the equations
 of every declared function, the injectivity, distinctness, discriminator and
 selector equations of every datatype, proof-local theorems selected by
-@rhombus(use), and the goal's own assumptions.
+@rhombus(~use: [theorem]), and the goal's own assumptions.
 
 The assumptions are simplified too, not merely used as rules. An assumption is
 only a rule for the conclusion, which says nothing when the assumption is
@@ -85,8 +85,8 @@ per constructor, with an induction hypothesis for each recursive field.
 
 The variable is chosen by the argument positions the functions in the goal
 actually recurse on --- the same information the termination checker produced,
-so the prover inducts the way the definitions recurse. @rhombus(induct(variable), ~datum)
-overrides the choice.
+so the prover inducts the way the definitions recurse. The
+@rhombus(~induct: variable) option overrides the choice.
 
 Nested induction is bounded at depth six. That constant is not a tuning budget;
 it is what makes the driver a function rather than a search. Induction
@@ -119,21 +119,21 @@ for arbitrary distinct @tt{x} and @tt{y}, which no lemma will close.
 
 When a goal is instead a true statement the prover could not reach --- an
 instance of associativity, say --- the fix is to prove that statement as its
-own theorem and select it explicitly with @rhombus(use([associativity]), ~datum).
+own theorem and select it explicitly with @rhombus(~use: [associativity]).
 
 The things to reach for, in order: prove the missing theorem and select it with
-@rhombus(use); give @rhombus(induct(variable), ~datum) when the prover picked
-the wrong variable; give @rhombus(use([lemma]), ~datum) when an existing theorem
-is needed here; give
-@rhombus(disable([rule]), ~datum) --- ACL2's @tt{:in-theory (disable ...)} ---
+@rhombus(~use); give @rhombus(~induct: variable) when the prover picked the
+wrong variable; give @rhombus(~use: [lemma]) when an existing theorem is
+needed here; give
+@rhombus(~disable: [rule]) --- ACL2's @tt{:in-theory (disable ...)} ---
 to turn off a named rewrite rule for this proof only, layered on top of whatever
 a module-level @rhombus(disable_rules, ~datum) already turned off, on the
 occasion an enabled rule is firing where it should not; give
-@rhombus(split(proposition), ~datum) --- ACL2's @tt{:cases} --- when the goal
+@rhombus(~split: proposition) --- ACL2's @tt{:cases} --- when the goal
 turns on a Boolean term (typically an application of an uninterpreted or
 externally-supplied predicate) that no other stage can resolve, to split on it
 up front and let each branch reach its own conclusion with that term's truth
-value as a hypothesis; give @rhombus(skip([stage]), ~datum) --- ACL2's
+value as a hypothesis; give @rhombus(~skip: [stage]) --- ACL2's
 @tt{:do-not} --- to turn off one of @tt{simplify}, @tt{eliminate},
 @tt{fertilize}, @tt{generalize}, @tt{irrelevance} or @tt{induct} for this
 proof only, on the rare occasion a stage's heuristic is actively getting in

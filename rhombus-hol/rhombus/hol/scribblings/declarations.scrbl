@@ -135,7 +135,7 @@ requested by its clauses:
         operator. It is not accepted in theorem statements or logical
         @rhombus(function) bodies.}
   @item{With only @rhombus(~logic), the notation is available in theorem
-        statements and proof @rhombus(split) propositions. It has no
+        statements and @rhombus(~split) proof propositions. It has no
         ordinary Rhombus binding and is rejected in a logical
         @rhombus(function) body.}
   @item{With both clauses, the notation is reflected: it is available as an
@@ -331,24 +331,24 @@ theorem Id:
   proposition
 
 proof:
-  tactic
+  proof_option
   ...
 
-tactic = induct(Id)
-       | split(proposition)
-       | choose(term)
-       | use([Id, ...])
-       | skip([Id, ...])
-       | disable([Id, ...])
-       | limit(nonnegative_integer)
+proof_option = ~induct: Id
+             | ~split: proposition
+             | ~choose: term
+             | ~use: [Id, ...]
+             | ~skip: [Id, ...]
+             | ~disable: [Id, ...]
+             | ~limit: nonnegative_integer
 }
 
 States a proposition and proves it while the module compiles. The proposition
 grammar is in @secref("propositions").
 
 The @rhombus(proof, ~datum) clause is optional and defaults to the same
-waterfall automation as an empty directive configuration. When present, it
-must follow its theorem immediately and contain one or more tactic forms.
+waterfall automation as an empty option configuration. When present, it
+must follow its theorem immediately and contain one or more option groups.
 
 @rhombusblock(
   theorem app_nil_r:
@@ -358,28 +358,26 @@ must follow its theorem immediately and contain one or more tactic forms.
     forall (xs :: List.of(?a), ys :: List.of(?a), zs :: List.of(?a)):
       app(app(xs, ys), zs) === app(xs, app(ys, zs))
   proof:
-    induct(xs)
+    ~induct: xs
 )
 
 Every theorem is retained by name but is not added to the global rule database.
-Use a theorem explicitly in a proof with @rhombus(use([theorem]), ~datum).
+Use a theorem explicitly in a proof with the @rhombus(~use) option.
 Adding an unrelated theorem therefore cannot change later automation.
 
-@rhombus(induct(variable), ~datum) names a variable to induct on; it may
-appear once. @rhombus(split(proposition), ~datum) adds a Boolean case split;
-repeat it for each proposition. @rhombus(choose(term), ~datum) supplies one
-existential candidate; it may repeat. @rhombus(use([theorem]), ~datum) names
-theorems to enable for this proof only, which is useful when a lemma is too
-aggressive to leave in the rewriter permanently. @rhombus(disable([rule]), ~datum)
-names rules to disable for this proof only, on top of whatever a
-module-level @rhombus(disable_rules, ~datum) already disabled.
-@rhombus(skip([stage]), ~datum) names waterfall stages ---
-@tt{simplify}, @tt{eliminate}, @tt{fertilize}, @tt{generalize},
-@tt{irrelevance}, @tt{induct} --- to skip for this proof only; see
-@secref("prover"). @rhombus(limit(steps), ~datum) sets this proof's
-nonnegative search-step ceiling and may appear once. The list directives may
-repeat and append their values in source order. None of the directives change what the
-prover is allowed to conclude, only what it tries.
+The @rhombus(~induct) option names a variable to induct on; it may appear
+once. @rhombus(~split) adds a Boolean case split; repeat it for each
+proposition. @rhombus(~choose) supplies one existential candidate and may
+repeat. @rhombus(~use) names theorems to enable for this proof only, which is
+useful when a lemma is too aggressive to leave in the rewriter permanently.
+@rhombus(~disable) names rules to disable for this proof only, on top of
+whatever a module-level @rhombus(disable_rules, ~datum) already disabled.
+@rhombus(~skip) names waterfall stages --- @tt{simplify}, @tt{eliminate},
+@tt{fertilize}, @tt{generalize}, @tt{irrelevance}, @tt{induct} --- to skip
+for this proof only; see @secref("prover"). @rhombus(~limit) sets this
+proof's nonnegative search-step ceiling and may appear once. The list options
+may repeat and append their values in source order. None of the options
+change what the prover is allowed to conclude, only what it tries.
 
 @section{@rhombus(disable_rules, ~datum) and @rhombus(enable_rules, ~datum)}
 
@@ -484,7 +482,7 @@ After it passes, change the declaration head and add a proof:
   theorem rev_involutive:
     forall (xs :: List.of(Nat)): rev(rev(xs)) === xs
   proof:
-    induct(xs)
+    ~induct: xs
 )
 
 Input types must be concrete because every input needs a run-time generator.

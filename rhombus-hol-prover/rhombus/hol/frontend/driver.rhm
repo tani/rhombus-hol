@@ -50,7 +50,6 @@ export:
   initial_state
   add_datatype
   add_function
-  add_axiomatic_function
   add_theorem
   add_overload_method_encoded
   adopt
@@ -189,19 +188,6 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
 // statement for the ordinary declaration form.
 fun add_function(st :: HolState, core :: CoreFunctionSpec,
                  at :: Syntax) :: HolState:
-  install_declared_function(st, core, at, ~postulate: #false)
-
-// `axiomatic_function` is the escape hatch, and it is a different word on
-// purpose: a reader scanning a module can see which declarations extended
-// the theory by assumption without knowing which recursion schemes this
-// version happens to derive.
-fun add_axiomatic_function(st :: HolState, core :: CoreFunctionSpec,
-                           at :: Syntax) :: HolState:
-  install_declared_function(st, core, at, ~postulate: #true)
-
-fun install_declared_function(st :: HolState, core :: CoreFunctionSpec,
-                              at :: Syntax,
-                              ~postulate: postulate :: Boolean) :: HolState:
   let spec :~ FunSpec = try:
                           elab.elaborate_function_decl(
                             st.ctx.thy, core, ~operators: st.operators,
@@ -216,9 +202,6 @@ fun install_declared_function(st :: HolState, core :: CoreFunctionSpec,
                                       ~catch e :: Exn.Fail: hol_reraise(e, at)
   let (thy2, info0) = try:
                         cond
-                        | postulate:
-                            install_axiomatic_function(st.ctx.thy, prepared,
-                                                       dt_specs)
                         | prepared.recursion is_a NoRecursion:
                             define_nonrecursive(st.ctx.thy, prepared, st.ctx.dts)
                         | ~else:
@@ -231,9 +214,7 @@ fun install_declared_function(st :: HolState, core :: CoreFunctionSpec,
                                     ++ "this version has no proof-producing "
                                     ++ "definition compiler for this "
                                     ++ "recursion scheme: "
-                                    ++ describe_failure(f)
-                                    ++ "; write `axiomatic_function` to "
-                                    ++ "postulate the equations instead",
+                                    ++ describe_failure(f),
                                   at)
                             | Derivable(plan):
                                 install_structural_function(
@@ -241,9 +222,8 @@ fun install_declared_function(st :: HolState, core :: CoreFunctionSpec,
                                   algebra_base_thms())
                         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let info :~ FunInfo = info0
-  unless postulate
-  | require_no_new_axioms(#'function, st.ctx.thy, thy2, spec.name, at)
-    require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
+  require_no_new_axioms(#'function, st.ctx.thy, thy2, spec.name, at)
+  require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
   let db2 = add_thms(thy2, st.ctx.db, spec.name, info.equations)
   let ctx2 = context_add_function(st.ctx, thy2, db2, spec.name, info)
   HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)

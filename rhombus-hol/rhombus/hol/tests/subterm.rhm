@@ -12,7 +12,7 @@ import:
   rhombus/hol/datatype/datatype open
   "datatype_axiom_support.rhm" open
   rhombus/hol/recursion/recdef open
-  "function_axiom_support.rhm" open
+  rhombus/hol/recursion/wfrec open
   rhombus/hol/recursion/terminate open
   rhombus/hol/recursion/subterm open
 
@@ -36,23 +36,23 @@ def tree:
 def color:
   DatatypeSpec(#'Color, [], [Ctor(#'red, []), Ctor(#'blue, [])])
 
-fun install(spec :: DatatypeSpec) :: FunInfo:
-  let (thy, _) = datatype_axioms(base_theory(), spec)
-  let (_, info) = axiomatic_define(thy, subterm_spec(spec) :~ FunSpec,
-                                   {spec.name: spec})
-  info
+fun prepared_subterm(spec :: DatatypeSpec) :: PreparedFunction:
+  let (thy, _) = datatype_axioms(wfrec_base_theory(), spec)
+  prepare_function(thy, subterm_spec(spec) :~ FunSpec, {spec.name: spec})
 
 fun equations(spec :: DatatypeSpec) :: List.of(String):
-  install(spec).equations.map(fun (t :: Thm): show(concl_of(t)))
+  let (thy, thms) = datatype_axioms(wfrec_base_theory(), spec)
+  let (_, eqs) = derive_subterm_relation(thy, spec, thms)
+  eqs.map(fun (t :: Thm): show(concl_of(t)))
 
 // `WF(T_lt)`, fully derived from `spec`'s own induction axiom -- no fresh
 // axiom, and no hypotheses left over (checked below alongside the
 // conclusion, since a hypothesis-laden "theorem" would be free to prove
 // anything a caller's own context happened to assume).
 fun wf_t_lt(spec :: DatatypeSpec) :: Thm:
-  let (thy, thms) = datatype_axioms(base_theory(), spec)
-  let (thy2, info) = axiomatic_define(thy, subterm_spec(spec) :~ FunSpec, {spec.name: spec})
-  prove_wf_t_lt(thy2, spec, (info :~ FunInfo).equations, thms.induction)
+  let (thy, thms) = datatype_axioms(wfrec_base_theory(), spec)
+  let (thy2, eqs) = derive_subterm_relation(thy, spec, thms)
+  prove_wf_t_lt(thy2, spec, eqs, thms.induction)
 
 // -- a datatype with no recursion has no subterm relation --------------------
 
@@ -84,14 +84,14 @@ check:
         ++ " Tree_lt(x, Node(y, z, u))"
         ++ " <=> x === y or (Tree_lt(x, y) or (x === u or Tree_lt(x, u)))"
 
-// -- it is an ordinary definition, so it descends structurally ---------------
+// -- it descends structurally ------------------------------------------------
 //
-// The test-only axiom installer runs the same preparation and termination
-// analysis, so a structurally descending relation is accepted without hiding
-// a failed termination check.
+// Preparation sees the same constructor equations that the derived
+// implementation proves, and recognizes descent in the relation's second
+// argument.
 
-check install(nat).recursion ~matches StructuralRecursion([1], [1], _)
-check install(tree).recursion ~matches StructuralRecursion([1], [1], _)
+check prepared_subterm(nat).recursion ~matches StructuralRecursion([1], [1], _)
+check prepared_subterm(tree).recursion ~matches StructuralRecursion([1], [1], _)
 
 // -- `WF(T_lt)` is a genuine derivation, not a postulate ---------------------
 //

@@ -100,12 +100,10 @@ clause must win for at least one argument shape after earlier clauses take
 priority, and the recursion must be shown to terminate
 (@secref("termination")). Clauses may overlap; matching is ordered and the
 earliest matching clause wins in both the logical and executable readings.
-The compiler prepares that checked clause matrix once. An ordinary
+The compiler prepares that checked clause matrix once. A
 @rhombus(function, ~datum) defines a non-recursive matrix directly or derives
-its recursive equations from the selected well-founded order; the explicit
-@rhombus(axiomatic_function, ~datum) form reuses the same preparation and
-postulates those equations instead.
-
+its recursive equations from the selected well-founded order. If this version
+cannot construct that proof, it refuses the declaration.
 
 Executably it emits a Rhombus @rhombus(fun) with the type annotations erased.
 The erasure is why the annotations may mention type variables that have no
@@ -455,21 +453,3 @@ A falsified property fails module initialization immediately with its shrunk
 inputs. Consequently, @rhombus(quickcheck, ~datum) must appear directly in a
 @rhombuslangname(rhombus/hol) module body, like
 @rhombus(theorem, ~datum); run the module or use @tt{raco test} to execute it.
-
-@section{@rhombus(axiomatic_function, ~datum)}
-
-The same grammar as @rhombus(function, ~datum), and a different contract: it
-@emph{postulates} its clausal equations rather than deriving them. Always ---
-not only when the derivation would have failed. A form whose meaning depended
-on which recursion schemes this version happens to handle is the thing having
-two forms is for.
-
-Termination, exhaustiveness, and reachability under ordered matching are still
-checked, because those are what make postulating the resulting winning
-equations a conservative extension; see @secref("termination"). What is
-skipped is the proof.
-
-@rhombus(function, ~datum) refuses a definition whose recursion it cannot
-build a well-founded order for, so an ordinary declaration never extends the
-theory by assumption. This is the form to write when you want one anyway; see
-@secref("trust") for what it costs.

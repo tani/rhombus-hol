@@ -13,10 +13,13 @@ import:
   rhombus/hol/printer open
   rhombus/hol/logic/bool open
   rhombus/hol/datatype/datatype open
+  rhombus/hol/datatype/algebra open
   "datatype_axiom_support.rhm" open
   rhombus/hol/recursion/terminate open
   rhombus/hol/recursion/recdef open
-  "function_axiom_support.rhm" open
+  rhombus/hol/recursion/subterm open
+  rhombus/hol/recursion/wfrec open
+  rhombus/hol/recursion/stepfn open
 
 export:
   Prelude
@@ -46,6 +49,30 @@ fun ap3(f, a, b, c) :: Term: mk_comb(mk_comb(mk_comb(f, a), b), c)
 // term as `app` over `List.of(?a)`.
 fun at(c :: Term, ty :: HType) :: Term: inst_type({#'a: ty}, c)
 
+fun derive_order(thy0 :: Theory, spec :: DatatypeSpec,
+                 thms :: DatatypeThms,
+                 specs :: Map.of(Symbol, DatatypeSpec))
+    :: values(Theory, FunInfo):
+  let rel_spec = subterm_spec(spec) :~ FunSpec
+  let prepared = prepare_function(thy0, rel_spec, specs)
+  let (thy, eqs) = derive_subterm_relation(thy0, spec, thms)
+  values(thy,
+         FunInfo(rel_spec, mk_const(rel_spec.name, fun_type(rel_spec)),
+                 eqs, prepared.recursion))
+
+fun install_derived(thy :: Theory, spec :: FunSpec,
+                    dts :: Map.of(Symbol, DatatypeThms),
+                    orders :: Map.of(Symbol, FunInfo))
+    :: values(Theory, FunInfo):
+  let specs = for values(out :~ Map = {}) ((name, thms) in dts):
+                out ++ {name: (thms :~ DatatypeThms).spec}
+  let prepared = prepare_function(thy, spec, specs)
+  match plan_derivation(prepared, dts, orders)
+  | Derivable(plan):
+      install_structural_function(thy, wfrec_base_def(), plan, dts,
+                                  algebra_base_thms())
+  | NotDerivable(f): error(~who: #'spec_prelude, describe_failure(f))
+
 class Prelude(thy :: Theory,
               dts :: Map.of(Symbol, DatatypeSpec),
               thms :: Map.of(Symbol, DatatypeThms),
@@ -58,7 +85,7 @@ class Prelude(thy :: Theory,
               length :: Term, size :: Term, flatten :: Term)
 
 fun build() :: Prelude:
-  let thy = base_theory()
+  let thy = wfrec_base_theory()
 
   // -- datatypes -----------------------------------------------------------
   let nat_spec = DatatypeSpec(#'Nat, [],
@@ -80,6 +107,11 @@ fun build() :: Prelude:
   let (thy, tree_thms) = datatype_axioms(thy, tree_spec)
 
   let dts = {#'Nat: nat_spec, #'List: list_spec, #'Tree: tree_spec}
+  let datatype_thms = {#'Nat: nat_thms, #'List: list_thms, #'Tree: tree_thms}
+  let (thy, nat_order) = derive_order(thy, nat_spec, nat_thms, dts)
+  let (thy, list_order) = derive_order(thy, list_spec, list_thms, dts)
+  let (thy, tree_order) = derive_order(thy, tree_spec, tree_thms, dts)
+  let orders = {#'Nat_lt: nat_order, #'List_lt: list_order, #'Tree_lt: tree_order}
 
   let zero = mk_const(#'zero, nat_ty)
   let succ = mk_const(#'succ, mk_fun(nat_ty, nat_ty))
@@ -99,7 +131,7 @@ fun build() :: Prelude:
                           [DefClause([zero, n], n),
                            DefClause([ap1(succ, m), n],
                                      ap1(succ, ap2(plus_c, m, n)))])
-  let (thy, plus_info) = axiomatic_define(thy, plus_spec, dts)
+  let (thy, plus_info) = install_derived(thy, plus_spec, datatype_thms, orders)
 
   // -- app -----------------------------------------------------------------
   let xs = v(#'xs, list_ty(A))
@@ -111,7 +143,7 @@ fun build() :: Prelude:
                          [DefClause([nil, ys], ys),
                           DefClause([ap2(cons, hd, tl), ys],
                                     ap2(cons, hd, ap2(app_c, tl, ys)))])
-  let (thy, app_info) = axiomatic_define(thy, app_spec, dts)
+  let (thy, app_info) = install_derived(thy, app_spec, datatype_thms, orders)
 
   // -- rev -----------------------------------------------------------------
   let rev_c = mk_const(#'rev, mk_fun(list_ty(A), list_ty(A)))
@@ -120,7 +152,7 @@ fun build() :: Prelude:
                           DefClause([ap2(cons, hd, tl)],
                                     ap2(app_c, ap1(rev_c, tl),
                                         ap2(cons, hd, nil)))])
-  let (thy, rev_info) = axiomatic_define(thy, rev_spec, dts)
+  let (thy, rev_info) = install_derived(thy, rev_spec, datatype_thms, orders)
 
   // -- length --------------------------------------------------------------
   let len_c = mk_const(#'length, mk_fun(list_ty(A), nat_ty))
@@ -128,7 +160,7 @@ fun build() :: Prelude:
                          [DefClause([nil], zero),
                           DefClause([ap2(cons, hd, tl)],
                                     ap1(succ, ap1(len_c, tl)))])
-  let (thy, len_info) = axiomatic_define(thy, len_spec, dts)
+  let (thy, len_info) = install_derived(thy, len_spec, datatype_thms, orders)
 
   // -- size ----------------------------------------------------------------
   let tv = v(#'v, A)
@@ -140,7 +172,7 @@ fun build() :: Prelude:
                            DefClause([ap3(node, tv, tl_, tr)],
                                      ap1(succ, ap2(plus_c, ap1(size_c, tl_),
                                                    ap1(size_c, tr))))])
-  let (thy, size_info) = axiomatic_define(thy, size_spec, dts)
+  let (thy, size_info) = install_derived(thy, size_spec, datatype_thms, orders)
 
   // -- flatten -------------------------------------------------------------
   let flat_c = mk_const(#'flatten, mk_fun(tree_ty(A), list_ty(A)))
@@ -149,10 +181,9 @@ fun build() :: Prelude:
                            DefClause([ap3(node, tv, tl_, tr)],
                                      ap2(app_c, ap1(flat_c, tl_),
                                          ap2(cons, tv, ap1(flat_c, tr))))])
-  let (thy, flat_info) = axiomatic_define(thy, flat_spec, dts)
+  let (thy, flat_info) = install_derived(thy, flat_spec, datatype_thms, orders)
 
-  Prelude(thy, dts,
-          {#'Nat: nat_thms, #'List: list_thms, #'Tree: tree_thms},
+  Prelude(thy, dts, datatype_thms,
           {#'plus: plus_info, #'app: app_info, #'rev: rev_info,
            #'length: len_info, #'size: size_info, #'flatten: flat_info},
           zero, succ, nil, cons, leaf, node,

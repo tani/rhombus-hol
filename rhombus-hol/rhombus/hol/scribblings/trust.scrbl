@@ -117,11 +117,9 @@ theorem. The equations then follow from the closure's induction principle
 
 @section{What is postulated beyond that}
 
-Nothing, unless you write it. Both kinds of datatype, the subterm relation
-each brings, and every @rhombus(function, ~datum) are proved; a definition
-this version cannot derive is refused rather than assumed. One declaration
-form postulates, @rhombus(axiomatic_function, ~datum), and it says so in its
-name.
+Nothing. Both kinds of datatype, the subterm relation each brings, and every
+@rhombus(function, ~datum) are proved; a definition this version cannot derive
+is refused rather than assumed.
 
 You do not have to count, though, because the compiler does. Every
 declaration that takes a derived path checks that the theory it produced has
@@ -185,20 +183,9 @@ declaration compares the axioms of the theory it produced against the theory
 it was given, checks that the second extends the first, and checks that every
 equation it registered is hypothesis-free and belongs to that theory.
 
-@rhombus(axiomatic_function, ~datum) is the escape hatch, with the same
-grammar and a different contract: it postulates its equations rather than
-deriving them, and it does so unconditionally --- a declaration written that
-way assumes its equations even if the derivation would have succeeded.
-Termination, exhaustiveness, and reachability under ordered matching are still
-checked, which is what makes postulating the resulting winning equations a
-conservative extension; see @secref("termination").
-It is a separate word so that a reader scanning a module can see which
-declarations extended the theory by assumption without having to know which
-recursion schemes this version happens to handle.
-
-None of these derivations changed anything above them: the theorems have the
-same statements, so the rule database, the waterfall and @rhombus(match)
-compilation cannot tell which route a given datatype or function came by.
+None of these derivations change the statements consumed downstream, so the
+rule database, the waterfall, and @rhombus(match) compilation are unaffected
+by how those statements were proved.
 
 @section{Theories}
 
@@ -242,10 +229,9 @@ part of the trusted computing base.
 
 @bold{Type variables in specialised theorems.} A datatype's theorems are
 proved at its own type and instantiated at each use through the same
-@tt{INST_TYPE} as everything else, and the same holds for the equations an
-@rhombus(axiomatic_function, ~datum) postulates. That is standard, but it
-means the positivity checker has to be right about parameterised types, not
-merely about ground ones.
+@tt{INST_TYPE} as everything else. That is standard, but it means the
+positivity checker has to be right about parameterised types, not merely about
+ground ones.
 
 @section{Limitations of this version}
 

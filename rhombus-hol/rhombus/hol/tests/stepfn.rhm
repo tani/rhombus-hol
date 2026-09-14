@@ -8,7 +8,7 @@
 // finds plain structural descent into a *known* datatype.  `length` (over
 // the polymorphic `List.of(?a)`) and `double` (over the monomorphic `Nat`)
 // each exercise a different datatype shape; both are installed with zero
-// new axioms, unlike the test-only axiomatic installer.
+// new axioms.
 
 import:
   rhombus/hol/htype open
@@ -19,7 +19,6 @@ import:
   rhombus/hol/datatype/datatype open
   "datatype_axiom_support.rhm" open
   rhombus/hol/recursion/recdef open
-  "function_axiom_support.rhm" open
   rhombus/hol/recursion/funcases open
   rhombus/hol/recursion/subterm open
   rhombus/hol/recursion/terminate open
@@ -47,16 +46,18 @@ def list_spec:
 fun setup(base :: Theory, spec :: DatatypeSpec)
      :: values(Theory, DatatypeThms, FunInfo, Thm):
   let (thy0, thms) = datatype_axioms(base, spec)
-  let (thy1, tlt_info) = axiomatic_define(
-    thy0, subterm_spec(spec) :~ FunSpec, {spec.name: spec})
-  let (thy2, wr_def) = build_wfrec_rel(thy1)
-  values(thy2, thms, tlt_info, wr_def)
+  let rel_spec = subterm_spec(spec) :~ FunSpec
+  let prepared = prepare_function(thy0, rel_spec, {spec.name: spec})
+  let (thy1, eqs) = derive_subterm_relation(thy0, spec, thms)
+  let info = FunInfo(rel_spec, mk_const(rel_spec.name, fun_type(rel_spec)),
+                     eqs, prepared.recursion)
+  values(thy1, thms, info, wfrec_base_def())
 
 // `length`'s result type is `Nat`, so its theory needs both datatypes --
 // `Nat` declared first (plain, no subterm relation needed by `length`
 // itself), then `List` (with its own subterm relation and `wfrec_rel`).
 def alg = algebra_base_thms()
-def (nat_base, nat_base_thms) = datatype_axioms(algebra_base_theory(), nat_spec)
+def (nat_base, nat_base_thms) = datatype_axioms(wfrec_base_theory(), nat_spec)
 
 // -- length(xs :: List.of(?a)) :: Nat -------------------------------------------
 
@@ -157,7 +158,7 @@ check:
 
 // -- double(n :: Nat) :: Nat --------------------------------------------------
 
-def (thy_n, nat_thms, nat_tlt_info, nat_wr_def) = setup(algebra_base_theory(), nat_spec)
+def (thy_n, nat_thms, nat_tlt_info, nat_wr_def) = setup(wfrec_base_theory(), nat_spec)
 def k_var = mk_var(#'k, nat_ty)
 def double_ph = mk_const(#'double, mk_fun(nat_ty, nat_ty))
 def nat_only_thms = {#'Nat: nat_thms}
@@ -235,8 +236,13 @@ def drop_spec:
                       list_mk_comb(cons_ctor, [x_var, rest_var])],
                      list_mk_comb(drop_ph, [k_var, rest_var]))])
 // `thy_l` has `List_lt` but not `Nat_lt`, and `drop` descends in `Nat`.
-def (thy_nl, drop_nat_tlt_info):
-  axiomatic_define(thy_l, subterm_spec(nat_spec) :~ FunSpec, {#'Nat: nat_spec})
+def drop_nat_spec = subterm_spec(nat_spec) :~ FunSpec
+def drop_nat_prepared = prepare_function(thy_l, drop_nat_spec, {#'Nat: nat_spec})
+def (thy_nl, drop_nat_eqs) = derive_subterm_relation(thy_l, nat_spec, nat_base_thms)
+def drop_nat_tlt_info:
+  FunInfo(drop_nat_spec,
+          mk_const(drop_nat_spec.name, fun_type(drop_nat_spec)),
+          drop_nat_eqs, drop_nat_prepared.recursion)
 def drop_funs = all_funs ++ {#'Nat_lt: drop_nat_tlt_info}
 def drop_prepared = prepare_function(thy_nl, drop_spec, specs_of(all_thms))
 def drop_plan = plan_of(drop_prepared, all_thms, drop_funs)

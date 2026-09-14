@@ -24,7 +24,6 @@ export:
     mb.module_block as #%module_block
     mb.datatype as datatype
     mb.function as function
-    mb.axiomatic_function as axiomatic_function
     mb.theorem as theorem
     mb.proof as proof
     mb.overload as overload

@@ -19,8 +19,17 @@ export:
   all_from(rhombus):
     except:
       #%module_block
+      import
   rename:
     mb.module_block as #%module_block
+    mb.datatype as datatype
+    mb.function as function
+    mb.axiomatic_function as axiomatic_function
+    mb.theorem as theorem
+    mb.proof as proof
+    mb.overload as overload
+    mb.quickcheck as quickcheck
+    mb.hol_import as import
     sn.notation as notation
   hol_expr
   hol_equivalence

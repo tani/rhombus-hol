@@ -6,12 +6,13 @@ These are the forms that @rhombuslangname(rhombus/hol) gives a logical reading.
 Anything else in a module body is ordinary Rhombus.
 
 The declarations that change the current theory, including
-@rhombus(overload, ~datum), are recognised by the language's module-block
-expander and must appear directly in the module body. They cannot appear
-inside a @rhombus(block), inside a @rhombus(fun) body, or in the expansion of
-a user-written macro.
+@rhombus(overload, ~datum), are bound macros. A user-written declaration macro
+can expand to them; generated declarations contribute executable bindings and
+logical state in the same expansion order as directly written declarations.
+They must ultimately expand in a module body, not inside a @rhombus(block) or
+a @rhombus(fun) body.
 
-@rhombus(notation, ~datum) is a bound macro. Each notation definition is
+@rhombus(notation, ~datum) is also a bound macro. Each notation definition is
 visible while the following logical declaration is enforested.
 
 @section{@rhombus(datatype, ~datum)}

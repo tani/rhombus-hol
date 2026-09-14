@@ -3,20 +3,20 @@
 // QuickCheck is a design reference for generated testing support; see THIRD_PARTY_NOTICES.
 
 
-// The `#%module_block` of `#lang rhombus/hol`.
+// Macro expansion for the declarations of `#lang rhombus/hol`.
 //
-// It hands the module body to `expand.rhm` for recognition, then emits, for
-// each declaration, the runtime code and one step of the compile-time state.
+// Each public declaration macro recognises and emits one declaration. Its
+// encoded logical transition is accumulated in an `ExpansionState` carried by
+// a syntax parameter. The parameter contains a fresh box for each module, so
+// mutating it cannot leak state through a transformer instance reused by
+// `raco make`.
 //
-// The state is threaded as ordinary phase-1 definitions *in the user's
-// module* -- `_hol_st0`, `_hol_st1`, ... -- rather than as compile-time state
-// belonging to this macro.  `raco make` compiles many modules in one process,
-// so macro-level state would be shared between them; per-module phase-1
-// definitions cannot be.  Every generated identifier comes out of a single
-// expansion of this one macro, so they share an introduction scope, refer to
-// each other with no name surgery, and cannot be captured by user code.
+// `#%module_block` only installs that expansion-local box, splices the source
+// body, and appends a finalizer. The finalizer emits the accumulated logical
+// transitions as ordinary phase-1 `_hol_st0`, `_hol_st1`, ... definitions in
+// the private `hol_theory` submodule.
 //
-// All syntax templates live here.  A template built in a phase-0 helper module
+// All syntax templates live here. A template built in a phase-0 helper module
 // loses its bindings on the way out of a phase-1 macro -- `'def x = 1'`
 // written there and returned from a macro reports `def: unbound identifier` --
 // so `expand.rhm` and `elab.rhm` analyse, and this module emits.
@@ -43,6 +43,14 @@ import:
     rhombus/hol/frontend/surface_core open
 export:
   module_block
+  datatype
+  function
+  axiomatic_function
+  theorem
+  proof
+  overload
+  quickcheck
+  hol_import
 
 meta:
   // Any literal from this module will do as a lexical context: what matters is
@@ -60,21 +68,21 @@ meta:
   class SurfaceContext(surface :: SurfaceState,
                        pending_imports :: List.of(List.of(Syntax)))
 
-  def surface_state_key = #'rhombus_hol_surface_state
   def initial_surface_context:
     SurfaceContext(
       SurfaceState(standard_overload_registry(), {},
                    standard_type_constructor_registry()),
       [])
 
-  fun state_on(stx :: Syntax) :: SurfaceContext:
-    match rb.#{syntax-property}(stx, surface_state_key)
-    | state :: SurfaceContext: state
-    | #false: initial_surface_context
-    | ~else: error(~who: #'module_block, "invalid surface elaboration state")
+  // Per-module expansion state. The syntax-parameter binding is rebound at
+  // the start of every module, so no value is shared through the transformer
+  // instance that `raco make` reuses for other modules.
+  class ExpansionState(next_index :: NonnegInt,
+                       surface :: SurfaceContext,
+                       steps_rev :: List.of(Syntax))
 
-  fun carry_state(stx :: Syntax, state :: SurfaceContext) :: Syntax:
-    rb.#{syntax-property}(stx, surface_state_key, state)
+  fun initial_expansion_state() :: ExpansionState:
+    ExpansionState(0, initial_surface_context, [])
 
   fun imported_surface_context(terms :: List.of(Syntax)) :: SurfaceContext:
     let [t, ...] = terms
@@ -866,17 +874,24 @@ meta:
            | $alternative
            | ...'
       | body:
-          let [parameter, ...] = parameter_names
+          let [parameter, ...] = parameter_names.map(
+                                   fun (parameter):
+                                     source_id(
+                                       Syntax.unwrap(parameter :~ Syntax),
+                                       parameter :~ Syntax))
           let result = runtime_body(state, env, body, result_type)
           'fun $name($parameter, ...):
              $result'
 
   // -- HOL surface parsing ---------------------------------------------------
 
+  fun parse_hol_encoding(stx :: Syntax) :: Syntax:
+    let '$(parsed :: hol_expr_meta.Parsed)' = stx
+    hol_expr_meta.unpack(parsed)
+
   fun parse_core_encoding(stx :: Syntax) :: Syntax:
     try:
-      let '$(parsed :: hol_expr_meta.Parsed)' = stx
-      hol_expr_meta.unpack(parsed)
+      parse_hol_encoding(stx)
       ~catch e :: Exn.Fail:
         (if e.message.contains("unbound HOL expression operator")
          | syntax_meta.error("unexpected text after an expression", stx)
@@ -995,15 +1010,6 @@ meta:
     let steps_stx = option_int_stx(search_steps)
     '(core_tactic $induct_stx [$u, ...] [$d, ...] [$r, ...] [$c, ...] [$w, ...] $steps_stx)'.relocate_span([at])
 
-
-  fun box_group(g :: Syntax) :: Syntax:
-    '(hol_group: $g)'
-
-  fun unbox_group(box :: Syntax) :: Syntax:
-    match box
-    | '(hol_group: $g; ...)': '$g; ...'
-    | ~else: syntax_meta.error("internal malformed expansion group", box)
-
   fun render_step(step :: Syntax) :: List.of(Syntax):
     let step = step.replace_scopes(id_ctx)
     match step
@@ -1057,6 +1063,22 @@ meta:
     | '$head $_ ...': head
     | ~else: form
 
+  // A sequence macro receives the untouched tail as more groups. Peel that
+  // outer sequence before recovering the declaration keyword.
+  fun macro_use_head(use :: Syntax) :: Syntax:
+    match use
+    | '$first; $_; ...': head_term(first)
+    | ~else: head_term(use)
+
+  // Rebuild a user-facing HOL import with this module's ordinary Rhombus
+  // `import` binding. Returning the original head after the language rebinds
+  // `import` would invoke the HOL wrapper recursively.
+  fun emit_plain_import(form :: Syntax) :: Syntax:
+    match form
+    | '$_: $clause; ...': 'import: $clause; ...'
+    | '$_ $term ...': 'import $term ...'
+    | ~else: syntax_meta.error("internal malformed import declaration", form)
+
   // -- one declaration -------------------------------------------------------
 
   // Two outputs, because they go to two places: the runtime forms stay in the
@@ -1082,7 +1104,7 @@ meta:
         let next_runtime:
           for values(state :~ SurfaceContext = runtime_state) (terms in (paths :~ List)):
             defer_surface_import(state, terms :~ List.of(Syntax))
-        values([d.form], chain, n2, next_runtime)
+        values([emit_plain_import(d.form)], chain, n2, next_runtime)
     | #'datatype:
         let [name, ctors] = d.parts
         let at = head_term(d.form)
@@ -1135,7 +1157,7 @@ meta:
         let at = head_term(d.form)
         let gs :~ List = stmt
         let [g, ...] = gs
-        let core = parse_core_encoding('$g; ...')
+        let core = parse_hol_encoding('$g; ...')
         let tactic_core = tactic_encoding(tactic, at)
         values([],
                ['(~theorem $cur $nxt [$name] [$core] [$tactic_core] [$at])'],
@@ -1170,117 +1192,163 @@ meta:
                ['(~overload_method $cur $nxt [$function_name] [$signature] [$constant] [$position, ...] [$at])'],
                n + 1, next_runtime)
 
-// One declaration per expansion. Emitting the current declaration before the
-// recursive macro call lets imports and operator definitions establish their
-// bindings before the next HOL expression is enforested. Logical steps remain
-// boxed syntax until the source tail is empty.
-meta:
-  fun continue_theorem(n :: Syntax, step_boxes :: List, name :: Syntax,
-                       core :: Syntax, tactic :: maybe(List.of(Syntax)),
-                       rest :: List.of(Syntax)) :: Syntax:
-    let step_n = Syntax.unwrap(n)
-    let cur = st(step_n)
-    let nxt = st(step_n + 1)
-    let tactic_core = tactic_encoding(tactic, name)
-    let chain = '(~theorem $cur $nxt [$name] [$core] [$tactic_core] [$name])'
-    let prior = step_boxes.map(unbox_group)
-    let [sb, ...] = (prior ++ [chain]).map(box_group)
-    let [f, ...] = rest
-    let next_n = carry_state(
-                   Syntax.make(step_n + 1, id_ctx), state_on(n))
-    'hol_expand($next_n, [$sb, ...]):
-       $f
-       ...'
+syntax_parameter.bridge hol_expansion_state:
+  Box(initial_expansion_state())
 
-  fun continue_quickcheck(n :: Syntax, step_boxes :: List,
-                          name :: Syntax, opts :: List.of(Syntax),
-                          core :: Syntax, rest :: List.of(Syntax)) :: Syntax:
-    let ready = force_surface_context(state_on(n))
-    let runtime = emit_quickcheck(ready, name, opts, core, name)
-    let [sb, ...] = step_boxes
-    let [f, ...] = rest
-    let next_n = carry_state(n, ready)
+meta:
+  fun current_expansion_box() :: Box:
+    syntax_parameter_meta.lookup('hol_expansion_state') :~ Box
+
+  fun current_expansion_state() :: ExpansionState:
+    current_expansion_box().value :~ ExpansionState
+
+  fun ensure_module_declaration(at :: Syntax):
+    unless rb.#{syntax-local-context}() == #'module
+    | syntax_meta.error("allowed only in a module body", at)
+
+  fun declaration_expansion(forms :: List.of(Syntax)) :: Syntax:
+    let box = current_expansion_box()
+    let state = box.value :~ ExpansionState
+    let (planned, rest) = expand.plan_next(forms)
+    match planned
+    | #false:
+        syntax_meta.error("internal missing HOL declaration", forms[0])
+    | d:
+        unless rest == []
+        | syntax_meta.error("internal unconsumed HOL declaration tail",
+                            rest[0])
+        let d = d :~ expand.Decl
+        when d.kind == #'other
+        | syntax_meta.error("internal non-HOL declaration", d.form)
+        let (runtime, chain, next_index, surface) = emit_one(
+                                                       d, state.next_index,
+                                                       state.surface)
+        let steps_rev:
+          for values(acc :~ List.of(Syntax) = state.steps_rev) (
+                step in chain):
+            List.cons(step :~ Syntax, acc)
+        box.value := ExpansionState(
+                       next_index :~ NonnegInt, surface, steps_rev)
+        let [runtime_form, ...] = runtime
+        '«
+           $runtime_form
+           ...
+         »'
+
+  fun quickcheck_expansion(name :: Syntax, opts :: List.of(Syntax),
+                           core :: Syntax, at :: Syntax) :: Syntax:
+    let box = current_expansion_box()
+    let state = box.value :~ ExpansionState
+    let ready = force_surface_context(state.surface)
+    box.value := ExpansionState(
+                   state.next_index, ready, state.steps_rev)
+    emit_quickcheck(ready, name, opts, core, at)
+
+  fun finish_expansion() :: Syntax:
+    let state = current_expansion_state()
+    let final = st(state.next_index)
+    let rendered:
+      for values(acc :~ List.of(Syntax) = []) (
+            encoded in state.steps_rev):
+        render_step(encoded :~ Syntax) ++ acc
+    let [step, ...] = rendered
+    let surface_state = emit_surface_state(state.surface)
     '«
-       $runtime
-       hol_expand($next_n, [$sb, ...]):
-         $f
+       $surface_state
+       module hol_theory ~lang rhombus:
+         import: rhombus/hol/frontend/driver as _hol_driver
+         import: rhombus/hol/frontend/surface_core as _hol_surface
+         export: theory
+         def $(st(0)) = _hol_driver.initial_state()
+         $step
          ...
+         def theory = $final
      »'
 
-decl.macro
-| 'hol_expand($(n :: Int), [$step_box, ...]):
-     quickcheck $(name :: Identifier)($option, ...):
-       $(stmt :: hol_expr_meta.Parsed)
-     $rest; ...':
-    continue_quickcheck(
-      n, [step_box, ...], name, [option, ...],
-      hol_expr_meta.unpack(stmt), [rest, ...])
-| 'hol_expand($(n :: Int), [$step_box, ...]):
-     quickcheck $(name :: Identifier):
-       $(stmt :: hol_expr_meta.Parsed)
-     $rest; ...':
-    continue_quickcheck(
-      n, [step_box, ...], name, [],
-      hol_expr_meta.unpack(stmt), [rest, ...])
-| 'hol_expand($(n :: Int), [$step_box, ...]):
-     theorem $(name :: Identifier):
-       $(stmt :: hol_expr_meta.Parsed)
-     proof:
-       $tactic; ...
-     $rest; ...':
-    continue_theorem(n, [step_box, ...], name,
-                     hol_expr_meta.unpack(stmt), [tactic, ...], [rest, ...])
-| 'hol_expand($(n :: Int), [$step_box, ...]):
-     theorem $(name :: Identifier):
-       $(stmt :: hol_expr_meta.Parsed)
-     $rest; ...':
-    continue_theorem(n, [step_box, ...], name,
-                     hol_expr_meta.unpack(stmt), #false, [rest, ...])
-| 'hol_expand($(n :: Int), [$step_box, ...]): $form; ...':
-    let steps = [step_box, ...].map(unbox_group)
-    let forms = [form, ...]
-    let (next, rest) = expand.plan_next(forms)
-    match next
+  fun sequence_declaration_expansion(forms :: List.of(Syntax),
+                                     expected_kind :: Symbol):
+    ensure_module_declaration(forms[0])
+    let (planned, rest) = expand.plan_next(forms)
+    match planned
     | #false:
-        let final = st(Syntax.unwrap(n))
-        let rendered:
-          for values(acc :~ List = []) (encoded in steps):
-            acc ++ render_step(encoded)
-        let [step, ...] = rendered
-        let surface_state = emit_surface_state(state_on(n))
-        '«
-           $surface_state
-           module hol_theory ~lang rhombus:
-             import: rhombus/hol/frontend/driver as _hol_driver
-             import: rhombus/hol/frontend/surface_core as _hol_surface
-             export: theory
-             def $(st(0)) = _hol_driver.initial_state()
-             $step
-             ...
-             def theory = $final
-         »'
+        syntax_meta.error("internal missing HOL sequence declaration",
+                          forms[0])
     | d:
-        let (runtime, chain, n2, next_runtime) = emit_one(
-                                                   d :~ expand.Decl,
-                                                   Syntax.unwrap(n),
-                                                   state_on(n))
-        let [r, ...] = runtime
-        let [sb, ...] = (steps ++ chain).map(box_group)
-        let [f, ...] = rest
-        let next_n = carry_state(Syntax.make(n2, id_ctx), next_runtime)
-        '«
-           $r
-           ...
-           hol_expand($next_n, [$sb, ...]):
-             $f
-             ...
-         »'
+        let d = d :~ expand.Decl
+        unless d.kind == expected_kind
+        | syntax_meta.error("internal wrong HOL sequence declaration",
+                            d.form)
+        let consumed = forms.take(forms.length() - rest.length())
+        let [tail, ...] = rest
+        values(declaration_expansion(consumed), '$tail; ...')
 
-// Every `#lang rhombus/hol` module carries its importable frontend state in
-// `hol_surface` and its final logical state in `hol_theory`. The trampoline
-// emits both only after every source declaration has been expanded in order.
+decl.macro 'hol_finalize':
+  finish_expansion()
+
+decl.macro 'datatype $term ...':
+  ~all_stx use
+  let head = macro_use_head(use)
+  declaration_expansion(['$head $term ...'])
+
+decl.macro 'overload $term ...':
+  ~all_stx use
+  let head = macro_use_head(use)
+  declaration_expansion(['$head $term ...'])
+
+decl.macro
+| 'quickcheck $(name :: Identifier)($option, ...):
+     $(stmt :: hol_expr_meta.Parsed)':
+    quickcheck_expansion(
+      name, [option, ...], hol_expr_meta.unpack(stmt), name)
+| 'quickcheck $(name :: Identifier):
+     $(stmt :: hol_expr_meta.Parsed)':
+    quickcheck_expansion(name, [], hol_expr_meta.unpack(stmt), name)
+
+decl.macro 'proof: $body; ...':
+  ~all_stx form
+  syntax_meta.error(
+    "a `proof:` must immediately follow a `theorem`, `function`, or "
+      ++ "`axiomatic_function` declaration",
+    form)
+
+decl.macro
+| 'hol_import: $clause; ...':
+    ~all_stx use
+    let head = macro_use_head(use)
+    declaration_expansion(['$head: $clause; ...'])
+| 'hol_import $term ...':
+    ~all_stx use
+    let head = macro_use_head(use)
+    declaration_expansion(['$head $term ...'])
+
+defn.sequence_macro 'function $term ...; $tail; ...':
+  ~all_stx use
+  let head = macro_use_head(use)
+  let form = '$head $term ...'
+  sequence_declaration_expansion(
+    [form] ++ [tail, ...], #'function)
+
+defn.sequence_macro 'axiomatic_function $term ...; $tail; ...':
+  ~all_stx use
+  let head = macro_use_head(use)
+  let form = '$head $term ...'
+  sequence_declaration_expansion(
+    [form] ++ [tail, ...], #'axiomatic_function)
+
+defn.sequence_macro 'theorem $term ...; $tail; ...':
+  ~all_stx use
+  let head = macro_use_head(use)
+  let form = '$head $term ...'
+  sequence_declaration_expansion(
+    [form] ++ [tail, ...], #'theorem)
+
+// Every `#lang rhombus/hol` module initializes an expansion-local state,
+// expands its declarations normally, and finalizes the accumulated surface
+// metadata and logical steps after the source body.
 decl.macro 'module_block: $form; ...':
   '#%module_block:
-     hol_expand(0, []):
-       $form
-       ...'
+     syntax_parameter.relet hol_expansion_state:
+       Box(initial_expansion_state())
+     $form
+     ...
+     hol_finalize'

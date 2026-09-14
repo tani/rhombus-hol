@@ -224,23 +224,37 @@ result type. A successful call becomes a direct call to the selected
 implementation constant. Kernel terms contain no overload node, and generated
 executable code performs no runtime type test.
 
-The standard overloaded function names are @tt{add}, @tt{subtract},
+The notation-facing overloaded names are @tt{add}, @tt{subtract},
 @tt{negate}, @tt{multiply}, @tt{power}, @tt{less}, @tt{less_equal},
 @tt{greater}, @tt{greater_equal}, @tt{append}, @tt{member}, @tt{union}, and
-@tt{intersection}. Importing a theory imports its overload registry together
-with its constants and theorems. User-defined names such as @tt{map} use the
-same mechanism.
+@tt{intersection}. The standard library also makes common operations available
+through @tt{map}, @tt{empty}, @tt{size}, @tt{reverse}, @tt{flatten},
+@tt{height}, @tt{contains}, @tt{delete}, @tt{to_list}, @tt{compare},
+@tt{minimum}, and @tt{maximum}. Importing a theory imports its overload
+registry together with its constants and theorems.
 
 The standard method set is:
 
 @itemlist(
-  @item{@tt{Nat}: addition, subtraction, multiplication, power, and all four
-        order comparisons.}
-  @item{@tt{Integer} and @tt{Rational}: addition, subtraction,
-        multiplication, unary negation, and all four order comparisons.}
-  @item{@tt{List.of(?a)} and @tt{String}: append.}
-  @item{@tt{?a -> Boolean} sets: membership, union, and intersection.}
-  @item{@tt{?a -> ?a -> Boolean} relations: union and intersection.}
+  @item{@tt{Nat}: arithmetic, power, four order comparisons, three-way
+        comparison, minimum, and maximum.}
+  @item{@tt{Integer} and @tt{Rational}: arithmetic, unary negation, four order
+        comparisons, three-way comparison, minimum, and maximum.}
+  @item{@tt{Option.of(?a)}: map and empty.}
+  @item{@tt{List.of(?a)}: append, map, empty, size, reverse, flatten, and
+        contains.}
+  @item{@tt{NonemptyList.of(?a)}: append, map, and conversion to a list.}
+  @item{@tt{BinaryTree.of(?a)} and @tt{RoseTree.of(?a)}: map, size, flatten,
+        height, and contains.}
+  @item{@tt{FiniteSet.of(?a)}: empty, size, contains, delete, and conversion to
+        a list.}
+  @item{@tt{FiniteMap.of(?k, ?v)}: value map, empty, size, key containment,
+        deletion, and conversion to a list.}
+  @item{@tt{String}: append, map, empty, size, and reverse.}
+  @item{@tt{?a -> Boolean} sets: membership, union, intersection, and
+        subtraction.}
+  @item{@tt{?a -> ?a -> Boolean} relations: union, intersection, and
+        subtraction.}
 )
 
 Each clause declares the complete argument tuple. Every argument and the
@@ -264,7 +278,7 @@ function name; no separate declaration is required:
 
 @verbatim{
 overload map(?a -> ?b, List.of(?a)) = list_map
-overload empty() = list_empty
+overload empty() = nil
 
 function mapped_empty(f :: Nat -> Nat) :: List.of(Nat):
   map(f, empty())

@@ -69,7 +69,7 @@ meta:
 
   def initial_surface_context:
     SurfaceContext(
-      SurfaceState(standard_overload_registry(), {},
+      SurfaceState(standard_overload_registry(), {}, {},
                    standard_type_constructor_registry()),
       [])
 
@@ -186,6 +186,7 @@ meta:
       SurfaceState(
         add_overload_method(registry_with_function, method),
         ready.surface.constants,
+        ready.surface.runtime_arities,
         ready.surface.type_constructors),
       ready.pending_imports)
 
@@ -207,6 +208,8 @@ meta:
       SurfaceState(
         ready.surface.operators,
         ready.surface.constants ++ {spec.name: full_type},
+        ready.surface.runtime_arities
+          ++ {spec.name: spec.params.length()},
         ready.surface.type_constructors),
       [])
 
@@ -216,11 +219,17 @@ meta:
       for values(out :~ Map = context.surface.constants) (ctor in spec.ctors):
         let ctor :~ Ctor = ctor
         out ++ {ctor.name: ctor_type(spec, ctor)}
+    let runtime_arities:
+      for values(out :~ Map = context.surface.runtime_arities) (
+            ctor in spec.ctors):
+        let ctor :~ Ctor = ctor
+        out ++ {ctor.name: ctor.fields.length()}
     let type_constructors = add_declared_type_constructor(
                               context.surface.type_constructors,
                               spec.name, spec.params)
     SurfaceContext(
-      SurfaceState(context.surface.operators, additions, type_constructors),
+      SurfaceState(context.surface.operators, additions, runtime_arities,
+                   type_constructors),
       context.pending_imports)
 
   fun surface_symbol_expr(name :: Symbol) :: Syntax:
@@ -235,7 +244,7 @@ meta:
         let [arg, ...] = args.map(surface_type_expr)
         'mk_tyapp($(surface_symbol_expr(name)), [$arg, ...])'
 
-  fun surface_overload_expr(name :: Symbol, arity :: NonnegInt) :: Syntax:
+  fun surface_arity_expr(name :: Symbol, arity :: NonnegInt) :: Syntax:
     let arity_stx = Syntax.make(arity, id_ctx)
     '[$(surface_symbol_expr(name)), $arity_stx]'
 
@@ -268,7 +277,7 @@ meta:
     let ready = force_surface_context(context).surface
     let function_exprs:
       for values(out :~ List = []) ((name, arity) in ready.operators.arities):
-        out ++ [surface_overload_expr(name, arity :~ NonnegInt)]
+        out ++ [surface_arity_expr(name, arity :~ NonnegInt)]
     let [overload_function, ...] = function_exprs
     let [method, ...] = ready.operators.methods.map(
                           fun (value):
@@ -277,6 +286,10 @@ meta:
       for values(out :~ List = []) ((name, ty) in ready.constants):
         out ++ [surface_constant_expr(name, ty :~ HType)]
     let [constant, ...] = constant_exprs
+    let runtime_arity_exprs:
+      for values(out :~ List = []) ((name, arity) in ready.runtime_arities):
+        out ++ [surface_arity_expr(name, arity :~ NonnegInt)]
+    let [runtime_arity, ...] = runtime_arity_exprs
     let type_constructor_exprs:
       for values(out :~ List = []) (
             (_, constructor) in ready.type_constructors.bindings):
@@ -294,6 +307,7 @@ meta:
                      [$overload_function, ...],
                      [$method, ...],
                      [$constant, ...],
+                     [$runtime_arity, ...],
                      [$type_constructor, ...])'
 
 
@@ -484,6 +498,35 @@ meta:
     let [arg, ...] = args
     '$id($arg, ...)'
 
+  // Logical constants are curried, while generated Rhombus functions accept
+  // all declaration parameters at once. Adapt a named function whenever it is
+  // used with fewer or more arguments than its generated runtime arity.
+  fun runtime_named_apply(state :: SurfaceContext, name :: Symbol,
+                          args :: List.of(Syntax), at :: Syntax) :: Syntax:
+    match state.surface.runtime_arities.get(name, #false)
+    | #false:
+        (if args.length() == 0
+         | source_id(name, at)
+         | runtime_call_syntax(name, args, at))
+    | declared:
+        let arity :~ NonnegInt = declared
+        cond
+        | args.length() < arity:
+            recur curry (all_args :: List.of(Syntax) = args):
+              cond
+              | all_args.length() == arity:
+                  runtime_call_syntax(name, all_args, at)
+              | ~else:
+                  let parameter = source_id(Symbol.gen("_hol_arg"), at)
+                  let body = curry(all_args ++ [parameter])
+                  '(fun ($parameter): $body)'
+        | ~else:
+            let initial = runtime_call_syntax(
+                            name, args.take(arity), at)
+            for values(call :~ Syntax = initial) (
+                  argument in args.drop(arity)):
+              '$call($argument)'
+
 
   fun runtime_peel(ty :: HType, arity :: NonnegInt)
        :: values(List.of(HType), HType):
@@ -610,7 +653,7 @@ meta:
     let ordered = method.argument_order.map(
                     fun (index):
                       (rendered[index] :~ RuntimeExpr).stx)
-    RuntimeExpr(runtime_call_syntax(method.constant, ordered, at),
+    RuntimeExpr(runtime_named_apply(state, method.constant, ordered, at),
                 resolution.result_type)
 
 
@@ -635,16 +678,18 @@ meta:
         ensure(RuntimeExpr(Syntax.make(#false, runtime_context()),
                            mk_tyapp(#'bool, [])))
     | CoreRef(name, at):
-        let ty:
-          match env.get(name, #false)
-          | found :: HType: found
-          | #false:
-              match surface_const_type(state, name)
-              | found :: HType: found
-              | #false:
-                  syntax_meta.error("unknown constant " ++ to_string(name),
-                                    at)
-        ensure(RuntimeExpr(source_id(name, at), ty))
+        match env.get(name, #false)
+        | found :: HType:
+            ensure(RuntimeExpr(source_id(name, at), found))
+        | #false:
+            match surface_const_type(state, name)
+            | found :: HType:
+                ensure(
+                  RuntimeExpr(runtime_named_apply(state, name, [], at),
+                              found))
+            | #false:
+                syntax_meta.error("unknown constant " ++ to_string(name),
+                                  at)
     | CoreNumeral(value, at):
         match expected
         | #false:
@@ -704,8 +749,15 @@ meta:
                          theta :~ Map = {}):
               match remaining
               | []:
-                  let [arg, ...] = rendered
-                  ensure(RuntimeExpr('$((head.stx))($arg, ...)',
+                  let rendered_call:
+                    match func
+                    | CoreRef(name, _) when !env.get(name, #false)
+                                              && surface_const_type(state, name):
+                        runtime_named_apply(state, name, rendered, at)
+                    | ~else:
+                        let [arg, ...] = rendered
+                        '$((head.stx))($arg, ...)'
+                  ensure(RuntimeExpr(rendered_call,
                                      type_subst(theta, current)))
               | List.cons(arg, rest):
                   let instantiated = type_subst(theta, current)

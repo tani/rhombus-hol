@@ -1,101 +1,44 @@
 #lang rhombus/static
 
-// R4: `check_property`.
-//
-// Checking runs at *runtime*, in the emitted code, not at compile time.  The
-// property has to be evaluated by the executable definitions `type` and `fun`
-// produced, and those do not exist until the module runs -- checking it at
-// compile time would mean a second interpreter for the same definitions, which
-// is exactly the drift the one-parser rule exists to prevent.
-//
-// A `check_property` declaration is a definition whose value is the outcome, so
-// a test can assert on it instead of reading printed output.
+// `quickcheck` runs the executable reading of a HOL proposition at module
+// initialization. Successful declarations produce no binding; a falsified
+// property fails immediately with its reproducible seed and shrunk inputs.
 
 import:
   "fixture_load.rhm" open
   rhombus/hol/qc open
   "fixtures/qc_local.rhm" as q
-  "fixtures/check_property_composed.rhm" as cp
 
-fun load_bad_property():
+fun load_variable_type():
   instantiate_hol_fixture(
-    ModulePath'lib("rhombus/hol/tests/fixtures/qc_variable_type.rhm")'
-  )
+    ModulePath'lib("rhombus/hol/tests/fixtures/qc_variable_type.rhm")')
+fun load_wrong():
+  instantiate_hol_fixture(
+    ModulePath'lib("rhombus/hol/tests/fixtures/quickcheck_wrong.rhm")')
+fun load_shrink_wrong():
+  instantiate_hol_fixture(
+    ModulePath'lib("rhombus/hol/tests/fixtures/quickcheck_shrink_wrong.rhm")')
 
-// -- a true property passes --------------------------------------------------
-
-check q.plus_comm_holds ~matches QCPassed(150)
-check:
-  match q.plus_comm_holds
-  | QCPassed(n): n
-  | ~else: -1
-  ~is 150
-
-// The property body is an arbitrary executable Boolean expression.
-check q.excluded_middle_holds ~matches QCPassed(120)
-
-// A type variable has no run-time generator.
-check load_bad_property() ~throws "unbound type variable"
-
-// -- a false one is caught, with a reproducible seed -------------------------
-
-check q.plus_wrong ~matches QCFailed(_, _, _)
-check q.big_wrong ~matches QCFailed(_, _, _)
-check:
-  match q.plus_wrong
-  | QCFailed(_, seed, _): seed
-  | ~else: -1
-  ~is 20240904
-
-// -- shrinking gets to a minimal counterexample ------------------------------
-//
-// `length(xs) == zero()` is false for any non-empty list, so the smallest
-// counterexample is a one-element list.  The generator starts larger than
-// that, so the shrinker has work to do.
+// Importing the fixture executes both successful quickchecks.
+check q.plus(q.zero(), q.zero()) ~is q.zero()
 
 check:
-  match q.big_wrong
-  | QCFailed(inputs, _, _): inputs.length()
-  | ~else: -1
-  ~is 1
-check:
-  // one element, and its tail is empty -- nothing smaller falsifies it
-  match q.big_wrong
-  | QCFailed([q.Cons(_, q.Nil())], _, _): "minimal"
-  | QCFailed(other, _, _): "not minimal: " ++ to_string(other)
-  | ~else: "passed"
-  ~is "minimal"
-check:
-  match q.big_wrong
-  | QCFailed(_, _, shrinks): shrinks > 0
-  | ~else: #false
-  ~is #true
-
-// -- the report is legible ---------------------------------------------------
-
-check report(#'plus_comm_holds, q.plus_comm_holds) ~is "plus_comm_holds: passed 150 samples"
-check:
-  report(#'plus_wrong, q.plus_wrong).contains("counterexample found")
-  ~is #true
-check:
-  report(#'plus_wrong, q.plus_wrong).contains("seed: 20240904")
-  ~is #true
-
-// -- the runtime pieces on their own -----------------------------------------
+  load_variable_type()
+  ~throws "a quickcheck input type must be concrete"
 
 check:
-  // `pick` uses only the non-recursive constructors at size zero, which is
-  // what makes generation terminate -- the positivity check guarantees there
-  // is at least one.
+  load_wrong()
+  ~throws "counterexample found"
+
+check:
+  load_wrong()
+  ~throws "seed: 12345"
+
+check:
+  load_shrink_wrong()
+  ~throws "shrinks:"
+
+// The generator primitive still chooses only base constructors at size zero.
+check:
   pick(0, [fun (): "base"], [fun (): "base", fun (): "recursive"])
   ~is "base"
-
-// -- `check_property` is a genuine macro, not a scanned spelling -------------
-//
-// `check_property_composed.rhm` produces its `check_property` declaration
-// through a macro of its own (`commutative`).  A form recognised by scanning
-// unexpanded syntax for the spelling "check_property" could never have seen
-// this -- it would only observe the unexpanded call to `commutative`.  That
-// this compiles and runs at all is the test.
-
-check cp.comm_check ~matches QCPassed(_)

@@ -12,12 +12,9 @@
 // drift the one-parser rule exists to prevent.
 //
 // Generators and shrinkers are emitted per datatype by `module_block.rhm`, from
-// the same declaration the logic was built from.  They reach `check_property`
-// through the registry below rather than through a guessed name: `type`
-// registers a generator and a shrinker under the type's own name when its
-// module runs, and `check_property` looks them up under the same name.  The
-// two never need to agree on a naming convention, only on the type's name --
-// which is why this file, not `module_block.rhm`, is where they meet.
+// the same declaration the logic was built from. They reach `quickcheck`
+// through the registry below: `type` registers both under its own name when
+// its module runs, and `quickcheck` looks them up under that name.
 
 import:
   lib("racket/base.rkt") as rb
@@ -28,6 +25,7 @@ export:
   pick
   run
   report
+  assert_run
   register_gen
   register_shrink
   lookup_gen
@@ -58,7 +56,7 @@ fun register_shrink(name :: String, shrink :: Function) :: Void:
 fun lookup_gen(name :: String) :: Function:
   match _gens.get(name, #false)
   | #false:
-      error(~who: #'check_property,
+      error(~who: #'quickcheck,
             "no generator registered for this type",
             error.val(~label: "type", name))
   | f: f :~ Function
@@ -66,7 +64,7 @@ fun lookup_gen(name :: String) :: Function:
 fun lookup_shrink(name :: String) :: Function:
   match _shrinks.get(name, #false)
   | #false:
-      error(~who: #'check_property,
+      error(~who: #'quickcheck,
             "no shrinker registered for this type",
             error.val(~label: "type", name))
   | f: f :~ Function
@@ -115,6 +113,27 @@ fun run(name :: Symbol,
         | ~else:
             let (small, n) = shrink(prop, shrinks, inputs)
             QCFailed(small, seed, n)
+
+// Declaration-facing entry point: a falsified property fails immediately;
+// a successful check contributes no binding or theorem.
+fun assert_run(name :: Symbol,
+               ~samples: samples :: Int = 100,
+               ~size: size :: Int = 6,
+               ~seed: seed :: Int = 20240904,
+               ~gens: gens :: List,
+               ~shrinks: shrinks :: List,
+               ~prop: prop :: Function) :: Void:
+  let result = run(name,
+                   ~samples: samples,
+                   ~size: size,
+                   ~seed: seed,
+                   ~gens: gens,
+                   ~shrinks: shrinks,
+                   ~prop: prop)
+  match result
+  | QCPassed(_): #void
+  | failed :: QCFailed:
+      error(~who: #'quickcheck, report(name, failed))
 
 fun holds(prop :: Function, inputs :: List) :: Boolean:
   prop(& inputs)

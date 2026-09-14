@@ -251,9 +251,9 @@ Beyond the termination restrictions in @secref("termination"):
 
 @itemlist(
 
- @item{Most declarations must appear directly in a module body --- not inside
-  @rhombus(block), not inside a macro expansion. @rhombus(check_property, ~datum)
-  is the one exception; see @secref("declarations").}
+ @item{Logical declarations, including @rhombus(quickcheck, ~datum), must
+  appear directly in a @rhombuslangname(rhombus/hol) module body --- not
+  inside @rhombus(block) and not inside a macro expansion.}
 
  @item{Patterns may nest to any depth, clauses are ordered (earliest match
   wins, as in the @rhombus(match) they compile to), and @tt{_} names a
@@ -277,11 +277,11 @@ Beyond the termination restrictions in @secref("termination"):
  @item{Adopting a theory re-runs the exporting module's proofs, once per
   importing compilation.}
 
- @item{@rhombus(check_property, ~datum) checks a universally quantified
-  equation over concrete types only, and only over a type that some declared
-  datatype has registered a generator and a shrinker for; if none was, the
-  error surfaces at run time, when the property is actually checked, rather
-  than at compile time.}
+ @item{@rhombus(quickcheck, ~datum) executes the runtime reading of a
+  universally quantified proposition over concrete input types. Each input
+  type needs a generator and shrinker registered by a declared datatype.
+  Success does not construct a theorem or modify the theory; failure aborts
+  module initialization with a shrunk counterexample.}
 
  @item{The function body grammar has named applications, @rhombus(if),
   @rhombus(cond), local @rhombus(let), matching, Booleans, type-directed

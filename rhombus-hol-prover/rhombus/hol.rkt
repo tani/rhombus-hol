@@ -44,4 +44,3 @@ export:
       #%parens
       #%call
     === <=> ==> and or not == && || ! + - * ** < <= > >= ++ in union intersect if cond forall exists
-  mb.check_property

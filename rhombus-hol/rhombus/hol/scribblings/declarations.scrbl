@@ -11,10 +11,9 @@ expander and must appear directly in the module body. They cannot appear
 inside a @rhombus(block), inside a @rhombus(fun) body, or in the expansion of
 a user-written macro.
 
-@rhombus(notation, ~datum) and @rhombus(check_property, ~datum) are genuine
-bound macros. Notation definitions are expanded one declaration at a time, so
-a binding established by one is visible while the following logical
-declaration is enforested.
+@rhombus(notation, ~datum) is a genuine bound macro. Notation definitions are
+expanded one declaration at a time, so a binding established by one is visible
+while the following logical declaration is enforested.
 
 @section{@rhombus(type, ~datum)}
 
@@ -445,56 +444,59 @@ It does not cover a clause whose path is inside a block, as in
 an import that names a theory in a form this version cannot read is an error,
 and says so.
 
-@section{@rhombus(check_property, ~datum)}
+@section{@rhombus(quickcheck, ~datum)}
 
 @verbatim{
-check_property Id:
-  forall (arg :: Type, ...): expression
+quickcheck Id:
+  forall (arg :: ConcreteType, ...): proposition
 
-check_property Id(~samples: n, ~size: n):
-  forall (arg :: Type, ...): expression
+quickcheck Id(~samples: n, ~size: n, ~seed: n):
+  forall (arg :: ConcreteType, ...): proposition
 }
 
-Tests an executable Boolean expression on generated values at run time. The
-body is ordinary Rhombus expression syntax, not the logical proposition syntax
-used by @rhombus(theorem, ~datum), so equality is written @rhombus(==). This is
-not a proof; it is the cheap check you run while you are still working out what
-is true.
+Tests the executable reading of a HOL proposition on generated values at run
+time. The body uses exactly the same proposition syntax as
+@rhombus(theorem, ~datum), including @rhombus(===, ~datum),
+@rhombus(and, ~datum), @rhombus(or, ~datum), and @rhombus(not, ~datum).
+Passing a quickcheck is evidence against simple mistakes, not a proof.
+
+The intended workflow requires no duplicated property:
 
 @rhombusblock(
-  check_property rev_involutive(~samples: 500):
-    forall (xs :: List(Nat)): rev(rev(xs)) == xs
+  quickcheck rev_involutive(~samples: 500):
+    forall (xs :: List(Nat)): rev(rev(xs)) === xs
 )
 
-The binder types must be concrete --- a generator cannot be built for a type
-variable. A generator and a shrinker are registered alongside each datatype
-declaration, under the type's own name, in a run-time registry that
-@rhombus(check_property, ~datum) draws from; any declared datatype can be
-sampled, and a counterexample is shrunk before it is reported.
+After it passes, change the declaration head and add a proof:
 
-The body is not restricted to an equation. It may use any Rhombus expression
-that produces a Boolean, including function calls, conditionals, local
-definitions, and Boolean operators.
+@rhombusblock(
+  theorem rev_involutive:
+    forall (xs :: List(Nat)): rev(rev(xs)) === xs
+  proof:
+    induct(xs)
+)
 
-Because the registry is keyed by name rather than by an identifier this
-module would have to import, a type need not be declared in the same module
-as the @rhombus(check_property, ~datum) that samples it, or even be imported
-directly --- being pulled in transitively, through some other import, is
-enough. @rhombus(check_property, ~datum) can equally be written in an
-ordinary @rhombuslangname(rhombus) module that never declares
-@rhombuslangname(rhombus/hol) as its language at all, as long as it imports
-@rhombus(check_property) and the types it needs.
+Input types must be concrete because every input needs a run-time generator.
+A generator and shrinker are registered alongside each datatype declaration
+under the type's own name. The registry works through transitive imports; the
+datatype need not be declared in the quickcheck's own module.
 
-@rhombus(~samples) is how many values to try, @rhombus(~size) bounds how deep a
-generated value can get. The declaration's value is the outcome, so a test can
-assert on it.
+The proposition must have an executable reading. Function calls, conditionals,
+Boolean connectives, equality, numerals, and statically dispatched calls are
+lowered through the same runtime path used by a declared
+@rhombus(function, ~datum). Logic-only constants and existential
+quantification are rejected.
 
-Unlike the other forms on this page, @rhombus(check_property, ~datum) is a
-genuine, independently bound macro: it never touches the theory a module
-builds up, since checking a property means running the emitted code rather
-than proving anything, so there is no state for it to thread through. That
-also means it can be written by a macro of the user's own, and Rhombus's
-ordinary expansion will still find it.
+@rhombus(~samples) selects the number of generated input tuples.
+@rhombus(~size) bounds generated-value depth. @rhombus(~seed) makes a run
+reproducible; its default is deterministic, and every counterexample report
+includes the effective seed and number of shrinking steps.
+
+A successful declaration produces no binding and adds nothing to the theory.
+A falsified property fails module initialization immediately with its shrunk
+inputs. Consequently, @rhombus(quickcheck, ~datum) must appear directly in a
+@rhombuslangname(rhombus/hol) module body, like
+@rhombus(theorem, ~datum); run the module or use @tt{raco test} to execute it.
 
 @section{@rhombus(axiomatic_function, ~datum)}
 

@@ -38,10 +38,10 @@ import:
     rhombus/hol/frontend/elab as elab
     rhombus/hol/frontend/driver open
     rhombus/hol/frontend/dispatch open
+    rhombus/hol/frontend/surface_state open
     rhombus/hol/frontend/surface_core open
 export:
   module_block
-  check_property
 
 meta:
   // Any literal from this module will do as a lexical context: what matters is
@@ -54,70 +54,79 @@ meta:
   fun st(n :: Int) :: Syntax:
     Syntax.make_id("_hol_st" ++ to_string(n), id_ctx)
 
-  class RuntimeState(operators :: DispatchRegistry,
-                     thy :: maybe(Theory),
-                     constants :: Map.of(Symbol, HType),
-                     pending_import :: maybe(List.of(Syntax)))
+  // Expansion-local wrapper around the importable surface state. The fallback
+  // theory is needed only for kernel primitives and legacy theory modules.
+  class SurfaceContext(surface :: SurfaceState,
+                       fallback_theory :: maybe(Theory),
+                       pending_imports :: List.of(List.of(Syntax)))
 
-  def runtime_state_key = #'rhombus_hol_runtime_state
-  def initial_runtime_state:
+  def surface_state_key = #'rhombus_hol_surface_state
+  def initial_surface_context:
     let base = initial_state()
-    RuntimeState(base.operators, base.ctx.thy, {}, #false)
+    SurfaceContext(SurfaceState(base.operators, {}), base.ctx.thy, [])
 
+  fun state_on(stx :: Syntax) :: SurfaceContext:
+    match rb.#{syntax-property}(stx, surface_state_key)
+    | state :: SurfaceContext: state
+    | #false: initial_surface_context
+    | ~else: error(~who: #'module_block, "invalid surface elaboration state")
 
-  fun state_on(stx :: Syntax) :: RuntimeState:
-    match rb.#{syntax-property}(stx, runtime_state_key)
-    | state :: RuntimeState: state
-    | #false: initial_runtime_state
-    | ~else: error(~who: #'module_block, "invalid runtime dispatch state")
+  fun carry_state(stx :: Syntax, state :: SurfaceContext) :: Syntax:
+    rb.#{syntax-property}(stx, surface_state_key, state)
 
-  fun carry_state(stx :: Syntax, state :: RuntimeState) :: Syntax:
-    rb.#{syntax-property}(stx, runtime_state_key, state)
-  fun imported_runtime_state(terms :: List.of(Syntax)) :: RuntimeState:
+  fun imported_surface_context(terms :: List.of(Syntax)) :: SurfaceContext:
     let [t, ...] = terms
     let path:
       match ModulePath.maybe('$t ...')
       | #false: error(~who: #'import, "invalid imported theory path")
       | p: p :~ ModulePath
-    let imported = Evaluator.instantiate(
-                     path.add(ModulePath('self ! hol_theory')), #'theory)
-    let imported :~ HolState = imported
-    RuntimeState(imported.operators, imported.ctx.thy, {}, #false)
+    let surface_path = path.add(ModulePath('self ! hol_surface'))
+    fun load_surface() :: SurfaceContext:
+      let imported = Evaluator.instantiate(surface_path, #'state)
+      let imported :~ SurfaceState = imported
+      SurfaceContext(imported, initial_surface_context.fallback_theory, [])
+    fun load_legacy_theory() :: SurfaceContext:
+      let imported = Evaluator.instantiate(
+                       path.add(ModulePath('self ! hol_theory')), #'theory)
+      let imported :~ HolState = imported
+      SurfaceContext(SurfaceState(imported.operators, {}),
+                     imported.ctx.thy, [])
+    if Evaluator.module_is_declared(surface_path, ~load: #true)
+    | load_surface()
+    | load_legacy_theory()
 
-  fun force_runtime_state(state :: RuntimeState) :: RuntimeState:
-    match state.pending_import
-    | #false: state
-    | terms:
-        let imported = imported_runtime_state(terms :~ List.of(Syntax))
-        let with_families:
-          for values(registry :~ DispatchRegistry = imported.operators) (
-                (_, family) in state.operators.families):
-            add_dispatch_family(registry, family :~ DispatchFamily)
-        let with_methods:
-          for values(registry :~ DispatchRegistry = with_families) (
-                method in state.operators.methods):
-            add_dispatch_method(registry, method :~ DispatchMethod)
-        RuntimeState(with_methods, imported.thy, state.constants, #false)
+  fun force_surface_context(context :: SurfaceContext) :: SurfaceContext:
+    for values(current :~ SurfaceContext = context) (
+          terms in context.pending_imports):
+      let imported = imported_surface_context(terms :~ List.of(Syntax))
+      SurfaceContext(
+        merge_surface_states(imported.surface, current.surface),
+        imported.fallback_theory,
+        [])
 
-  fun defer_runtime_import(state :: RuntimeState,
-                           terms :: List.of(Syntax)) :: RuntimeState:
-    RuntimeState(state.operators, state.thy, state.constants, terms)
+  fun defer_surface_import(context :: SurfaceContext,
+                           terms :: List.of(Syntax)) :: SurfaceContext:
+    SurfaceContext(context.surface, context.fallback_theory,
+                   context.pending_imports ++ [terms])
 
-  fun runtime_const_type(state :: RuntimeState, name :: Symbol)
+  fun surface_const_type(context :: SurfaceContext, name :: Symbol)
        :: maybe(HType):
-    match state.constants.get(name, #false)
+    match context.surface.constants.get(name, #false)
     | ty :: HType: ty
     | #false:
-        match state.thy
+        match context.fallback_theory
         | #false: #false
         | thy: const_type(thy :~ Theory, name)
 
-  fun runtime_add_family(state :: RuntimeState, name :: Symbol,
-                         arity :: NonnegInt) :: RuntimeState:
-    RuntimeState(
-      add_dispatch_family(
-        state.operators, DispatchFamily(name, arity)),
-      state.thy, state.constants, state.pending_import)
+  fun surface_add_family(context :: SurfaceContext, name :: Symbol,
+                         arity :: NonnegInt) :: SurfaceContext:
+    SurfaceContext(
+      SurfaceState(
+        add_dispatch_family(
+          context.surface.operators, DispatchFamily(name, arity)),
+        context.surface.constants),
+      context.fallback_theory,
+      context.pending_imports)
 
   fun dispatch_argument_position(argument_names :: List,
                                  name :: Symbol,
@@ -152,16 +161,16 @@ meta:
             at)
         order
 
-  fun runtime_add_method(
-        state :: RuntimeState, family_name :: Symbol,
+  fun surface_add_method(
+        context :: SurfaceContext, family_name :: Symbol,
         argument_type_stxs :: List.of(Syntax),
         result_type_stx :: maybe(Syntax),
         constant :: Symbol, argument_order :: List.of(NonnegInt),
-        at :: Syntax) :: RuntimeState:
-    let ready = force_runtime_state(state)
+        at :: Syntax) :: SurfaceContext:
+    let ready = force_surface_context(context)
     let arity = argument_type_stxs.length()
     let registry_with_family = add_dispatch_family(
-                                 ready.operators,
+                                 ready.surface.operators,
                                  DispatchFamily(family_name, arity))
     let argument_types = argument_type_stxs.map(elab.parse_open_type)
     let result_type:
@@ -169,7 +178,7 @@ meta:
       | #false: #false
       | result_stx: elab.parse_open_type(result_stx :~ Syntax)
     let constant_type:
-      match runtime_const_type(ready, constant)
+      match surface_const_type(ready, constant)
       | #false:
           syntax_meta.error(
             "implementation constant is not declared: "
@@ -183,12 +192,15 @@ meta:
           constant, constant_type, argument_order)
         ~catch e :: Exn.Fail:
           syntax_meta.error(e.message, at)
-    RuntimeState(
-      add_dispatch_method(registry_with_family, method),
-      ready.thy, ready.constants, ready.pending_import)
+    SurfaceContext(
+      SurfaceState(
+        add_dispatch_method(registry_with_family, method),
+        ready.surface.constants),
+      ready.fallback_theory,
+      ready.pending_imports)
 
-  fun runtime_add_function(state :: RuntimeState, form :: Syntax)
-       :: RuntimeState:
+  fun surface_add_function(context :: SurfaceContext, form :: Syntax)
+       :: SurfaceContext:
     let [name, params, result_type, _, _] = elab.function_parts(form)
     let ps :~ List = params
     let result = elab.parse_open_type(result_type :~ Syntax)
@@ -202,16 +214,79 @@ meta:
                                 "a parameter needs a type"))
     let full_type = for values(ty :~ HType = result) (domain in domains.reverse()):
                       mk_fun(domain :~ HType, ty)
-    RuntimeState(state.operators, state.thy,
-                 state.constants ++ {Syntax.unwrap(name): full_type},
-                 state.pending_import)
+    SurfaceContext(
+      SurfaceState(
+        context.surface.operators,
+        context.surface.constants ++ {Syntax.unwrap(name): full_type}),
+      context.fallback_theory,
+      context.pending_imports)
 
-  fun runtime_add_type(state :: RuntimeState, form :: Syntax) :: RuntimeState:
+  fun surface_add_type(context :: SurfaceContext, form :: Syntax)
+       :: SurfaceContext:
     let spec = elab.parse_type_decl(form)
-    let additions = for values(out :~ Map = state.constants) (ctor in spec.ctors):
-                      let ctor :~ Ctor = ctor
-                      out ++ {ctor.name: ctor_type(spec, ctor)}
-    RuntimeState(state.operators, state.thy, additions, state.pending_import)
+    let additions:
+      for values(out :~ Map = context.surface.constants) (ctor in spec.ctors):
+        let ctor :~ Ctor = ctor
+        out ++ {ctor.name: ctor_type(spec, ctor)}
+    SurfaceContext(
+      SurfaceState(context.surface.operators, additions),
+      context.fallback_theory,
+      context.pending_imports)
+
+  fun surface_symbol_expr(name :: Symbol) :: Syntax:
+    let text = Syntax.make(to_string(name), id_ctx)
+    'Symbol.from_string($text)'
+
+  fun surface_type_expr(ty :: HType) :: Syntax:
+    match ty
+    | TyVar(name):
+        'mk_tyvar($(surface_symbol_expr(name)))'
+    | TyApp(name, args):
+        let [arg, ...] = args.map(surface_type_expr)
+        'mk_tyapp($(surface_symbol_expr(name)), [$arg, ...])'
+
+  fun surface_family_expr(family :: DispatchFamily) :: Syntax:
+    let arity = Syntax.make(family.arity, id_ctx)
+    'DispatchFamily($(surface_symbol_expr(family.name)), $arity)'
+
+  fun surface_method_expr(method :: DispatchMethod) :: Syntax:
+    let [argument_type, ...] = method.argument_types.map(surface_type_expr)
+    let result_type = surface_type_expr(method.result_type)
+    let [position, ...] = method.argument_order.map(
+                            fun (value): Syntax.make(value, id_ctx))
+    'DispatchMethod(
+       $(surface_symbol_expr(method.family)),
+       [$argument_type, ...],
+       $result_type,
+       $(surface_symbol_expr(method.constant)),
+       [$position, ...])'
+
+  fun surface_constant_expr(name :: Symbol, ty :: HType) :: Syntax:
+    '[$(surface_symbol_expr(name)), $(surface_type_expr(ty))]'
+
+  fun emit_surface_state(context :: SurfaceContext) :: Syntax:
+    let ready = force_surface_context(context).surface
+    let family_exprs:
+      for values(out :~ List = []) ((_, family) in ready.operators.families):
+        out ++ [surface_family_expr(family :~ DispatchFamily)]
+    let [family, ...] = family_exprs
+    let [method, ...] = ready.operators.methods.map(
+                          fun (value):
+                            surface_method_expr(value :~ DispatchMethod))
+    let constant_exprs:
+      for values(out :~ List = []) ((name, ty) in ready.constants):
+        out ++ [surface_constant_expr(name, ty :~ HType)]
+    let [constant, ...] = constant_exprs
+    'module hol_surface ~lang rhombus:
+       import:
+         rhombus/hol/htype open
+         rhombus/hol/frontend/dispatch open
+         rhombus/hol/frontend/surface_state open
+       export: state
+       def state = make_surface_state(
+                     [$family, ...],
+                     [$method, ...],
+                     [$constant, ...])'
 
 
   // A term rebuilt with this module's context.
@@ -250,18 +325,13 @@ meta:
   // -- generators and shrinkers ----------------------------------------------
   //
   // Emitted alongside a datatype, from the same declaration, so that
-  // `check_property` has something to draw values from.  They are ordinary
-  // Rhombus functions over the emitted classes -- the property is checked by
-  // running the real code, which is the whole point of doing it at runtime.
+  // `quickcheck` has values to sample. They are ordinary Rhombus functions
+  // over the emitted classes; checking runs the real executable code.
   //
-  // They reach `check_property` through `qc.rhm`'s registry rather than
-  // through a name it has to guess: `type` registers its generator and
-  // shrinker under the type's own name as an ordinary run-time effect, when
-  // the type's own module is instantiated.  That happens automatically for a
-  // datatype declared in another module too, since instantiating an import
-  // runs its top-level effects before this module's own body -- no export of
-  // the generator or shrinker is needed, because nothing outside this file
-  // ever refers to one by name.
+  // They reach `quickcheck` through `qc.rhm`'s registry rather than through a
+  // guessed identifier. `type` registers its generator and shrinker under the
+  // type's own name when its module is instantiated. No generated helper needs
+  // to be exported.
   //
   // A name has to travel as a plain string, not a `Symbol`: a symbol written
   // `#'foo` cannot appear inside a syntax template, the quote would close it.
@@ -287,7 +357,7 @@ meta:
     match ty
     | TyApp(n, _): '_hol_qc.lookup_shrink($(type_name_str(n)))'
     | ~else:
-        error(~who: #'check_property,
+        error(~who: #'quickcheck,
               "cannot shrink a value of variable type",
               error.val(~label: "in", to_string(at)))
 
@@ -335,41 +405,62 @@ meta:
     | TyApp(n, _): n == Syntax.unwrap(tname)
     | ~else: #false
 
-  // -- check_property --------------------------------------------------------
-  //
-  // `check_property` is a genuine, independently bound macro rather than a
-  // form `#%module_block` recognises by scanning.  It can do this because,
-  // unlike `type`/`function`/`theorem`, it never touches the theory chain --
-  // `driver.rhm` has no step for it at all, since a property is checked by
-  // running the emitted code, and its value is the outcome.  With nothing to
-  // thread, there is nothing standing between it and being an ordinary macro,
-  // usable directly or from within a macro of the user's own.
+  // -- quickcheck -------------------------------------------------------------
 
-  fun emit_property_from(name :: Syntax, samples, binders :: List,
-                         body :: Syntax, size, at :: Syntax) :: Syntax:
-    let [v, ...] = binders.map(fun (b :: List): b[0] :~ Syntax)
-    let [g, ...] = binders.map(fun (b :: List): gen_expr(b[1]))
-    let [sh, ...] = binders.map(fun (b :: List): shrink_expr(b[1], at))
-    let prop = 'fun ($v, ...):
-                  $body'
+  fun emit_quickcheck_in(state :: SurfaceContext,
+                         name :: Syntax,
+                         opts :: List.of(Syntax),
+                         core :: Syntax,
+                         at :: Syntax) :: Syntax:
+    let expr = decode_prop(core)
+    let (binders, body):
+      match expr
+      | CoreForall(bs, proposition, _): values(bs, proposition)
+      | ~else:
+          syntax_meta.error(
+            "a quickcheck property starts with `forall (x :: T, ...):`",
+            at)
+    let parsed:
+      for List (binder in (binders :~ List.of(CoreBinder))):
+        let binder :~ CoreBinder = binder
+        let ty = elab.parse_open_type(binder.type_stx)
+        when type_vars(ty).length() > 0
+        | syntax_meta.error(
+            "a quickcheck input type must be concrete", binder.at)
+        [source_id(binder.name, binder.at), binder.name, ty]
+    let ready = force_surface_context(state)
+    let env:
+      for values(out :~ Map = {}) (entry in parsed):
+        let entry :~ List = entry
+        out ++ {entry[1] :~ Symbol: entry[2] :~ HType}
+    let rendered = runtime_expr(
+                     ready, env, body :~ CoreExpr,
+                     mk_tyapp(#'bool, [])).stx
+    let [v, ...] = parsed.map(fun (entry :: List): entry[0] :~ Syntax)
+    let [g, ...] = parsed.map(fun (entry :: List): gen_expr(entry[2]))
+    let [sh, ...] = parsed.map(fun (entry :: List): shrink_expr(entry[2], at))
+    let [samples, size, seed] = elab.quickcheck_options(opts)
     let count = Syntax.make(samples, id_ctx)
     let sz = Syntax.make(size, id_ctx)
-    // `check_property` imports `qc` for itself, as `_hol_qc` -- the same
-    // spelling `gen_expr`/`shrink_expr` write, and this is what makes the two
-    // resolve to the same binding.  `check_property` is a separate macro
-    // expansion from `type`'s, so an identifier introduced by one is never the
-    // same binding as the same spelling introduced by the other; what makes
-    // this pair line up is that both the import and the references it
-    // supports are produced as part of *this one* expansion, regardless of
-    // which file's function assembled them.
+    let seed_stx = Syntax.make(seed, id_ctx)
+    let prop = 'fun ($v, ...): $rendered'
     'import: rhombus/hol/qc as _hol_qc
-     def $name:
-       _hol_qc.run(Syntax.unwrap('$name'),
-                   ~samples: $count,
-                   ~size: $sz,
-                   ~gens: [$g, ...],
-                   ~shrinks: [$sh, ...],
-                   ~prop: $prop)'
+     _hol_qc.assert_run(
+       Syntax.unwrap('$name'),
+       ~samples: $count,
+       ~size: $sz,
+       ~seed: $seed_stx,
+       ~gens: [$g, ...],
+       ~shrinks: [$sh, ...],
+       ~prop: $prop)'
+
+  fun emit_quickcheck(state :: SurfaceContext,
+                      name :: Syntax,
+                      opts :: List.of(Syntax),
+                      core :: Syntax,
+                      at :: Syntax) :: Syntax:
+    parameterize { runtime_context: name }:
+      emit_quickcheck_in(state, name, opts, core, at)
 
   // -- functions -------------------------------------------------------------
 
@@ -404,7 +495,7 @@ meta:
         out ++ {v: mk_tyvar(Symbol.gen(to_string(v))) :~ HType}
     type_subst(renaming, ty)
 
-  fun runtime_needs_expected(state :: RuntimeState,
+  fun runtime_needs_expected(state :: SurfaceContext,
                              expr :: CoreExpr) :: Boolean:
     fun every_arg(args :: List.of(CoreExpr)) :: Boolean:
       args.length() == 0
@@ -413,7 +504,7 @@ meta:
     match expr
     | CoreNumeral(_, _): #true
     | CoreCall(CoreOverloadRef(_, _, _), args, _): every_arg(args)
-    | CoreCall(CoreRef(name, _), args, _) when dispatch_family(state.operators, name):
+    | CoreCall(CoreRef(name, _), args, _) when dispatch_family(state.surface.operators, name):
         every_arg(args)
     | CoreCall(_, args, _):
         for values(found = #false) (arg in args):
@@ -453,7 +544,7 @@ meta:
             ++ type_to_string(expected),
           at)
 
-  fun runtime_dispatch_expr(state :: RuntimeState,
+  fun runtime_dispatch_expr(state :: SurfaceContext,
                             env :: Map.of(Symbol, HType),
                             family_name :: Symbol,
                             display_name :: String,
@@ -461,7 +552,7 @@ meta:
                             expected :: maybe(HType),
                             at :: Syntax) :: RuntimeExpr:
     let family:
-      match dispatch_family(state.operators, family_name)
+      match dispatch_family(state.surface.operators, family_name)
       | #false:
           syntax_meta.error(
             "unknown dispatch family " ++ to_string(family_name), at)
@@ -484,7 +575,7 @@ meta:
           | #false: #false
           | runtime: (runtime :~ RuntimeExpr).ty)
     let matches = resolve_dispatch(
-                    state.operators, family_name,
+                    state.surface.operators, family_name,
                     argument_types, expected)
     when matches.length() == 0
     | syntax_meta.error(
@@ -516,11 +607,11 @@ meta:
     RuntimeExpr(runtime_call_syntax(method.constant, ordered, at),
                 resolution.result_type)
 
-  fun needs_runtime_lowering(state :: RuntimeState,
+  fun needs_runtime_lowering(state :: SurfaceContext,
                              expr :: CoreExpr) :: Boolean:
     match expr
     | CoreNumeral(_, _) || CoreOverloadRef(_, _, _): #true
-    | CoreCall(CoreRef(name, _), _, _) when dispatch_family(state.operators, name): #true
+    | CoreCall(CoreRef(name, _), _, _) when dispatch_family(state.surface.operators, name): #true
     | CoreCall(func, args, _):
         needs_runtime_lowering(state, func)
           || for values(found = #false) (arg in args):
@@ -531,7 +622,7 @@ meta:
           || needs_runtime_lowering(state, else_expr)
     | ~else: #false
 
-  fun runtime_expr(state :: RuntimeState, env :: Map.of(Symbol, HType),
+  fun runtime_expr(state :: SurfaceContext, env :: Map.of(Symbol, HType),
                    expr :: CoreExpr,
                    expected :: maybe(HType) = #false) :: RuntimeExpr:
     fun ensure(value :: RuntimeExpr) :: RuntimeExpr:
@@ -556,7 +647,7 @@ meta:
           match env.get(name, #false)
           | found :: HType: found
           | #false:
-              match runtime_const_type(state, name)
+              match surface_const_type(state, name)
               | found :: HType: found
               | #false:
                   syntax_meta.error("unknown constant " ++ to_string(name),
@@ -575,8 +666,8 @@ meta:
             runtime_dispatch_expr(
               state, env, family, display_name, args, expected, at)
         | CoreRef(name, _) when !env.get(name, #false)
-                                  && !runtime_const_type(state, name)
-                                  && dispatch_family(state.operators, name):
+                                  && !surface_const_type(state, name)
+                                  && dispatch_family(state.surface.operators, name):
             runtime_dispatch_expr(
               state, env, name, to_string(name), args, expected, at)
         | CoreRef(name, _) when name == #'eq && args.length() == 2:
@@ -661,7 +752,7 @@ meta:
         syntax_meta.error("expression has no runtime meaning",
                           runtime_context())
 
-  fun runtime_pattern(state :: RuntimeState, pat :: CorePattern,
+  fun runtime_pattern(state :: SurfaceContext, pat :: CorePattern,
                       expected :: HType)
        :: values(Syntax, Map.of(Symbol, HType)):
     match pat
@@ -670,7 +761,7 @@ meta:
         values(source_id(name, at), {name: expected})
     | CorePatCtor(name, args, at):
         let generic:
-          match runtime_const_type(state, name)
+          match surface_const_type(state, name)
           | #false:
               syntax_meta.error("unknown constructor " ++ to_string(name), at)
           | ty: ty :~ HType
@@ -699,7 +790,7 @@ meta:
     | ~else:
         error(~who: #'function, "unknown runtime pattern")
 
-  fun runtime_body(state :: RuntimeState,
+  fun runtime_body(state :: SurfaceContext,
                    env :: Map.of(Symbol, HType),
                    body :: CoreFunBody,
                    expected :: HType) :: Syntax:
@@ -736,7 +827,7 @@ meta:
     | ~else:
         error(~who: #'function, "invalid nested function body")
 
-  fun runtime_row(state :: RuntimeState,
+  fun runtime_row(state :: SurfaceContext,
                   base_env :: Map.of(Symbol, HType),
                   name :: Syntax,
                   parameter_types :: List.of(HType),
@@ -760,7 +851,7 @@ meta:
   // Dispatch methods are therefore selected at expansion time from declared
   // argument and expected-result types; generated code contains only direct
   // named calls.
-  fun body_needs_runtime_lowering(state :: RuntimeState,
+  fun body_needs_runtime_lowering(state :: SurfaceContext,
                                   body :: CoreFunBody) :: Boolean:
     match body
     | CoreBodyExpr(expr, _): needs_runtime_lowering(state, expr)
@@ -797,7 +888,7 @@ meta:
          | $alternative
          | ...'
 
-  fun emit_function(spec :: CoreFunctionSpec, state :: RuntimeState,
+  fun emit_function(spec :: CoreFunctionSpec, state :: SurfaceContext,
                     name :: Syntax, parameter_names :: List.of(Syntax),
                     raw_body :: Syntax)
        :: Syntax:
@@ -807,7 +898,7 @@ meta:
     | ~else:
         emit_lowered_function(spec, state, name, parameter_names)
 
-  fun emit_lowered_function(spec :: CoreFunctionSpec, state :: RuntimeState,
+  fun emit_lowered_function(spec :: CoreFunctionSpec, state :: SurfaceContext,
                             name :: Syntax,
                             parameter_names :: List.of(Syntax)) :: Syntax:
     parameterize { runtime_context: name }:
@@ -1069,8 +1160,8 @@ meta:
   // module, and the chain steps go into the `hol_theory` submodule.  Nothing
   // in the runtime half ever refers to the chain, which is what makes the
   // split possible.
-  fun emit_one(d :: expand.Decl, n :: Int, runtime_state :: RuntimeState)
-       :: values(List.of(Syntax), List.of(Syntax), Int, RuntimeState):
+  fun emit_one(d :: expand.Decl, n :: Int, runtime_state :: SurfaceContext)
+       :: values(List.of(Syntax), List.of(Syntax), Int, SurfaceContext):
     let cur = st(n)
     let nxt = st(n + 1)
     match d.kind
@@ -1086,8 +1177,8 @@ meta:
                            '(~adopt $(st(k)) $(st(k + 1)) $alias [$at])'],
                    k + 1)
         let next_runtime:
-          for values(state :~ RuntimeState = runtime_state) (terms in (paths :~ List)):
-            defer_runtime_import(state, terms :~ List.of(Syntax))
+          for values(state :~ SurfaceContext = runtime_state) (terms in (paths :~ List)):
+            defer_surface_import(state, terms :~ List.of(Syntax))
         values([d.form], chain, n2, next_runtime)
     | #'type:
         let [name, ctors, params, gen] = d.parts
@@ -1098,16 +1189,16 @@ meta:
                 emit_shrinker(name, gen :~ List)],
                ['(~type $cur $nxt [$form] [$at])'],
                n + 1,
-               runtime_add_type(runtime_state, form))
+               surface_add_type(runtime_state, form))
     | #'function:
         let [name, params, body] = d.parts
         let at = head_term(d.form)
         let form = d.form
         let core = function_encoding(form)
         let spec = decode_function(core)
-        let registered_runtime = runtime_add_function(runtime_state, form)
+        let registered_runtime = surface_add_function(runtime_state, form)
         let next_runtime = (if body_needs_runtime_lowering(registered_runtime, spec.body)
-                            | force_runtime_state(registered_runtime)
+                            | force_surface_context(registered_runtime)
                             | registered_runtime)
         values([emit_function(spec, next_runtime, name,
                               params :~ List.of(Syntax), body :~ Syntax)],
@@ -1119,9 +1210,9 @@ meta:
         let form = d.form
         let core = function_encoding(form)
         let spec = decode_function(core)
-        let registered_runtime = runtime_add_function(runtime_state, form)
+        let registered_runtime = surface_add_function(runtime_state, form)
         let next_runtime = (if body_needs_runtime_lowering(registered_runtime, spec.body)
-                            | force_runtime_state(registered_runtime)
+                            | force_surface_context(registered_runtime)
                             | registered_runtime)
         values([emit_function(spec, next_runtime, name,
                               params :~ List.of(Syntax), body :~ Syntax)],
@@ -1151,7 +1242,7 @@ meta:
         values(notation_forms,
                ['(~dispatch_family $cur $nxt [$name] [$arity_stx] [$at])'],
                n + 1,
-               runtime_add_family(
+               surface_add_family(
                  runtime_state, Syntax.unwrap(name), arity))
     | #'dispatch_method:
         let [family, argument_names, argument_types,
@@ -1164,7 +1255,7 @@ meta:
             | name_stx: Syntax.unwrap(name_stx :~ Syntax)
         let positions = dispatch_argument_order(
                           names, template_arguments, at)
-        let next_runtime = runtime_add_method(
+        let next_runtime = surface_add_method(
                              runtime_state,
                              Syntax.unwrap(family),
                              argument_types :~ List.of(Syntax),
@@ -1190,18 +1281,6 @@ meta:
         values(forms, chain, n2, runtime_state)
 
 
-// `check_property` is a genuine, independently bound macro, not a form
-// `#%module_block` recognises by scanning -- see the note by
-// `emit_property_from` above for why it alone can be one.  Because it is
-// bound, `#%module_block`'s generic pass-through (the `#'other` case in
-// `emit_one`) is what reaches it: Rhombus's own expansion discovers this
-// binding exactly as it would for `fun` or `class`, including when the use
-// arrives via a macro of the user's own.
-defn.macro 'check_property $rest ...':
-  let whole = 'check_property $rest ...'
-  let [name, samples, binders, body, size] = elab.check_property_shape(whole)
-  emit_property_from(name :~ Syntax, samples, binders :~ List,
-                     body :~ Syntax, size, whole)
 
 // One declaration per expansion. Emitting the current declaration before the
 // recursive macro call lets imports and operator definitions establish their
@@ -1225,7 +1304,36 @@ meta:
        $f
        ...'
 
+  fun continue_quickcheck(n :: Syntax, step_boxes :: List,
+                          name :: Syntax, opts :: List.of(Syntax),
+                          core :: Syntax, rest :: List.of(Syntax)) :: Syntax:
+    let ready = force_surface_context(state_on(n))
+    let runtime = emit_quickcheck(ready, name, opts, core, name)
+    let [sb, ...] = step_boxes
+    let [f, ...] = rest
+    let next_n = carry_state(n, ready)
+    '«
+       $runtime
+       hol_expand($next_n, [$sb, ...]):
+         $f
+         ...
+     »'
+
 decl.macro
+| 'hol_expand($(n :: Int), [$step_box, ...]):
+     quickcheck $(name :: Identifier)($option, ...):
+       $(stmt :: hol_expr_meta.Parsed)
+     $rest; ...':
+    continue_quickcheck(
+      n, [step_box, ...], name, [option, ...],
+      hol_expr_meta.unpack(stmt), [rest, ...])
+| 'hol_expand($(n :: Int), [$step_box, ...]):
+     quickcheck $(name :: Identifier):
+       $(stmt :: hol_expr_meta.Parsed)
+     $rest; ...':
+    continue_quickcheck(
+      n, [step_box, ...], name, [],
+      hol_expr_meta.unpack(stmt), [rest, ...])
 | 'hol_expand($(n :: Int), [$step_box, ...]):
      theorem $(name :: Identifier):
        $(stmt :: hol_expr_meta.Parsed)
@@ -1251,7 +1359,9 @@ decl.macro
           for values(acc :~ List = []) (encoded in steps):
             acc ++ render_step(encoded)
         let [step, ...] = rendered
+        let surface_state = emit_surface_state(state_on(n))
         '«
+           $surface_state
            module hol_theory ~lang rhombus:
              import: rhombus/hol/frontend/driver as _hol_driver
              import: rhombus/hol/frontend/surface_core as _hol_surface
@@ -1278,9 +1388,9 @@ decl.macro
              ...
          »'
 
-// Every `#lang rhombus/hol` module carries its final logical state in a
-// `hol_theory` submodule. The trampoline emits that submodule only after every
-// source declaration has been expanded in order.
+// Every `#lang rhombus/hol` module carries its importable frontend state in
+// `hol_surface` and its final logical state in `hol_theory`. The trampoline
+// emits both only after every source declaration has been expanded in order.
 decl.macro 'module_block: $form; ...':
   '#%module_block:
      hol_expand(0, []):

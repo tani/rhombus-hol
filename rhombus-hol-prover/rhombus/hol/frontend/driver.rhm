@@ -40,6 +40,9 @@ import:
   rhombus/hol/frontend/surface_core open
   rhombus/hol/frontend/elab as elab
   rhombus/hol/frontend/dispatch open
+  rhombus/hol/frontend/type/registry open
+  rhombus/hol/frontend/type/parse as type_parser
+  rhombus/hol/frontend/type/print open
 
 export:
   hol_reraise
@@ -91,6 +94,7 @@ class HolState(ctx :: Context,
                // Surface capabilities are import-scoped elaboration metadata.
                // They never enter Theory or the theorem database.
                operators :: DispatchRegistry,
+               type_constructors :: TypeConstructorRegistry,
                // `wfrec_rel`'s definition (`wfrec.rhm`'s `build_wfrec_rel`),
                // installed exactly once at the very start of the session so
                // every structurally derived `function` can share it.
@@ -108,7 +112,8 @@ def initial_context:
   mk_context(thy, ~rules: db)
 
 fun initial_state() :: HolState:
-  HolState(initial_context, {}, standard_dispatch_registry(), wfrec_base_def())
+  HolState(initial_context, {}, standard_dispatch_registry(),
+           standard_type_constructor_registry(), wfrec_base_def())
 
 // The prover context for the state as it currently stands.
 fun state_context(st :: HolState) :: Context:
@@ -117,7 +122,9 @@ fun state_context(st :: HolState) :: Context:
 // -- type --------------------------------------------------------------------
 
 fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
-  let spec = elab.parse_type_decl(form)
+  let spec = type_parser.parse_type_decl(form, st.type_constructors)
+  let type_constructors = add_declared_type_constructor(
+                            st.type_constructors, spec.name, spec.params)
   // Non-recursive specs (no self-recursive fields) get a genuinely derived
   // `DatatypeThms`, proved from `unit`/`prod`/`sum` via
   // `new_basic_type_definition`, with zero `new_axiom` calls. A
@@ -145,7 +152,7 @@ fun add_type(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
               add_thm(thy2, d, spec.name, th)
   let ctx2 = context_add_datatype(st.ctx, thy2, db2, spec.name, thms)
   add_subterm_relation(
-    HolState(ctx2, st.thms, st.operators, st.wfrec_def),
+    HolState(ctx2, st.thms, st.operators, type_constructors, st.wfrec_def),
     spec, at)
 
 // Every recursive datatype brings its structural subterm relation with it, so
@@ -181,7 +188,7 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
                          equations, NoRecursion())
       let db2 = add_thms(thy2, st.ctx.db, fs.name, equations)
       let ctx2 = context_add_function(st.ctx, thy2, db2, fs.name, info)
-      HolState(ctx2, st.thms, st.operators, st.wfrec_def)
+      HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
 
 // -- function ----------------------------------------------------------------
 
@@ -206,7 +213,8 @@ fun install_declared_function(st :: HolState, core :: CoreFunctionSpec,
                               ~postulate: postulate :: Boolean) :: HolState:
   let spec :~ FunSpec = try:
                           elab.elaborate_function_decl(
-                            st.ctx.thy, core, ~operators: st.operators)
+                            st.ctx.thy, core, ~operators: st.operators,
+                            ~type_constructors: st.type_constructors)
                           ~catch e :: Exn.Fail: hol_reraise(e, at)
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
@@ -247,7 +255,7 @@ fun install_declared_function(st :: HolState, core :: CoreFunctionSpec,
     require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
   let db2 = add_thms(thy2, st.ctx.db, spec.name, info.equations)
   let ctx2 = context_add_function(st.ctx, thy2, db2, spec.name, info)
-  HolState(ctx2, st.thms, st.operators, st.wfrec_def)
+  HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
 
 // A path that claims to derive must not have added an axiom.  Every
 // declaration below that is documented as derived runs through this, so the
@@ -325,7 +333,8 @@ fun prepare_measure(st :: HolState, spec :: FunSpec) :: maybe(Measure):
                     error(
                       ~who: #'function,
                       "a measure must land in a declared datatype that "
-                        ++ "recurses: " ++ type_to_string(ty)
+                        ++ "recurses: "
+                        ++ type_to_surface_string(st.type_constructors, ty)
                         ++ " has no subterm relation for it to decrease in"))
       | ~else: Measure(term :~ Term, discharger(st))
 
@@ -363,7 +372,8 @@ fun add_theorem(st :: HolState, name :: Symbol,
                 at :: Syntax) :: HolState:
   let (statement, names) = try:
                              elab.elaborate_theorem_statement(
-                               st.ctx.thy, stmt, ~operators: st.operators)
+                               st.ctx.thy, stmt, ~operators: st.operators,
+                               ~type_constructors: st.type_constructors)
                              ~catch e :: Exn.Fail: hol_reraise(e, at)
   let induct = tactic.induct
   let using_names = tactic.using_names
@@ -389,14 +399,16 @@ fun add_theorem(st :: HolState, name :: Symbol,
   let cases:
     for List (c in case_exprs):
       try:
-        elab.parse_core_prop(st.ctx.thy, tyvars, env, c,
-                             ~operators: st.operators)
+        elab.parse_core_prop(
+          st.ctx.thy, tyvars, env, c, ~operators: st.operators,
+          ~type_constructors: st.type_constructors)
         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let witnesses:
     for List (w in witness_exprs):
       try:
-        elab.parse_core_prop(st.ctx.thy, tyvars, env, w,
-                             ~operators: st.operators)
+        elab.parse_core_prop(
+          st.ctx.thy, tyvars, env, w, ~operators: st.operators,
+          ~type_constructors: st.type_constructors)
         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let limits :~ SearchLimits:
     match search_steps
@@ -413,7 +425,8 @@ fun add_theorem(st :: HolState, name :: Symbol,
       | hol_error(#'theorem,
                   "prover returned a result that does not prove this theorem source",
                   at)
-      HolState(st.ctx, st.thms ++ {name: th}, st.operators, st.wfrec_def)
+      HolState(st.ctx, st.thms ++ {name: th}, st.operators,
+               st.type_constructors, st.wfrec_def)
 // -- static dispatch metadata ----------------------------------------------
 
 fun add_dispatch_family_decl(st :: HolState, name :: Symbol,
@@ -423,7 +436,7 @@ fun add_dispatch_family_decl(st :: HolState, name :: Symbol,
                    add_dispatch_family(
                      st.operators, DispatchFamily(name, arity))
                    ~catch e :: Exn.Fail: hol_reraise(e, at)
-  HolState(st.ctx, st.thms, registry, st.wfrec_def)
+  HolState(st.ctx, st.thms, registry, st.type_constructors, st.wfrec_def)
 
 fun add_dispatch_method_decl(
       st :: HolState, family_name :: Symbol,
@@ -440,14 +453,15 @@ fun add_dispatch_method_decl(
     argument_type_stxs.map(
       fun (type_stx):
         try:
-          elab.parse_open_type(type_stx)
+          type_parser.parse_open_type(type_stx, st.type_constructors)
           ~catch e :: Exn.Fail: hol_reraise(e, at))
   let result_type:
     match result_type_stx
     | #false: #false
     | result_stx:
         try:
-          elab.parse_open_type(result_stx :~ Syntax)
+          type_parser.parse_open_type(
+            result_stx :~ Syntax, st.type_constructors)
           ~catch e :: Exn.Fail: hol_reraise(e, at)
   let constant_type:
     match const_type(st.ctx.thy, constant)
@@ -467,7 +481,7 @@ fun add_dispatch_method_decl(
     try:
       add_dispatch_method(registry_with_family, method)
       ~catch e :: Exn.Fail: hol_reraise(e, at)
-  HolState(st.ctx, st.thms, registry, st.wfrec_def)
+  HolState(st.ctx, st.thms, registry, st.type_constructors, st.wfrec_def)
 
 fun add_dispatch_method_encoded(
       st :: HolState, family_name :: Symbol,
@@ -514,7 +528,8 @@ fun adopt(st :: HolState, imported :: HolState, at :: Syntax) :: HolState:
   let off = for values(acc :~ List = []) (n in st.ctx.db.disabled): acc ++ [n]
   let ctx = context_with_rules(imported.ctx,
                                disable(imported.ctx.db, off))
-  HolState(ctx, imported.thms, imported.operators, imported.wfrec_def)
+  HolState(ctx, imported.thms, imported.operators,
+           imported.type_constructors, imported.wfrec_def)
 
 // -- rule control ------------------------------------------------------------
 
@@ -522,7 +537,7 @@ fun set_rules(st :: HolState, on :: Boolean,
               names :: List.of(Symbol)) :: HolState:
   let db2 = (if on | enable(st.ctx.db, names) | disable(st.ctx.db, names))
   HolState(context_with_rules(st.ctx, db2), st.thms, st.operators,
-           st.wfrec_def)
+           st.type_constructors, st.wfrec_def)
 
 fun datatype_rules(thms :: DatatypeThms) :: List.of(Thm):
   let inj = for values(acc :~ List = []) ((_, th) in thms.injectivity): acc ++ [th]

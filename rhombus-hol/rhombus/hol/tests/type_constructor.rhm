@@ -1,0 +1,83 @@
+#lang rhombus/static
+
+import:
+  lib("shrubbery/parse.rkt") as shrubbery
+  rhombus/hol/htype open
+  rhombus/hol/frontend/type/registry open
+  rhombus/hol/frontend/type/parse open
+  rhombus/hol/frontend/type/print open
+
+fun read_type(text :: String) :: Syntax:
+  match shrubbery.#{parse-all}(Port.Input.open_string(text))
+  | '$group': group
+  | ~else: error("unexpected parsed type")
+
+def types:
+  let with_nat = add_declared_type_constructor(
+                   standard_type_constructor_registry(), #'Nat, [])
+  let with_list = add_declared_type_constructor(with_nat, #'List, [#'a])
+  add_declared_type_constructor(with_list, #'Pair, [#'a, #'b])
+
+def samples = [
+  'Nat',
+  'Boolean',
+  'List.of(Nat)',
+  'Pair.of(List.of(Nat), Boolean)',
+  '?a -> ?b',
+  '?a -> ?b -> ?c',
+  '(?a -> ?b) -> ?c',
+  'List.of(?a -> ?b)',
+  'List.of(?a) -> List.of(?b)'
+]
+
+for (sample in samples):
+  let parsed = parse_open_type(sample, types)
+  check:
+    parse_open_type(read_type(type_to_surface_string(types, parsed)), types)
+    ~is parsed
+
+// `.of` and `->` are surface syntax only; kernel HType names stay unchanged.
+check:
+  parse_open_type('List.of(Nat)', types)
+  ~is mk_tyapp(#'List, [mk_tyapp(#'Nat, [])])
+check:
+  parse_open_type('?a -> ?b -> ?c', types)
+  ~is mk_fun(mk_tyvar(#'a), mk_fun(mk_tyvar(#'b), mk_tyvar(#'c)))
+
+def box_spec:
+  parse_type_decl(
+    'type Box.of(?item)
+     | box(value :: ?item)',
+    standard_type_constructor_registry())
+check box_spec.name ~is #'Box
+check box_spec.params ~is [#'item]
+check box_spec.ctors[0].fields[0].ty ~is mk_tyvar(#'item)
+
+check:
+  type_to_surface_string(
+    types,
+    mk_tyapp(#'Pair, [mk_tyapp(#'List, [mk_tyapp(#'Nat, [])]), bool_ty]))
+  ~is "Pair.of(List.of(Nat), Boolean)"
+
+check:
+  parse_open_type('List', types)
+  ~throws "`List` is a type constructor of arity 1; use `List.of(...)`"
+
+check:
+  parse_open_type('List(?a)', types)
+  ~throws "parameterized HOL types use `.of`"
+
+check:
+  parse_open_type('Function(?a, ?b)', types)
+  ~throws "function types use `->`"
+
+check:
+  parse_open_type('List.of(?a, ?b)', types)
+  ~throws "expects 1 argument"
+
+check:
+  parse_type_decl(
+    'type List(?a)
+     | nil()',
+    standard_type_constructor_registry())
+  ~throws "parameterized type declarations use `.of`"

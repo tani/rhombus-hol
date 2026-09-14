@@ -22,7 +22,7 @@ type Id
 | ctor
 | ...
 
-type Id(?tyvar, ...)
+type Id.of(?tyvar, ...)
 | ctor
 | ...
 
@@ -31,12 +31,14 @@ ctor = CtorId()
 }
 
 Declares an @deftech{algebraic datatype}. A type variable is written
-@rhombus(?a).
+@rhombus(?a). A parameterized declaration binds @tt{Id.of}; the bare
+@tt{Id} remains a constructor namespace and cannot be used as a type without
+its arguments. Nullary datatypes continue to use their bare identifier.
 
 @rhombusblock(
-  type List(?a)
+  type List.of(?a)
   | Nil()
-  | Cons(head :: ?a, tail :: List(?a))
+  | Cons(head :: ?a, tail :: List.of(?a))
 )
 
 Logically this @emph{derives} the usual characterisation of the type ---
@@ -79,7 +81,7 @@ Declares a total, terminating function. The body must be in the grammar of
 expression.
 
 @rhombusblock(
-  function app(xs :: List(?a), ys :: List(?a)) :: List(?a):
+  function app(xs :: List.of(?a), ys :: List.of(?a)) :: List.of(?a):
     match xs
     | Nil(): ys
     | Cons(x, rest): Cons(x, app(rest, ys))
@@ -223,9 +225,9 @@ The standard method set is:
         order comparisons.}
   @item{@tt{Integer} and @tt{Rational}: addition, subtraction,
         multiplication, unary negation, and all four order comparisons.}
-  @item{@tt{List(?a)} and @tt{String}: append.}
-  @item{@tt{Function(?a, Boolean)} sets: membership, union, and intersection.}
-  @item{@tt{Function(?a, Function(?a, Boolean))} relations: union and
+  @item{@tt{List.of(?a)} and @tt{String}: append.}
+  @item{@tt{?a -> Boolean} sets: membership, union, and intersection.}
+  @item{@tt{?a -> ?a -> Boolean} relations: union and
         intersection.}
 )
 
@@ -276,14 +278,14 @@ it. Dispatch declarations create ordinary named families as needed, so no
 notation declaration is required:
 
 @verbatim{
-dispatch map(Function(?a, ?b), List(?a)) = list_map
+dispatch map(?a -> ?b, List.of(?a)) = list_map
 dispatch empty() = list_empty
 
-function mapped_empty(f :: Function(Nat, Nat)) :: List(Nat):
+function mapped_empty(f :: Nat -> Nat) :: List.of(Nat):
   map(f, empty())
 }
 
-The outer expected @tt{List(Nat)} result selects @tt{map}'s method; its selected
+The outer expected @tt{List.of(Nat)} result selects @tt{map}'s method; its selected
 argument signature then supplies the expected type that selects @tt{empty}.
 
 A bare implementation constant receives arguments in signature order. When
@@ -297,7 +299,7 @@ notation Membership (element in collection):
 
 dispatch Membership(
   element :: ?a,
-  collection :: Function(?a, Boolean)
+  collection :: ?a -> Boolean
 ):
   set_member(collection, element)
 
@@ -341,10 +343,10 @@ must follow its theorem immediately and contain one or more tactic forms.
 
 @rhombusblock(
   theorem app_nil_r:
-    forall (xs :: List(?a)): app(xs, Nil()) === xs
+    forall (xs :: List.of(?a)): app(xs, Nil()) === xs
 
   theorem app_assoc:
-    forall (xs :: List(?a), ys :: List(?a), zs :: List(?a)):
+    forall (xs :: List.of(?a), ys :: List.of(?a), zs :: List.of(?a)):
       app(app(xs, ys), zs) === app(xs, app(ys, zs))
   proof:
     induct(xs)
@@ -387,7 +389,7 @@ built-in groups @rhombus(propositional, ~datum) and
   disable_rules [app]
 
   theorem about_app_without_unfolding_it:
-    forall (xs :: List(?a)): app(xs, Nil()) === app(xs, Nil())
+    forall (xs :: List.of(?a)): app(xs, Nil()) === app(xs, Nil())
 
   enable_rules [app]
 )
@@ -464,14 +466,14 @@ The intended workflow requires no duplicated property:
 
 @rhombusblock(
   quickcheck rev_involutive(~samples: 500):
-    forall (xs :: List(Nat)): rev(rev(xs)) === xs
+    forall (xs :: List.of(Nat)): rev(rev(xs)) === xs
 )
 
 After it passes, change the declaration head and add a proof:
 
 @rhombusblock(
   theorem rev_involutive:
-    forall (xs :: List(Nat)): rev(rev(xs)) === xs
+    forall (xs :: List.of(Nat)): rev(rev(xs)) === xs
   proof:
     induct(xs)
 )

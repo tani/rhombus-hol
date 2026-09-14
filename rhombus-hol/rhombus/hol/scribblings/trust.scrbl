@@ -173,8 +173,8 @@ check found --- one column's subterm relation, the lexicographic product of
 several columns' when no single one shrinks everywhere (Ackermann's), or the
 measure's result type's pulled back along the measure. Several arguments are
 derived over their tuple; patterns may nest to any depth; the types the order
-compares in may be any instance of a datatype declared here, @tt{List(Nat)}
-as much as @tt{List(?a)}.
+compares in may be any instance of a datatype declared here, @tt{List.of(Nat)}
+as much as @tt{List.of(?a)}.
 
 @bold{An ordinary @rhombus(function, ~datum) never adds an axiom.} If the
 recursion has no order this version can build, the declaration is

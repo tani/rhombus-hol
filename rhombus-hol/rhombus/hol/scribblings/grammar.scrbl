@@ -6,14 +6,23 @@
 
 @verbatim{
 Type = Id                 a declared datatype with no parameters
-     | Id(Type, ...)      a declared datatype, applied
+     | Id.of(Type, ...)   a declared type constructor, applied
      | ?a                 a type variable
+     | Type -> Type       a function type (right associative)
+     | (Type)             explicit grouping
      | Boolean            the type of propositions
 }
 
 Type variables are written @rhombus(?a), @rhombus(?b) and so on. A function is
 implicitly polymorphic in every type variable it mentions; there is no
 @tt{forall} at the type level to write.
+
+Parameterized type declarations bind a constructor namespace: for example,
+@tt{type List.of(?a)} binds @tt{List.of}, and an instance is written
+@tt{List.of(Nat)}. The bare name @tt{List} is not a type, because its argument
+is missing. Function arrows associate to the right, so @tt{A -> B -> C} means
+@tt{A -> (B -> C)}; write @tt{(A -> B) -> C} when the domain is itself a
+function.
 
 @rhombus(Boolean) is spelled as Rhombus spells it. A function's annotations are
 erased on the way to the executable half, but the conditions of its
@@ -148,7 +157,7 @@ per clause covering every argument, which is how Rhombus's own multi-case
 @rhombus(fun) is written:
 
 @rhombusblock(
-  function app(xs :: List(?a), ys :: List(?a)) :: List(?a)
+  function app(xs :: List.of(?a), ys :: List.of(?a)) :: List.of(?a)
   | (Nil(), ys): ys
   | (Cons(x, rest), ys): Cons(x, app(rest, ys))
 )
@@ -245,7 +254,7 @@ syntax errors.
 A quantifier extends as far to the right as it can, so
 
 @rhombusblock(
-  forall (xs :: List(?a)): app(xs, Nil()) === xs and rev(xs) === rev(xs)
+  forall (xs :: List.of(?a)): app(xs, Nil()) === xs and rev(xs) === rev(xs)
 )
 
 quantifies over the whole conjunction.

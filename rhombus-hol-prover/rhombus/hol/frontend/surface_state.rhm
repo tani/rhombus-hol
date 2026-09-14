@@ -7,6 +7,8 @@
 import:
   rhombus/hol/htype open
   rhombus/hol/frontend/dispatch open
+  rhombus/hol/frontend/type/constructor open
+  rhombus/hol/frontend/type/registry open
 
 export:
   SurfaceState
@@ -14,11 +16,13 @@ export:
   merge_surface_states
 
 class SurfaceState(operators :: DispatchRegistry,
-                   constants :: Map.of(Symbol, HType))
+                   constants :: Map.of(Symbol, HType),
+                   type_constructors :: TypeConstructorRegistry)
 
 fun make_surface_state(families :: List.of(DispatchFamily),
                        methods :: List.of(DispatchMethod),
-                       constants :: List)
+                       constants :: List,
+                       type_constructors :: List.of(TypeConstructor))
      :: SurfaceState:
   let family_map:
     for values(out :~ Map = {}) (family in families):
@@ -28,7 +32,25 @@ fun make_surface_state(families :: List.of(DispatchFamily),
     for values(out :~ Map = {}) (entry in constants):
       let [name :: Symbol, ty :: HType] = entry :~ List
       out ++ {name: ty}
-  SurfaceState(DispatchRegistry(family_map, methods), constant_map)
+  let type_registry:
+    for values(out :~ TypeConstructorRegistry = empty_type_constructor_registry()) (
+          constructor in type_constructors):
+      add_type_constructor(out, constructor)
+  SurfaceState(DispatchRegistry(family_map, methods), constant_map,
+               type_registry)
+
+fun same_dispatch_method(left :: DispatchMethod,
+                         right :: DispatchMethod) :: Boolean:
+  left.family == right.family
+    && left.argument_types == right.argument_types
+    && left.result_type == right.result_type
+    && left.constant == right.constant
+    && left.argument_order == right.argument_order
+
+fun contains_dispatch_method(registry :: DispatchRegistry,
+                             method :: DispatchMethod) :: Boolean:
+  for values(found = #false) (existing in registry.methods):
+    found || same_dispatch_method(existing :~ DispatchMethod, method)
 
 fun merge_surface_states(imported :: SurfaceState,
                          current :: SurfaceState)
@@ -40,5 +62,11 @@ fun merge_surface_states(imported :: SurfaceState,
   let with_methods:
     for values(registry :~ DispatchRegistry = with_families) (
           method in current.operators.methods):
-      add_dispatch_method(registry, method :~ DispatchMethod)
-  SurfaceState(with_methods, imported.constants ++ current.constants)
+      (if contains_dispatch_method(registry, method :~ DispatchMethod)
+       | registry
+       | add_dispatch_method(registry, method :~ DispatchMethod))
+  SurfaceState(
+    with_methods,
+    imported.constants ++ current.constants,
+    merge_type_constructor_registries(imported.type_constructors,
+                                      current.type_constructors))

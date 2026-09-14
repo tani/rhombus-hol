@@ -19,7 +19,7 @@ its pattern.
 Descending on a single argument is the one-element case:
 
 @rhombusblock(
-  function app(xs :: List(?a), ys :: List(?a)) :: List(?a):
+  function app(xs :: List.of(?a), ys :: List.of(?a)) :: List.of(?a):
     match xs
     | Nil(): ys
     | Cons(x, rest): Cons(x, app(rest, ys))

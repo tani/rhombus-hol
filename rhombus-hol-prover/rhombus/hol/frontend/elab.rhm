@@ -27,14 +27,12 @@ import:
   rhombus/hol/logic/bool open
   rhombus/hol/frontend/tyunify open
   rhombus/hol/frontend/dispatch open
+  rhombus/hol/frontend/type/registry open
+  rhombus/hol/frontend/type/parse open
+  rhombus/hol/frontend/type/print open
   rhombus/hol/effect/core open
   rhombus/hol/effect/core as effect
   rhombus/hol/effect/syntax open
-
-export:
-  parse_type_decl
-  type_decl_shape
-  parse_open_type
 
 // `?` is already one shrubbery operator token. A type variable is therefore
 // parsed structurally as that operator followed by one identifier; no string
@@ -43,101 +41,6 @@ export:
 fun syntax_error(who :: Symbol, message :: String, at :: Syntax):
   error(~who: who, message, error.val(~label: "in", to_string(at)))
 
-// -- types -------------------------------------------------------------------
-//
-// A type variable is written `?a`. Shrubbery keeps `?` as one operator token
-// followed by the identifier `a`, which makes recognizing the prefix constant
-// time and leaves the identifier's source location intact.
-
-fun parse_type(stx :: Syntax, params :: List.of(Symbol)) :: HType:
-  match stx
-  | '? $(id :: Identifier)':
-      let n = Syntax.unwrap(id)
-      unless params.contains(n)
-      | syntax_error(#'type, "unbound type variable", stx)
-      mk_tyvar(n)
-  | 'Function($domain, $range)':
-      mk_fun(parse_type(domain, params), parse_type(range, params))
-  | '$(id :: Identifier)($arg, ...)':
-      mk_tyapp(Syntax.unwrap(id),
-               [parse_type(arg, params), ...])
-  | 'Boolean':
-      // Spelled as Rhombus spells it: a function's parameter annotations are
-      // erased on the way to the executable half, but its `if` conditions are
-      // not, so the two halves have to agree on what a Boolean is.
-      bool
-  | '$(id :: Identifier)':
-      mk_tyapp(Syntax.unwrap(id), [])
-  | ~else:
-      syntax_error(#'type, "not a type", stx)
-
-// -- datatype declarations ---------------------------------------------------
-
-fun parse_type_decl(stx :: Syntax) :: DatatypeSpec:
-  match stx
-  | 'type $(name :: Identifier)($param, ...)
-     | $ctor
-     | ...':
-      let params = [parse_param(param), ...]
-      DatatypeSpec(Syntax.unwrap(name), params,
-                   [parse_ctor(ctor, params), ...])
-  | 'type $(name :: Identifier)
-     | $ctor
-     | ...':
-      DatatypeSpec(Syntax.unwrap(name), [], [parse_ctor(ctor, []), ...])
-  | ~else:
-      syntax_error(#'type, "malformed datatype declaration", stx)
-
-fun parse_param(stx :: Syntax) :: Symbol:
-  match stx
-  | '? $(id :: Identifier)': Syntax.unwrap(id)
-  | ~else:
-      syntax_error(#'type,
-                   "a type parameter is written `?a`, not a plain name", stx)
-
-fun parse_ctor(stx :: Syntax, params :: List.of(Symbol)) :: Ctor:
-  match stx
-  | '$(name :: Identifier)($field, ...)':
-      Ctor(Syntax.unwrap(name), [parse_field(field, params), ...])
-  | '$(name :: Identifier)':
-      Ctor(Syntax.unwrap(name), [])
-  | ~else:
-      syntax_error(#'type, "malformed constructor", stx)
-
-fun parse_field(stx :: Syntax, params :: List.of(Symbol)) :: Field:
-  match stx
-  | '$(name :: Identifier) :: $ty ...':
-      Field(Syntax.unwrap(name), parse_type('$ty ...', params))
-  | ~else:
-      syntax_error(#'type,
-                   "a constructor field needs a name and a type", stx)
-
-// The identifiers a datatype declaration introduces, as syntax rather than as
-// symbols: `[name, [[ctor, [field, ...]], ...]]`.
-//
-// Emission needs the user's own identifiers, not reconstructed ones.  A name
-// built with `Syntax.make_id` would carry the macro's scopes, and then a
-// `Cons(...)` the user writes would not refer to the class we generated.
-fun type_decl_shape(stx :: Syntax) :: List:
-  fun ctor_shape(c :: Syntax) :: List:
-    match c
-    | '$(name :: Identifier)($field, ...)': [name, [field_name(field), ...]]
-    | '$(name :: Identifier)': [name, []]
-    | ~else: syntax_error(#'type, "malformed constructor", c)
-  fun field_name(f :: Syntax) :: Syntax:
-    match f
-    | '$(name :: Identifier) :: $_ ...': name
-    | ~else: syntax_error(#'type, "malformed constructor field", f)
-  match stx
-  | 'type $(name :: Identifier)($_, ...)
-     | $ctor
-     | ...':
-      [name, [ctor_shape(ctor), ...]]
-  | 'type $(name :: Identifier)
-     | $ctor
-     | ...':
-      [name, [ctor_shape(ctor), ...]]
-  | ~else: syntax_error(#'type, "malformed datatype declaration", stx)
 
 // ============================================================================
 // Function declarations
@@ -236,20 +139,6 @@ fun param_name(p :: Syntax) :: Syntax:
       syntax_error(#'function,
                    "a parameter needs a name and a type", p)
 
-fun collect_type_vars(stx :: Syntax) :: List.of(Symbol):
-  fun add(acc :: List.of(Symbol), more :: List.of(Symbol)) :: List.of(Symbol):
-    for values(out :~ List = acc) (n in more):
-      (if out.contains(n) | out | out ++ [n])
-  match stx
-  | '? $(id :: Identifier)': [Syntax.unwrap(id)]
-  | 'Function($domain, $range)':
-      add(collect_type_vars(domain), collect_type_vars(range))
-  | '$(id :: Identifier)($arg, ...)':
-      for values(acc :~ List = []) (a in [arg, ...]):
-        add(acc, collect_type_vars(a))
-  | ~else: []
-fun parse_open_type(stx :: Syntax) :: HType:
-  parse_type(stx, collect_type_vars(stx))
 
 
 fun fresh_wildcard(ty :: HType) :: FVar:
@@ -384,7 +273,8 @@ class ElabEnv(thy :: Theory,
               mode :: Symbol,
               self_name :: maybe(Symbol),
               self :: maybe(Term),
-              operators :: DispatchRegistry = standard_dispatch_registry()):
+              operators :: DispatchRegistry = standard_dispatch_registry(),
+              type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry()):
   property who :: Symbol: (if mode == #'prop | #'theorem | #'function)
 
   reader_effect
@@ -398,7 +288,7 @@ fun core_const_instance(env :: ElabEnv, name :: Symbol,
                  | t: t)
   // A constant's type variables are schematic. Freshen them before
   // unification so a surrounding theorem variable with the same printed name
-  // cannot fail the occurs check (for example, equality on `List(?a)`).
+  // cannot fail the occurs check (for example, equality on `List.of(?a)`).
   let renaming:
     for values(m :~ Map = {}) (v in type_vars(generic)):
       m ++ {v: mk_tyvar(Symbol.gen(to_string(v))) :~ HType}
@@ -609,9 +499,13 @@ fun elaborate_non_numerals_effect(args :: List.of(CoreExpr)) :: Computation:
                 let term :: Term <- elaborate_effect(first :~ CoreExpr)
                 loop(rest, terms ++ [term])
 
-fun dispatch_signature(method :: DispatchMethod) :: String:
-  String.join(method.argument_types.map(type_to_string), " * ")
-    ++ " -> " ++ type_to_string(method.result_type)
+fun dispatch_signature(method :: DispatchMethod,
+                       registry :: TypeConstructorRegistry) :: String:
+  String.join(
+    method.argument_types.map(
+      fun (type): type_to_surface_string(registry, type)),
+    " * ")
+    ++ " -> " ++ type_to_surface_string(registry, method.result_type)
     ++ " via " ++ to_string(method.constant)
 
 fun specialize_dispatch_term(term :: Term, expected :: HType) :: Term:
@@ -646,10 +540,11 @@ fun elaborate_numeral(env :: ElabEnv, value :: NonnegInt,
                       [nat_numeral(env, value, at)], at)
       numeral_apply(env, #'rational_from_integer, [integer], at)
   | ~else:
-      syntax_error(env.who,
-                   "a numeral has no representation at type "
-                     ++ type_to_string(expected),
-                   at)
+      syntax_error(
+        env.who,
+        "a numeral has no representation at type "
+          ++ type_to_surface_string(env.type_constructors, expected),
+        at)
 
 fun elaborate_dispatch_effect(family_name :: Symbol,
                               display_name :: String,
@@ -683,7 +578,7 @@ fun elaborate_dispatch_effect(family_name :: Symbol,
     when matches.length() == 0
     | let signatures = dispatch_candidates(env.operators, family_name).map(
                          fun (method :: DispatchMethod):
-                           dispatch_signature(method))
+                           dispatch_signature(method, env.type_constructors))
       syntax_error(
         env.who,
         "`" ++ display_name ++ "` has no applicable dispatch"
@@ -693,13 +588,14 @@ fun elaborate_dispatch_effect(family_name :: Symbol,
                   ++ String.join(signatures, "\n  ")),
         at)
     when matches.length() > 1
-    | let candidates = matches.map(
+    | let signatures = matches.map(
                          fun (resolution :: DispatchResolution):
-                           dispatch_signature(resolution.method))
+                           dispatch_signature(
+                             resolution.method, env.type_constructors))
       syntax_error(env.who,
                    "`" ++ display_name ++ "` has ambiguous dispatch"
                      ++ "\ncandidates:\n  "
-                     ++ String.join(candidates, "\n  "),
+                     ++ String.join(signatures, "\n  "),
                    at)
     let resolution :~ DispatchResolution = matches[0]
     let method = resolution.method
@@ -732,7 +628,9 @@ fun elaborate_binders_effect(binders :: List.of(CoreBinder), body :: CoreExpr,
   fun elaborate_in(env :: ElabEnv) :: Computation:
     let vars = for List (binder in binders):
                  let binder :~ CoreBinder = binder
-                 mk_var(binder.name, parse_type(binder.type_stx, env.tyvars))
+                 mk_var(binder.name,
+                        parse_type(binder.type_stx, env.tyvars,
+                                   env.type_constructors))
     let vars2 = for values(bindings :~ Map = env.vars) (variable in vars):
                   bindings ++ {(variable :~ FVar).name: variable :~ Term}
     fun close(inner :: Term) :: Computation:
@@ -888,19 +786,21 @@ fun run_checked_elaboration(env :: ElabEnv, expr :: CoreExpr,
 fun parse_type_effect(stx :: Syntax) :: Computation:
   effect:
     let env :: ElabEnv <- ElabEnv.ask()
-    return parse_type(stx, env.tyvars)
+    return parse_type(stx, env.tyvars, env.type_constructors)
 
 fun run_type_elaboration(env :: ElabEnv, stx :: Syntax) :: HType:
   match ElabEnv.handle(env, parse_type_effect(stx))
   | Pure(ty): ty :~ HType
   | ~else: error(~who: #'run_type_elaboration, "internal error: unhandled effect")
 
-fun parse_core_prop(thy :: Theory, tyvars :: List.of(Symbol),
-                    vars :: Map.of(Symbol, Term),
-                    expr :: CoreExpr,
-                    ~operators: operators :: DispatchRegistry = standard_dispatch_registry()) :: Term:
+fun parse_core_prop(
+      thy :: Theory, tyvars :: List.of(Symbol),
+      vars :: Map.of(Symbol, Term), expr :: CoreExpr,
+      ~operators: operators :: DispatchRegistry = standard_dispatch_registry(),
+      ~type_constructors: type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry())
+     :: Term:
   run_elaboration(ElabEnv(thy, tyvars, vars, #'prop, #false, #false,
-                          operators), expr)
+                          operators, type_constructors), expr)
 
 fun append_unique(base :: List.of(Symbol),
                   more :: List.of(Symbol)) :: List.of(Symbol):
@@ -936,10 +836,13 @@ fun leading_core_binder_names(expr :: CoreExpr) :: List.of(Symbol):
 
 fun elaborate_theorem_statement(
       thy :: Theory, expr :: CoreExpr,
-      ~operators: operators :: DispatchRegistry = standard_dispatch_registry())
+      ~operators: operators :: DispatchRegistry = standard_dispatch_registry(),
+      ~type_constructors: type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry())
      :: values(Term, List.of(Symbol)):
   let tyvars = core_type_vars(expr)
-  values(parse_core_prop(thy, tyvars, {}, expr, ~operators: operators),
+  values(parse_core_prop(thy, tyvars, {}, expr,
+                         ~operators: operators,
+                         ~type_constructors: type_constructors),
          leading_core_binder_names(expr))
 
 // -- CoreFunctionSpec elaboration -------------------------------------------
@@ -993,7 +896,8 @@ class ClauseEnv(thy :: Theory,
                 vars :: Map.of(Symbol, Term),
                 at :: Syntax,
                 result_type :: HType,
-                operators :: DispatchRegistry):
+                operators :: DispatchRegistry,
+                type_constructors :: TypeConstructorRegistry):
   reader_effect
 
 fun core_parse_body(body :: CoreFunBody) :: Computation:
@@ -1009,12 +913,14 @@ fun core_parse_body(body :: CoreFunBody) :: Computation:
         effect:
           let value = run_elaboration(
                         ElabEnv(env.thy, [], env.vars, #'function,
-                                env.self_name, env.self, env.operators),
+                                env.self_name, env.self, env.operators,
+                                env.type_constructors),
                         init)
           let vars2 = env.vars ++ {name: value}
           fun bind_let(_):
             ClauseEnv(env.thy, env.self_name, env.self, env.pats,
-                      vars2, env.at, env.result_type, env.operators)
+                      vars2, env.at, env.result_type, env.operators,
+                      env.type_constructors)
           let clauses :: List <- ClauseEnv.local(bind_let, core_parse_body(tail))
           return for List (clause in clauses):
                    let clause :~ DefClause = clause
@@ -1025,7 +931,8 @@ fun core_parse_body(body :: CoreFunBody) :: Computation:
     | CoreBodyExpr(expr, _):
         let elab_env = ElabEnv(
                          env.thy, [], env.vars, #'function,
-                         env.self_name, env.self, env.operators)
+                         env.self_name, env.self, env.operators,
+                         env.type_constructors)
         let value = (if requires_expected_type(expr, env.operators)
                      | run_checked_elaboration(
                          elab_env, expr, env.result_type)
@@ -1059,7 +966,8 @@ fun core_parse_clause(v :: FVar,
         fun bind_pattern(_):
           ClauseEnv(env.thy, env.self_name, env.self,
                     refine_pats(env.pats, v, pat :~ Term),
-                    vars2, env.at, env.result_type, env.operators)
+                    vars2, env.at, env.result_type, env.operators,
+                    env.type_constructors)
         ClauseEnv.local(bind_pattern, core_parse_body(clause.body))
     | ~else:
         syntax_error(#'function, "malformed match clause", clause.at)
@@ -1098,20 +1006,23 @@ fun core_clause_row(row :: CoreRow) :: Computation:
                  m ++ {(bv :~ FVar).name: bv :~ Term})
     fun bind_row(_):
       ClauseEnv(env.thy, env.self_name, env.self, pats2, vars2, env.at,
-                env.result_type, env.operators)
+                env.result_type, env.operators, env.type_constructors)
     ClauseEnv.local(bind_row, core_parse_body(row.body))
 
 fun elaborate_function_decl(
       thy :: Theory, spec :: CoreFunctionSpec,
-      ~operators: operators :: DispatchRegistry = standard_dispatch_registry())
+      ~operators: operators :: DispatchRegistry = standard_dispatch_registry(),
+      ~type_constructors: type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry())
      :: FunSpec:
   let tyvars = spec_type_vars(spec)
   let bindings:
-    for List (b in spec.params):
-      let b :~ CoreBinder = b
-      [b.name, parse_type(b.type_stx, tyvars)]
-  let arg_tys :~ List = bindings.map(fun (b :: List): b[1] :~ HType)
-  let result_ty = parse_type(spec.result_type, tyvars)
+    for List (binder in spec.params):
+      let binder :~ CoreBinder = binder
+      [binder.name,
+       parse_type(binder.type_stx, tyvars, type_constructors)]
+  let arg_tys :~ List = bindings.map(fun (binding :: List):
+                                      binding[1] :~ HType)
+  let result_ty = parse_type(spec.result_type, tyvars, type_constructors)
   let fty = for values(t :~ HType = result_ty) (a in arg_tys.reverse()):
               mk_fun(a, t)
   let self = mk_const(spec.name, fty)
@@ -1125,13 +1036,13 @@ fun elaborate_function_decl(
     | expr:
         let value = run_elaboration(
                       ElabEnv(thy, tyvars, env0, #'function, #false, #false,
-                              operators),
+                              operators, type_constructors),
                       expr :~ CoreExpr)
         list_mk_abs(pvars, value)
   let clause_env = ClauseEnv(
                      thy, spec.name, self,
                      pvars.map(fun (v :: FVar): v :~ Term),
-                     env0, spec.at, result_ty, operators)
+                     env0, spec.at, result_ty, operators, type_constructors)
   let clauses0 :~ List:
     match ClauseEnv.handle(clause_env, core_parse_body(spec.body))
     | Pure(clauses): clauses :~ List
@@ -1154,7 +1065,7 @@ fun elaborate_function_decl(
 
 fun sub_env(env :: ElabEnv, vars :: Map.of(Symbol, Term)) :: ElabEnv:
   ElabEnv(env.thy, env.tyvars, vars, env.mode, env.self_name, env.self,
-          env.operators)
+          env.operators, env.type_constructors)
 
 // ============================================================================
 // Tactics

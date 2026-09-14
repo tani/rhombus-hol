@@ -15,17 +15,17 @@ theorem is a claim that is proved while the module compiles.
 @rhombusblock(
   #,(@hash_lang()) #,(@rhombuslangname(rhombus/hol))
 
-  type List(?a)
+  type List.of(?a)
   | Nil()
-  | Cons(head :: ?a, tail :: List(?a))
+  | Cons(head :: ?a, tail :: List.of(?a))
 
-  function app(xs :: List(?a), ys :: List(?a)) :: List(?a):
+  function app(xs :: List.of(?a), ys :: List.of(?a)) :: List.of(?a):
     match xs
     | Nil(): ys
     | Cons(x, rest): Cons(x, app(rest, ys))
 
   theorem app_nil_r:
-    forall (xs :: List(?a)): app(xs, Nil()) === xs
+    forall (xs :: List.of(?a)): app(xs, Nil()) === xs
 )
 
 That module exports a working @rhombus(app) function, and it does not compile

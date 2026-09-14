@@ -39,6 +39,10 @@ import:
     rhombus/hol/frontend/driver open
     rhombus/hol/frontend/dispatch open
     rhombus/hol/frontend/surface_state open
+    rhombus/hol/frontend/type/constructor open
+    rhombus/hol/frontend/type/registry open
+    rhombus/hol/frontend/type/parse as type_parser
+    rhombus/hol/frontend/type/print open
     rhombus/hol/frontend/surface_core open
 export:
   module_block
@@ -63,7 +67,9 @@ meta:
   def surface_state_key = #'rhombus_hol_surface_state
   def initial_surface_context:
     let base = initial_state()
-    SurfaceContext(SurfaceState(base.operators, {}), base.ctx.thy, [])
+    SurfaceContext(
+      SurfaceState(base.operators, {}, base.type_constructors),
+      base.ctx.thy, [])
 
   fun state_on(stx :: Syntax) :: SurfaceContext:
     match rb.#{syntax-property}(stx, surface_state_key)
@@ -89,8 +95,9 @@ meta:
       let imported = Evaluator.instantiate(
                        path.add(ModulePath('self ! hol_theory')), #'theory)
       let imported :~ HolState = imported
-      SurfaceContext(SurfaceState(imported.operators, {}),
-                     imported.ctx.thy, [])
+      SurfaceContext(
+        SurfaceState(imported.operators, {}, imported.type_constructors),
+        imported.ctx.thy, [])
     if Evaluator.module_is_declared(surface_path, ~load: #true)
     | load_surface()
     | load_legacy_theory()
@@ -124,7 +131,8 @@ meta:
       SurfaceState(
         add_dispatch_family(
           context.surface.operators, DispatchFamily(name, arity)),
-        context.surface.constants),
+        context.surface.constants,
+        context.surface.type_constructors),
       context.fallback_theory,
       context.pending_imports)
 
@@ -172,11 +180,18 @@ meta:
     let registry_with_family = add_dispatch_family(
                                  ready.surface.operators,
                                  DispatchFamily(family_name, arity))
-    let argument_types = argument_type_stxs.map(elab.parse_open_type)
+    let argument_types = argument_type_stxs.map(
+                           fun (argument):
+                             type_parser.parse_open_type(
+                               argument,
+                               ready.surface.type_constructors))
     let result_type:
       match result_type_stx
       | #false: #false
-      | result_stx: elab.parse_open_type(result_stx :~ Syntax)
+      | result_stx:
+          type_parser.parse_open_type(
+            result_stx :~ Syntax,
+            ready.surface.type_constructors)
     let constant_type:
       match surface_const_type(ready, constant)
       | #false:
@@ -195,20 +210,25 @@ meta:
     SurfaceContext(
       SurfaceState(
         add_dispatch_method(registry_with_family, method),
-        ready.surface.constants),
+        ready.surface.constants,
+        ready.surface.type_constructors),
       ready.fallback_theory,
       ready.pending_imports)
 
   fun surface_add_function(context :: SurfaceContext, form :: Syntax)
        :: SurfaceContext:
+    let ready = force_surface_context(context)
     let [name, params, result_type, _, _] = elab.function_parts(form)
     let ps :~ List = params
-    let result = elab.parse_open_type(result_type :~ Syntax)
+    let result = type_parser.parse_open_type(
+                   result_type :~ Syntax,
+                   ready.surface.type_constructors)
     let domains = ps.map(
                     fun (param :: Syntax):
                       match param
                       | '$_ :: $ty ...':
-                          elab.parse_open_type('$ty ...')
+                          type_parser.parse_open_type(
+                            '$ty ...', ready.surface.type_constructors)
                       | ~else:
                           error(~who: #'function,
                                 "a parameter needs a type"))
@@ -216,22 +236,26 @@ meta:
                       mk_fun(domain :~ HType, ty)
     SurfaceContext(
       SurfaceState(
-        context.surface.operators,
-        context.surface.constants ++ {Syntax.unwrap(name): full_type}),
-      context.fallback_theory,
-      context.pending_imports)
+        ready.surface.operators,
+        ready.surface.constants ++ {Syntax.unwrap(name): full_type},
+        ready.surface.type_constructors),
+      ready.fallback_theory,
+      ready.pending_imports)
 
-  fun surface_add_type(context :: SurfaceContext, form :: Syntax)
+  fun surface_add_type(context :: SurfaceContext, spec :: DatatypeSpec)
        :: SurfaceContext:
-    let spec = elab.parse_type_decl(form)
+    let ready = force_surface_context(context)
     let additions:
-      for values(out :~ Map = context.surface.constants) (ctor in spec.ctors):
+      for values(out :~ Map = ready.surface.constants) (ctor in spec.ctors):
         let ctor :~ Ctor = ctor
         out ++ {ctor.name: ctor_type(spec, ctor)}
+    let type_constructors = add_declared_type_constructor(
+                              ready.surface.type_constructors,
+                              spec.name, spec.params)
     SurfaceContext(
-      SurfaceState(context.surface.operators, additions),
-      context.fallback_theory,
-      context.pending_imports)
+      SurfaceState(ready.surface.operators, additions, type_constructors),
+      ready.fallback_theory,
+      ready.pending_imports)
 
   fun surface_symbol_expr(name :: Symbol) :: Syntax:
     let text = Syntax.make(to_string(name), id_ctx)
@@ -263,6 +287,16 @@ meta:
 
   fun surface_constant_expr(name :: Symbol, ty :: HType) :: Syntax:
     '[$(surface_symbol_expr(name)), $(surface_type_expr(ty))]'
+  fun surface_type_constructor_expr(
+        constructor :: TypeConstructor) :: Syntax:
+    let arity = Syntax.make(constructor.arity, id_ctx)
+    let [parameter, ...] = constructor.parameter_names.map(
+                            fun (name): surface_symbol_expr(name))
+    'TypeConstructor(
+       $(surface_symbol_expr(constructor.surface_name)),
+       $(surface_symbol_expr(constructor.kernel_name)),
+       $arity,
+       [$parameter, ...])'
 
   fun emit_surface_state(context :: SurfaceContext) :: Syntax:
     let ready = force_surface_context(context).surface
@@ -277,16 +311,24 @@ meta:
       for values(out :~ List = []) ((name, ty) in ready.constants):
         out ++ [surface_constant_expr(name, ty :~ HType)]
     let [constant, ...] = constant_exprs
+    let type_constructor_exprs:
+      for values(out :~ List = []) (
+            (_, constructor) in ready.type_constructors.bindings):
+        out ++ [surface_type_constructor_expr(
+                  constructor :~ TypeConstructor)]
+    let [type_constructor, ...] = type_constructor_exprs
     'module hol_surface ~lang rhombus:
        import:
          rhombus/hol/htype open
          rhombus/hol/frontend/dispatch open
          rhombus/hol/frontend/surface_state open
+         rhombus/hol/frontend/type/constructor open
        export: state
        def state = make_surface_state(
                      [$family, ...],
                      [$method, ...],
-                     [$constant, ...])'
+                     [$constant, ...],
+                     [$type_constructor, ...])'
 
 
   // A term rebuilt with this module's context.
@@ -306,7 +348,7 @@ meta:
   // fields and imposes no field order on the variants.
   //
   // Field annotations are dropped -- that is the type erasure.  Rhombus has no
-  // parametric polymorphism, so `List(?a)` has nothing to erase *to*, and the
+  // parametric polymorphism, so `List.of(?a)` has nothing to erase *to*, and the
   // logical side has already checked the types.
   fun emit_type(name :: Syntax, ctors :: List) :: Syntax:
     let [variant, ...] = ctors.map(fun (c :: List): emit_variant(name, c))
@@ -420,15 +462,16 @@ meta:
           syntax_meta.error(
             "a quickcheck property starts with `forall (x :: T, ...):`",
             at)
+    let ready = force_surface_context(state)
     let parsed:
       for List (binder in (binders :~ List.of(CoreBinder))):
         let binder :~ CoreBinder = binder
-        let ty = elab.parse_open_type(binder.type_stx)
+        let ty = type_parser.parse_open_type(
+                   binder.type_stx, ready.surface.type_constructors)
         when type_vars(ty).length() > 0
         | syntax_meta.error(
             "a quickcheck input type must be concrete", binder.at)
         [source_id(binder.name, binder.at), binder.name, ty]
-    let ready = force_surface_context(state)
     let env:
       for values(out :~ Map = {}) (entry in parsed):
         let entry :~ List = entry
@@ -515,8 +558,8 @@ meta:
           || runtime_needs_expected(state, else_expr)
     | ~else: #false
 
-  fun runtime_numeral(value :: NonnegInt, expected :: HType,
-                      at :: Syntax) :: RuntimeExpr:
+  fun runtime_numeral(state :: SurfaceContext, value :: NonnegInt,
+                      expected :: HType, at :: Syntax) :: RuntimeExpr:
     let nat_ty = mk_tyapp(#'Nat, [])
     let int_ty = mk_tyapp(#'Integer, [])
     let rational_ty = mk_tyapp(#'Rational, [])
@@ -541,7 +584,8 @@ meta:
     | ~else:
         syntax_meta.error(
           "a numeral has no representation at type "
-            ++ type_to_string(expected),
+            ++ type_to_surface_string(
+                 state.surface.type_constructors, expected),
           at)
 
   fun runtime_dispatch_expr(state :: SurfaceContext,
@@ -657,7 +701,8 @@ meta:
         match expected
         | #false:
             syntax_meta.error("a numeral needs an expected numeric type", at)
-        | wanted: runtime_numeral(value, wanted :~ HType, at)
+        | wanted:
+            runtime_numeral(state, value, wanted :~ HType, at)
     | CoreOverloadRef(_, _, at):
         syntax_meta.error("an overloaded reference must be called", at)
     | CoreCall(func, args, at):
@@ -904,8 +949,12 @@ meta:
     parameterize { runtime_context: name }:
       let parameter_types = spec.params.map(
                               fun (binder :: CoreBinder):
-                                elab.parse_open_type(binder.type_stx))
-      let result_type = elab.parse_open_type(spec.result_type)
+                                type_parser.parse_open_type(
+                                  binder.type_stx,
+                                  state.surface.type_constructors))
+      let result_type = type_parser.parse_open_type(
+                          spec.result_type,
+                          state.surface.type_constructors)
       let env:
         for values(out :~ Map = {}) (binder in spec.params,
                                      ty in parameter_types):
@@ -1181,15 +1230,28 @@ meta:
             defer_surface_import(state, terms :~ List.of(Syntax))
         values([d.form], chain, n2, next_runtime)
     | #'type:
-        let [name, ctors, params, gen] = d.parts
+        let [name, ctors] = d.parts
         let at = head_term(d.form)
         let form = d.form
+        let ready = force_surface_context(runtime_state)
+        let spec = type_parser.parse_type_decl(
+                     form, ready.surface.type_constructors)
+        let self = mk_tyapp(
+                     spec.name,
+                     spec.params.map(fun (parameter :: Symbol):
+                                       mk_tyvar(parameter)))
+        let cs :~ List = ctors
+        let gen = for List (ctor in cs, semantic_ctor in spec.ctors):
+                    let types = (semantic_ctor :~ Ctor).fields.map(
+                                  fun (field :: Field): field.ty)
+                    [(ctor :~ List)[0], types,
+                     for any (type in types): type == self]
         values([emit_type(name, ctors :~ List),
-                emit_generator(name, params :~ List, gen :~ List),
-                emit_shrinker(name, gen :~ List)],
+                emit_generator(name, spec.params, gen),
+                emit_shrinker(name, gen)],
                ['(~type $cur $nxt [$form] [$at])'],
                n + 1,
-               surface_add_type(runtime_state, form))
+               surface_add_type(ready, spec))
     | #'function:
         let [name, params, body] = d.parts
         let at = head_term(d.form)

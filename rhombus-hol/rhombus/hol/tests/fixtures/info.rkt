@@ -58,4 +58,8 @@
     "theory_meta_import.rhm"
     "theory_out_of_order.rhm"
     "type_empty.rhm"
+    "type_bare_constructor.rhm"
+    "type_old_application.rhm"
+    "type_old_declaration.rhm"
+    "type_old_function.rhm"
     "type_negative.rhm"))

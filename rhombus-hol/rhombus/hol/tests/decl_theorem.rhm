@@ -11,6 +11,8 @@ import:
   rhombus/hol/printer open
   rhombus/hol/logic/bool open
   rhombus/hol/frontend/elab open
+  rhombus/hol/frontend/dispatch open
+  rhombus/hol/frontend/type/registry open
   rhombus/hol/frontend/surface_core open
   rhombus/hol/effect/core open
   "fixtures/theorem_ok.rhm" as t
@@ -57,6 +59,9 @@ def thy:
   let x = new_constant(x, #'succ, mk_fun(n, n))
   let x = new_constant(x, #'p, mk_fun(n, bool))
   new_constant(x, #'q, mk_fun(n, bool))
+def type_constructors:
+  add_declared_type_constructor(
+    standard_type_constructor_registry(), #'Nat, [])
 
 // Core elaboration and structural printing stay inverse at every precedence
 // boundary. Surface grouping itself is golden-tested by `surface_props.rhm`.
@@ -64,18 +69,30 @@ def at = 'core_expression'
 fun cref(n :: Symbol): CoreRef(n, at)
 fun ccall(n :: Symbol, args :: List.of(CoreExpr)):
   CoreCall(cref(n), args, at)
-fun rt(e :: CoreExpr) :~ String: show(parse_core_prop(thy, [], {}, e))
+fun rt(e :: CoreExpr) :~ String:
+  show(parse_core_prop(
+         thy, [], {}, e, ~type_constructors: type_constructors))
 
 def zero_c = cref(#'zero)
 def pz = ccall(#'p, [zero_c])
 def qz = ccall(#'q, [zero_c])
 check:
-  show(run_elaboration(ElabEnv(thy, [], {}, #'prop, #false, #false), pz))
+  show(run_elaboration(
+         ElabEnv(thy, [], {}, #'prop, #false, #false,
+                 standard_dispatch_registry(), type_constructors),
+         pz))
   ~is "p(zero)"
-check run_type_elaboration(ElabEnv(thy, [#'a], {}, #'prop, #false, #false), '? a') ~is mk_tyvar(#'a)
 check:
-  match ElabEnv.handle(ElabEnv(thy, [], {}, #'prop, #false, #false),
-                       check_core(pz, bool))
+  run_type_elaboration(
+    ElabEnv(thy, [#'a], {}, #'prop, #false, #false,
+            standard_dispatch_registry(), type_constructors),
+    '? a')
+  ~is mk_tyvar(#'a)
+check:
+  match ElabEnv.handle(
+          ElabEnv(thy, [], {}, #'prop, #false, #false,
+                  standard_dispatch_registry(), type_constructors),
+          check_core(pz, bool))
   | Pure(term): show(term :~ Term)
   ~is "p(zero)"
 fun binary(n :: Symbol, left :: CoreExpr, right :: CoreExpr):
@@ -136,7 +153,9 @@ check:
   let statement = CoreForall([binder(#'xs), binder(#'ys)],
                              binary(#'eq, cref(#'xs), cref(#'ys)),
                              at)
-  let (_, names) = elaborate_theorem_statement(thy, statement)
+  let (_, names) = elaborate_theorem_statement(
+                     thy, statement,
+                     ~type_constructors: type_constructors)
   names
   ~is [#'xs, #'ys]
 

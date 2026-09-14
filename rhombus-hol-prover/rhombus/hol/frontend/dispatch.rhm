@@ -1,37 +1,34 @@
 #lang rhombus/static
 
-// Static full-signature dispatch metadata. This layer is outside `Theory`:
-// families and methods guide elaboration, but the kernel receives only the
+// Static function-overload metadata. This layer is outside `Theory`: dispatch
+// declarations extend callable names, but the kernel receives only the
 // selected constant application.
 
 import:
   rhombus/hol/htype open
 
 export:
-  DispatchFamily
   DispatchMethod
   DispatchRegistry
   DispatchResolution
   standard_dispatch_registry
-  add_dispatch_family
+  ensure_dispatch_function
   add_dispatch_method
   valid_argument_order
   build_dispatch_method
-  dispatch_family
+  dispatch_arity
   dispatch_candidates
   normalize_type
   unify_type
   resolve_dispatch
 
-class DispatchFamily(name :: Symbol, arity :: NonnegInt)
-
-class DispatchMethod(family :: Symbol,
+class DispatchMethod(function :: Symbol,
                      argument_types :: List.of(HType),
                      result_type :: HType,
                      constant :: Symbol,
                      argument_order :: List.of(NonnegInt))
 
-class DispatchRegistry(families :: Map.of(Symbol, DispatchFamily),
+class DispatchRegistry(arities :: Map.of(Symbol, NonnegInt),
                        methods :: List.of(DispatchMethod))
 
 class DispatchResolution(method :: DispatchMethod,
@@ -40,43 +37,44 @@ class DispatchResolution(method :: DispatchMethod,
                          result_type :: HType)
 
 fun standard_dispatch_registry() :: DispatchRegistry:
-  let families = [
-    DispatchFamily(#'Add, 2),
-    DispatchFamily(#'Subtract, 2),
-    DispatchFamily(#'Negate, 1),
-    DispatchFamily(#'Multiply, 2),
-    DispatchFamily(#'Power, 2),
-    DispatchFamily(#'Less, 2),
-    DispatchFamily(#'LessEqual, 2),
-    DispatchFamily(#'Greater, 2),
-    DispatchFamily(#'GreaterEqual, 2),
-    DispatchFamily(#'Append, 2),
-    DispatchFamily(#'Membership, 2),
-    DispatchFamily(#'Union, 2),
-    DispatchFamily(#'Intersection, 2)
+  let functions = [
+    [#'add, 2],
+    [#'subtract, 2],
+    [#'negate, 1],
+    [#'multiply, 2],
+    [#'power, 2],
+    [#'less, 2],
+    [#'less_equal, 2],
+    [#'greater, 2],
+    [#'greater_equal, 2],
+    [#'append, 2],
+    [#'member, 2],
+    [#'union, 2],
+    [#'intersection, 2]
   ]
   DispatchRegistry(
-    for values(out :~ Map = {}) (family in families):
-      out ++ {(family :~ DispatchFamily).name: family},
+    for values(out :~ Map = {}) (entry in functions):
+      let [name :: Symbol, arity :: NonnegInt] = entry :~ List
+      out ++ {name: arity},
     [])
 
-fun dispatch_family(registry :: DispatchRegistry,
-                    name :: Symbol) :: maybe(DispatchFamily):
-  registry.families.get(name, #false)
+fun dispatch_arity(registry :: DispatchRegistry,
+                   name :: Symbol) :: maybe(NonnegInt):
+  registry.arities.get(name, #false)
 
-fun add_dispatch_family(registry :: DispatchRegistry,
-                        family :: DispatchFamily) :: DispatchRegistry:
-  match registry.families.get(family.name, #false)
+fun ensure_dispatch_function(registry :: DispatchRegistry,
+                             name :: Symbol,
+                             arity :: NonnegInt) :: DispatchRegistry:
+  match registry.arities.get(name, #false)
   | #false:
-      DispatchRegistry(registry.families ++ {family.name: family},
+      DispatchRegistry(registry.arities ++ {name: arity},
                        registry.methods)
   | existing:
-      unless (existing :~ DispatchFamily).arity == family.arity
+      unless (existing :~ NonnegInt) == arity
       | error(~who: #'dispatch,
-              "dispatch family conflicts with an existing arity",
-              error.val(~label: "family", family.name))
+              "dispatch function conflicts with an existing arity",
+              error.val(~label: "function", name))
       registry
-
 fun valid_argument_order(order :: List.of(NonnegInt), arity :: NonnegInt)
      :: Boolean:
   recur loop (remaining :~ List = order, seen :~ Set = Set()):
@@ -138,7 +136,7 @@ fun fresh_type(ty :: HType) :: HType:
   type_subst(renaming, ty)
 
 fun build_dispatch_method(
-      family :: Symbol,
+      function :: Symbol,
       argument_types :: List.of(HType),
       declared_result :: maybe(HType),
       constant :: Symbol,
@@ -188,7 +186,7 @@ fun build_dispatch_method(
                     ++ "implementation constant")
         | next: next :~ Map
   DispatchMethod(
-    family,
+    function,
     argument_types.map(
       fun (ty): normalize_type(final_theta, ty)),
     normalize_type(final_theta, raw_result),
@@ -227,32 +225,32 @@ fun methods_overlap(left :: DispatchMethod, right :: DispatchMethod)
 
 fun add_dispatch_method(registry :: DispatchRegistry,
                         method :: DispatchMethod) :: DispatchRegistry:
-  let family = dispatch_family(registry, method.family)
-  unless family
+  let arity = dispatch_arity(registry, method.function)
+  unless arity
   | error(~who: #'dispatch,
-          "dispatch family is not declared",
-          error.val(~label: "family", method.family))
-  let family :~ DispatchFamily = family
-  unless method.argument_types.length() == family.arity
+          "dispatch function is not declared",
+          error.val(~label: "function", method.function))
+  let arity :~ NonnegInt = arity
+  unless method.argument_types.length() == arity
   | error(~who: #'dispatch,
           "dispatch signature has the wrong arity")
-  unless valid_argument_order(method.argument_order, family.arity)
+  unless valid_argument_order(method.argument_order, arity)
   | error(~who: #'dispatch,
           "implementation argument order must be a permutation")
   for (existing in registry.methods):
     let existing :~ DispatchMethod = existing
-    when existing.family == method.family
+    when existing.function == method.function
            && methods_overlap(existing, method)
     | error(~who: #'dispatch,
             "dispatch method overlaps an existing method",
-            error.val(~label: "family", method.family))
-  DispatchRegistry(registry.families,
+            error.val(~label: "function", method.function))
+  DispatchRegistry(registry.arities,
                    registry.methods ++ [method])
 
 fun dispatch_candidates(registry :: DispatchRegistry,
-                        family :: Symbol) :: List.of(DispatchMethod):
+                        function :: Symbol) :: List.of(DispatchMethod):
   for values(out :~ List = []) (method in registry.methods):
-    (if (method :~ DispatchMethod).family == family
+    (if (method :~ DispatchMethod).function == function
      | out ++ [method]
      | out)
 
@@ -290,11 +288,11 @@ fun resolve_method(method :: DispatchMethod,
             | next: match_arguments(index + 1, next :~ Map)
 
 fun resolve_dispatch(registry :: DispatchRegistry,
-                     family :: Symbol,
+                     function :: Symbol,
                      argument_types :: List,
                      expected_result :: maybe(HType) = #false)
      :: List.of(DispatchResolution):
-  for values(out :~ List = []) (method in dispatch_candidates(registry, family)):
+  for values(out :~ List = []) (method in dispatch_candidates(registry, function)):
     match resolve_method(method, argument_types, expected_result)
     | #false: out
     | resolution: out ++ [resolution]

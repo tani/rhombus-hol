@@ -11,9 +11,9 @@ expander and must appear directly in the module body. They cannot appear
 inside a @rhombus(block), inside a @rhombus(fun) body, or in the expansion of
 a user-written macro.
 
-@rhombus(notation, ~datum) is a genuine bound macro. Notation definitions are
-expanded one declaration at a time, so a binding established by one is visible
-while the following logical declaration is enforested.
+@tt{operator.logic} and @tt{operator.reflect} are bound macros. Each
+operator definition is visible while the following logical declaration is
+enforested.
 
 @section{@rhombus(type, ~datum)}
 
@@ -116,62 +116,70 @@ run-time meaning.
 not descend structurally. It is checked only when no structural descent can be
 found, so a measure on a definition that already descends is not examined.
 
-@section(~tag: "surface-operators"){HOL expression notation}
+@section(~tag: "surface-operators"){Operators}
 
 @verbatim{
-notation (left op right):
-  [~runtime: expression]
-  [~logic: Constant(left, right)]
-  ~order: order
+operator left op right:
+  ordinary-operator-body
+
+operator.logic left op right:
+  operator-option
+  ...
+  FunctionName
+
+operator.reflect left op right:
+  operator-option
+  ...
+  FunctionName
 }
 
-The anonymous @rhombus(notation, ~datum) form assigns runtime meaning, logical
-meaning, or both to an infix spelling. At least one of @rhombus(~runtime) and
-@rhombus(~logic) is required. The declaration creates only the bindings
-requested by its clauses:
+@rhombuslangname(rhombus/hol) retains Rhombus's ordinary
+@rhombus(operator, ~datum) form and adds @tt{operator.logic} and
+@tt{operator.reflect}. All three use Rhombus operator case syntax: operands
+and the operator appear directly in the declaration head, and prefix, infix,
+postfix, immediate @tt{|} cases, and named groups of cases are accepted.
+
+An ordinary @rhombus(operator, ~datum) has exactly its Rhombus meaning. It
+creates an operator in the ordinary expression space and has no HOL binding.
+The two dotted forms create operators in the HOL expression space. Their
+operands must be identifiers; precedence options precede exactly one final
+function name.
 
 @itemlist(
-  @item{With only @rhombus(~runtime), the notation is an ordinary Rhombus
-        operator. It is not accepted in theorem statements or logical
-        @rhombus(function) bodies.}
-  @item{With only @rhombus(~logic), the notation is available in theorem
-        statements and @rhombus(~split) proof propositions. It has no
-        ordinary Rhombus binding and is rejected in a logical
-        @rhombus(function) body.}
-  @item{With both clauses, the notation is reflected: it is available as an
-        ordinary Rhombus operator, in logical @rhombus(function) bodies, and
-        in theorem statements.}
+  @item{@tt{operator.logic} creates only the HOL-space operator binding. Each
+        use lowers to a normal call of the final function name, with operands
+        in source order. It does not create an ordinary Rhombus operator.}
+  @item{@tt{operator.reflect} creates both the ordinary and HOL-space
+        bindings. Both readings call the same final function name, so the
+        declaration does not duplicate the operation's implementation.}
 )
 
-A logic-only notation can describe proof syntax that has no useful runtime
-reading:
+For example, a proof-only spelling needs only a HOL-space binding:
 
 @rhombusblock(
-  notation (x <&> y):
-    ~logic: conj(x, y)
+  operator.logic left <&> right:
     ~order: hol_conjunction
+    conj
 
   theorem conjunction_example:
     true <&> true
 )
 
-A reflected notation gives the same spelling separate runtime and HOL
-interpretations:
+A reflected spelling is also available to ordinary Rhombus code:
 
 @rhombusblock(
-  notation (x <+> y):
-    ~runtime: x && y
-    ~logic: conj(x, y)
+  operator.reflect left <&&> right:
     ~order: hol_conjunction
+    conj
 )
 
-The notation author is responsible for making the two clauses denote the same
-operation. The definition and proof machinery use the corresponding side.
-The @rhombus(~logic) clause must have the form
-@rhombus(Constant(left, right), ~datum), using the two declared operand names
-in order.
-
-The available named orders, strongest to weakest, are
+The precedence options are the ones accepted by Rhombus
+@rhombus(operator, ~datum), including @rhombus(~order),
+@rhombus(~stronger_than), @rhombus(~weaker_than),
+@rhombus(~same_as), @rhombus(~same_on_left_as),
+@rhombus(~same_on_right_as), and @rhombus(~associativity).
+A named order supplies its associativity; an explicit associativity is checked
+against that order. The available HOL orders, strongest to weakest, are
 @rhombus(hol_application), @rhombus(hol_power),
 @rhombus(hol_prefix_arithmetic), @rhombus(hol_multiplication),
 @rhombus(hol_addition), @rhombus(hol_append),
@@ -182,50 +190,66 @@ The available named orders, strongest to weakest, are
 @rhombus(hol_equivalence). See @secref("propositions") for the built-in
 operators at each order.
 
-Notation declarations take effect before the following declaration is
-enforested. Exporting and importing a reflected notation brings both its
+Multiple fixities of one operator can share options:
+
+@rhombusblock(
+  operator.logic <~>:
+    ~order: hol_conjunction
+  | <~> value:
+      neg
+  | left <~> right:
+      conj
+)
+
+Different spellings use separate, symmetric declarations:
+
+@rhombusblock(
+  operator.logic left <+> right:
+    ~order: hol_addition
+    custom_add
+
+  operator.logic a <++> b:
+    ~order: hol_addition
+    custom_add
+)
+
+Operator definitions take effect before the following declaration is
+enforested. Exporting and importing a reflected operator brings both its
 ordinary and HOL-space bindings:
 
 @rhombusblock(
-  export: both <+>
+  export: both <&&>
 )
 
-@subsection{Fixed and overloaded notation}
+@section{Function dispatch}
 
-The @rhombus(notation, ~datum) declaration has two expression forms. An
-anonymous pattern has one fixed interpretation:
-
-@verbatim{
-notation (x <&> y):
-  ~logic: conj(x, y)
-  ~order: hol_conjunction
-}
-
-A named pattern introduces notation for a static dispatch family:
+@rhombus(dispatch, ~datum) adds an overload clause to a callable function
+name. No separate registration form or operator-specific dispatch form is
+needed. A direct call and an operator targeting the same name are resolved
+identically.
 
 @verbatim{
-notation Add (left + right):
+dispatch add(Nat, Nat) = nat_add
+dispatch add(Integer, Integer) = int_add
+
+operator.logic left <+> right:
   ~order: hol_addition
-  ~associativity: ~left
+  add
 }
 
-The fixed form uses @rhombus(~logic) and @rhombus(~runtime) as described above.
-The named form only binds syntax. A separate @rhombus(dispatch, ~datum)
-declaration supplies type-directed meanings. Rhombus's ordinary
-@rhombus(operator) declaration remains runtime-only and is not assigned a
-logical meaning.
+Here @tt{x + y} lowers to the same named call as @tt{add(x, y)}. The ordinary
+elaborator sees the call, checks whether @tt{add} has overload clauses, and
+selects a clause from the argument types and, when available, the expected
+result type. A successful call becomes a direct call to the selected
+implementation constant. Kernel terms contain no dispatch node, and generated
+executable code performs no runtime type test.
 
-Both notation forms use a named @tt{hol_*} order; there is no numeric
-precedence hook or parser table to modify.
-
-@section{Static dispatch}
-
-The standard notation families are @tt{Add}, @tt{Subtract}, @tt{Negate},
-@tt{Multiply}, @tt{Power}, @tt{Less}, @tt{LessEqual}, @tt{Greater},
-@tt{GreaterEqual}, @tt{Append}, @tt{Membership}, @tt{Union}, and
-@tt{Intersection}. Importing a theory imports its dispatch registry together
-with its constants and theorems. Dispatch is also available for ordinary
-function names such as @tt{map}; it is not restricted to operator notation.
+The standard overloaded function names are @tt{add}, @tt{subtract},
+@tt{negate}, @tt{multiply}, @tt{power}, @tt{less}, @tt{less_equal},
+@tt{greater}, @tt{greater_equal}, @tt{append}, @tt{member}, @tt{union}, and
+@tt{intersection}. Importing a theory imports its overload registry together
+with its constants and theorems. User-defined names such as @tt{map} use the
+same mechanism.
 
 The standard method set is:
 
@@ -236,55 +260,27 @@ The standard method set is:
         multiplication, unary negation, and all four order comparisons.}
   @item{@tt{List.of(?a)} and @tt{String}: append.}
   @item{@tt{?a -> Boolean} sets: membership, union, and intersection.}
-  @item{@tt{?a -> ?a -> Boolean} relations: union and
-        intersection.}
+  @item{@tt{?a -> ?a -> Boolean} relations: union and intersection.}
 )
 
-A notation declaration and its methods use distinct declaration heads:
+Each clause declares the complete argument tuple. Every argument and the
+expected result type participate in first-order unification. Clauses for one
+function name must have one arity and must not overlap; an overlap is rejected
+when the clause is registered instead of creating an order-dependent winner.
+No applicable clause is a compile error listing the available candidates.
+
+The accepted forms are:
 
 @verbatim{
-notation CustomAdd (left <+> right):
-  syntax (left <++> right)
-  ~order: hol_addition
-  ~associativity: ~left
+dispatch function_name(ArgumentType, ...) = constant
+dispatch function_name(ArgumentType, ...) :: ResultType = constant
 
-dispatch CustomAdd(Nat, Nat) = nat_add
-}
-
-The notation pattern binds the first spelling in the HOL expression space.
-Additional @rhombus(syntax, ~datum) clauses bind aliases. Pattern shape
-determines arity and whether the spelling is infix or prefix. All aliases must
-use the same operand names and fixity. Infix declarations require
-@rhombus(~associativity); prefix declarations omit it:
-
-@verbatim{
-notation Negate (- value):
-  ~order: hol_prefix_arithmetic
-
-dispatch Negate(Integer) = int_negate
-}
-
-A method declares the complete argument tuple, not a distinguished carrier.
-Every argument and the expected result type participate in first-order
-unification. Method signatures for one family must not overlap; an overlap is
-rejected when the method is registered instead of creating an
-order-dependent winner. No applicable method is a compile error listing the
-available candidates. Generated executable functions and logical terms
-contain a direct call to the selected constant, not a runtime type test.
-
-The accepted method forms are:
-
-@verbatim{
-dispatch Family(ArgumentType, ...) = constant
-dispatch Family(ArgumentType, ...) :: ResultType = constant
-
-dispatch Family(name :: ArgumentType, ...):
-  constant(name, ...)
+dispatch function_name(name :: ArgumentType, ...) = constant(name, ...)
 }
 
 The result annotation is optional when the implementation constant determines
-it. Dispatch declarations create ordinary named families as needed, so no
-notation declaration is required:
+it. The first @rhombus(dispatch, ~datum) clause establishes a callable
+function name; no separate declaration is required:
 
 @verbatim{
 dispatch map(?a -> ?b, List.of(?a)) = list_map
@@ -294,35 +290,35 @@ function mapped_empty(f :: Nat -> Nat) :: List.of(Nat):
   map(f, empty())
 }
 
-The outer expected @tt{List.of(Nat)} result selects @tt{map}'s method; its selected
-argument signature then supplies the expected type that selects @tt{empty}.
+The outer expected @tt{List.of(Nat)} result selects @tt{map}'s clause; its
+selected argument signature then supplies the expected type that selects
+@tt{empty}.
 
 A bare implementation constant receives arguments in signature order. When
 its parameter order differs, name the signature arguments and write a call
 template:
 
 @verbatim{
-notation Membership (element in collection):
+operator.logic element in collection:
   ~order: hol_relation
-  ~associativity: ~none
+  member
 
-dispatch Membership(
+dispatch member(
   element :: ?a,
   collection :: ?a -> Boolean
-):
-  set_member(collection, element)
+) = set_member(collection, element)
 
-dispatch Greater(
+dispatch greater(
   left :: Integer,
   right :: Integer
-):
-  int_lt(right, left)
+) = int_lt(right, left)
 }
 
 Thus @tt{x in s} lowers to @tt{set_member(s, x)}, while @tt{x > y} lowers to
 @tt{int_lt(y, x)}. A template must use every dispatch argument exactly once.
-Zero-argument families may use the expected result type for contextual
-selection, so nested calls such as @tt{map(f, empty())} resolve statically.
+Zero-argument overloaded functions may use the expected result type for
+contextual selection, so nested calls such as @tt{map(f, empty())} resolve
+statically.
 
 @section{@rhombus(theorem, ~datum) and @rhombus(proof, ~datum)}
 

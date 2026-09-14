@@ -366,7 +366,6 @@ fun core_location(expr :: CoreExpr) :: Syntax:
   match expr
   | CoreRef(_, at): at
   | CoreCall(_, _, at): at
-  | CoreOverloadRef(_, _, at): at
   | CoreNumeral(_, at): at
   | CoreIf(_, _, _, at): at
   | CoreForall(_, _, at): at
@@ -462,19 +461,17 @@ fun core_apply_effect(func :: CoreExpr, args :: List.of(CoreExpr),
         elaborate_typed_arguments_effect(func :~ CoreRef, args)
     | ~else: elaborate_arguments_effect(args)
   match func
-  | CoreOverloadRef(family, display_name, _):
-      elaborate_dispatch_effect(family, display_name, args, at)
   | CoreRef(name, ref_at):
       effect:
         let env :: ElabEnv <- ElabEnv.ask()
         let overloaded = !env.vars.get(name, #false)
                            && name != env.self_name
                            && !const_type(env.thy, name)
-                           && dispatch_family(env.operators, name)
+                           && dispatch_arity(env.operators, name) != #false
         cond
         | overloaded:
             effect:
-              let term :: Term <- elaborate_dispatch_effect(name, to_string(name), args, at)
+              let term :: Term <- elaborate_dispatch_effect(name, args, at)
               return term
         | ~else:
             effect:
@@ -546,24 +543,23 @@ fun elaborate_numeral(env :: ElabEnv, value :: NonnegInt,
           ++ type_to_surface_string(env.type_constructors, expected),
         at)
 
-fun elaborate_dispatch_effect(family_name :: Symbol,
-                              display_name :: String,
+fun elaborate_dispatch_effect(function_name :: Symbol,
                               args :: List.of(CoreExpr),
                               at :: Syntax,
                               ~expected: expected_result :: maybe(HType) = #false)
      :: Computation:
   effect:
     let env :: ElabEnv <- ElabEnv.ask()
-    let family = dispatch_family(env.operators, family_name)
-    unless family
+    let arity = dispatch_arity(env.operators, function_name)
+    unless arity
     | syntax_error(env.who,
-                   "unknown dispatch family " ++ to_string(family_name),
+                   "unknown dispatch function " ++ to_string(function_name),
                    at)
-    let family :~ DispatchFamily = family
-    unless args.length() == family.arity
+    let arity :~ NonnegInt = arity
+    unless args.length() == arity
     | syntax_error(env.who,
-                   "`" ++ display_name ++ "` expects "
-                     ++ to_string(family.arity) ++ " arguments",
+                   "`" ++ to_string(function_name) ++ "` expects "
+                     ++ to_string(arity) ++ " arguments",
                    at)
     let known :: List <- elaborate_non_numerals_effect(args)
     let argument_types:
@@ -573,15 +569,15 @@ fun elaborate_dispatch_effect(family_name :: Symbol,
           | #false: #false
           | value: type_of(value :~ Term))
     let matches = resolve_dispatch(
-                    env.operators, family_name,
+                    env.operators, function_name,
                     argument_types, expected_result)
     when matches.length() == 0
-    | let signatures = dispatch_candidates(env.operators, family_name).map(
+    | let signatures = dispatch_candidates(env.operators, function_name).map(
                          fun (method :: DispatchMethod):
                            dispatch_signature(method, env.type_constructors))
       syntax_error(
         env.who,
-        "`" ++ display_name ++ "` has no applicable dispatch"
+        "`" ++ to_string(function_name) ++ "` has no applicable dispatch"
           ++ (if signatures.length() == 0
               | ""
               | "\navailable methods:\n  "
@@ -593,7 +589,7 @@ fun elaborate_dispatch_effect(family_name :: Symbol,
                            dispatch_signature(
                              resolution.method, env.type_constructors))
       syntax_error(env.who,
-                   "`" ++ display_name ++ "` has ambiguous dispatch"
+                   "`" ++ to_string(function_name) ++ "` has ambiguous dispatch"
                      ++ "\ncandidates:\n  "
                      ++ String.join(signatures, "\n  "),
                    at)
@@ -667,10 +663,6 @@ fun elaborate_effect(expr :: CoreExpr) :: Computation:
         let env :: ElabEnv <- ElabEnv.ask()
         return core_lookup(env, name, at)
   | CoreCall(func, args, at): core_apply_effect(func, args, at)
-  | CoreOverloadRef(_, _, at):
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        syntax_error(env.who, "an overloaded reference must be called", at)
   | CoreNumeral(_, at):
       effect:
         let env :: ElabEnv <- ElabEnv.ask()
@@ -703,14 +695,12 @@ fun requires_expected_type(
            all && requires_expected_type(arg :~ CoreExpr, operators)
   match expr
   | CoreNumeral(_, _): #true
-  | CoreCall(CoreOverloadRef(_, _, _), args, _): every_arg(args)
   | CoreCall(CoreRef(name, _), args, _):
       (if operators
-            && dispatch_family(operators :~ DispatchRegistry, name) != #false
+            && dispatch_arity(operators :~ DispatchRegistry, name) != #false
        | args.length() == 0 || any_arg(args)
        | any_arg(args))
   | CoreCall(_, args, _): any_arg(args)
-  | CoreOverloadRef(_, _, _): #true
   | CoreIf(_, then_expr, else_expr, _):
       requires_expected_type(then_expr, operators)
         || requires_expected_type(else_expr, operators)
@@ -722,20 +712,17 @@ fun check_core(expr :: CoreExpr, expected :: HType) :: Computation:
       effect:
         let env :: ElabEnv <- ElabEnv.ask()
         return elaborate_numeral(env, value, expected, at)
-  | CoreCall(CoreOverloadRef(family, display_name, _), args, at):
-      elaborate_dispatch_effect(
-        family, display_name, args, at, ~expected: expected)
   | CoreCall(CoreRef(name, ref_at), args, at):
       effect:
         let env :: ElabEnv <- ElabEnv.ask()
         let overloaded = !env.vars.get(name, #false)
                            && name != env.self_name
                            && !const_type(env.thy, name)
-                           && dispatch_family(env.operators, name)
+                           && dispatch_arity(env.operators, name) != #false
         cond
         | overloaded:
             effect:
-              let term :: Term <- elaborate_dispatch_effect(name, to_string(name), args, at, ~expected: expected)
+              let term :: Term <- elaborate_dispatch_effect(name, args, at, ~expected: expected)
               return term
         | ~else:
             effect:
@@ -745,10 +732,6 @@ fun check_core(expr :: CoreExpr, expected :: HType) :: Computation:
               | #false:
                   error(~who: #'check_core,
                         "expression has an unexpected type")
-  | CoreOverloadRef(_, _, at):
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        syntax_error(env.who, "an overloaded reference must be called", at)
   | CoreIf(condition_expr, then_expr, else_expr, at):
       effect:
         let condition :: Term <- infer_core(condition_expr)
@@ -821,7 +804,6 @@ fun core_type_vars(expr :: CoreExpr) :: List.of(Symbol):
                     append_unique(core_type_vars(t), core_type_vars(e)))
   | CoreForall(bs, body, _):
       append_unique(binders_vars(bs), core_type_vars(body))
-  | CoreOverloadRef(_, _, _): []
   | CoreNumeral(_, _): []
   | CoreExists(bs, body, _):
       append_unique(binders_vars(bs), core_type_vars(body))

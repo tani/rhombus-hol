@@ -10,7 +10,7 @@ import:
   rhombus/meta open
   "hol/frontend/module_block.rhm" as mb
   "hol/frontend/surface_space.rhm" open
-  "hol/frontend/surface_notation.rhm" open
+  "hol/frontend/surface_operator.rhm" as so
 
 module reader ~lang rhombus/reader:
   ~lang: "hol.rkt"
@@ -19,8 +19,10 @@ export:
   all_from(rhombus):
     except:
       #%module_block
+      operator
   rename:
     mb.module_block as #%module_block
+    so.hol_operator as operator
   hol_expr
   hol_equivalence
   hol_implication
@@ -37,7 +39,6 @@ export:
   hol_prefix_arithmetic
   hol_power
   hol_application
-  notation
   only_space hol_expr:
     names:
       #%literal

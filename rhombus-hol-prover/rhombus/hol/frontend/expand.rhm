@@ -33,7 +33,7 @@ class Decl(kind :: Symbol,
 def declaration_heads :: List.of(Symbol) = [#'type, #'function,
                                             #'axiomatic_function,
                                             #'theorem, #'proof,
-                                            #'notation, #'dispatch,
+                                            #'dispatch,
                                             #'disable_rules, #'enable_rules,
                                             #'import]
 
@@ -94,8 +94,6 @@ fun plan_one(form :: Syntax) :: Decl:
       // its equations, and `function` is not.  See `driver.rhm`.
       let [name, params, body] = elab.function_decl_shape(form)
       Decl(#'axiomatic_function, form, [name, params, body])
-  | #'notation:
-      notation_decl(form)
   | #'dispatch:
       dispatch_decl(form)
   | #'proof:
@@ -116,86 +114,6 @@ fun rule_control(kind :: Symbol, form :: Syntax) :: Decl:
   | ~else:
       syntax_error_here(kind, "expected a bracketed list of rule names", form)
 
-fun overloaded_notation_pattern(shape :: Syntax) :: List:
-  match shape
-  | '($(left :: Identifier) $(op :: Operator) $(right :: Identifier))':
-      [shape,
-       [Syntax.unwrap(left), Syntax.unwrap(right)],
-       to_string(Syntax.unwrap(op)),
-       #'infix]
-  | '($(op :: Operator) $(operand :: Identifier))':
-      [shape,
-       [Syntax.unwrap(operand)],
-       to_string(Syntax.unwrap(op)),
-       #'prefix]
-  | ~else:
-      syntax_error_here(
-        #'notation,
-        "expected `(left operator right)` or `(operator value)`",
-        shape)
-
-fun overloaded_notation_decl(name :: Syntax, shape :: Syntax,
-                             clauses :: List.of(Syntax),
-                             form :: Syntax) :: Decl:
-  let first = overloaded_notation_pattern(shape)
-  let (syntaxes, order, associativity):
-    for values(syntaxes :~ List = [first],
-               order = #false,
-               associativity = #false) (clause in clauses):
-      match clause
-      | 'syntax $alias':
-          when order || associativity
-          | syntax_error_here(
-              #'notation,
-              "`syntax` clauses must precede notation options",
-              clause)
-          values(syntaxes ++ [overloaded_notation_pattern(alias)],
-                 order, associativity)
-      | '~order: $(value :: Identifier)':
-          when order
-          | syntax_error_here(#'notation, "duplicate `~order` option", clause)
-          values(syntaxes, value, associativity)
-      | '~associativity: ~left':
-          when associativity
-          | syntax_error_here(
-              #'notation, "duplicate `~associativity` option", clause)
-          values(syntaxes, order, #'left)
-      | '~associativity: ~right':
-          when associativity
-          | syntax_error_here(
-              #'notation, "duplicate `~associativity` option", clause)
-          values(syntaxes, order, #'right)
-      | '~associativity: ~none':
-          when associativity
-          | syntax_error_here(
-              #'notation, "duplicate `~associativity` option", clause)
-          values(syntaxes, order, #'none)
-      | '~associativity: $_':
-          syntax_error_here(
-            #'notation,
-            "`~associativity` must be `~left`, `~right`, or `~none`",
-            clause)
-      | ~else:
-          syntax_error_here(#'notation, "unknown notation declaration clause",
-                            clause)
-  let first :~ List = first
-  let operand_names :~ List.of(Symbol) = first[1]
-  let fixity :~ Symbol = first[3]
-  for (syntax_spec in syntaxes):
-    let syntax_spec :~ List = syntax_spec
-    unless syntax_spec[1] == operand_names && syntax_spec[3] == fixity
-    | syntax_error_here(
-        #'notation,
-        "all syntax patterns must use the same operands and fixity",
-        form)
-  when fixity == #'infix && !associativity
-  | syntax_error_here(
-      #'notation, "an infix notation needs a `~associativity` option", form)
-  unless order
-  | syntax_error_here(#'notation, "a notation needs a `~order` option", form)
-  let assoc = (if associativity | associativity | #'none)
-  Decl(#'dispatch_family, form,
-       [name, syntaxes, order, assoc, operand_names, first[2]])
 
 fun dispatch_argument(arg :: Syntax, named :: Boolean,
                       form :: Syntax) :: List:
@@ -204,7 +122,7 @@ fun dispatch_argument(arg :: Syntax, named :: Boolean,
       unless named
       | syntax_error_here(
           #'dispatch,
-          "the `=` form takes types without argument names",
+          "a bare implementation constant takes types without argument names",
           form)
       [name, '$ty ...']
   | ~else:
@@ -215,14 +133,14 @@ fun dispatch_argument(arg :: Syntax, named :: Boolean,
           arg)
       [#false, arg]
 
-fun dispatch_parts(family :: Syntax, args :: List.of(Syntax),
+fun dispatch_parts(function_name :: Syntax, args :: List.of(Syntax),
                    result_type, constant :: Syntax,
                    template_arguments, named :: Boolean,
                    form :: Syntax) :: Decl:
   let parsed = args.map(
                  fun (arg): dispatch_argument(arg, named, form))
   Decl(#'dispatch_method, form,
-       [family,
+       [function_name,
         parsed.map(fun (part): (part :~ List)[0]),
         parsed.map(fun (part): (part :~ List)[1]),
         result_type,
@@ -231,44 +149,30 @@ fun dispatch_parts(family :: Syntax, args :: List.of(Syntax),
 
 fun dispatch_decl(form :: Syntax) :: Decl:
   match form
-  | 'dispatch $(family :: Identifier)($arg, ...)
+  | 'dispatch $(function_name :: Identifier)($arg, ...)
+       :: $result_type ... = $(constant :: Identifier)($(template :: Identifier), ...)':
+      dispatch_parts(
+        function_name, [arg, ...], '$result_type ...', constant,
+        [Syntax.unwrap(template), ...], #true, form)
+  | 'dispatch $(function_name :: Identifier)($arg, ...)
+       = $(constant :: Identifier)($(template :: Identifier), ...)':
+      dispatch_parts(
+        function_name, [arg, ...], #false, constant,
+        [Syntax.unwrap(template), ...], #true, form)
+  | 'dispatch $(function_name :: Identifier)($arg, ...)
        :: $result_type ... = $(constant :: Identifier)':
-      dispatch_parts(family, [arg, ...], '$result_type ...',
+      dispatch_parts(function_name, [arg, ...], '$result_type ...',
                      constant, #false, #false, form)
-  | 'dispatch $(family :: Identifier)($arg, ...)
+  | 'dispatch $(function_name :: Identifier)($arg, ...)
        = $(constant :: Identifier)':
-      dispatch_parts(family, [arg, ...], #false,
+      dispatch_parts(function_name, [arg, ...], #false,
                      constant, #false, #false, form)
-  | 'dispatch $(family :: Identifier)($arg, ...)
-       :: $result_type ...:
-       $(constant :: Identifier)($(template :: Identifier), ...)':
-      dispatch_parts(
-        family, [arg, ...], '$result_type ...', constant,
-        [Syntax.unwrap(template), ...], #true, form)
-  | 'dispatch $(family :: Identifier)($arg, ...):
-       $(constant :: Identifier)($(template :: Identifier), ...)':
-      dispatch_parts(
-        family, [arg, ...], #false, constant,
-        [Syntax.unwrap(template), ...], #true, form)
   | ~else:
       syntax_error_here(
         #'dispatch,
-        "expected `dispatch Name(Type, ...) = constant` or a named "
-          ++ "signature with an implementation template",
+        "expected `dispatch function(Type, ...) = implementation` or "
+          ++ "`dispatch function(arg :: Type, ...) = implementation(arg, ...)`",
         form)
-
-fun notation_decl(form :: Syntax) :: Decl:
-  match form
-  | 'notation $(name :: Identifier) $shape: $clause; ...':
-      overloaded_notation_decl(name, shape, [clause, ...], form)
-  | 'notation ($_ ...): $clause; ...':
-      Decl(#'other, form, [])
-  | ~else:
-      syntax_error_here(
-        #'notation,
-        "expected `notation (pattern):` or `notation Name (pattern):`",
-        form)
-
 
 fun syntax_error_here(who :: Symbol, message :: String, at :: Syntax):
   error(~who: who, message, error.val(~label: "in", to_string(at)))

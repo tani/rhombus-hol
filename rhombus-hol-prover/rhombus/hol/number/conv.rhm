@@ -28,6 +28,7 @@ import:
   rhombus/hol/logic/bool open
   rhombus/hol/logic/drule open
   rhombus/hol/logic/conv open
+  rhombus/hol/prover/context open
   rhombus/hol/number/literal open
   rhombus/hol/number/nat open
 
@@ -36,6 +37,7 @@ export:
   nat_add_conv
   nat_eq_conv
   nat_literal_conv
+  numeral_conv
 
 // `|- succ(a) === <a+1>` for a literal `a`.
 //
@@ -133,7 +135,7 @@ fun nat_eq_conv(arith :: NatArith, thy :: Theory,
   match dest_eq(t)
   | #false: #false
   | [l, r]:
-      match [dest_numeral(shape, l), dest_numeral(shape, r)]
+      match [canonical_numeral(shape, l), canonical_numeral(shape, r)]
       | [lv :: NonnegInt, rv :: NonnegInt]:
           cond
           | l == r: EQT_INTRO(thy, REFL(thy, l))
@@ -192,17 +194,163 @@ fun flip_disequality(thy :: Theory, th :: Thm,
                         SYM(thy, sym_iff))
   EQ_MP(negated, th)
 
+// `|- b0(x) === <canonical>` given `|- x === s`: doubling the chain is one
+// congruence step, except that doubling zero is zero, which the chain must
+// not spell as `b0(zero())`.
+fun double_of(arith :: NatArith, thy :: Theory, inner :: Thm) :: Thm:
+  let doubled = AP_TERM(thy, arith.shape.bit0_term, inner)
+  (if rhs_of(inner) == arith.shape.zero_term
+   | TRANS(doubled, arith.b0_zero)
+   | doubled)
+
+// `|- mul(a, b) === <a*b>` for literals `a` and `b`, by recursion on `a`'s
+// digits: an even `a` doubles the product, an odd one doubles it and adds `b`.
+fun nat_mul_conv(arith :: NatArith, thy :: Theory,
+                 t :: Term) :: maybe(Thm):
+  match arith.mul
+  | #false: #false
+  | mul :: NatMul:
+      match dest_binary(mul.mul_term, t)
+      | #false: #false
+      | [a, b]: mul_of(arith, mul, thy, a, b)
+
+fun mul_of(arith :: NatArith, mul :: NatMul, thy :: Theory,
+           a :: Term, b :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  cond
+  | a == shape.zero_term: SPEC(thy, b, mul.zero_left)
+  | b == shape.zero_term: SPEC(thy, a, mul.zero_right)
+  | ~else:
+      match a
+      | Comb(Const(digit, _), ai) when digit == bit0_name
+                                         || digit == bit1_name:
+          match mul_of(arith, mul, thy, ai :~ Term, b)
+          | #false: #false
+          | inner :: Thm:
+              let law = (if digit == bit0_name | mul.at_b0 | mul.at_b1)
+              let instance = SPEC(thy, b, SPEC(thy, ai :~ Term, law))
+              let doubled = double_of(arith, thy, inner)
+              cond
+              | digit == bit0_name: TRANS(instance, doubled)
+              | ~else:
+                  // The odd case still owes one `b +`, written on the left,
+                  // which is the shape `at_b1` states.
+                  match add_of(arith, thy, b, rhs_of(doubled))
+                  | #false: #false
+                  | total :: Thm:
+                      let rebuilt = AP_TERM(thy,
+                                            mk_comb(arith.add_term, b),
+                                            doubled)
+                      TRANS(instance, TRANS(rebuilt, total))
+      | ~else: #false
+
+// `|- le(a, b) <=> true` or `<=> false` for literals `a` and `b`.
+//
+// Which it is comes from the difference, the same way disequality does: `a`
+// is at most `a + d` for any `d`, and `b + succ d` is never at most `b`.
+fun nat_le_conv(arith :: NatArith, thy :: Theory,
+                t :: Term) :: maybe(Thm):
+  match arith.order
+  | #false: #false
+  | order :: NatOrder:
+      let shape = arith.shape
+      match dest_binary(order.le_term, t)
+      | #false: #false
+      | [l, r]:
+          match [canonical_numeral(shape, l), canonical_numeral(shape, r)]
+          | [lv :: NonnegInt, rv :: NonnegInt]:
+              cond
+              | lv <= rv:
+                  // `le(l, l + <r-l>)`, with the sum rewritten to `r`.
+                  let gap = encode_numeral(shape, rv - lv)
+                  match add_of(arith, thy, l, gap)
+                  | #false: #false
+                  | summed :: Thm:
+                      let fact = SPEC(thy, gap, SPEC(thy, l, order.le_add))
+                      EQT_INTRO(thy,
+                                EQ_MP(AP_TERM(thy, mk_comb(order.le_term, l),
+                                              summed),
+                                      fact))
+              | ~else:
+                  // `not le(r + succ <l-r-1>, r)`, with the sum rewritten
+                  // to `l`.
+                  let gap = encode_numeral(shape, lv - rv - 1)
+                  match succ_of(arith, thy, gap)
+                  | #false: #false
+                  | bumped :: Thm:
+                      match add_of(arith, thy, r, rhs_of(bumped))
+                      | #false: #false
+                      | summed :: Thm:
+                          let sum_eq = TRANS(
+                                         AP_TERM(thy,
+                                                 mk_comb(arith.add_term, r),
+                                                 bumped),
+                                         summed)
+                          let fact = SPEC(thy, gap,
+                                          SPEC(thy, r, order.not_le_add_succ))
+                          let inner = AP_THM(thy,
+                                             AP_TERM(thy, order.le_term,
+                                                     sum_eq),
+                                             r)
+                          let negated = AP_TERM(thy,
+                                                mk_const(#'neg,
+                                                         mk_fun(bool, bool)),
+                                                inner)
+                          EQF_INTRO(thy, EQ_MP(negated, fact))
+          | ~else: #false
+
 // The one conversion the simplifier asks for: whichever of the above applies
 // to this term, or `#false`.
 fun nat_literal_conv(arith :: NatArith, thy :: Theory,
                      t :: Term) :: maybe(Thm):
   let shape = arith.shape
-  fun literal(x :: Term) :: Boolean: dest_numeral(shape, x) != #false
+  fun literal(x :: Term) :: Boolean:
+    canonical_numeral(shape, x) != #false
   match t
-  | Comb(Comb(f, x), y) when f == arith.add_term:
-      (if literal(x :~ Term) && literal(y :~ Term)
-       | nat_add_conv(arith, thy, t)
-       | #false)
+  | Comb(Comb(f, x), y) when literal(x :~ Term) && literal(y :~ Term):
+      cond
+      | f == arith.add_term: nat_add_conv(arith, thy, t)
+      | is_mul(arith, f :~ Term): nat_mul_conv(arith, thy, t)
+      | is_le(arith, f :~ Term): nat_le_conv(arith, thy, t)
+      | ~else: nat_eq_conv(arith, thy, t)
   | Comb(Const(s, _), x) when s == shape.succ_name && literal(x :~ Term):
       nat_succ_conv(arith, thy, t)
   | ~else: nat_eq_conv(arith, thy, t)
+
+fun is_mul(arith :: NatArith, f :: Term) :: Boolean:
+  match arith.mul
+  | #false: #false
+  | mul :: NatMul: f == mul.mul_term
+
+fun is_le(arith :: NatArith, f :: Term) :: Boolean:
+  match arith.order
+  | #false: #false
+  | order :: NatOrder: f == order.le_term
+
+// What the driver installs in the `Context` as its numeral capability, and
+// what the simplifier calls on every subterm it is about to rewrite.
+//
+// The derivation behind `nat_arith` costs a few seconds, so it must not
+// happen in a module that never computes with a literal: the syntactic
+// pre-check below is what keeps it from being paid for. Only a term that
+// already mentions a digit constant can be decided here, since `zero()` and
+// `succ` alone are what the rewriter has always handled by itself.
+fun numeral_conv(ctx :: Context, thy :: Theory, t :: Term) :: maybe(Thm):
+  cond
+  | !mentions_digit(t): #false
+  | ~else:
+      match nat_arith(ctx)
+      | #false: #false
+      | arith :: NatArith: nat_literal_conv(arith, thy, t)
+
+// A digit constant in an immediate argument. Cheap, and true exactly of the
+// terms the conversions can do anything with.
+fun mentions_digit(t :: Term) :: Boolean:
+  fun digit_headed(x :: Term) :: Boolean:
+    match x
+    | Comb(Const(d, _), _): d == bit0_name || d == bit1_name
+    | ~else: #false
+  match t
+  | Comb(Comb(_, x), y): digit_headed(x :~ Term) || digit_headed(y :~ Term)
+  | Comb(_, x): digit_headed(x :~ Term)
+  | ~else: #false

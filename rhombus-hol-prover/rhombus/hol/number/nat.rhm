@@ -42,7 +42,28 @@ import:
 
 export:
   NatArith
+  NatMul
+  NatOrder
   nat_arith
+
+// Multiplication's own equations, at the module's multiplication constant.
+//
+//   `zero_left`  `|- forall n. mul(zero(), n) === zero()`
+//   `zero_right` `|- forall n. mul(n, zero()) === zero()`
+//   `at_b0`      `|- forall m n. mul(b0 m, n) === b0 (mul(m, n))`
+//   `at_b1`      `|- forall m n. mul(b1 m, n) === add(b0 (mul(m, n)), n)`
+class NatMul(mul_term :: Term,
+             zero_left :: Thm, zero_right :: Thm,
+             at_b0 :: Thm, at_b1 :: Thm)
+
+// What decides a comparison between two literals. Both facts are about
+// addition, not about the recursion `le` is defined by: `a <= a + d` always,
+// and `a + succ d <= a` never, and every pair of literals is of one of those
+// two shapes.
+//
+//   `le_add`           `|- forall a d. le(a, add(a, d))`
+//   `not_le_add_succ`  `|- forall a d. not le(add(a, succ d), a)`
+class NatOrder(le_term :: Term, le_add :: Thm, not_le_add_succ :: Thm)
 
 // The derived equations, at the module's own addition constant.
 //
@@ -55,13 +76,17 @@ export:
 //   `suc_zero`    `|- succ(zero()) === b1 (zero())`
 //   `suc_b0`      `|- forall n. succ(b0 n) === b1 n`
 //   `suc_b1`      `|- forall n. succ(b1 n) === b0 (succ n)`
+//   `b0_zero`     `|- b0 (zero()) === zero()`
 //   `ne_add_succ` `|- forall a d. not (a === add(a, succ d))`
 class NatArith(shape :: NumeralShape,
                add_term :: Term,
                zero_left :: Thm, zero_right :: Thm,
                b0b0 :: Thm, b0b1 :: Thm, b1b0 :: Thm, b1b1 :: Thm,
                suc_zero :: Thm, suc_b0 :: Thm, suc_b1 :: Thm,
-               ne_add_succ :: Thm)
+               b0_zero :: Thm,
+               ne_add_succ :: Thm,
+               mul :: maybe(NatMul),
+               order :: maybe(NatOrder))
 
 // One derivation per module, keyed by the digit definition the driver
 // installed -- the one value every context descending from that installation
@@ -69,12 +94,23 @@ class NatArith(shape :: NumeralShape,
 // actually meets arithmetic on literals rather than at every declaration.
 def derivations = WeakMutableMap.by(===)()
 
+// Each derived equation is a short induction over one variable; a budget this
+// size is several times what any of them needs, and small enough that a
+// module whose addition the prover cannot handle finds out quickly.
+def derivation_steps :: NonnegInt = 40000
+
 fun nat_arith(ctx :: Context) :: maybe(NatArith):
   match definition_of(ctx.thy, bit0_name)
   | #false: #false
   | key :: Thm:
       match derivations.maybe[key]
       | #false:
+          // The derivation proves its equations with the ordinary prover,
+          // whose simplifier asks this same question about every subterm it
+          // meets. Publishing "no arithmetic yet" before starting is what
+          // stops that from being infinite: the proofs below run with the
+          // plain rewriter, which is all they need.
+          derivations[key] := Box(#false)
           let derived = derive_nat_arith(ctx)
           derivations[key] := Box(derived)
           derived
@@ -126,20 +162,32 @@ fun derive_with(ctx :: Context, shape :: NumeralShape,
   fun b1(x :: Term) :: Term: mk_comb(shape.bit1_term, x)
   fun suc(x :: Term) :: Term: mk_comb(shape.succ_term, x)
   // A step returns `#false` rather than raising, so a module whose addition
-  // the prover cannot handle keeps working without numeral arithmetic.
+  // the prover cannot handle keeps working without numeral arithmetic. The
+  // budget is deliberately small: each of these is a short induction, and a
+  // derivation that is going to fail should fail in a moment rather than
+  // spend a full proof's allowance discovering it.
   fun attempt(statement :: Term, names :: List.of(Symbol),
               induct :: maybe(Symbol),
               using :: List.of(RuleBinding)) :: maybe(Thm):
-    let (proved, _) = prove(ctx, statement, ~names: names, ~induct: induct,
-                            ~scope: RuleScope(using, [], Set()))
-    proved
+    try:
+      let (proved, _) = prove(ctx, statement, ~names: names, ~induct: induct,
+                              ~scope: RuleScope(using, [], Set()),
+                              ~limits: SearchLimits(derivation_steps))
+      proved
+      ~catch _ :: Exn.Fail: #false
   fun binding(name :: Symbol, th :: maybe(Thm)) :: List.of(RuleBinding):
     match th
     | #false: []
     | proved :: Thm: [RuleBinding(name, proved)]
   match [definition_of(ctx.thy, bit0_name), definition_of(ctx.thy, bit1_name)]
   | [def0 :: Thm, def1 :: Thm]:
-      let defs = [RuleBinding(bit0_name, def0), RuleBinding(bit1_name, def1)]
+      // The digit equations as the rewriter can use them: `nat_bit0 n === ...`
+      // rather than `nat_bit0 === \n. ...`, whose right-hand side would leave
+      // a redex the simplifier deliberately does not reduce.
+      let defs = [RuleBinding(bit0_name, GEN(ctx.thy, n,
+                                             unfold_def(ctx.thy, def0, [n]))),
+                  RuleBinding(bit1_name, GEN(ctx.thy, n,
+                                             unfold_def(ctx.thy, def1, [n])))]
       // Peano addition's own lemmas first: the digit equations are all
       // rearrangements of `+`, and the waterfall needs associativity and the
       // right-hand successor law to do the rearranging.
@@ -174,6 +222,9 @@ fun derive_with(ctx :: Context, shape :: NumeralShape,
                            [#'n], #false, base)
       let suc_b1 = attempt(mk_forall(n, mk_eq(suc(b1(n)), b0(suc(n)))),
                            [#'n], #false, base)
+      // A digit chain is canonical only if it never ends in `b0(zero())`, so
+      // a conversion whose recursion produces one normalizes it away.
+      let b0_zero = attempt(mk_eq(b0(zero), zero), [], #false, base)
       // What makes two different literals provably different: no number is
       // its own successor's sum, so `a` and `a + succ d` are never equal, and
       // every pair of distinct literals is of that shape one way round.
@@ -182,9 +233,107 @@ fun derive_with(ctx :: Context, shape :: NumeralShape,
                                          mk_neg(mk_eq(a, plus(a, suc(d))))),
                           [#'a, #'d], #'a, base)
       match [zero_left, zero_right, b0b0, b0b1, b1b0, b1b1,
-             suc_zero, suc_b0, suc_b1, ne_add_succ]
+             suc_zero, suc_b0, suc_b1, b0_zero, ne_add_succ]
       | [zl :: Thm, zr :: Thm, e00 :: Thm, e01 :: Thm, e10 :: Thm, e11 :: Thm,
-         sz :: Thm, s0 :: Thm, s1 :: Thm, ne :: Thm]:
-          NatArith(shape, add, zl, zr, e00, e01, e10, e11, sz, s0, s1, ne)
+         sz :: Thm, s0 :: Thm, s1 :: Thm, bz :: Thm, ne :: Thm]:
+          NatArith(shape, add, zl, zr, e00, e01, e10, e11, sz, s0, s1, bz, ne,
+                   derive_mul(ctx, shape, add, attempt, base, m, n),
+                   derive_order(ctx, shape, add, attempt, base, a, d))
       | ~else: #false
   | ~else: #false
+
+// Multiplication, if the module declared it. Right distributivity is what
+// makes a product recurse on the left factor's digits; the two digit
+// equations follow from it without any induction of their own:
+//
+//   `mul(b0 m, n) === b0 (mul(m, n))`
+//   `mul(b1 m, n) === add(n, b0 (mul(m, n)))`
+//
+// The odd case writes the addend first, which is the shape the Peano equation
+// for `mul` already produces, so no commutativity is needed anywhere.
+//
+// A module with addition but no multiplication keeps working; only products
+// stay unevaluated.
+fun derive_mul(ctx :: Context, shape :: NumeralShape, add :: Term,
+               attempt :: Function, base :: List.of(RuleBinding),
+               m :: FVar, n :: FVar) :: maybe(NatMul):
+  let ty = shape.ty
+  let binary = mk_fun(ty, mk_fun(ty, ty))
+  let add_name = (match add | Const(name, _): name | ~else: #false)
+  let ctors = PeanoCtors(shape.zero_name, shape.succ_name)
+  let found:
+    for values(found :: maybe(Term) = #false) ((name, info) in ctx.funs):
+      cond
+      | found: found
+      | const_type(ctx.thy, name) != binary: #false
+      | !peano_mul_equations(ctors, name, add_name :~ Symbol,
+                             (info :~ FunInfo).equations): #false
+      | ~else: mk_const(name, binary)
+  match found
+  | #false: #false
+  | mul :: Term:
+      let c = mk_var(#'c, ty)
+      fun times(x :: Term, y :: Term) :: Term: mk_comb(mk_comb(mul, x), y)
+      fun plus(x :: Term, y :: Term) :: Term: mk_comb(mk_comb(add, x), y)
+      fun b0(x :: Term) :: Term: mk_comb(shape.bit0_term, x)
+      fun b1(x :: Term) :: Term: mk_comb(shape.bit1_term, x)
+      let zero = shape.zero_term
+      let dist = attempt(
+                   mk_forall_list([m, n, c],
+                                  mk_eq(times(plus(m, n), c),
+                                        plus(times(m, c), times(n, c)))),
+                   [#'m, #'n, #'c], #'m, base)
+      match dist
+      | #false: #false
+      | distributive :: Thm:
+          let with_dist = base ++ [RuleBinding(#'mul_distributive, distributive)]
+          let zero_left = attempt(mk_forall(n, mk_eq(times(zero, n), zero)),
+                                  [#'n], #false, with_dist)
+          let zero_right = attempt(mk_forall(n, mk_eq(times(n, zero), zero)),
+                                   [#'n], #'n, with_dist)
+          let at_b0 = attempt(
+                        mk_forall_list([m, n],
+                                       mk_eq(times(b0(m), n), b0(times(m, n)))),
+                        [#'m, #'n], #false, with_dist)
+          let at_b1 = attempt(
+                        mk_forall_list([m, n],
+                                       mk_eq(times(b1(m), n),
+                                             plus(n, b0(times(m, n))))),
+                        [#'m, #'n], #false, with_dist)
+          match [zero_left, zero_right, at_b0, at_b1]
+          | [zl :: Thm, zr :: Thm, d0 :: Thm, d1 :: Thm]:
+              NatMul(mul, zl, zr, d0, d1)
+          | ~else: #false
+
+// Comparison, if the module declared it. Both facts are ordinary inductions
+// over the definition of `le` and of addition; a module without `le` keeps
+// working, with comparisons left unevaluated.
+fun derive_order(ctx :: Context, shape :: NumeralShape, add :: Term,
+                 attempt :: Function, base :: List.of(RuleBinding),
+                 a :: FVar, d :: FVar) :: maybe(NatOrder):
+  let ty = shape.ty
+  let compare_ty = mk_fun(ty, mk_fun(ty, bool))
+  let ctors = PeanoCtors(shape.zero_name, shape.succ_name)
+  let found:
+    for values(found :: maybe(Term) = #false) ((name, info) in ctx.funs):
+      cond
+      | found: found
+      | const_type(ctx.thy, name) != compare_ty: #false
+      | !is_peano_le(ctors, name, (info :~ FunInfo).equations): #false
+      | ~else: mk_const(name, compare_ty)
+  match found
+  | #false: #false
+  | le :: Term:
+      fun at_most(x :: Term, y :: Term) :: Term: mk_comb(mk_comb(le, x), y)
+      fun plus(x :: Term, y :: Term) :: Term: mk_comb(mk_comb(add, x), y)
+      fun suc(x :: Term) :: Term: mk_comb(shape.succ_term, x)
+      let le_add = attempt(
+                     mk_forall_list([a, d], at_most(a, plus(a, d))),
+                     [#'a, #'d], #'a, base)
+      let not_le = attempt(
+                     mk_forall_list([a, d],
+                                    mk_neg(at_most(plus(a, suc(d)), a))),
+                     [#'a, #'d], #'a, base)
+      match [le_add, not_le]
+      | [yes :: Thm, no :: Thm]: NatOrder(le, yes, no)
+      | ~else: #false

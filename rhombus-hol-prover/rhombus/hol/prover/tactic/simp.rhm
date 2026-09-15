@@ -50,7 +50,8 @@ fun with_assumptions(thy :: Theory, db :: RuleDB,
 // Using all of them would let an assumption rewrite itself to `true`, which
 // discards it, and would let two assumptions rewrite each other without end.
 fun simplify_asms(thy :: Theory, db :: RuleDB,
-                  asms :: List.of(Term)) :: Computation:
+                  asms :: List.of(Term),
+                  ~decide: decide :: maybe(Function) = #false) :: Computation:
   recur loop (i = 0, seen :~ List = [], acc :~ List = [], changed = #false):
     cond
     | i >= asms.length(): return (if changed | acc | #false)
@@ -58,7 +59,8 @@ fun simplify_asms(thy :: Theory, db :: RuleDB,
         let a = asms[i]
         effect:
           let rewritten <- simp_conv_effect(
-                               with_assumptions(thy, db, seen))(thy, a)
+                               with_assumptions(thy, db, seen),
+                               ~decide: decide)(thy, a)
           match rewritten
           | #false:
               loop(i + 1, seen ++ [a], acc ++ [REFL(thy, a)], changed)
@@ -68,11 +70,12 @@ fun simplify_asms(thy :: Theory, db :: RuleDB,
 
 // Keep binders and antecedents intact at simplification time. The induction
 // and generalization stages need that structure for termination obligations.
-fun simplify_goal(thy :: Theory, db :: RuleDB, g :: Goal) :: Computation:
+fun simplify_goal(thy :: Theory, db :: RuleDB, g :: Goal,
+                  ~decide: decide :: maybe(Function) = #false) :: Computation:
   effect:
-    let eqs <- simplify_asms(thy, db, g.asms)
+    let eqs <- simplify_asms(thy, db, g.asms, ~decide: decide)
     match eqs
-    | #false: simplify_concl(thy, db, g)
+    | #false: simplify_concl(thy, db, g, ~decide: decide)
     | eqs: return rebuild_asms(thy, db, g, eqs :~ List)
 
 // One assumption reduced to `false` closes the goal; otherwise the goal is
@@ -130,10 +133,10 @@ fun extensionalize_concl(thy :: Theory, g :: Goal) :: maybe(Step):
 // recursive call with the raw `WFREC` encoding and the search stops
 // terminating. Applying beta only to a goal the waterfall is holding
 // keeps it away from that derivation.
-fun simp_then_beta(db :: RuleDB):
+fun simp_then_beta(db :: RuleDB, ~decide: decide :: maybe(Function) = #false):
   fun (thy :: Theory, t :: Term) :: Computation:
     effect:
-      let rewritten <- simp_conv_effect(db)(thy, t)
+      let rewritten <- simp_conv_effect(db, ~decide: decide)(thy, t)
       let current = (if rewritten | rhs_of(rewritten :~ Thm) | t)
       let beta = TOP_DEPTH_CONV(BETA_CONV)(thy, current)
       return (cond
@@ -141,14 +144,15 @@ fun simp_then_beta(db :: RuleDB):
               | rewritten: TRANS(rewritten :~ Thm, beta :~ Thm)
               | ~else: beta)
 
-fun simplify_concl(thy :: Theory, db :: RuleDB, g :: Goal) :: Computation:
+fun simplify_concl(thy :: Theory, db :: RuleDB, g :: Goal,
+                   ~decide: decide :: maybe(Function) = #false) :: Computation:
   cond
   | g.concl == tm_true:
       return Step([], fun (_ :: List.of(Thm)): TRUTH(thy), [])
   | ~else:
       let db2 = with_assumptions(thy, db, g.asms)
       effect:
-        let rewritten <- simp_then_beta(db2)(thy, g.concl)
+        let rewritten <- simp_then_beta(db2, ~decide: decide)(thy, g.concl)
         match rewritten
         | #false: return extensionalize_concl(thy, g)
         | eqth :~ Thm:

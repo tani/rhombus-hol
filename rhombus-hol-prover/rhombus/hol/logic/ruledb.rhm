@@ -475,19 +475,30 @@ fun refl_conv(thy :: Theory, t :: Term) :: maybe(Thm):
 // stops terminating. Goal-level beta normalization belongs at the proof
 // entry point instead, where only the user's own statement is touched; see
 // `prove_impl` in `prover/waterfall.rhm`.
-fun simp_step(db :: RuleDB):
+//
+// `~decide` is an optional decision procedure -- a `(Theory, Term) ->
+// maybe(Thm)` the caller supplies, used by `prover/stage.rhm` for arithmetic
+// on numeral literals. It is tried before the rule database, because the
+// questions it answers are exactly the ones an indexed rule would answer one
+// slow constructor at a time, and it returns `#false` for everything else, so
+// nothing else changes when one is installed.
+fun simp_step(db :: RuleDB, ~decide: decide :: maybe(Function) = #false):
   fun (thy :: Theory, t :: Term) :: Computation:
-    effect:
-      let result <- db_conv(db)(thy, t)
-      return (if result | result | refl_conv(thy, t))
+    match (if decide | decide(thy, t) | #false)
+    | th :: Thm: effect: return th
+    | ~else:
+        effect:
+          let result <- db_conv(db)(thy, t)
+          return (if result | result | refl_conv(thy, t))
 // The simplifier's effectful conversion: rewrite top-down, revisiting after
 // each change. It performs SearchBudget requests but installs no handler, so a
 // nested conditional rewrite consumes the caller's allowance.
-fun simp_conv_effect(db :: RuleDB):
-  BOUNDED_TOP_DEPTH_CONV(simp_step(db))
+fun simp_conv_effect(db :: RuleDB, ~decide: decide :: maybe(Function) = #false):
+  BOUNDED_TOP_DEPTH_CONV(simp_step(db, ~decide: decide))
 
 // Standalone conversion boundary. Proof orchestration uses
 // `simp_conv_effect` so its simplifier shares the enclosing proof budget.
-fun simp_conv(db :: RuleDB):
+fun simp_conv(db :: RuleDB, ~decide: decide :: maybe(Function) = #false):
   fun (thy :: Theory, t :: Term) :: maybe(Thm):
-    SearchBudget.run(SearchLimits(), simp_conv_effect(db)(thy, t))
+    SearchBudget.run(SearchLimits(),
+                     simp_conv_effect(db, ~decide: decide)(thy, t))

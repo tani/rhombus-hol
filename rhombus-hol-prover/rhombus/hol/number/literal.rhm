@@ -49,9 +49,12 @@ export:
   encode_numeral
   dest_numeral
   unary_numeral
+  canonical_numeral
   expand_numerals
   is_numeral
   peano_add_equations
+  peano_mul_equations
+  is_peano_le
   install_numeral_constants
   NumeralDefs
 
@@ -154,6 +157,21 @@ fun dest_numeral(shape :: NumeralShape, t :: Term) :: maybe(NonnegInt):
 fun is_numeral(shape :: NumeralShape, t :: Term) :: Boolean:
   dest_numeral(shape, t) != #false
 
+// The value of a literal that is *already* in the canonical digit form
+// `encode_numeral` produces, and `#false` for anything else -- including a
+// numeral written some other way, such as `succ` of a digit chain.
+//
+// Every arithmetic conversion asks for this rather than for `dest_numeral`.
+// A conversion has to return a theorem whose left-hand side is the term it
+// was given, so it cannot decide `le(succ(5), 5)` by computing with `6`: the
+// traversal normalizes the argument first, and the question comes back in
+// canonical form.
+fun canonical_numeral(shape :: NumeralShape, t :: Term) :: maybe(NonnegInt):
+  match dest_numeral(shape, t)
+  | #false: #false
+  | value :: NonnegInt:
+      (if encode_numeral(shape, value) == t | value | #false)
+
 // The same value as a `succ` chain. A pattern is matched against constructors
 // and `nat_bit0` is not one, so a literal in pattern position keeps the shape
 // it always had; the compact form is for expressions, where a term is
@@ -199,49 +217,117 @@ fun install_numeral_constants(thy :: Theory, ctors :: PeanoCtors,
   let (thy2, bit1_def) = new_basic_definition(thy1, bit1_eq)
   values(thy2, NumeralDefs(bit0_def, bit1_def))
 
-// Peano addition, recognized by its equations rather than by its name, so a
-// module that calls it `plus` gets numerals too:
+// A function defined by Peano recursion on its first argument is recognized
+// by its equations rather than by a reserved name, so a module that calls its
+// addition `plus` gets numerals too.
 //
-//   `f(zero(), n) === n`  and  `f(succ(k), n) === succ(f(k, n))`
+//   addition        `f(zero(), n) === n`
+//                   `f(succ k, n) === succ(f(k, n))`
+//   multiplication  `f(zero(), n) === zero()`
+//                   `f(succ k, n) === add(n, f(k, n))`
 //
-// Returns the two equations in that order, or `#false` if the function is not
-// addition. `equations` are the universally closed equations a `function`
-// declaration installs.
+// Each returns the two equations in that order, or `#false`.
 fun peano_add_equations(ctors :: PeanoCtors, name :: Symbol,
                         equations :: List.of(Thm)) :: maybe(List.of(Thm)):
-  fun strip(th :: Thm) :: maybe(Term):
-    recur peel (t :~ Term = concl_of(th)):
-      match t
-      | Comb(Const(#'forall, _), Abs(_, body)): peel(body :~ Term)
-      | ~else: t
-  fun zero_case(t :: Term) :: Boolean:
-    // `f(zero(), n) === n` with `n` the innermost bound variable.
+  fun at_zero(t :: Term) :: Boolean:
     match dest_eq(t)
     | [Comb(Comb(Const(f, _), Const(z, _)), BVar(i, _)), BVar(j, _)]:
         f == name && z == ctors.zero && i == j
     | ~else: #false
-  fun succ_case(t :: Term) :: Boolean:
-    // `f(succ(k), n) === succ(f(k, n))`.
+  fun at_succ(t :: Term) :: Boolean:
     match dest_eq(t)
     | [Comb(Comb(Const(f, _), Comb(Const(s, _), BVar(k, _))), BVar(n, _)),
        Comb(Const(s2, _), Comb(Comb(Const(f2, _), BVar(k2, _)), BVar(n2, _)))]:
         f == name && f2 == name && s == ctors.succ && s2 == ctors.succ
           && k == k2 && n == n2
     | ~else: #false
+  peano_clauses(equations, at_zero, at_succ)
+
+fun peano_mul_equations(ctors :: PeanoCtors, name :: Symbol,
+                        add_name :: Symbol,
+                        equations :: List.of(Thm)) :: maybe(List.of(Thm)):
+  fun at_zero(t :: Term) :: Boolean:
+    match dest_eq(t)
+    | [Comb(Comb(Const(f, _), Const(z, _)), BVar(_, _)), Const(z2, _)]:
+        f == name && z == ctors.zero && z2 == ctors.zero
+    | ~else: #false
+  fun at_succ(t :: Term) :: Boolean:
+    match dest_eq(t)
+    | [Comb(Comb(Const(f, _), Comb(Const(s, _), BVar(k, _))), BVar(n, _)),
+       Comb(Comb(Const(plus, _), BVar(n2, _)),
+            Comb(Comb(Const(f2, _), BVar(k2, _)), BVar(n3, _)))]:
+        f == name && f2 == name && s == ctors.succ && plus == add_name
+          && k == k2 && n == n2 && n == n3
+    | ~else: #false
+  peano_clauses(equations, at_zero, at_succ)
+
+// The comparison defined by the usual double recursion, recognized the same
+// way:
+//
+//   `f(zero(), n) === true`
+//   `f(succ a, zero()) === false`
+//   `f(succ a, succ b) === f(a, b)`
+//
+// Only whether it is present matters -- the conversions decide a comparison
+// from addition, not from these equations -- so this answers `#true`/`#false`
+// rather than handing the equations back.
+fun is_peano_le(ctors :: PeanoCtors, name :: Symbol,
+                equations :: List.of(Thm)) :: Boolean:
+  fun body(th :: Thm) :: Term:
+    recur peel (t :~ Term = concl_of(th)):
+      match t
+      | Comb(Const(#'forall, _), Abs(_, inner)): peel(inner :~ Term)
+      | ~else: t
+  fun at_zero(t :: Term) :: Boolean:
+    match dest_eq(t)
+    | [Comb(Comb(Const(f, _), Const(z, _)), BVar(_, _)), Const(#'true, _)]:
+        f == name && z == ctors.zero
+    | ~else: #false
+  fun at_succ_zero(t :: Term) :: Boolean:
+    match dest_eq(t)
+    | [Comb(Comb(Const(f, _), Comb(Const(s, _), BVar(_, _))), Const(z, _)),
+       Const(#'false, _)]:
+        f == name && s == ctors.succ && z == ctors.zero
+    | ~else: #false
+  fun at_succ_succ(t :: Term) :: Boolean:
+    match dest_eq(t)
+    | [Comb(Comb(Const(f, _), Comb(Const(s, _), BVar(k, _))),
+            Comb(Const(s2, _), BVar(n, _))),
+       Comb(Comb(Const(f2, _), BVar(k2, _)), BVar(n2, _))]:
+        f == name && f2 == name && s == ctors.succ && s2 == ctors.succ
+          && k == k2 && n == n2
+    | ~else: #false
+  let seen = for values(acc :~ Set = Set()) (th in equations):
+               let b = body(th :~ Thm)
+               cond
+               | at_zero(b): acc ++ {#'zero}
+               | at_succ_zero(b): acc ++ {#'succ_zero}
+               | at_succ_succ(b): acc ++ {#'succ_succ}
+               | ~else: acc
+  seen == {#'zero, #'succ_zero, #'succ_succ}
+
+// The equation whose body `zero_case` accepts and the one `succ_case`
+// accepts, in that order, or `#false` if either is missing.
+fun peano_clauses(equations :: List.of(Thm),
+                  zero_case :: Function,
+                  succ_case :: Function) :: maybe(List.of(Thm)):
+  fun body(th :: Thm) :: Term:
+    recur peel (t :~ Term = concl_of(th)):
+      match t
+      | Comb(Const(#'forall, _), Abs(_, inner)): peel(inner :~ Term)
+      | ~else: t
   recur scan (rest :~ List = equations,
-              at_zero :: maybe(Thm) = #false,
-              at_succ :: maybe(Thm) = #false):
+              found_zero :: maybe(Thm) = #false,
+              found_succ :: maybe(Thm) = #false):
     match rest
     | []:
-        (if at_zero && at_succ
-         | [at_zero :~ Thm, at_succ :~ Thm]
+        (if found_zero && found_succ
+         | [found_zero :~ Thm, found_succ :~ Thm]
          | #false)
     | List.cons(th, more):
         let th :~ Thm = th
-        match strip(th)
-        | #false: scan(more :~ List, at_zero, at_succ)
-        | body :~ Term:
-            cond
-            | zero_case(body): scan(more :~ List, th, at_succ)
-            | succ_case(body): scan(more :~ List, at_zero, th)
-            | ~else: scan(more :~ List, at_zero, at_succ)
+        let b = body(th)
+        cond
+        | zero_case(b): scan(more :~ List, th, found_succ)
+        | succ_case(b): scan(more :~ List, found_zero, th)
+        | ~else: scan(more :~ List, found_zero, found_succ)

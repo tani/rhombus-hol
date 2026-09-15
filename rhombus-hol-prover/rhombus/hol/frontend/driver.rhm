@@ -25,6 +25,7 @@ import:
   rhombus/hol/logic/bool open
   rhombus/hol/datatype/bool_datatype open
   rhombus/hol/datatype/datatype open
+  rhombus/hol/datatype/datatype_common open
   rhombus/hol/datatype/datatype_gen open
   rhombus/hol/datatype/datatype_rec open
   rhombus/hol/datatype/infinity open
@@ -97,6 +98,15 @@ class HolState(ctx :: Context,
                // every structurally derived `function` can share it.
                wfrec_def :: Thm)
 
+fun datatype_rules(thy :: Theory, thms :: DatatypeThms) :: List.of(Thm):
+  let inj = for values(acc :~ List = []) ((_, th) in thms.injectivity): acc ++ [th]
+  // Both orientations of every distinctness fact: a rule is indexed by its
+  // left-hand side, so one orientation leaves the other phrase unrewritten.
+  let flipped = thms.distinctness.map(
+                  fun (th :: Thm): forall_not_eq_sym(thy, th))
+  inj ++ thms.distinctness ++ flipped ++ thms.discriminators
+    ++ thms.selectors
+
 def initial_context:
   // These derived base rules are immutable and belong to the one memoized
   // base theory. Derive and index them once; every module can safely share
@@ -106,6 +116,15 @@ def initial_context:
              add_thm(thy, d, #'propositional, th)
   let db = for values(d :~ RuleDB = db) (th in conditionals(thy)):
              add_thm(thy, d, #'conditional, th)
+  // `Pair` is the language's one product type and `fst`/`snd` are defined
+  // with it, in the algebra base theory every session already extends. Their
+  // equations are derived there (`algebra.rhm`'s `ProdThms`) but were only
+  // used to build datatypes, so `fst(Pair(x, y)) === x` had no rule and
+  // stayed unsimplified in every goal that mentioned a projection.
+  let prod = algebra_base_thms().prod
+  let db = for values(d :~ RuleDB = db) (
+                 th in [prod.fst_pair, prod.snd_pair]):
+             add_thm(thy, d, #'Pair, th)
   // `bool` is a datatype like any other as far as pattern matching is
   // concerned -- `#true` and `#false` are its two nullary constructors --
   // but it is primitive, so its facts are derived from `BOOL_CASES_AX`
@@ -113,8 +132,8 @@ def initial_context:
   // here is what makes a Boolean literal pattern compile, and it adds no
   // axiom: the two discriminator constants are definitions.
   let (bool_thy, bool_thms) = build_bool_datatype_thms(thy)
-  let db = for values(d :~ RuleDB = db) (th in bool_thms.distinctness
-                                                 ++ bool_thms.discriminators):
+  let db = for values(d :~ RuleDB = db) (
+                 th in datatype_rules(bool_thy, bool_thms)):
              add_thm(bool_thy, d, #'bool, th)
   mk_context(bool_thy, ~rules: db, ~datatypes: {#'bool: bool_thms})
 
@@ -151,7 +170,8 @@ fun add_datatype(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   // Every equation the datatype brings -- injectivity, distinctness,
   // discriminators, selectors -- goes straight into the rule database, which
   // is what makes `match`-defined functions simplify.
-  let db2 = for values(d :~ RuleDB = st.ctx.db) (th in datatype_rules(thms)):
+  let db2 = for values(d :~ RuleDB = st.ctx.db) (
+                  th in datatype_rules(thy2, thms)):
               add_thm(thy2, d, spec.name, th)
   let ctx2 = context_add_datatype(st.ctx, thy2, db2, spec.name, thms)
   add_subterm_relation(
@@ -496,6 +516,3 @@ fun adopt(st :: HolState, imported :: HolState, at :: Syntax) :: HolState:
               at)
   imported
 
-fun datatype_rules(thms :: DatatypeThms) :: List.of(Thm):
-  let inj = for values(acc :~ List = []) ((_, th) in thms.injectivity): acc ++ [th]
-  inj ++ thms.distinctness ++ thms.discriminators ++ thms.selectors

@@ -21,8 +21,16 @@ successful proof stable when an unrelated theorem is added elsewhere.
 
 The goal is rewritten to a normal form with every enabled rule: the equations
 of every declared function, the injectivity, distinctness, discriminator and
-selector equations of every datatype, proof-local theorems selected by
+selector equations of every datatype, the product projections
+(@tt{fst(Pair(x, y)) === x} and its dual), proof-local theorems selected by
 @rhombus(~use: [theorem]), and the goal's own assumptions.
+
+A rule is indexed by its left-hand side, so an equation's two orientations are
+two different rules. A datatype derives each distinctness fact in one
+orientation --- @tt{not (zero === succ(x))} --- and that says nothing about
+the phrase @tt{succ(zero) === zero}, so the database is given the symmetric
+form of each as well. Neither can loop: both rewrite an equation to
+@tt{false}.
 
 The rewritten goal is then beta-normalized. A rewrite rule is indexed by the
 head constant of its left-hand side, and a beta redex --- a @rhombus(function)

@@ -466,36 +466,6 @@ fun specialize_call_args(fty :: HType, args :: List.of(Term)) :: List.of(Term):
         loop(range, more, acc ++ [arg2])
 
 
-// Effectful CoreExpr elaboration is the Reader-facing domain algebra. Every
-// expression entry point below uses it; function clauses enter through
-// `run_elaboration` with their explicit local binding map.
-fun elaborate_arguments_effect(args :: List.of(CoreExpr)) :: Computation:
-  recur loop (remaining :~ List = args, terms :~ List = []):
-    match remaining
-    | []: return terms
-    | List.cons(first, rest):
-        effect:
-          let term :: Term <- elaborate_effect(first :~ CoreExpr)
-          loop(rest, terms ++ [term])
-fun elaborate_equality_arguments_effect(args :: List.of(CoreExpr))
-     :: Computation:
-  effect:
-    let env :: ElabEnv <- ElabEnv.ask()
-    match args
-    | [left, right]:
-        cond
-        | requires_expected_type(right, env.operators):
-            effect:
-              let left_term :: Term <- infer_core(left)
-              let right_term :: Term <- check_core(right, type_of(left_term))
-              return [left_term, right_term]
-        | requires_expected_type(left, env.operators):
-            effect:
-              let right_term :: Term <- infer_core(right)
-              let left_term :: Term <- check_core(left, type_of(right_term))
-              return [left_term, right_term]
-        | ~else: elaborate_arguments_effect(args)
-    | ~else: elaborate_arguments_effect(args)
 fun core_location(expr :: CoreExpr) :: Syntax:
   match expr
   | CoreRef(_, at): at
@@ -514,98 +484,87 @@ fun core_location(expr :: CoreExpr) :: Syntax:
   | CoreSetExpr(_, at): at
   | ~else: error(~who: #'elaborate, "unknown CoreExpr variant")
 
-fun elaborate_typed_arguments_effect(func :: CoreRef,
-                                     args :: List.of(CoreExpr))
-     :: Computation:
-  effect:
-    let env :: ElabEnv <- ElabEnv.ask()
-    let generic:
-      match func
-      | CoreRef(name, at):
-          match env.vars.get(name, #false)
-          | value :: Term: type_of(value)
-          | #false:
-              reject_restricted_reference(env, name, at, #true)
-              cond
-              | name == env.self_name: type_of(env.self :~ Term)
-              | ~else:
-                  match const_type(env.thy, name)
-                  | #false:
-                      reject_restricted_reference(env, name, at, #false)
-                      syntax_error(env.who, "unknown constant", at)
-                  | ty:
-                      let ty :~ HType = ty
-                      let renaming:
-                        for values(m :~ Map = {}) (v in type_vars(ty)):
-                          m ++ {v: mk_tyvar(
-                                     Symbol.gen(to_string(v))) :~ HType}
-                      type_subst(renaming, ty)
-    recur loop (remaining :~ List = args,
-                current :~ HType = generic,
-                theta :~ Map = {},
-                terms :~ List = []):
-      match remaining
-      | []: return terms
-      | List.cons(arg, rest):
-          let instantiated = type_subst(theta, current)
-          unless is_fun(instantiated)
-          | syntax_error(env.who, "too many function arguments",
-                         core_location(arg :~ CoreExpr))
-          let (domain, range) = dest_fun(instantiated)
-          effect:
-            let term :: Term <- (if requires_expected_type(
-                                      arg :~ CoreExpr, env.operators)
-                                 | check_core(arg, domain)
-                                 | infer_core(arg))
-            let next:
-              match type_match(domain, type_of(term), theta)
-              | #false:
-                  syntax_error(env.who,
-                               "argument has an unexpected type",
-                               core_location(arg :~ CoreExpr))
-              | substitution: substitution :~ Map
-            loop(rest, range, next, terms ++ [term])
-
-fun arguments_require_expected(args :: List.of(CoreExpr)) :: Boolean:
-  for values(found = #false) (arg in args):
-    found || requires_expected_type(arg :~ CoreExpr)
-
-
-
 fun core_apply_effect(func :: CoreExpr, args :: List.of(CoreExpr),
                       at :: Syntax) :: Computation:
+  // Applying the arguments takes two passes, because an argument that needs
+  // an expected type and a parameter whose type is still an open variable
+  // are useless to each other. `x === y` is the case that matters: it
+  // applies the polymorphic `eq : ?a -> ?a -> bool`, and checking
+  // `1 === succ(zero())`'s numeral or `map(f, empty()) === seq_nil()`'s
+  // overloaded call against a bare `?a` can only fail (nothing fixes the
+  // numeral's type) or resolve ambiguously (every overload unifies with a
+  // variable). The other argument decides `?a`, so such an argument waits
+  // for it. Type unification is stateful, so the second pass only has to
+  // re-`resolve_type` the domain it recorded.
+  //
+  // Nothing decides it in `1 === 2`; the second pass then checks against the
+  // variable anyway and the same diagnostic comes out, one pass later.
+  fun replace(xs :: List, index :: Int, value) :: List:
+    for List (x in xs, k in List.iota(xs.length())):
+      (if k == index | value | x)
+  fun consume(env :: ElabEnv, head :: Term) :: HType:
+    let head_type = type_of(head)
+    when head_type is_a TyVar
+    | let domain = mk_tyvar(Symbol.gen("_domain"))
+      let range = mk_tyvar(Symbol.gen("_range"))
+      unify_types(
+        env, head_type, mk_fun(domain, range), at,
+        "the applied expression is not a function")
+    let function_type = resolve_type(env, type_of(head))
+    unless is_fun(function_type)
+    | syntax_error(env.who,
+                   "the applied expression is not a function", at)
+    function_type
   fun apply_arguments(head :: Term,
                       remaining :: List.of(CoreExpr)) :: Computation:
-    match remaining
-    | []:
-        effect:
-          let env :: ElabEnv <- ElabEnv.ask()
-          return resolve_term(env, head)
-    | List.cons(arg, rest):
-        effect:
-          let env :: ElabEnv <- ElabEnv.ask()
-          let head = resolve_term(env, head)
-          let head_type = type_of(head)
-          when head_type is_a TyVar
-          | let domain = mk_tyvar(Symbol.gen("_domain"))
-            let range = mk_tyvar(Symbol.gen("_range"))
-            unify_types(
-              env, head_type, mk_fun(domain, range), at,
-              "the applied expression is not a function")
-          let function_type = resolve_type(env, type_of(head))
-          unless is_fun(function_type)
-          | syntax_error(env.who,
-                         "the applied expression is not a function", at)
-          let (domain, _) = dest_fun(function_type)
-          let operand :: Term <- check_core(
-                                  arg :~ CoreExpr,
-                                  resolve_type(env, domain))
-          unify_types(
-            env, domain, type_of(operand), core_location(arg :~ CoreExpr),
-            "operand type does not match function domain")
-          let function_term = resolve_term(env, head)
-          let operand_term = resolve_term(env, operand)
-          apply_arguments(mk_comb(function_term, operand_term), rest)
+    effect:
+      let env :: ElabEnv <- ElabEnv.ask()
+      fun fit(arg :: CoreExpr, domain :: HType,
+              operand :: Term) :: Void:
+        unify_types(
+          env, domain, type_of(operand), core_location(arg),
+          "operand type does not match function domain")
+      recur scan (rest :~ List = remaining,
+                  index = 0,
+                  current :~ Term = head,
+                  operands :~ List = [],
+                  domains :~ List = [],
+                  deferred :~ List = []):
+        match rest
+        | []:
+            recur fill (pending :~ List = deferred, out :~ List = operands):
+              match pending
+              | []:
+                  return for values(t :~ Term = resolve_term(env, head)) (
+                               o in out):
+                    mk_comb(resolve_term(env, t),
+                            resolve_term(env, o :~ Term))
+              | List.cons(i, more):
+                  let arg = remaining[i] :~ CoreExpr
+                  let domain = resolve_type(env, domains[i] :~ HType)
+                  effect:
+                    let operand :: Term <- check_core(arg, domain)
+                    fit(arg, domain, operand)
+                    fill(more, replace(out, i :~ Int, operand))
+        | List.cons(arg, more):
+            let resolved = resolve_term(env, current)
+            let (domain, range_type) = dest_fun(consume(env, resolved))
+            // `current` only carries the head's remaining type; the applied
+            // term itself is rebuilt once both passes have every operand.
+            let range = mk_var(Symbol.gen("_partial"), range_type)
+            cond
+            | requires_expected_type(arg :~ CoreExpr, env.operators)
+                && resolve_type(env, domain) is_a TyVar:
+                scan(more, index + 1, range, operands ++ [#false],
+                     domains ++ [domain], deferred ++ [index])
+            | ~else:
+                effect:
+                  let operand :: Term <- check_core(
+                                           arg :~ CoreExpr,
+                                           resolve_type(env, domain))
+                  fit(arg :~ CoreExpr, domain, operand)
+                  scan(more, index + 1, range, operands ++ [operand],
+                       domains ++ [domain], deferred)
   effect:
     let env :: ElabEnv <- ElabEnv.ask()
     match func
@@ -835,10 +794,17 @@ fun elaborate_set_at_type(elements :: List.of(CoreExpr),
           elaborate_elements(rest, out ++ [term])
   effect:
     let terms :: List.of(Term) <- elaborate_elements(elements, [])
-    let variable = mk_var(Symbol.gen("_set_element"), element_type)
+    let env :: ElabEnv <- ElabEnv.ask()
+    // Checking the elements is what decides `element_type` when it arrived
+    // as a metavariable -- `Set{zero()}` against an equation's still-open
+    // `?a`, say -- and unification is stateful, so the binder has to be
+    // built from the resolved type. Built from the metavariable it disagrees
+    // with the very elements it is compared against.
+    let variable = mk_var(Symbol.gen("_set_element"),
+                          resolve_type(env, element_type))
     let membership:
       for values(result :~ Term = tm_false) (term in terms.reverse()):
-        mk_disj(mk_eq(variable, term :~ Term), result)
+        mk_disj(mk_eq(variable, resolve_term(env, term :~ Term)), result)
     return mk_abs(variable, membership)
 
 fun elaborate_set_effect(elements :: List.of(CoreExpr), at :: Syntax,
@@ -925,19 +891,23 @@ fun elaborate_overload_effect(function_name :: Symbol,
                      ++ String.join(signatures, "\n  "),
                    at)
     let resolution :~ OverloadResolution = matches[0]
+    // A placeholder argument -- one whose type only the selected method can
+    // supply -- is `#false` here, and `#false` matches a bare pattern
+    // variable, so the `#false` case has to come first or it is dead code
+    // and `type_of` is handed a non-term.
     for (term in known, expected_type in resolution.argument_types):
       match term
+      | #false: #void
       | value:
           unify_types(
             env, type_of(value :~ Term), expected_type :~ HType, at,
             "overload operand type does not match the selected method")
-      | #false: #void
     match expected_result
+    | #false: #void
     | wanted:
         unify_types(
           env, resolution.result_type, wanted :~ HType, at,
           "overload result type does not match the expected type")
-    | #false: #void
     let method = resolution.method
     fun finish(index :: NonnegInt,
                out :: List.of(Term)) :: Computation:

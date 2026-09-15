@@ -687,13 +687,24 @@ meta:
     let nat_ty = mk_tyapp(#'Nat, [])
     let int_ty = mk_tyapp(#'Integer, [])
     let rational_ty = mk_tyapp(#'Rational, [])
+    // Emitted at constant syntax depth regardless of `value`: a nested
+    // `succ(succ(...zero()))` build is generated Rhombus syntax that the
+    // expander must process one level at a time, and that dominates the
+    // cost of elaborating a large numeral literal. A local recursive
+    // function looping at run time builds the identical `zero`/`succ`
+    // chain at O(1) syntax depth.
     fun nat_syntax() :: Syntax:
-      recur build (remaining = value,
-                   term = runtime_call_syntax(#'zero, [], at)):
-        if remaining == 0
-        | term
-        | build(remaining - 1,
-                runtime_call_syntax(#'succ, [term], at))
+      let go = source_id(Symbol.gen("_hol_numeral"), at)
+      let count = source_id(Symbol.gen("_hol_count"), at)
+      let zero_case = runtime_call_syntax(#'zero, [], at)
+      let succ_case = runtime_call_syntax(#'succ, ['$go($count - 1)'], at)
+      let literal = Syntax.make(value, runtime_context())
+      'block:
+         fun $go($count):
+           if $count == 0
+           | $zero_case
+           | $succ_case
+         $go($literal)'
     cond
     | expected == nat_ty: RuntimeExpr(nat_syntax(), nat_ty)
     | expected == int_ty:
@@ -702,6 +713,42 @@ meta:
     | expected == rational_ty:
         let integer = runtime_call_syntax(
                         #'int_from_nat, [nat_syntax()], at)
+        RuntimeExpr(runtime_call_syntax(
+                      #'rational_from_integer, [integer], at),
+                    rational_ty)
+    | ~else:
+        syntax_meta.error(
+          "a numeral has no representation at type "
+            ++ type_to_surface_string(
+                 state.surface.type_constructors, expected),
+          at)
+
+  // A pattern position cannot call a helper function (there is nowhere
+  // for `fun $go(...): ...` to live), so a numeral *pattern* keeps the
+  // nested `succ(succ(...zero()))` build `runtime_numeral` moved away
+  // from. Every numeral pattern in this repo is 0, 1, or 2, so the depth
+  // that build is O(1)-syntax-depth for is never reached here.
+  fun nat_pattern_syntax(value :: NonnegInt, at :: Syntax) :: Syntax:
+    recur build (remaining = value,
+                 term = runtime_call_syntax(#'zero, [], at)):
+      if remaining == 0
+      | term
+      | build(remaining - 1, runtime_call_syntax(#'succ, [term], at))
+
+  fun runtime_numeral_pattern(state :: SurfaceContext, value :: NonnegInt,
+                              expected :: HType, at :: Syntax) :: RuntimeExpr:
+    let nat_ty = mk_tyapp(#'Nat, [])
+    let int_ty = mk_tyapp(#'Integer, [])
+    let rational_ty = mk_tyapp(#'Rational, [])
+    cond
+    | expected == nat_ty: RuntimeExpr(nat_pattern_syntax(value, at), nat_ty)
+    | expected == int_ty:
+        RuntimeExpr(
+          runtime_call_syntax(#'int_from_nat, [nat_pattern_syntax(value, at)], at),
+          int_ty)
+    | expected == rational_ty:
+        let integer = runtime_call_syntax(
+                        #'int_from_nat, [nat_pattern_syntax(value, at)], at)
         RuntimeExpr(runtime_call_syntax(
                       #'rational_from_integer, [integer], at),
                     rational_ty)
@@ -866,10 +913,15 @@ meta:
       runtime_resolve_type(
         prod_ty(first_value.ty, second_value.ty)))
 
+  // A string is `text` applied to the list of its codepoints. The runtime
+  // reading builds each codepoint with `runtime_numeral`, whose emitted
+  // syntax is O(1) deep whatever the value, so a CJK literal costs no more
+  // than an ASCII one. The logical reading builds the same value from the
+  // unary `succ`/`zero` chain (`elab.rhm`'s `nat_numeral`); the two
+  // readings agree on the number, which is what has to agree.
   fun runtime_string_expr(state :: SurfaceContext, value :: String,
                           at :: Syntax) :: RuntimeExpr:
     let nat_type = mk_tyapp(#'Nat, [])
-    let list_type = mk_tyapp(#'List, [nat_type])
     let codes:
       for List (character in value.to_list()):
         runtime_numeral(state, character.to_int(), nat_type, at).stx
@@ -1276,21 +1328,26 @@ meta:
             | syntax_meta.error(
                 "a numeral pattern needs a type annotation or an unambiguous context",
                 at)
-            values(runtime_numeral(state, raw, expected, at).stx, {})
+            values(runtime_numeral_pattern(state, raw, expected, at).stx, {})
         | raw is_a String:
             runtime_unify(
               expected, mk_tyapp(#'String, []), at,
               "a string pattern needs a String value")
-            // The executable reading could match any literal, but the two
-            // readings of one declaration must agree, and the logical one
-            // cannot: see `elab.rhm`'s literal-pattern case.
+            // The two readings of one declaration must agree, and the
+            // logical one only admits `""`: see `elab.rhm`'s
+            // literal-pattern case. `""` is `text(nil())`, which is a
+            // constructor application and so is also a pattern.
             unless (raw :~ String) == ""
             | syntax_meta.error(
-                "a non-empty string literal pattern is not supported: it "
-                  ++ "expands to one constructor per codepoint; match on "
-                  ++ "`text(codes)` and compare `codes` instead",
+                "a non-empty string literal pattern is not supported: "
+                  ++ "a codepoint pattern is as deep as the codepoint; "
+                  ++ "match on `text(codes)` and compare `codes` instead",
                 at)
-            values(runtime_string_expr(state, raw, at).stx, {})
+            values(
+              runtime_named_apply(
+                state, #'text,
+                [runtime_named_apply(state, #'nil, [], at)], at),
+              {})
         | ~else:
             syntax_meta.error("unsupported literal pattern", at)
     | CorePatCtor(name, args, at):

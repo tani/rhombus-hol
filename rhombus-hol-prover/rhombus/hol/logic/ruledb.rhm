@@ -475,11 +475,23 @@ fun refl_conv(thy :: Theory, t :: Term) :: maybe(Thm):
 // stops terminating. Goal-level beta normalization belongs at the proof
 // entry point instead, where only the user's own statement is touched; see
 // `prove_impl` in `prover/waterfall.rhm`.
+//
+// `refl_conv` is tried before the rule database, not after: an injectivity
+// rule for a datatype like `Nat` is indexed under `#'eq` and fires on
+// `succ^N(zero()) === succ^N(zero())`, peeling one `succ` per iteration
+// instead of recognizing the two sides are already identical. Trying
+// `refl_conv` first still reaches the same normal form any rule chain would
+// (`<term> <=> true`), and `#false` still means "nothing fired", so
+// `REPEATC_BOUNDED` stops exactly where it did before.
 fun simp_step(db :: RuleDB):
   fun (thy :: Theory, t :: Term) :: Computation:
-    effect:
-      let result <- db_conv(db)(thy, t)
-      return (if result | result | refl_conv(thy, t))
+    match refl_conv(thy, t)
+    | #false:
+        effect:
+          let result <- db_conv(db)(thy, t)
+          return result
+    | th:
+        effect: return th
 // The simplifier's effectful conversion: rewrite top-down, revisiting after
 // each change. It performs SearchBudget requests but installs no handler, so a
 // nested conditional rewrite consumes the caller's allowance.

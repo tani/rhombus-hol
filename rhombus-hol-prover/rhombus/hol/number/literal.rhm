@@ -1,0 +1,247 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+// HOL Light's `nums.ml`/`arith.ml` numeral representation is the design
+// reference; see THIRD_PARTY_NOTICES.
+
+
+// Compact numerals over a Peano datatype.
+//
+// A literal `N` written in a `Nat` context used to elaborate to `succ` applied
+// `N` times to `zero()`, a term of size `N`. Everything downstream paid for
+// that size: a kernel type check, a rewrite match, a substitution and a
+// printed form are all linear in the term, so arithmetic on literals was
+// quadratic at best and the compiler could not construct, let alone reason
+// about, an ordinary number like `123456`.
+//
+// The representation here is HOL Light's: a positive numeral is a chain of
+// binary digits, least significant outermost, bottoming out at `zero()`.
+//
+//   `nat_bit0 n` is `n + n`         an even digit
+//   `nat_bit1 n` is `succ (n + n)`  an odd digit
+//
+// so `5` is `nat_bit1(nat_bit0(nat_bit1(zero())))` -- four nodes rather than
+// five, and `123456` is eighteen rather than a hundred and twenty thousand.
+// The chain never ends in `nat_bit0(zero())`, which is `zero()` again, so the
+// encoding is canonical: two literals are equal exactly when their terms are.
+//
+// Both constants are ordinary definitions over whatever function the module
+// declared as Peano addition (`driver.rhm`'s `install_numeral_constants`), so
+// they add no axiom and every fact about them is derivable. They are *not*
+// installed as rewrite rules -- unfolding `nat_bit0` back into `+` would
+// undo the representation on contact -- which is why they are introduced by
+// the driver rather than written as an ordinary `function`.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/datatype/datatype open
+
+export:
+  nat_type_name
+  bit0_name
+  bit1_name
+  PeanoCtors
+  peano_ctors
+  NumeralShape
+  numeral_shape
+  numeral_shape_of_type
+  encode_numeral
+  dest_numeral
+  unary_numeral
+  expand_numerals
+  is_numeral
+  peano_add_equations
+  install_numeral_constants
+  NumeralDefs
+
+// The numeral type and its digit constants are recognized by name, the same
+// way `elaborate_numeral` already recognizes `Nat`, `zero` and `succ`.
+def nat_type_name :: Symbol = #'Nat
+def bit0_name :: Symbol = #'nat_bit0
+def bit1_name :: Symbol = #'nat_bit1
+
+// The two constructors of a Peano-shaped datatype: one nullary, one taking a
+// single field of the type itself.
+class PeanoCtors(zero :: Symbol, succ :: Symbol)
+
+fun peano_ctors(spec :: DatatypeSpec) :: maybe(PeanoCtors):
+  fun unary_self(c :: Ctor) :: Boolean:
+    match c.fields
+    | [f :: Field]: is_recursive_field(spec, f)
+    | ~else: #false
+  match spec.ctors
+  | [a :: Ctor, b :: Ctor] when spec.params == []:
+      cond
+      | a.fields == [] && unary_self(b): PeanoCtors(a.name, b.name)
+      | b.fields == [] && unary_self(a): PeanoCtors(b.name, a.name)
+      | ~else: #false
+  | ~else: #false
+
+// Everything the encoder and decoder need, resolved once against a theory.
+class NumeralShape(ty :: HType,
+                   zero_name :: Symbol, succ_name :: Symbol,
+                   zero_term :: Term, succ_term :: Term,
+                   bit0_term :: Term, bit1_term :: Term)
+
+// `#false` when the theory has no compact numerals for `ty` -- either it is
+// not the numeral type, or its digit constants were never installed because
+// the module declared no Peano addition. A caller then falls back to the
+// unary chain, which remains a correct, if large, literal.
+fun numeral_shape(thy :: Theory, ty :: HType,
+                  ctors :: PeanoCtors) :: maybe(NumeralShape):
+  let fn_ty = mk_fun(ty, ty)
+  match const_type(thy, ctors.zero)
+  | #false: #false
+  | zero_ty when zero_ty == ty:
+      match [const_type(thy, ctors.succ),
+             const_type(thy, bit0_name),
+             const_type(thy, bit1_name)]
+      | [succ_ty, bit0_ty, bit1_ty] when succ_ty == fn_ty
+                                           && bit0_ty == fn_ty
+                                           && bit1_ty == fn_ty:
+          NumeralShape(ty, ctors.zero, ctors.succ,
+                       mk_const(ctors.zero, ty), mk_const(ctors.succ, fn_ty),
+                       mk_const(bit0_name, fn_ty), mk_const(bit1_name, fn_ty))
+      | ~else: #false
+  | ~else: #false
+
+// The shape for the conventional numeral type, given the declared datatypes.
+fun numeral_shape_of_type(thy :: Theory,
+                          dts :: Map.of(Symbol, DatatypeSpec),
+                          ty :: HType) :: maybe(NumeralShape):
+  match ty
+  | TyApp(name, []):
+      match dts.get(name, #false)
+      | #false: #false
+      | spec :~ DatatypeSpec:
+          match peano_ctors(spec)
+          | #false: #false
+          | ctors :~ PeanoCtors: numeral_shape(thy, ty, ctors)
+  | ~else: #false
+
+// `N` as a digit chain: least significant digit outermost, `zero()` at the
+// bottom, never a `nat_bit0(zero())` -- so the term is canonical and its size
+// is the number of bits in `N`.
+fun encode_numeral(shape :: NumeralShape, value :: NonnegInt) :: Term:
+  recur build (v = value):
+    cond
+    | v == 0: shape.zero_term
+    | ~else:
+        let digit = (if v mod 2 == 0 | shape.bit0_term | shape.bit1_term)
+        mk_comb(digit, build(v div 2))
+
+// The value of a literal, whether it is a digit chain, a `succ` chain, or a
+// digit chain under a few `succ`s -- which is what `succ` applied to a literal
+// looks like before the successor conversion normalizes it.
+fun dest_numeral(shape :: NumeralShape, t :: Term) :: maybe(NonnegInt):
+  recur loop (t :~ Term = t):
+    match t
+    | Const(n, _) when n == shape.zero_name: 0
+    | Comb(Const(n, _), x):
+        cond
+        | n == bit0_name || n == bit1_name || n == shape.succ_name:
+            match loop(x :~ Term)
+            | #false: #false
+            | inner :~ NonnegInt:
+                cond
+                | n == bit0_name: 2 * inner
+                | n == bit1_name: 2 * inner + 1
+                | ~else: inner + 1
+        | ~else: #false
+    | ~else: #false
+
+fun is_numeral(shape :: NumeralShape, t :: Term) :: Boolean:
+  dest_numeral(shape, t) != #false
+
+// The same value as a `succ` chain. A pattern is matched against constructors
+// and `nat_bit0` is not one, so a literal in pattern position keeps the shape
+// it always had; the compact form is for expressions, where a term is
+// rewritten rather than destructured.
+fun unary_numeral(shape :: NumeralShape, value :: NonnegInt) :: Term:
+  recur build (v = value, acc :~ Term = shape.zero_term):
+    (if v == 0 | acc | build(v - 1, mk_comb(shape.succ_term, acc)))
+
+// Every numeral inside `t`, as a `succ` chain. Applied to an elaborated
+// literal pattern, which is a numeral possibly under a coercion such as
+// `int_from_nat`; it does not descend under a binder, since a pattern has
+// none.
+fun expand_numerals(shape :: NumeralShape, t :: Term) :: Term:
+  recur go (t :~ Term = t):
+    match dest_numeral(shape, t)
+    | value :: NonnegInt: unary_numeral(shape, value)
+    | #false:
+        match t
+        | Comb(f, x): mk_comb(go(f :~ Term), go(x :~ Term))
+        | ~else: t
+
+// What the driver installs: the two digit constants and their definitions.
+// The definitions are kept so the arithmetic conversions can unfold a digit
+// when they need to reason about it; they are deliberately never added to the
+// rule database, since unfolding a digit is exactly what must not happen
+// while simplifying a numeral.
+class NumeralDefs(bit0 :: Thm, bit1 :: Thm)
+
+// `nat_bit0 = \n. add(n, n)` and `nat_bit1 = \n. succ(add(n, n))` over the
+// module's own Peano addition. Two definitions, no axiom.
+fun install_numeral_constants(thy :: Theory, ctors :: PeanoCtors,
+                              ty :: HType,
+                              add_name :: Symbol) :: values(Theory, NumeralDefs):
+  let fn_ty = mk_fun(ty, ty)
+  let add_term = mk_const(add_name, mk_fun(ty, fn_ty))
+  let succ_term = mk_const(ctors.succ, fn_ty)
+  let n = mk_var(#'n, ty)
+  let doubled = mk_comb(mk_comb(add_term, n), n)
+  let bit0_eq = mk_eq(mk_var(bit0_name, fn_ty), mk_abs(n, doubled))
+  let bit1_eq = mk_eq(mk_var(bit1_name, fn_ty),
+                      mk_abs(n, mk_comb(succ_term, doubled)))
+  let (thy1, bit0_def) = new_basic_definition(thy, bit0_eq)
+  let (thy2, bit1_def) = new_basic_definition(thy1, bit1_eq)
+  values(thy2, NumeralDefs(bit0_def, bit1_def))
+
+// Peano addition, recognized by its equations rather than by its name, so a
+// module that calls it `plus` gets numerals too:
+//
+//   `f(zero(), n) === n`  and  `f(succ(k), n) === succ(f(k, n))`
+//
+// Returns the two equations in that order, or `#false` if the function is not
+// addition. `equations` are the universally closed equations a `function`
+// declaration installs.
+fun peano_add_equations(ctors :: PeanoCtors, name :: Symbol,
+                        equations :: List.of(Thm)) :: maybe(List.of(Thm)):
+  fun strip(th :: Thm) :: maybe(Term):
+    recur peel (t :~ Term = concl_of(th)):
+      match t
+      | Comb(Const(#'forall, _), Abs(_, body)): peel(body :~ Term)
+      | ~else: t
+  fun zero_case(t :: Term) :: Boolean:
+    // `f(zero(), n) === n` with `n` the innermost bound variable.
+    match dest_eq(t)
+    | [Comb(Comb(Const(f, _), Const(z, _)), BVar(i, _)), BVar(j, _)]:
+        f == name && z == ctors.zero && i == j
+    | ~else: #false
+  fun succ_case(t :: Term) :: Boolean:
+    // `f(succ(k), n) === succ(f(k, n))`.
+    match dest_eq(t)
+    | [Comb(Comb(Const(f, _), Comb(Const(s, _), BVar(k, _))), BVar(n, _)),
+       Comb(Const(s2, _), Comb(Comb(Const(f2, _), BVar(k2, _)), BVar(n2, _)))]:
+        f == name && f2 == name && s == ctors.succ && s2 == ctors.succ
+          && k == k2 && n == n2
+    | ~else: #false
+  recur scan (rest :~ List = equations,
+              at_zero :: maybe(Thm) = #false,
+              at_succ :: maybe(Thm) = #false):
+    match rest
+    | []:
+        (if at_zero && at_succ
+         | [at_zero :~ Thm, at_succ :~ Thm]
+         | #false)
+    | List.cons(th, more):
+        let th :~ Thm = th
+        match strip(th)
+        | #false: scan(more :~ List, at_zero, at_succ)
+        | body :~ Term:
+            cond
+            | zero_case(body): scan(more :~ List, th, at_succ)
+            | succ_case(body): scan(more :~ List, at_zero, th)
+            | ~else: scan(more :~ List, at_zero, at_succ)

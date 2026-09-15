@@ -24,6 +24,7 @@ import:
   rhombus/hol/datatype/algebra open
   rhombus/hol/recursion/recdef open
   rhombus/hol/recursion/dtree open
+  rhombus/hol/number/literal open
   rhombus/hol/frontend/core open
   rhombus/hol/frontend/surface_core open
   rhombus/hol/logic/bool open
@@ -615,12 +616,20 @@ fun numeral_apply(env :: ElabEnv, name :: Symbol,
   let cty = core_const_instance(env, name, args, at)
   list_mk_comb(mk_const(name, cty), specialize_call_args(cty, args))
 
+// A literal is a chain of binary digits when the module's theory has the
+// digit constants (`number/literal.rhm`), and the `succ` chain it always was
+// when it does not -- a module that declares no Peano addition has nothing to
+// define them from. Both are the same number; only the term size differs.
 fun nat_numeral(env :: ElabEnv, value :: NonnegInt, at :: Syntax) :: Term:
-  let zero_term = numeral_apply(env, #'zero, [], at)
-  recur build (remaining = value, term = zero_term):
-    (if remaining == 0
-     | term
-     | build(remaining - 1, numeral_apply(env, #'succ, [term], at)))
+  let nat_ty = mk_tyapp(nat_type_name, [])
+  match numeral_shape(env.thy, nat_ty, PeanoCtors(#'zero, #'succ))
+  | #false:
+      let zero_term = numeral_apply(env, #'zero, [], at)
+      recur build (remaining = value, term = zero_term):
+        (if remaining == 0
+         | term
+         | build(remaining - 1, numeral_apply(env, #'succ, [term], at)))
+  | shape :: NumeralShape: encode_numeral(shape, value)
 
 fun elaborate_numeral(env :: ElabEnv, value :: NonnegInt,
                       expected :: HType, at :: Syntax) :: Term:
@@ -1497,7 +1506,17 @@ fun core_sub_pattern(env :: ElabEnv, pat :: CorePattern,
             syntax_error(env.who, "unsupported literal pattern", at)
       let literal = run_checked_elaboration(
                       env, literal_expr, resolve_type(env, ty))
-      [resolve_term(env, literal), {}]
+      [pattern_shaped(env, resolve_term(env, literal)), {}]
+
+// A literal pattern is a constructor pattern: the decision tree splits on
+// `zero()` and `succ(...)`, and a compact digit chain names neither. The
+// expression form of the same literal stays compact; only what is matched
+// against is expanded.
+fun pattern_shaped(env :: ElabEnv, t :: Term) :: Term:
+  match numeral_shape(env.thy, mk_tyapp(nat_type_name, []),
+                      PeanoCtors(#'zero, #'succ))
+  | #false: t
+  | shape :: NumeralShape: expand_numerals(shape, t)
 
 class ClauseEnv(thy :: Theory,
                 self_name :: maybe(Symbol),

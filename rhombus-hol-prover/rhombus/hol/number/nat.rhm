@@ -1,0 +1,190 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+// HOL Light's `arith.ml` numeral conversions are the design reference; see
+// THIRD_PARTY_NOTICES.
+
+
+// The facts a compact numeral needs before anything can be computed with it.
+//
+// A digit chain is a term like any other: nothing in the kernel knows that
+// `nat_bit1(nat_bit0(zero()))` is two more than zero. What makes arithmetic on
+// literals cheap is a handful of *derived* equations, one per pair of leading
+// digits, which let a sum be computed one bit at a time:
+//
+//   `b0 m + b0 n = b0 (m + n)`      `b1 m + b1 n = b0 (succ (m + n))`
+//
+// Together with the successor equations they turn `a + b` into a recursion on
+// the length of the digit chains -- logarithmic in the numbers -- where each
+// step is one instantiation of one derived theorem. There is no native
+// arithmetic anywhere in that: `number/evaluator.rhm` computes the answer
+// first so the recursion knows where it is going, but the theorem is built
+// only from these equations, so an evaluator that lied would produce no
+// theorem at all.
+//
+// Every equation here is proved by the ordinary waterfall from the module's
+// own Peano definition of addition, with the digit definitions supplied as
+// proof-local rules. Nothing is postulated, and a module whose addition the
+// prover cannot reason about simply gets no numeral arithmetic -- literals
+// stay literals and the rewriter behaves as it did before.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/logic/drule open
+  rhombus/hol/logic/conv open
+  rhombus/hol/prover/context open
+  rhombus/hol/prover/waterfall open
+  rhombus/hol/recursion/recdef open
+  rhombus/hol/datatype/datatype open
+  rhombus/hol/number/literal open
+
+export:
+  NatArith
+  nat_arith
+
+// The derived equations, at the module's own addition constant.
+//
+//   `zero_left`   `|- forall n. add(zero(), n) === n`
+//   `zero_right`  `|- forall n. add(n, zero()) === n`
+//   `b0b0`        `|- forall m n. add(b0 m, b0 n) === b0 (add(m, n))`
+//   `b0b1`        `|- forall m n. add(b0 m, b1 n) === b1 (add(m, n))`
+//   `b1b0`        `|- forall m n. add(b1 m, b0 n) === b1 (add(m, n))`
+//   `b1b1`        `|- forall m n. add(b1 m, b1 n) === b0 (succ (add(m, n)))`
+//   `suc_zero`    `|- succ(zero()) === b1 (zero())`
+//   `suc_b0`      `|- forall n. succ(b0 n) === b1 n`
+//   `suc_b1`      `|- forall n. succ(b1 n) === b0 (succ n)`
+//   `ne_add_succ` `|- forall a d. not (a === add(a, succ d))`
+class NatArith(shape :: NumeralShape,
+               add_term :: Term,
+               zero_left :: Thm, zero_right :: Thm,
+               b0b0 :: Thm, b0b1 :: Thm, b1b0 :: Thm, b1b1 :: Thm,
+               suc_zero :: Thm, suc_b0 :: Thm, suc_b1 :: Thm,
+               ne_add_succ :: Thm)
+
+// One derivation per module, keyed by the digit definition the driver
+// installed -- the one value every context descending from that installation
+// shares. Deriving costs a few seconds, so it happens the first time a proof
+// actually meets arithmetic on literals rather than at every declaration.
+def derivations = WeakMutableMap.by(===)()
+
+fun nat_arith(ctx :: Context) :: maybe(NatArith):
+  match definition_of(ctx.thy, bit0_name)
+  | #false: #false
+  | key :: Thm:
+      match derivations.maybe[key]
+      | #false:
+          let derived = derive_nat_arith(ctx)
+          derivations[key] := Box(derived)
+          derived
+      | cached :: Box: cached.value
+
+// The module's Peano addition: the binary function over the numeral type
+// whose equations are `f(zero(), n) = n` and `f(succ k, n) = succ(f(k, n))`.
+// This is the same recognition the driver used to define the digits, so it
+// finds the same function.
+fun peano_addition(ctx :: Context, shape :: NumeralShape,
+                   ctors :: PeanoCtors) :: maybe(Term):
+  let binary = mk_fun(shape.ty, mk_fun(shape.ty, shape.ty))
+  for values(found :: maybe(Term) = #false) ((name, info) in ctx.funs):
+    cond
+    | found: found
+    | const_type(ctx.thy, name) != binary: #false
+    | !peano_add_equations(ctors, name, (info :~ FunInfo).equations): #false
+    | ~else: mk_const(name, binary)
+
+fun derive_nat_arith(ctx :: Context) :: maybe(NatArith):
+  let ty = mk_tyapp(nat_type_name, [])
+  match ctx.dts.get(nat_type_name, #false)
+  | #false: #false
+  | dt :: DatatypeThms:
+      match peano_ctors(dt.spec)
+      | #false: #false
+      | ctors :: PeanoCtors:
+          match numeral_shape(ctx.thy, ty, ctors)
+          | #false: #false
+          | shape :: NumeralShape:
+              match peano_addition(ctx, shape, ctors)
+              | #false: #false
+              | add :: Term: derive_with(ctx, shape, add)
+
+// The derivation itself. Each step is an ordinary theorem proved by the
+// waterfall; the ones already proved are handed to the next as proof-local
+// rules, exactly as a `~use:` option would. A failure anywhere returns
+// `#false`: no numeral arithmetic, no unsound shortcut.
+fun derive_with(ctx :: Context, shape :: NumeralShape,
+                add :: Term) :: maybe(NatArith):
+  let ty = shape.ty
+  let m = mk_var(#'m, ty)
+  let n = mk_var(#'n, ty)
+  let a = mk_var(#'a, ty)
+  let d = mk_var(#'d, ty)
+  let zero = shape.zero_term
+  fun plus(x :: Term, y :: Term) :: Term: mk_comb(mk_comb(add, x), y)
+  fun b0(x :: Term) :: Term: mk_comb(shape.bit0_term, x)
+  fun b1(x :: Term) :: Term: mk_comb(shape.bit1_term, x)
+  fun suc(x :: Term) :: Term: mk_comb(shape.succ_term, x)
+  // A step returns `#false` rather than raising, so a module whose addition
+  // the prover cannot handle keeps working without numeral arithmetic.
+  fun attempt(statement :: Term, names :: List.of(Symbol),
+              induct :: maybe(Symbol),
+              using :: List.of(RuleBinding)) :: maybe(Thm):
+    let (proved, _) = prove(ctx, statement, ~names: names, ~induct: induct,
+                            ~scope: RuleScope(using, [], Set()))
+    proved
+  fun binding(name :: Symbol, th :: maybe(Thm)) :: List.of(RuleBinding):
+    match th
+    | #false: []
+    | proved :: Thm: [RuleBinding(name, proved)]
+  match [definition_of(ctx.thy, bit0_name), definition_of(ctx.thy, bit1_name)]
+  | [def0 :: Thm, def1 :: Thm]:
+      let defs = [RuleBinding(bit0_name, def0), RuleBinding(bit1_name, def1)]
+      // Peano addition's own lemmas first: the digit equations are all
+      // rearrangements of `+`, and the waterfall needs associativity and the
+      // right-hand successor law to do the rearranging.
+      let zero_left = attempt(mk_forall(n, mk_eq(plus(zero, n), n)),
+                              [#'n], #false, [])
+      let zero_right = attempt(mk_forall(n, mk_eq(plus(n, zero), n)),
+                               [#'n], #'n, [])
+      let succ_right = attempt(
+                         mk_forall_list([m, n],
+                                        mk_eq(plus(m, suc(n)), suc(plus(m, n)))),
+                         [#'m, #'n], #'m, [])
+      let assoc = attempt(
+                    mk_forall_list([a, m, n],
+                                   mk_eq(plus(plus(a, m), n),
+                                         plus(a, plus(m, n)))),
+                    [#'a, #'m, #'n], #'a, [])
+      let base = defs ++ binding(#'add_succ_right, succ_right)
+                   ++ binding(#'add_associative, assoc)
+      fun digit_sum(left :: Function, right :: Function,
+                    result :: Function, carry :: Boolean) :: maybe(Thm):
+        let sum = plus(m, n)
+        let rhs = result(if carry | suc(sum) | sum)
+        attempt(mk_forall_list([m, n],
+                               mk_eq(plus(left(m), right(n)), rhs)),
+                [#'m, #'n], #'m, base)
+      let b0b0 = digit_sum(b0, b0, b0, #false)
+      let b0b1 = digit_sum(b0, b1, b1, #false)
+      let b1b0 = digit_sum(b1, b0, b1, #false)
+      let b1b1 = digit_sum(b1, b1, b0, #true)
+      let suc_zero = attempt(mk_eq(suc(zero), b1(zero)), [], #false, base)
+      let suc_b0 = attempt(mk_forall(n, mk_eq(suc(b0(n)), b1(n))),
+                           [#'n], #false, base)
+      let suc_b1 = attempt(mk_forall(n, mk_eq(suc(b1(n)), b0(suc(n)))),
+                           [#'n], #false, base)
+      // What makes two different literals provably different: no number is
+      // its own successor's sum, so `a` and `a + succ d` are never equal, and
+      // every pair of distinct literals is of that shape one way round.
+      let ne_add_succ = attempt(
+                          mk_forall_list([a, d],
+                                         mk_neg(mk_eq(a, plus(a, suc(d))))),
+                          [#'a, #'d], #'a, base)
+      match [zero_left, zero_right, b0b0, b0b1, b1b0, b1b1,
+             suc_zero, suc_b0, suc_b1, ne_add_succ]
+      | [zl :: Thm, zr :: Thm, e00 :: Thm, e01 :: Thm, e10 :: Thm, e11 :: Thm,
+         sz :: Thm, s0 :: Thm, s1 :: Thm, ne :: Thm]:
+          NatArith(shape, add, zl, zr, e00, e01, e10, e11, sz, s0, s1, ne)
+      | ~else: #false
+  | ~else: #false

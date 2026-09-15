@@ -1,0 +1,208 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+// HOL Light's `arith.ml` numeral conversions are the design reference; see
+// THIRD_PARTY_NOTICES.
+
+
+// Proof-producing arithmetic on compact numerals.
+//
+// Each conversion here answers a closed arithmetic question -- what is
+// `a + b`, is `a` equal to `b` -- with a theorem, never with a value. The
+// answer is computed the fast way, by recursion on the digit chains, but every
+// step of that recursion is an instantiation of one of the derived equations
+// in `number/nat.rhm`, chained with `TRANS`, `AP_TERM` and `EQ_MP`. The
+// kernel therefore checks the arithmetic: a bug in the recursion below can
+// only fail to produce a theorem, never produce a wrong one.
+//
+//   `nat_add_conv`  `add(a, b)`  ->  `|- add(a, b) === <a+b>`
+//   `nat_succ_conv` `succ(a)`    ->  `|- succ(a) === <a+1>`
+//   `nat_eq_conv`   `a === b`    ->  `|- (a === b) <=> true` or `<=> false`
+//
+// All three take literals only, and return `#false` for anything else: an
+// open term is not their business.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/logic/drule open
+  rhombus/hol/logic/conv open
+  rhombus/hol/number/literal open
+  rhombus/hol/number/nat open
+
+export:
+  nat_succ_conv
+  nat_add_conv
+  nat_eq_conv
+  nat_literal_conv
+
+// `|- succ(a) === <a+1>` for a literal `a`.
+//
+//   `succ(zero())` is `b1(zero())`, `succ(b0 n)` is `b1 n`, and `succ(b1 n)`
+//   carries: `b0(succ n)`, whose inner successor is the same problem one digit
+//   shorter.
+fun nat_succ_conv(arith :: NatArith, thy :: Theory,
+                  t :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  match t
+  | Comb(Const(s, _), x) when s == shape.succ_name: succ_of(arith, thy, x)
+  | ~else: #false
+
+fun succ_of(arith :: NatArith, thy :: Theory, x :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  match x
+  | Const(z, _) when z == shape.zero_name: arith.suc_zero
+  | Comb(Const(digit, _), inner) when digit == bit0_name:
+      SPEC(thy, inner, arith.suc_b0)
+  | Comb(Const(digit, _), inner) when digit == bit1_name:
+      // `succ(b1 n) === b0(succ n)`, then the carry, then congruence.
+      match succ_of(arith, thy, inner)
+      | #false: #false
+      | carried :: Thm:
+          TRANS(SPEC(thy, inner, arith.suc_b1),
+                AP_TERM(thy, shape.bit0_term, carried))
+  | ~else: #false
+
+// `|- add(a, b) === <a+b>` for literals `a` and `b`.
+fun nat_add_conv(arith :: NatArith, thy :: Theory,
+                 t :: Term) :: maybe(Thm):
+  match dest_binary(arith.add_term, t)
+  | #false: #false
+  | [a, b]: add_of(arith, thy, a, b)
+
+fun dest_binary(op :: Term, t :: Term) :: maybe(List.of(Term)):
+  match t
+  | Comb(Comb(f, x), y) when f == op: [x :~ Term, y :~ Term]
+  | ~else: #false
+
+fun add_of(arith :: NatArith, thy :: Theory,
+           a :: Term, b :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  fun digit_of(t :: Term) :: maybe(List):
+    match t
+    | Comb(Const(d, _), inner) when d == bit0_name: [#'b0, inner :~ Term]
+    | Comb(Const(d, _), inner) when d == bit1_name: [#'b1, inner :~ Term]
+    | ~else: #false
+  cond
+  | a == shape.zero_term: SPEC(thy, b, arith.zero_left)
+  | b == shape.zero_term: SPEC(thy, a, arith.zero_right)
+  | ~else:
+      match [digit_of(a), digit_of(b)]
+      | [[da, ai], [db, bi]]:
+          let carry = da == #'b1 && db == #'b1
+          let law:
+            cond
+            | da == #'b0 && db == #'b0: arith.b0b0
+            | da == #'b0: arith.b0b1
+            | db == #'b0: arith.b1b0
+            | ~else: arith.b1b1
+          let result_digit = (if da == db | shape.bit0_term | shape.bit1_term)
+          match add_of(arith, thy, ai :~ Term, bi :~ Term)
+          | #false: #false
+          | inner :: Thm:
+              // `|- add(a, b) === <digit>(...)`, with the inner sum still
+              // written as an addition; rewriting it to its value is one
+              // congruence step, plus the carry's successor when there is one.
+              let stepped:
+                cond
+                | carry:
+                    match succ_of(arith, thy, rhs_of(inner))
+                    | #false: #false
+                    | bumped :: Thm:
+                        TRANS(AP_TERM(thy, arith.shape.succ_term, inner),
+                              bumped)
+                | ~else: inner
+              match stepped
+              | #false: #false
+              | step :: Thm:
+                  TRANS(SPEC(thy, bi :~ Term,
+                             SPEC(thy, ai :~ Term, law)),
+                        AP_TERM(thy, result_digit, step))
+      | ~else: #false
+
+// `|- (a === b) <=> true` when the two literals are the same number, and
+// `|- (a === b) <=> false` when they are not.
+//
+// Distinct literals differ by some `succ d`, and `ne_add_succ` says nothing
+// equals itself plus a successor. Which way round the difference goes decides
+// which of the two orientations is used; both are derived.
+fun nat_eq_conv(arith :: NatArith, thy :: Theory,
+                t :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  match dest_eq(t)
+  | #false: #false
+  | [l, r]:
+      match [dest_numeral(shape, l), dest_numeral(shape, r)]
+      | [lv :: NonnegInt, rv :: NonnegInt]:
+          cond
+          | l == r: EQT_INTRO(thy, REFL(thy, l))
+          | lv < rv: not_equal(arith, thy, l, r, rv - lv - 1, #true)
+          | ~else: not_equal(arith, thy, r, l, lv - rv - 1, #false)
+      | ~else: #false
+
+// `small` plus `succ <gap>` is `large`; `forward` says whether the goal is
+// `small === large` or `large === small`.
+fun not_equal(arith :: NatArith, thy :: Theory,
+              small :: Term, large :: Term, gap :: NonnegInt,
+              forward :: Boolean) :: maybe(Thm):
+  let shape = arith.shape
+  let gap_term = encode_numeral(shape, gap)
+  let ne = SPEC(thy, gap_term, SPEC(thy, small, arith.ne_add_succ))
+  // `|- small + succ gap === large`: the successor first, then the sum.
+  match succ_of(arith, thy, gap_term)
+  | #false: #false
+  | bumped :: Thm:
+      let add_at_small = mk_comb(arith.add_term, small)
+      match add_of(arith, thy, small, rhs_of(bumped))
+      | #false: #false
+      | summed :: Thm:
+          let sum_eq = TRANS(AP_TERM(thy, add_at_small, bumped), summed)
+          // Rewrite the sum inside `not (small === small + succ gap)`.
+          let eq_at_small = mk_comb(mk_const(#'eq,
+                                             mk_fun(shape.ty,
+                                                    mk_fun(shape.ty, bool))),
+                                    small)
+          let inner = AP_TERM(thy, eq_at_small, sum_eq)
+          let neg_ty = mk_fun(bool, bool)
+          let negated = AP_TERM(thy, mk_const(#'neg, neg_ty), inner)
+          let ne_at_large = EQ_MP(negated, ne)
+          let oriented = (if forward
+                          | ne_at_large
+                          | flip_disequality(thy, ne_at_large, small, large))
+          EQF_INTRO(thy, oriented)
+
+// `|- not (a === b)` from `|- not (b === a)`, by congruence on the two
+// orientations of the same equation.
+fun flip_disequality(thy :: Theory, th :: Thm,
+                     small :: Term, large :: Term) :: Thm:
+  let ty = type_of(small)
+  let eq_ty = mk_fun(ty, mk_fun(ty, bool))
+  let x = mk_var(Symbol.gen("_num_x"), ty)
+  let y = mk_var(Symbol.gen("_num_y"), ty)
+  // `|- (x === y) <=> (y === x)` at these two terms, from the derived
+  // symmetry of equality.
+  let sym_iff = IMP_ANTISYM_RULE(
+                  thy,
+                  DISCH(thy, mk_eq(large, small),
+                        SYM(thy, ASSUME(thy, mk_eq(large, small)))),
+                  DISCH(thy, mk_eq(small, large),
+                        SYM(thy, ASSUME(thy, mk_eq(small, large)))))
+  let negated = AP_TERM(thy, mk_const(#'neg, mk_fun(bool, bool)),
+                        SYM(thy, sym_iff))
+  EQ_MP(negated, th)
+
+// The one conversion the simplifier asks for: whichever of the above applies
+// to this term, or `#false`.
+fun nat_literal_conv(arith :: NatArith, thy :: Theory,
+                     t :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  fun literal(x :: Term) :: Boolean: dest_numeral(shape, x) != #false
+  match t
+  | Comb(Comb(f, x), y) when f == arith.add_term:
+      (if literal(x :~ Term) && literal(y :~ Term)
+       | nat_add_conv(arith, thy, t)
+       | #false)
+  | Comb(Const(s, _), x) when s == shape.succ_name && literal(x :~ Term):
+      nat_succ_conv(arith, thy, t)
+  | ~else: nat_eq_conv(arith, thy, t)

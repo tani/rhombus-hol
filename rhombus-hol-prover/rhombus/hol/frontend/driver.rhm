@@ -39,6 +39,7 @@ import:
   rhombus/hol/recursion/wfrec open
   rhombus/hol/recursion/terminate open
   rhombus/hol/recursion/stepfn open
+  rhombus/hol/number/literal open
   rhombus/hol/frontend/surface_core open
   rhombus/hol/frontend/elab as elab
   rhombus/hol/frontend/overload open
@@ -245,7 +246,39 @@ fun add_function(st :: HolState, core :: CoreFunctionSpec,
   require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
   let db2 = add_thms(thy2, st.ctx.db, spec.name, info.equations)
   let ctx2 = context_add_function(st.ctx, thy2, db2, spec.name, info)
-  HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
+  let ctx3 = install_numerals(ctx2, spec.name, info, at)
+  HolState(ctx3, st.thms, st.operators, st.type_constructors, st.wfrec_def)
+
+// A literal is compact only once the module has said what addition is: the
+// digit constants are defined as `n + n` and `succ (n + n)`, so they cannot
+// exist before the function they are defined from. Recognizing Peano addition
+// by its equations rather than by a reserved name means a module that calls
+// it `plus` gets compact numerals too, and a module that declares no addition
+// keeps the unary literals it always had.
+//
+// The two definitions add no axiom, and they stay out of the rule database:
+// a rewrite unfolding `nat_bit0` would turn every numeral back into the
+// `succ` chain the representation exists to avoid.
+fun install_numerals(ctx :: Context, name :: Symbol, info :: FunInfo,
+                     at :: Syntax) :: Context:
+  let ty = mk_tyapp(nat_type_name, [])
+  match ctx.dts.get(nat_type_name, #false)
+  | #false: ctx
+  | dt :~ DatatypeThms:
+      match peano_ctors(dt.spec)
+      | #false: ctx
+      | ctors :~ PeanoCtors:
+          cond
+          | const_type(ctx.thy, bit0_name) != #false: ctx
+          | const_type(ctx.thy, name) != mk_fun(ty, mk_fun(ty, ty)): ctx
+          | !peano_add_equations(ctors, name, info.equations): ctx
+          | ~else:
+              let (thy3, _) = try:
+                                install_numeral_constants(ctx.thy, ctors, ty,
+                                                          name)
+                                ~catch e :: Exn.Fail: hol_reraise(e, at)
+              require_no_new_axioms(#'function, ctx.thy, thy3, bit0_name, at)
+              context_with_theory(ctx, thy3)
 
 // A path that claims to derive must not have added an axiom.  Every
 // declaration below that is documented as derived runs through this, so the

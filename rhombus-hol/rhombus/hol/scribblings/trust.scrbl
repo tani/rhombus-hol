@@ -271,10 +271,17 @@ Beyond the termination restrictions in @secref("termination"):
 
  @item{The function body grammar has named applications, @rhombus(if),
   @rhombus(cond), local @rhombus(let), matching, Booleans, type-directed
-  nonnegative numerals, and HOL notation. Overloaded function calls are
-  resolved before kernel terms or executable code are produced; neither layer
-  contains a runtime overload mechanism. The grammar has no lambdas, effects,
-  implicit numeric coercions, or arbitrary runtime expressions.}
+  nonnegative numerals, HOL notation, @tt{block:}, an expected-type
+  ascription, and anonymous or named-local @rhombus(function) (an
+  ordinary, non-recursive lambda; @secref("local-function")). Overloaded
+  function calls are resolved before kernel terms or executable code are
+  produced; neither layer contains a runtime overload mechanism. The
+  grammar has no effects, implicit numeric coercions, general runtime-only
+  Rhombus expressions, or --- inside a local or anonymous
+  @rhombus(function) --- any recursive binding: self-recursion, forward
+  reference to a later local function, and a call back into the
+  currently-being-defined enclosing @rhombus(function, ~datum) are all
+  rejected (@secref("termination")).}
 
  @item{Proof search is bounded, but a rule that does not make progress is
   still admitted. @rhombus(mk_rule)'s conditions catch a variable left-hand

@@ -114,6 +114,66 @@ argument through @tt{~measure: expression} for a definition that does not
 descend structurally. It is checked only when no structural descent can be
 found, so a measure on a definition that already descends is not examined.
 
+
+@subsection(~tag: "local-function"){Local and anonymous @rhombus(function, ~datum)}
+
+@verbatim{
+function (arg :: Type, ...) :: Type:
+  body
+
+function Id(arg :: Type, ...) :: Type:
+  body
+tail
+}
+
+Anywhere inside a @rhombus(function) or @rhombus(theorem) body, @tt{function}
+means a HOL lambda abstraction rather than a recursive constant definition.
+Parenthesized parameters with no name (@tt{function (x :: Nat) :: Nat: ...})
+produce an anonymous first-class function value, usable as an ordinary
+argument, result, or applied directly:
+
+@rhombusblock(
+  function make_succ() :: Nat -> Nat:
+    function (x :: Nat) :: Nat: succ(x)
+)
+
+A named local @tt{function Id(...): body} desugars to @tt{let} binding
+@tt{Id} to that lambda value, then the rest of the enclosing body:
+@tt{function f(x): e; tail} means @tt{let f = (function (x): e) in tail}.
+No new semantic mechanism is introduced --- named local functions are
+ordinary non-recursive @rhombus(let) sugar, so they follow @rhombus(let)'s
+own sequential scoping (@secref("expressions")):
+a local function sees every earlier binding in the same body, including
+earlier local functions, but not itself and not any local function
+declared after it. Nesting to any depth, and lexical capture of an
+enclosing parameter or @rhombus(let), both follow from this: a local
+function's free variables are resolved the same way any other nested
+lambda's would be.
+
+Because a local function is a plain lambda, it has no recursive binding of
+its own name and no @rhombus(proof, ~datum) block. Three shapes are
+therefore rejected rather than silently accepted:
+
+@itemlist(
+  @item{A local function's body referring to its own name (local
+        self-recursion).}
+  @item{A local function's body referring to a local function declared
+        later in the same enclosing body (a forward reference).}
+  @item{A local or anonymous function's body calling the enclosing
+        @rhombus(function, ~datum) that is currently being defined ---
+        the top-level recursive-definition machinery is not extended to
+        reach through a nested lambda.}
+)
+
+A parameter or result type may be omitted from a local or anonymous
+function; it is then inferred from how the value is used, exactly like
+any other omitted binder type (@secref("propositions")). A local
+function may also use the case-clause form
+@tt{function | (pattern, ...): body | ...} in place of an explicit
+parameter list, with each case's own patterns supplying the parameters ---
+the same form available for a top-level @rhombus(function, ~datum)'s
+declaration-level clauses.
+
 @section(~tag: "notation"){HOL notation}
 
 @verbatim{
@@ -331,6 +391,7 @@ proof_option = ~induct: Id
              | ~skip: [Id, ...]
              | ~disable: [Id, ...]
              | ~limit: nonnegative_integer
+             | ~extensionality: Id
 }
 
 States a proposition and proves it while the module compiles. The proposition
@@ -367,6 +428,23 @@ for this proof only; see @secref("prover"). @rhombus(~limit) sets this
 proof's nonnegative search-step ceiling and may appear once. The list options
 may repeat and append their values in source order. None of the options
 change what the prover is allowed to conclude, only what it tries.
+
+@rhombus(~extensionality) names a fresh variable and reduces a goal
+equating two functions (or two @tt{Set} values, which are functions to
+@rhombus(Boolean)) to the pointwise goal at that variable, justified by
+the kernel's derived @tt{EXT} rule --- no new axiom. It applies only when
+the goal is an equality between functions; requesting it against any
+other equality is a compile-time error, not a silent no-op. It may
+appear once and is applied before the ordinary waterfall runs, so the
+remaining options (@rhombus(~induct) in particular) operate on the
+pointwise goal it produces:
+
+@rhombusblock(
+  theorem funs_equal:
+    double === add_self
+  proof:
+    ~extensionality: x
+)
 
 @section(~tag: "importing"){Importing a theory}
 

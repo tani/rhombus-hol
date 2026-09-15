@@ -27,11 +27,15 @@ import:
   rhombus/hol/frontend/surface_space!meta:
     expose:
       hol_expr_meta
+      encode_binder
+      encode_pattern
+      encode_function_body
   meta:
     lib("racket/base.rkt") as rb
     rhombus/hol/htype open
     rhombus/hol/frontend/tyunify open
     rhombus/hol/datatype/datatype open
+    rhombus/hol/datatype/algebra open
     rhombus/hol/frontend/expand as expand
     rhombus/hol/frontend/elab as elab
     rhombus/hol/frontend/overload open
@@ -57,6 +61,37 @@ meta:
   // introduction scope lands on them alike.
   def id_ctx :: Syntax = 'hol_state'
   Parameter.def runtime_context :: Syntax = id_ctx
+  Parameter.def runtime_inference :: Box = Box({})
+  // Mirrors `elab.rhm`'s `restricted_refs`: a local `let`-bound function's own
+  // name, and every later local function name in the same body, is off
+  // limits while elaborating *that* `let`'s initializer -- self- and
+  // forward-recursion through local function sugar are not supported. The
+  // logical path enforces this in `ElabEnv.restricted_refs`; this parameter
+  // gives the runtime/executable emission path (a separate walk over the
+  // same `CoreFunBody`, see the note atop `elab.rhm`) the same check, so a
+  // rejected declaration is rejected for the reason it actually violates
+  // instead of falling through to a generic "unknown constant".
+  Parameter.def runtime_restricted_names :: Map.of(Symbol, String) = {}
+
+  fun runtime_substitution() :: Map.of(Symbol, HType):
+    (runtime_inference().value :~ Map)
+
+  // Shares `elab.rhm`'s chain-following resolver rather than a second copy:
+  // the runtime path's accumulated substitution chains variable-to-variable
+  // exactly the way the logical path's does (see `elab.rhm`'s `deep_resolve`
+  // for why a single-level `type_subst` is not enough), and a fork here
+  // would only let the two paths' resolved types drift apart again.
+  fun runtime_resolve_type(ty :: HType) :: HType:
+    elab.deep_resolve(runtime_substitution(), ty, [])
+
+  fun runtime_unify(left :: HType, right :: HType,
+                    at :: Syntax, message :: String):
+    match type_unify(
+            runtime_resolve_type(left), runtime_resolve_type(right),
+            runtime_substitution())
+    | #false: syntax_meta.error(message, at)
+    | substitution:
+        runtime_inference().value := substitution
 
 
   fun st(n :: Int) :: Syntax:
@@ -190,20 +225,44 @@ meta:
         ready.surface.type_constructors),
       ready.pending_imports)
 
+  fun core_pattern_name(pat :: CorePattern, who :: String) :: Symbol:
+    match pat
+    | CorePatVar(name, _): name
+    | CorePatTyped(inner, _, _): core_pattern_name(inner, who)
+    | ~else:
+        syntax_meta.error(
+          who ++ " currently needs a named binding pattern",
+          (match pat
+           | CorePatWildcard(at): at
+           | CorePatCtor(_, _, at): at
+           | CorePatLiteral(_, at): at
+           | CorePatList(_, _, at): at
+           | CorePatPair(_, _, at): at
+           | CorePatTyped(_, _, at): at
+           | CorePatVar(_, at): at))
+
+  fun following_local_function_names(body :: CoreFunBody) :: List.of(Symbol):
+    match body
+    | CoreBodyLet(binding_pat, init, tail, _):
+        let following = following_local_function_names(tail)
+        (if init is_a CoreFunctionExpr
+         | [core_pattern_name(binding_pat, "a local function needs a name")]
+             ++ following
+         | following)
+    | ~else: []
+
+  fun surface_optional_type(type_stx :: maybe(Syntax),
+                            registry :: TypeConstructorRegistry,
+                            hint :: String) :: HType:
+    match type_stx
+    | #false: mk_tyvar(Symbol.gen(hint))
+    | stx: type_parser.parse_open_type(stx :~ Syntax, registry)
+
   fun surface_add_function(context :: SurfaceContext,
-                           spec :: CoreFunctionSpec)
+                           spec :: CoreFunctionSpec,
+                           full_type :: HType)
        :: SurfaceContext:
     let ready = force_surface_context(context)
-    let result = type_parser.parse_open_type(
-                   spec.result_type,
-                   ready.surface.type_constructors)
-    let domains = spec.params.map(
-                    fun (binder :: CoreBinder):
-                      type_parser.parse_open_type(
-                        binder.type_stx,
-                        ready.surface.type_constructors))
-    let full_type = for values(ty :~ HType = result) (domain in domains.reverse()):
-                      mk_fun(domain :~ HType, ty)
     SurfaceContext(
       SurfaceState(
         ready.surface.operators,
@@ -446,12 +505,21 @@ meta:
     let parsed:
       for List (binder in (binders :~ List.of(CoreBinder))):
         let binder :~ CoreBinder = binder
-        let ty = type_parser.parse_open_type(
-                   binder.type_stx, ready.surface.type_constructors)
+        let name = core_pattern_name(
+                     binder.pattern, "a quickcheck binder")
+        let ty:
+          match binder.type_stx
+          | #false:
+              syntax_meta.error(
+                "a quickcheck input needs an explicit concrete type",
+                binder.at)
+          | stx:
+              type_parser.parse_open_type(
+                stx :~ Syntax, ready.surface.type_constructors)
         when type_vars(ty).length() > 0
         | syntax_meta.error(
             "a quickcheck input type must be concrete", binder.at)
-        [source_id(binder.name, binder.at), binder.name, ty]
+        [source_id(name, binder.at), name, ty]
     let env:
       for values(out :~ Map = {}) (entry in parsed):
         let entry :~ List = entry
@@ -483,11 +551,13 @@ meta:
                       core :: Syntax,
                       at :: Syntax) :: Syntax:
     parameterize { runtime_context: name }:
-      emit_quickcheck_in(state, name, opts, core, at)
+      parameterize { runtime_inference: Box({}) }:
+        emit_quickcheck_in(state, name, opts, core, at)
 
   // -- functions -------------------------------------------------------------
 
   class RuntimeExpr(stx :: Syntax, ty :: HType)
+  class RuntimeFunction(stx :: Syntax, ty :: HType)
 
   fun source_id(name :: Symbol, _at :: Syntax) :: Syntax:
     Syntax.make_id(to_string(name), runtime_context())
@@ -541,6 +611,33 @@ meta:
           error(~who: #'overload,
                 "constant has fewer arguments than required")
 
+  fun runtime_expected_function_types(wanted :: HType,
+                                      arity :: NonnegInt,
+                                      at :: Syntax)
+       :: values(List.of(HType), HType):
+    recur loop (remaining = arity,
+                current :~ HType = wanted,
+                domains :~ List = []):
+      cond
+      | remaining == 0:
+          values(domains, runtime_resolve_type(current))
+      | ~else:
+          let current = runtime_resolve_type(current)
+          when current is_a TyVar
+          | let domain = mk_tyvar(Symbol.gen("_domain"))
+            let range = mk_tyvar(Symbol.gen("_range"))
+            runtime_unify(
+              current, mk_fun(domain, range), at,
+              "a function expression does not match its expected type")
+          let current = runtime_resolve_type(current)
+          unless is_fun(current)
+          | syntax_meta.error(
+              "a function expression has more parameters than its expected type",
+              at)
+          let (domain, range) = dest_fun(current)
+          loop(remaining - 1, range, domains ++ [domain])
+
+
   fun runtime_fresh_type(ty :: HType) :: HType:
     let renaming:
       for values(out :~ Map = {}) (v in type_vars(ty)):
@@ -555,6 +652,26 @@ meta:
              all && runtime_needs_expected(state, arg :~ CoreExpr)
     match expr
     | CoreNumeral(_, _): #true
+    | CoreTypedExpr(_, _, _): #false
+    | CoreListExpr(elements, tail, _):
+        let element_needs:
+          for values(found = #false) (element in elements):
+            found || runtime_needs_expected(
+                       state, element :~ CoreExpr)
+        elements.length() == 0
+          || element_needs
+          || (match tail
+              | #false: #false
+              | value:
+                  runtime_needs_expected(state, value :~ CoreExpr))
+    | CorePairExpr(first, second, _):
+        runtime_needs_expected(state, first)
+          || runtime_needs_expected(state, second)
+    | CoreSetExpr(elements, _):
+        elements.length() == 0
+          || (for values(found = #false) (element in elements):
+                found || runtime_needs_expected(
+                           state, element :~ CoreExpr))
     | CoreCall(CoreRef(name, _), args, _) when overload_arity(state.surface.operators, name) != #false:
         every_arg(args)
     | CoreCall(_, args, _):
@@ -656,20 +773,180 @@ meta:
     RuntimeExpr(runtime_named_apply(state, method.constant, ordered, at),
                 resolution.result_type)
 
+  fun runtime_list_element_type(expected :: HType,
+                                at :: Syntax) :: HType:
+    match expected
+    | TyApp(#'List, [element_type]): element_type
+    | ~else:
+        syntax_meta.error(
+          "a list expression needs a `List.of(...)` type", at)
+
+  fun runtime_list_expr(state :: SurfaceContext,
+                        env :: Map.of(Symbol, HType),
+                        elements :: List.of(CoreExpr),
+                        tail :: maybe(CoreExpr),
+                        at :: Syntax,
+                        expected :: maybe(HType)) :: RuntimeExpr:
+    let element_type:
+      match expected
+      | #false:
+          match elements
+          | List.cons(first, _):
+              runtime_expr(state, env, first :~ CoreExpr, #false).ty
+          | []:
+              match tail
+              | #false: mk_tyvar(Symbol.gen("_list_element"))
+              | tail_expr:
+                  runtime_list_element_type(
+                    runtime_expr(
+                      state, env, tail_expr :~ CoreExpr, #false).ty,
+                    at)
+      | wanted:
+          let wanted = runtime_resolve_type(wanted :~ HType)
+          match wanted
+          | TyVar(_,):
+              let element_type = mk_tyvar(Symbol.gen("_list_element"))
+              runtime_unify(
+                wanted, mk_tyapp(#'List, [element_type]), at,
+                "a list expression needs a `List.of(...)` type")
+              element_type
+          | ~else:
+              runtime_list_element_type(wanted, at)
+    let list_type = mk_tyapp(#'List, [element_type])
+    let rendered:
+      elements.map(
+        fun (element :: CoreExpr):
+          runtime_expr(state, env, element, element_type).stx)
+    let tail_stx:
+      match tail
+      | #false: runtime_named_apply(state, #'nil, [], at)
+      | tail_expr:
+          runtime_expr(
+            state, env, tail_expr :~ CoreExpr, list_type).stx
+    let result:
+      for values(out :~ Syntax = tail_stx) (element in rendered.reverse()):
+        runtime_named_apply(state, #'cons, [element :~ Syntax, out], at)
+    RuntimeExpr(result, runtime_resolve_type(list_type))
+
+  fun runtime_pair_types(expected :: HType, at :: Syntax)
+      :: values(HType, HType):
+    match expected
+    | TyApp(name, [first_type, second_type]) when name == ty_prod:
+        values(first_type, second_type)
+    | ~else:
+        syntax_meta.error(
+          "a Pair expression needs a `Pair.of(...)` type", at)
+
+  fun runtime_pair_expr(state :: SurfaceContext,
+                        env :: Map.of(Symbol, HType),
+                        first :: CoreExpr, second :: CoreExpr,
+                        at :: Syntax,
+                        expected :: maybe(HType)) :: RuntimeExpr:
+    let (first_value, second_value):
+      match expected
+      | #false:
+          values(runtime_expr(state, env, first, #false),
+                 runtime_expr(state, env, second, #false))
+      | wanted:
+          let wanted = runtime_resolve_type(wanted :~ HType)
+          let (first_type, second_type):
+            match wanted
+            | TyVar(_,):
+                let first_type = mk_tyvar(Symbol.gen("_pair_first"))
+                let second_type = mk_tyvar(Symbol.gen("_pair_second"))
+                runtime_unify(
+                  wanted, prod_ty(first_type, second_type), at,
+                  "a Pair expression needs a `Pair.of(...)` type")
+                values(first_type, second_type)
+            | ~else: runtime_pair_types(wanted, at)
+          values(runtime_expr(state, env, first, first_type),
+                 runtime_expr(state, env, second, second_type))
+    RuntimeExpr(
+      'Pair($((first_value.stx)), $((second_value.stx)))',
+      runtime_resolve_type(
+        prod_ty(first_value.ty, second_value.ty)))
+
+  fun runtime_string_expr(state :: SurfaceContext, value :: String,
+                          at :: Syntax) :: RuntimeExpr:
+    let nat_type = mk_tyapp(#'Nat, [])
+    let list_type = mk_tyapp(#'List, [nat_type])
+    let codes:
+      for List (character in value.to_list()):
+        runtime_numeral(state, character.to_int(), nat_type, at).stx
+    let contents:
+      for values(out :~ Syntax = runtime_named_apply(
+                                          state, #'nil, [], at)) (
+            code in codes.reverse()):
+        runtime_named_apply(state, #'cons, [code :~ Syntax, out], at)
+    RuntimeExpr(runtime_named_apply(state, #'text, [contents], at),
+                mk_tyapp(#'String, []))
+
+  fun runtime_set_element_type(expected :: HType,
+                               at :: Syntax) :: HType:
+    unless is_fun(expected)
+    | syntax_meta.error(
+        "a set expression needs a function-to-Boolean type", at)
+    let (element_type, result_type) = dest_fun(expected)
+    unless result_type == mk_tyapp(#'bool, [])
+    | syntax_meta.error(
+        "a set expression needs a function-to-Boolean type", at)
+    element_type
+
+  fun runtime_set_expr(state :: SurfaceContext,
+                       env :: Map.of(Symbol, HType),
+                       elements :: List.of(CoreExpr),
+                       at :: Syntax,
+                       expected :: maybe(HType)) :: RuntimeExpr:
+    let element_type:
+      match expected
+      | #false:
+          match elements
+          | List.cons(first, _):
+              runtime_expr(state, env, first :~ CoreExpr, #false).ty
+          | []: mk_tyvar(Symbol.gen("_set_element"))
+      | wanted:
+          let wanted = runtime_resolve_type(wanted :~ HType)
+          match wanted
+          | TyVar(_,):
+              let element_type = mk_tyvar(Symbol.gen("_set_element"))
+              runtime_unify(
+                wanted,
+                mk_fun(element_type, mk_tyapp(#'bool, [])),
+                at,
+                "a set expression needs a function-to-Boolean type")
+              element_type
+          | ~else: runtime_set_element_type(wanted, at)
+    let rendered:
+      elements.map(
+        fun (element :: CoreExpr):
+          runtime_expr(state, env, element, element_type).stx)
+    let element_type = runtime_resolve_type(element_type)
+    when is_fun(element_type)
+    | syntax_meta.error(
+        "a set literal has no sound executable equality for function values",
+        at)
+    let variable = source_id(Symbol.gen("_set_element"), at)
+    let predicate:
+      for values(out :~ Syntax = Syntax.make(#false, at)) (
+            element in rendered.reverse()):
+        '(($variable) == ($(element :~ Syntax))) || ($out)'
+    RuntimeExpr('(fun ($variable): $predicate)',
+                mk_fun(runtime_resolve_type(element_type),
+                       mk_tyapp(#'bool, [])))
+
 
   fun runtime_expr(state :: SurfaceContext, env :: Map.of(Symbol, HType),
                    expr :: CoreExpr,
                    expected :: maybe(HType) = #false) :: RuntimeExpr:
     fun ensure(value :: RuntimeExpr) :: RuntimeExpr:
       match expected
-      | #false: value
+      | #false:
+          RuntimeExpr(value.stx, runtime_resolve_type(value.ty))
       | wanted:
-          match type_unify(value.ty, wanted :~ HType, {})
-          | #false:
-              syntax_meta.error("expression has an unexpected type",
-                                runtime_context())
-          | _:
-              RuntimeExpr(value.stx, wanted :~ HType)
+          runtime_unify(
+            value.ty, wanted :~ HType, runtime_context(),
+            "expression has an unexpected type")
+          RuntimeExpr(value.stx, runtime_resolve_type(wanted :~ HType))
     match expr
     | CoreRef(name, at) when name == #'true:
         ensure(RuntimeExpr(Syntax.make(#true, runtime_context()),
@@ -680,22 +957,52 @@ meta:
     | CoreRef(name, at):
         match env.get(name, #false)
         | found :: HType:
-            ensure(RuntimeExpr(source_id(name, at), found))
+            ensure(RuntimeExpr(source_id(name, at),
+                               runtime_resolve_type(found)))
         | #false:
             match surface_const_type(state, name)
             | found :: HType:
                 ensure(
                   RuntimeExpr(runtime_named_apply(state, name, [], at),
-                              found))
+                              runtime_fresh_type(found)))
             | #false:
-                syntax_meta.error("unknown constant " ++ to_string(name),
-                                  at)
+                match runtime_restricted_names().get(name, #false)
+                | message :: String: syntax_meta.error(message, at)
+                | #false:
+                    syntax_meta.error(
+                      "unknown constant " ++ to_string(name), at)
     | CoreNumeral(value, at):
         match expected
         | #false:
             syntax_meta.error("a numeral needs an expected numeric type", at)
         | wanted:
-            runtime_numeral(state, value, wanted :~ HType, at)
+            let wanted = runtime_resolve_type(wanted :~ HType)
+            when wanted is_a TyVar
+            | syntax_meta.error(
+                "a numeral needs a type ascription or an unambiguous numeric context",
+                at)
+            runtime_numeral(state, value, wanted, at)
+    | CoreTypedExpr(inner, type_stx, _):
+        let annotated = type_parser.parse_open_type(
+                          type_stx,
+                          state.surface.type_constructors)
+        ensure(runtime_expr(state, env, inner, annotated))
+    | CoreListExpr(elements, tail, at):
+        ensure(runtime_list_expr(
+                 state, env, elements, tail, at, expected))
+    | CorePairExpr(first, second, at):
+        ensure(runtime_pair_expr(
+                 state, env, first, second, at, expected))
+    | CoreStringExpr(value, at):
+        ensure(runtime_string_expr(state, value, at))
+    | CoreSetExpr(elements, at):
+        ensure(runtime_set_expr(
+                 state, env, elements, at, expected))
+    | CoreBlockExpr(body, _):
+        ensure(runtime_body_expr(state, env, body, expected))
+    | CoreMatchExpr(scrutinee, clauses, at):
+        ensure(runtime_match_expr(
+                 state, env, scrutinee, clauses, at, expected))
     | CoreCall(func, args, at):
         match func
         | CoreRef(name, _) when !env.get(name, #false)
@@ -721,9 +1028,9 @@ meta:
               | ~else:
                   let left = runtime_expr(state, env, left_core, #false)
                   let right = runtime_expr(state, env, right_core, #false)
-                  unless type_unify(left.ty, right.ty, {}) != #false
-                  | syntax_meta.error(
-                      "equality operands have different types", at)
+                  runtime_unify(
+                    left.ty, right.ty, at,
+                    "equality operands have different types")
                   values(left, right)
             ensure(RuntimeExpr('($((left.stx))) == ($((right.stx)))',
                                mk_tyapp(#'bool, [])))
@@ -744,9 +1051,8 @@ meta:
         | ~else:
             let head = runtime_expr(state, env, func, #false)
             recur apply (remaining :~ List = args,
-                         current :~ HType = runtime_fresh_type(head.ty),
-                         rendered :~ List = [],
-                         theta :~ Map = {}):
+                         current :~ HType = head.ty,
+                         rendered :~ List = []):
               match remaining
               | []:
                   let rendered_call:
@@ -757,25 +1063,98 @@ meta:
                     | ~else:
                         let [arg, ...] = rendered
                         '$((head.stx))($arg, ...)'
-                  ensure(RuntimeExpr(rendered_call,
-                                     type_subst(theta, current)))
+                  ensure(RuntimeExpr(
+                           rendered_call,
+                           runtime_resolve_type(current)))
               | List.cons(arg, rest):
-                  let instantiated = type_subst(theta, current)
+                  let instantiated = runtime_resolve_type(current)
+                  when instantiated is_a TyVar
+                  | let domain = mk_tyvar(Symbol.gen("_domain"))
+                    let range = mk_tyvar(Symbol.gen("_range"))
+                    runtime_unify(
+                      instantiated, mk_fun(domain, range), at,
+                      "the applied expression is not a function")
+                  let instantiated = runtime_resolve_type(current)
                   unless is_fun(instantiated)
-                  | syntax_meta.error("too many function arguments", at)
+                  | syntax_meta.error(
+                      "the applied expression is not a function", at)
                   let (domain, range) = dest_fun(instantiated)
-                  let value = (if runtime_needs_expected(state, arg :~ CoreExpr)
-                               | runtime_expr(
-                                   state, env, arg :~ CoreExpr, domain)
-                               | runtime_expr(
-                                   state, env, arg :~ CoreExpr, #false))
-                  let next:
-                    match type_unify(domain, value.ty, theta)
-                    | #false:
-                        syntax_meta.error(
-                          "operand type does not match function domain", at)
-                    | substitution: substitution :~ Map
-                  apply(rest, range, rendered ++ [value.stx], next)
+                  let value = runtime_expr(
+                                state, env, arg :~ CoreExpr,
+                                runtime_resolve_type(domain))
+                  runtime_unify(
+                    domain, value.ty, at,
+                    "operand type does not match function domain")
+                  apply(rest, range, rendered ++ [value.stx])
+    | CoreFunctionExpr(params, result_type_stx, body, at):
+        let contextual:
+          match expected
+          | #false: #false
+          | wanted:
+              let (domains, range) = runtime_expected_function_types(
+                                       wanted :~ HType,
+                                       params.length(), at)
+              [domains, range]
+        let parameter_types:
+          for List (binder in params, index in List.iota(params.length())):
+            let binder :~ CoreBinder = binder
+            let declared = surface_optional_type(
+                             binder.type_stx,
+                             state.surface.type_constructors,
+                             "_parameter")
+            match contextual
+            | #false: declared
+            | [domains, _]:
+                let contextual_type = (domains :~ List)[index] :~ HType
+                runtime_unify(
+                  declared, contextual_type, binder.at,
+                  "a function parameter does not match its expected type")
+                runtime_resolve_type(declared)
+        let result_type = surface_optional_type(
+                            result_type_stx,
+                            state.surface.type_constructors,
+                            "_result")
+        match contextual
+        | [_, contextual_result]:
+            runtime_unify(
+              result_type, contextual_result :~ HType, at,
+              "a function result does not match its expected type")
+        | #false: #void
+        let function_type:
+          for values(current :~ HType = result_type) (
+                parameter_type in parameter_types.reverse()):
+            mk_fun(parameter_type :~ HType, current)
+        let rendered_function:
+          match body
+          | CoreBodyRows(rows):
+              let rendered:
+                rows.map(
+                  fun (row :: CoreRow):
+                    runtime_anonymous_row(
+                      state, env, parameter_types, result_type, row))
+              let [alternative, ...] = rendered
+              'fun
+               | $alternative
+               | ...'
+          | other_body:
+              let parsed:
+                for List (binder in params,
+                          parameter_type in parameter_types):
+                  let binder :~ CoreBinder = binder
+                  let (rendered, bindings) = runtime_pattern(
+                                                state, binder.pattern,
+                                                parameter_type :~ HType)
+                  [rendered, bindings]
+              let (parameters, local_bindings) = runtime_pattern_entries(
+                                                   parsed, at)
+              let local_env = env ++ local_bindings
+              let [parameter, ...] = parameters
+              let result = runtime_body(
+                             state, local_env, other_body, result_type)
+              '(fun ($parameter, ...): $result)'
+        ensure(
+          RuntimeExpr(rendered_function,
+                      runtime_resolve_type(function_type)))
     | CoreIf(condition, then_expr, else_expr, at):
         let condition_value = runtime_expr(
                                 state, env, condition,
@@ -792,80 +1171,218 @@ meta:
         syntax_meta.error("expression has no runtime meaning",
                           runtime_context())
 
+  fun merge_runtime_pattern_bindings(
+        left :: Map.of(Symbol, HType),
+        right :: Map.of(Symbol, HType),
+        at :: Syntax) :: Map.of(Symbol, HType):
+    for values(out :~ Map = left) ((name, ty) in right):
+      when out.get(name, #false)
+      | syntax_meta.error(
+          "a pattern repeats `" ++ to_string(name) ++ "`", at)
+      out ++ {name: ty :~ HType}
+
+  fun runtime_pattern_entries(parsed :: List, at :: Syntax)
+       :: values(List.of(Syntax), Map.of(Symbol, HType)):
+    let rendered:
+      parsed.map(fun (entry :: List): entry[0] :~ Syntax)
+    let bindings:
+      for values(out :~ Map = {}) (entry in parsed):
+        merge_runtime_pattern_bindings(
+          out, (entry :~ List)[1] :~ Map, at)
+    values(rendered, bindings)
+
   fun runtime_pattern(state :: SurfaceContext, pat :: CorePattern,
                       expected :: HType)
        :: values(Syntax, Map.of(Symbol, HType)):
+    let expected = runtime_resolve_type(expected)
     match pat
     | CorePatWildcard(at): values(source_id(#'_, at), {})
     | CorePatVar(name, at):
         values(source_id(name, at), {name: expected})
+    | CorePatTyped(inner, type_stx, at):
+        let annotated = type_parser.parse_open_type(
+                          type_stx, state.surface.type_constructors)
+        runtime_unify(
+          expected, annotated, at,
+          "a pattern annotation does not match the expected type")
+        runtime_pattern(state, inner, runtime_resolve_type(annotated))
+    | CorePatPair(first, second, at):
+        let expected = runtime_resolve_type(expected)
+        let (first_type, second_type):
+          match expected
+          | TyVar(_,):
+              let first_type = mk_tyvar(Symbol.gen("_pair_first"))
+              let second_type = mk_tyvar(Symbol.gen("_pair_second"))
+              runtime_unify(
+                expected, prod_ty(first_type, second_type), at,
+                "a Pair pattern needs a `Pair.of(...)` value")
+              values(first_type, second_type)
+          | ~else: runtime_pair_types(expected, at)
+        let (first_stx, first_bindings) = runtime_pattern(
+                                                  state, first, first_type)
+        let (second_stx, second_bindings) = runtime_pattern(
+                                                    state, second, second_type)
+        values(
+          'Pair($first_stx, $second_stx)',
+          merge_runtime_pattern_bindings(
+            first_bindings, second_bindings, at))
+    | CorePatList(elements, tail, at):
+        let expected = runtime_resolve_type(expected)
+        let element_type:
+          match expected
+          | TyVar(_,):
+              let element_type = mk_tyvar(Symbol.gen("_list_element"))
+              runtime_unify(
+                expected, mk_tyapp(#'List, [element_type]), at,
+                "a list pattern needs a `List.of(...)` value")
+              element_type
+          | ~else: runtime_list_element_type(expected, at)
+        let parsed:
+          for List (element in elements):
+            let (rendered, bindings) = runtime_pattern(
+                                          state, element :~ CorePattern,
+                                          element_type)
+            [rendered, bindings]
+        let (tail_stx, tail_bindings):
+          match tail
+          | #false:
+              values(runtime_named_apply(state, #'nil, [], at), {})
+          | tail_pattern:
+              runtime_pattern(
+                state, tail_pattern :~ CorePattern, expected)
+        let (rendered, bindings) = runtime_pattern_entries(parsed, at)
+        let result:
+          for values(out :~ Syntax = tail_stx) (element_stx in rendered.reverse()):
+            runtime_named_apply(
+              state, #'cons, [element_stx :~ Syntax, out], at)
+        values(
+          result,
+          merge_runtime_pattern_bindings(bindings, tail_bindings, at))
+    | CorePatLiteral(value_stx, at):
+        let raw = Syntax.unwrap(value_stx)
+        cond
+        | raw is_a Boolean:
+            runtime_unify(
+              expected, mk_tyapp(#'bool, []), at,
+              "a Boolean pattern needs a Boolean value")
+            values(value_stx, {})
+        | raw is_a NonnegInt:
+            let expected = runtime_resolve_type(expected)
+            when expected is_a TyVar
+            | syntax_meta.error(
+                "a numeral pattern needs a type annotation or an unambiguous context",
+                at)
+            values(runtime_numeral(state, raw, expected, at).stx, {})
+        | raw is_a String:
+            runtime_unify(
+              expected, mk_tyapp(#'String, []), at,
+              "a string pattern needs a String value")
+            // The executable reading could match any literal, but the two
+            // readings of one declaration must agree, and the logical one
+            // cannot: see `elab.rhm`'s literal-pattern case.
+            unless (raw :~ String) == ""
+            | syntax_meta.error(
+                "a non-empty string literal pattern is not supported: it "
+                  ++ "expands to one constructor per codepoint; match on "
+                  ++ "`text(codes)` and compare `codes` instead",
+                at)
+            values(runtime_string_expr(state, raw, at).stx, {})
+        | ~else:
+            syntax_meta.error("unsupported literal pattern", at)
     | CorePatCtor(name, args, at):
         let generic:
           match surface_const_type(state, name)
           | #false:
               syntax_meta.error("unknown constructor " ++ to_string(name), at)
-          | ty: ty :~ HType
+          | ty: runtime_fresh_type(ty :~ HType)
         let (domains, result) = runtime_peel(generic, args.length())
-        let theta:
-          match type_match(result, expected, {})
-          | #false:
-              syntax_meta.error(
-                "constructor does not build the matched type", at)
-          | substitution: substitution :~ Map
+        runtime_unify(
+          result, expected, at,
+          "constructor does not build the matched type")
         let parsed:
           for List (arg in args, domain in domains):
             let (rendered, bindings) = runtime_pattern(
                                           state, arg :~ CorePattern,
-                                          type_subst(theta,
-                                                     domain :~ HType))
+                                          runtime_resolve_type(
+                                            domain :~ HType))
             [rendered, bindings]
-        let [rendered, ...] = parsed.map(
-                                fun (entry :: List):
-                                  entry[0] :~ Syntax)
-        let bindings:
-          for values(out :~ Map = {}) (entry in parsed):
-            out ++ ((entry :~ List)[1] :~ Map)
+        let (rendered, bindings) = runtime_pattern_entries(parsed, at)
+        let [rendered_stx, ...] = rendered
         let constructor = source_id(name, at)
-        values('$constructor($rendered, ...)', bindings)
+        values('$constructor($rendered_stx, ...)', bindings)
+
+  fun runtime_match_expr(state :: SurfaceContext,
+                         env :: Map.of(Symbol, HType),
+                         scrutinee :: CoreExpr,
+                         clauses :: List.of(CoreMatchClause),
+                         at :: Syntax,
+                         expected :: maybe(HType)) :: RuntimeExpr:
+    when clauses.length() == 0
+    | syntax_meta.error("a match expression needs at least one clause", at)
+    let target = runtime_expr(state, env, scrutinee, #false)
+    let (rendered, result_type):
+      for values(out :~ List.of(Syntax) = [],
+                 current :~ maybe(HType) = expected) (
+            clause in clauses):
+        let clause :~ CoreMatchClause = clause
+        let (pattern_stx, bindings) = runtime_pattern(
+                                        state, clause.pattern,
+                                        target.ty)
+        let result = runtime_body_expr(
+                       state, env ++ bindings, clause.body, current)
+        values(out ++ ['$pattern_stx: $((result.stx))'],
+               result.ty)
+    let [clause_stx, ...] = rendered
+    RuntimeExpr(
+      'match ($((target.stx)))
+       | $clause_stx
+       | ...',
+      result_type :~ HType)
+
+  fun runtime_body_expr(state :: SurfaceContext,
+                        env :: Map.of(Symbol, HType),
+                        body :: CoreFunBody,
+                        expected :: maybe(HType)) :: RuntimeExpr:
+    match body
+    | CoreBodyExpr(expr):
+        runtime_expr(state, env, expr, expected)
+    | CoreBodyLet(binding_pat, init, tail, at):
+        let local_name:
+          (if init is_a CoreFunctionExpr
+           | core_pattern_name(binding_pat, "a local function needs a name")
+           | #false)
+        let forward_restricted:
+          for values(out :~ Map = runtime_restricted_names()) (
+                name in following_local_function_names(tail)):
+            out ++ {name: "forward local-function reference is not supported"}
+        let init_restricted:
+          match local_name
+          | #false: forward_restricted
+          | name:
+              forward_restricted
+                ++ {name: "local recursive functions are not supported"}
+        let value = parameterize { runtime_restricted_names: init_restricted }:
+                      runtime_expr(state, env, init, #false)
+        let (pattern_stx, bindings) = runtime_pattern(
+                                        state, binding_pat, value.ty)
+        let rest = runtime_body_expr(
+                     state, env ++ bindings, tail, expected)
+        RuntimeExpr(
+          'block:
+             let $pattern_stx = $((value.stx))
+             $((rest.stx))',
+          rest.ty)
+    | CoreBodyMatch(scrutinee, clauses, at):
+        runtime_match_expr(
+          state, env, CoreRef(scrutinee, at), clauses, at, expected)
     | ~else:
-        error(~who: #'function, "unknown runtime pattern")
+        error(~who: #'function, "invalid nested function body")
 
   fun runtime_body(state :: SurfaceContext,
                    env :: Map.of(Symbol, HType),
                    body :: CoreFunBody,
                    expected :: HType) :: Syntax:
-    match body
-    | CoreBodyExpr(expr):
-        runtime_expr(state, env, expr, expected).stx
-    | CoreBodyLet(name, init, tail, at):
-        let value = runtime_expr(state, env, init, #false)
-        let id = source_id(name, at)
-        let rest = runtime_body(
-                     state, env ++ {name: value.ty}, tail, expected)
-        'let $id = $((value.stx))
-         $rest'
-    | CoreBodyMatch(scrutinee, clauses, at):
-        let scrutinee_type:
-          match env.get(scrutinee, #false)
-          | #false:
-              syntax_meta.error("match scrutinee is not bound", at)
-          | ty: ty :~ HType
-        let rendered:
-          for List (clause in clauses):
-            let clause :~ CoreMatchClause = clause
-            let (pattern_stx, bindings) = runtime_pattern(
-                                            state, clause.pattern,
-                                            scrutinee_type)
-            let result = runtime_body(
-                           state, env ++ bindings, clause.body, expected)
-            '$pattern_stx: $result'
-        let target = source_id(scrutinee, at)
-        let [clause, ...] = rendered
-        'match $target
-         | $clause
-         | ...'
-    | ~else:
-        error(~who: #'function, "invalid nested function body")
+    runtime_body_expr(state, env, body, expected).stx
 
   fun runtime_row(state :: SurfaceContext,
                   base_env :: Map.of(Symbol, HType),
@@ -887,43 +1404,78 @@ meta:
                                fun (entry :: List): entry[0] :~ Syntax)
     '$name($pattern_stx, ...): $result'
 
+  fun runtime_anonymous_row(
+        state :: SurfaceContext,
+        base_env :: Map.of(Symbol, HType),
+        parameter_types :: List.of(HType),
+        expected :: HType,
+        row :: CoreRow) :: Syntax:
+    let parsed:
+      for List (pat in row.patterns, ty in parameter_types):
+        let (rendered, bindings) = runtime_pattern(
+                                      state, pat :~ CorePattern,
+                                      ty :~ HType)
+        [rendered, bindings]
+    let (patterns, local_bindings) = runtime_pattern_entries(
+                                       parsed, row.at)
+    let result = runtime_body(
+                   state, base_env ++ local_bindings, row.body, expected)
+    let [pattern_stx, ...] = patterns
+    '($pattern_stx, ...): $result'
+
   // The executable half lowers the same CoreExpr tree as the logical half.
   // Overload methods are therefore selected at expansion time from declared
   // argument and expected-result types; generated code contains only direct
   // named calls.
 
   fun emit_function(spec :: CoreFunctionSpec, state :: SurfaceContext,
-                    name :: Syntax) :: Syntax:
+                    name :: Syntax) :: RuntimeFunction:
     parameterize { runtime_context: name }:
-      let parameter_types = spec.params.map(
-                              fun (binder :: CoreBinder):
-                                type_parser.parse_open_type(
-                                  binder.type_stx,
-                                  state.surface.type_constructors))
-      let result_type = type_parser.parse_open_type(
-                          spec.result_type,
-                          state.surface.type_constructors)
-      let env:
-        for values(out :~ Map = {}) (binder in spec.params,
-                                     ty in parameter_types):
-          out ++ {(binder :~ CoreBinder).name: ty :~ HType}
-      match spec.body
-      | CoreBodyRows(rows):
-          let rendered = rows.map(
-                           fun (row :: CoreRow):
-                             runtime_row(state, env, name,
-                                         parameter_types, result_type, row))
-          let [alternative, ...] = rendered
-          'fun
-           | $alternative
-           | ...'
-      | body:
-          let [parameter, ...] = spec.params.map(
-                                   fun (binder :: CoreBinder):
-                                     source_id(binder.name, binder.at))
-          let result = runtime_body(state, env, body, result_type)
-          'fun $name($parameter, ...):
-             $result'
+      parameterize { runtime_inference: Box({}) }:
+        let parameter_types = spec.params.map(
+                                fun (binder :: CoreBinder):
+                                  surface_optional_type(
+                                    binder.type_stx,
+                                    state.surface.type_constructors,
+                                    "_parameter"))
+        let result_type = surface_optional_type(
+                            spec.result_type,
+                            state.surface.type_constructors,
+                            "_result")
+        let parsed_parameters:
+          for List (binder in spec.params, ty in parameter_types):
+            let binder :~ CoreBinder = binder
+            let (rendered, bindings) = runtime_pattern(
+                                          state, binder.pattern,
+                                          ty :~ HType)
+            [rendered, bindings]
+        let (parameters, parameter_bindings) = runtime_pattern_entries(
+                                                  parsed_parameters, name)
+        let function_type:
+          for values(ty :~ HType = result_type) (domain in parameter_types.reverse()):
+            mk_fun(domain :~ HType, ty)
+        let env = {spec.name: function_type} ++ parameter_bindings
+        let rendered_function:
+          match spec.body
+          | CoreBodyRows(rows):
+              let rendered = rows.map(
+                               fun (row :: CoreRow):
+                                 runtime_row(state, env, name,
+                                             parameter_types,
+                                             result_type, row))
+              let [alternative, ...] = rendered
+              'fun
+               | $alternative
+               | ...'
+          | body:
+              let [parameter, ...] = parameters
+              let result = runtime_body(
+                             state, env, body, result_type)
+              'fun $name($parameter, ...):
+                 $result'
+        RuntimeFunction(
+          rendered_function,
+          runtime_resolve_type(function_type))
 
   // -- HOL surface parsing ---------------------------------------------------
 
@@ -955,73 +1507,60 @@ meta:
     Syntax.make_id(to_string(n), id_ctx)
 
 
-  fun binder_encoding(param :: Syntax) :: Syntax:
-    match param
-    | '$(name :: Identifier) :: $ty ...':
-        '(core_binder $name ($ty ...))'.relocate_span([param])
-    | ~else: syntax_meta.error("a parameter needs a name and a type", param)
-
-  fun pattern_encoding(pat :: Syntax) :: Syntax:
-    match pat
-    | '_': '(core_pat_wildcard)'.relocate(pat)
-    | '$(name :: Identifier)($arg, ...)':
-        let [a, ...] = [arg, ...].map(pattern_encoding)
-        '(core_pat_ctor $name [$a, ...])'.relocate_span([pat])
-    | '$(name :: Identifier)':
-        '(core_pat_var $name)'.relocate(pat)
-    | ~else: syntax_meta.error("malformed pattern", pat)
-
-  fun match_clause_encoding(clause :: Syntax) :: Syntax:
-    match clause
-    | '$pat ...: $body; ...':
-        let p = pattern_encoding('$pat ...')
-        let b = function_body_encoding('$body; ...')
-        '(core_match_clause $p $b)'.relocate_span([clause])
-    | ~else: syntax_meta.error("malformed match clause", clause)
 
   fun row_encoding(row :: Syntax, arity :: Int) :: Syntax:
     let (patterns, body) = elab.row_parts(row, arity)
-    let [p, ...] = patterns.map(pattern_encoding)
-    let b = function_body_encoding(body)
+    let [p, ...] = patterns.map(encode_pattern)
+    let b = encode_function_body(body)
     '(core_row [$p, ...] $b)'.relocate_span([row])
 
   fun function_body_encoding(body :: Syntax) :: Syntax:
-    match body
-    | '#%hol_clauses: $row; ...':
-        syntax_meta.error("internal function row needs an arity", body)
-    | 'match $(name :: Identifier)
-       | $clause
-       | ...':
-        let [c, ...] = [clause, ...].map(match_clause_encoding)
-        '(core_body_match $name [$c, ...])'.relocate_span([body])
-    | 'let $(name :: Identifier) = $rhs ...
-       $more; ...':
-        let init = parse_function_expression('$rhs ...')
-        let tail = function_body_encoding('$more; ...')
-        '(core_body_let $name $init $tail)'.relocate_span([body])
-    | ~else:
-        let expr = parse_function_expression(body)
-        '(core_body_expr $expr)'.relocate_span([body])
+    encode_function_body(body)
+
+  fun function_row_arity(row :: Syntax) :: NonnegInt:
+    match row
+    | '($pat, ...): $body; ...': [pat, ...].length()
+    | '$pat ...: $body; ...': 1
+    | ~else: syntax_meta.error("malformed function clause", row)
+
+  fun inferred_parameter_syntax(rows :: List.of(Syntax),
+                                at :: Syntax) :: List.of(Syntax):
+    match rows
+    | []: syntax_meta.error("a case function needs at least one clause", at)
+    | List.cons(first, _):
+        for List (index in List.iota(function_row_arity(first))):
+          Syntax.make_id("_arg" ++ to_string(index), id_ctx)
 
   fun function_encoding(form :: Syntax,
                         measure_stx :: maybe(Syntax))
        :: values(Syntax, Syntax):
-    let [name, params, result_type, body] = elab.function_parts(form)
-    let ps :~ List = params
-    let [param, ...] = ps.map(fun (p :: Syntax): binder_encoding(p))
+    let [name, declared_params, result_type, body] = elab.function_parts(form)
+    let clauses = elab.body_clauses(body :~ Syntax)
+    let ps:
+      match declared_params
+      | #false:
+          inferred_parameter_syntax(clauses :~ List.of(Syntax), form)
+      | present: present :~ List
+    let [param, ...] = (ps :~ List).map(
+                         fun (p :: Syntax): encode_binder(p))
     let measure:
       match measure_stx
       | #false: Syntax.make(#false, id_ctx)
       | m: parse_function_expression(m :~ Syntax)
     let body_core:
-      match elab.body_clauses(body :~ Syntax)
+      match clauses
       | #false: function_body_encoding(body :~ Syntax)
       | rows:
           let [row, ...] = (rows :~ List).map(
-                             fun (r :: Syntax): row_encoding(r, ps.length()))
+                             fun (r :: Syntax):
+                               row_encoding(r, (ps :~ List).length()))
           '(core_body_rows [$row, ...])'.relocate_span([body :~ Syntax])
+    let result:
+      match result_type
+      | #false: '#false'
+      | ty: '($((ty :~ Syntax)))'
     let core:
-      '(core_function $name [$param, ...] ($(result_type :~ Syntax)) $measure $body_core)'.relocate_span([form])
+      '(core_function $name [$param, ...] $result $measure $body_core)'.relocate_span([form])
     values(core, name)
   fun option_symbol_stx(v) :: Syntax:
     match v
@@ -1041,8 +1580,9 @@ meta:
           let [g, ...] = groups :~ List
           '$g; ...'
     let [induct, using_names, skipped_stage_names, disabled_rule_names,
-         case_stxs, witness_stxs, search_steps] = elab.parse_tactic(tactic_stx)
+         case_stxs, witness_stxs, search_steps, extensionality] = elab.parse_tactic(tactic_stx)
     let induct_stx = option_symbol_stx(induct)
+    let extensionality_stx = option_symbol_stx(extensionality)
     let [u, ...] = (using_names :~ List).map(fun (n): symbol_id(n :~ Symbol))
     let [d, ...] = (skipped_stage_names :~ List).map(
                      fun (n): symbol_id(n :~ Symbol))
@@ -1053,7 +1593,7 @@ meta:
     let [w, ...] = (witness_stxs :~ List).map(
                       fun (s): parse_core_encoding(s :~ Syntax))
     let steps_stx = option_int_stx(search_steps)
-    '(core_tactic $induct_stx [$u, ...] [$d, ...] [$r, ...] [$c, ...] [$w, ...] $steps_stx)'.relocate_span([at])
+    '(core_tactic $induct_stx [$u, ...] [$d, ...] [$r, ...] [$c, ...] [$w, ...] $steps_stx $extensionality_stx)'.relocate_span([at])
 
   fun render_step(step :: Syntax) :: List.of(Syntax):
     let step = step.replace_scopes(id_ctx)
@@ -1172,8 +1712,11 @@ meta:
         let (core, name) = function_encoding(
                              form, measure :~ maybe(Syntax))
         let spec = decode_function(core)
-        let next_runtime = surface_add_function(runtime_state, spec)
-        values([emit_function(spec, next_runtime, name)],
+        let ready_runtime = force_surface_context(runtime_state)
+        let emitted = emit_function(spec, ready_runtime, name)
+        let next_runtime = surface_add_function(
+                             ready_runtime, spec, emitted.ty)
+        values([emitted.stx],
                ['(~function $cur $nxt [$core] [$at])'],
                n + 1, next_runtime)
     | #'theorem:

@@ -24,6 +24,18 @@ of every declared function, the injectivity, distinctness, discriminator and
 selector equations of every datatype, proof-local theorems selected by
 @rhombus(~use: [theorem]), and the goal's own assumptions.
 
+The rewritten goal is then beta-normalized. A rewrite rule is indexed by the
+head constant of its left-hand side, and a beta redex --- a @rhombus(function)
+expression applied to an argument --- has no head constant, so no rule can ever
+match one. Anonymous and local functions, an expression-position
+@rhombus(let), @rhombus(exists1), @rhombus(select) and a @rhombus(Set)
+comprehension all elaborate to exactly that shape, and unfolding an ordinary
+function whose argument is one creates further redexes, so the two passes
+alternate until neither applies. Beta conversion is applied to the goal the
+waterfall holds, not inside the rewriter, which is what keeps it away from the
+equations of a recursive definition: there a redex is the folded recursive
+call, and reducing it would expose the @tt{WFREC} encoding instead.
+
 The assumptions are simplified too, not merely used as rules. An assumption is
 only a rule for the conclusion, which says nothing when the assumption is
 @tt{not nul(zero)}: as a rule it rewrites a phrase that does not occur. Reduced

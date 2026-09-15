@@ -39,6 +39,11 @@ pure, total forms below.
 body = expr                        the value of the body
      | let Id = expr               a local definition, then the rest
        body
+     | let pattern = expr          an irrefutable-pattern local definition
+       body
+     | function Id(arg :: Type, ...) :: Type:   a named local function,
+         body                                   then the rest
+       body
      | match Id | clause | ...     on a parameter or a pattern variable
 
 expr = Id                          a parameter, pattern variable or local
@@ -61,6 +66,10 @@ expr = Id                          a parameter, pattern variable or local
      | if expr | expr | expr
      | cond-expr
      | expr notation-op expr
+     | expr :: Type                an expected-type ascription
+     | function (arg :: Type, ...) :: Type: body    an anonymous function
+     | function | (pattern, ...): body | ...        a case-clause function
+     | block: body                 an ordinary expression built from a body
      | (expr)
 
 cond-expr = cond
@@ -119,12 +128,16 @@ logical @tt{and} and @tt{or} are strict. Nothing can tell the difference,
 because every function in this grammar is total.
 
 Anything outside the grammar is a compile error that names the offending
-expression. String literals, @rhombus(block), and ordinary runtime-only
-operators are outside it. A bare numeral is also rejected when its numeric
-type cannot be determined from an overload argument, function domain, or
-checked result. The lexical form @tt{-1} is the @tt{negate} call applied to
-the nonnegative numeral @tt{1}; it therefore requires an expected type with
-an applicable @tt{negate} overload clause.
+expression. Ordinary runtime-only operators are outside it. A string
+literal is admitted as an expression (it desugars to @tt{text} applied to
+a @tt{List.of(Nat)} of character codes, over whatever datatypes provide
+@tt{Nat}, @tt{List.of(?a)}, and @tt{text}), but not yet as a pattern in a
+@rhombus(match) clause or row (see "Matching" below). A bare numeral
+is also rejected when its numeric type cannot be determined from an
+overload argument, function domain, or checked result. The lexical form
+@tt{-1} is the @tt{negate} call applied to the nonnegative numeral
+@tt{1}; it therefore requires an expected type with an applicable
+@tt{negate} overload clause.
 
 @subsection{Local definitions}
 
@@ -173,6 +186,29 @@ mistake however the clauses are arranged.
 @tt{_} stands for a position the clause does not name. It may appear inside
 a pattern (@tt{Cons(x, _)}) or as a whole clause head (@tt{| _: ...}), which
 is how a catch-all after a specific case is written.
+
+A pattern position may also be a bracket list pattern (@tt{[]},
+@tt{[x]}, @tt{[x, y, & rest]}), which desugars to nested @tt{cons}/@tt{nil}
+constructor patterns over whatever datatype provides them --- the pattern
+counterpart of a bracket list literal expression --- and a nonnegative
+numeral, which desugars to the matched constructor chain of whatever
+datatype the scrutinee's type declares (so @tt{| 0: ... | succ(k): ...}
+pattern (@tt{Pair(x, y)}) matches the language's one product type.
+
+A @tt{#true} or @tt{#false} pattern matches @tt{Boolean}. The kernel's
+@tt{bool} is a primitive type rather than a declaration, so the facts the
+pattern compiler needs --- two nullary constructors, their distinctness,
+cases and induction --- are derived from @tt{BOOL_CASES_AX} and installed
+with the base theory; no axiom is added. Totality is then checked as for
+any other datatype, so @tt{| #true: ...} alone is a missing case, not a
+fallthrough.
+
+A @tt{String} literal pattern is accepted and means what it says, but it
+is only practical for @tt{""}. A string is @tt{text} applied to the list of
+its codepoints and a codepoint is a unary numeral, so a one-character
+literal is a constructor chain as deep as its codepoint (97 for
+@tt{"a"}), and compiling the match exhausts the proof-search step limit.
+Match on @tt{text(codes)} and compare the codepoint list instead.
 
 @subsection{Clauses on the declaration}
 
@@ -234,6 +270,11 @@ prop = expr
      | prop === prop
      | forall (Id :: Type, ...): prop
      | exists (Id :: Type, ...): prop
+     | exists1 (Id :: Type): prop      exactly one binder
+     | select (Id :: Type): prop       exactly one binder
+     | Set{}                          the canonical empty set
+     | Set{expr, ...}                 an extensional set literal
+     | Set{Id :: Type | prop}         a set comprehension
      | if prop | prop | prop
      | cond-prop
      | prop notation-op prop
@@ -288,6 +329,48 @@ applications. Use them in theorem statements and proof terms, not in a
 existential quantification, and conditionals use the dedicated
 @rhombus(forall), @rhombus(exists), @rhombus(if), and @rhombus(cond) forms
 instead of calls to their kernel constants.
+
+@subsection{Quantifier and choice binders, and @tt{Set} values}
+
+@rhombus(exists1) and @rhombus(select) also have dedicated binder forms,
+parallel to @rhombus(forall) and @rhombus(exists), taking exactly one
+binder (unlike @rhombus(forall)/@rhombus(exists), which take one or
+more):
+
+@rhombusblock(
+  theorem unique_zero:
+    exists1 (x :: Nat): x === zero()
+
+  theorem pick_zero:
+    (select (x :: Nat): x === zero()) === zero()
+)
+
+Each desugars to the named kernel constant applied to an anonymous
+function: @tt{exists1 (x :: T): p} is
+@tt{exists1(function (x :: T): p)}, and likewise for @rhombus(select).
+Supplying more than one binder is a compile-time error, since
+@tt{exists1}/@tt{select} generalize no further than a single witness.
+A binder's type may be omitted and inferred from how the bound variable
+is used in the body, exactly like a @rhombus(forall)/@rhombus(exists)
+binder.
+
+A @tt{Set} value is an ordinary predicate (@tt{?a -> Boolean}), not a
+distinct builtin set type: @tt{Set{}} is the predicate that rejects every
+element, @tt{Set{e, ...}} is the extensional disjunction-of-equalities
+predicate over its listed elements, and @tt{Set{x :: T | prop}} (binder
+type optional, same inference rule) is the predicate @tt{function
+(x :: T) :: Boolean: prop}. All three are applied directly as a function
+to test membership. Two sets built from different literal descriptions
+are proved equal the same way two functions are: see @tt{~extensionality}
+in @secref("declarations").
+
+Because they assert existence or uniqueness without computing a witness,
+@rhombus(exists), @rhombus(exists1), and @rhombus(select) have no
+executable reading: they may appear in a @rhombus(theorem) statement but
+not in a @rhombus(function) body or an executable @rhombus(quickcheck)
+property. A @tt{Set} comprehension's own body, and @rhombus(forall), are
+ordinary predicates and follow the same executability rule as any other
+expression they are built from.
 
 @subsection{Precedence}
 

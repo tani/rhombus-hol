@@ -15,11 +15,23 @@ export:
   CoreIf
   CoreForall
   CoreExists
+  CoreFunctionExpr
+  CoreBlockExpr
+  CoreMatchExpr
+  CoreTypedExpr
+  CoreListExpr
+  CorePairExpr
+  CoreStringExpr
+  CoreSetExpr
   CoreBinder
   CorePattern
   CorePatVar
   CorePatWildcard
   CorePatCtor
+  CorePatLiteral
+  CorePatList
+  CorePatPair
+  CorePatTyped
   CoreFunBody
   CoreBodyExpr
   CoreBodyLet
@@ -54,19 +66,28 @@ class CoreIf(cond :: CoreExpr,
              at :: Syntax):
   extends CoreExpr
 
-class CoreBinder(name :: Symbol,
-                 type_stx :: Syntax,
-                 at :: Syntax)
 
-class CoreForall(binders :: List.of(CoreBinder),
-                 body :: CoreExpr,
-                 at :: Syntax):
+class CoreTypedExpr(expr :: CoreExpr,
+                    type_stx :: Syntax,
+                    at :: Syntax):
   extends CoreExpr
 
-class CoreExists(binders :: List.of(CoreBinder),
-                 body :: CoreExpr,
-                 at :: Syntax):
+class CoreListExpr(elements :: List.of(CoreExpr),
+                   tail :: maybe(CoreExpr),
+                   at :: Syntax):
   extends CoreExpr
+
+class CorePairExpr(first :: CoreExpr,
+                   second :: CoreExpr,
+                   at :: Syntax):
+  extends CoreExpr
+
+class CoreStringExpr(value :: String, at :: Syntax):
+  extends CoreExpr
+
+class CoreSetExpr(elements :: List.of(CoreExpr), at :: Syntax):
+  extends CoreExpr
+
 
 class CorePattern():
   nonfinal
@@ -82,13 +103,44 @@ class CorePatCtor(name :: Symbol,
                   at :: Syntax):
   extends CorePattern
 
+class CorePatLiteral(value_stx :: Syntax, at :: Syntax):
+  extends CorePattern
+
+class CorePatList(elements :: List.of(CorePattern),
+                  tail :: maybe(CorePattern),
+                  at :: Syntax):
+  extends CorePattern
+
+class CorePatPair(first :: CorePattern,
+                  second :: CorePattern,
+                  at :: Syntax):
+  extends CorePattern
+
+class CorePatTyped(pattern :: CorePattern,
+                   type_stx :: Syntax,
+                   at :: Syntax):
+  extends CorePattern
+class CoreBinder(pattern :: CorePattern,
+                 type_stx :: maybe(Syntax),
+                 at :: Syntax)
+
+class CoreForall(binders :: List.of(CoreBinder),
+                 body :: CoreExpr,
+                 at :: Syntax):
+  extends CoreExpr
+
+class CoreExists(binders :: List.of(CoreBinder),
+                 body :: CoreExpr,
+                 at :: Syntax):
+  extends CoreExpr
+
 class CoreFunBody():
   nonfinal
 
 class CoreBodyExpr(expr :: CoreExpr):
   extends CoreFunBody
 
-class CoreBodyLet(name :: Symbol,
+class CoreBodyLet(pattern :: CorePattern,
                   init :: CoreExpr,
                   body :: CoreFunBody,
                   at :: Syntax):
@@ -110,9 +162,23 @@ class CoreRow(patterns :: List.of(CorePattern),
 class CoreBodyRows(rows :: List.of(CoreRow)):
   extends CoreFunBody
 
+class CoreBlockExpr(body :: CoreFunBody, at :: Syntax):
+  extends CoreExpr
+
+class CoreMatchExpr(scrutinee :: CoreExpr,
+                    clauses :: List.of(CoreMatchClause),
+                    at :: Syntax):
+  extends CoreExpr
+
+
+class CoreFunctionExpr(params :: List.of(CoreBinder),
+                       result_type :: maybe(Syntax),
+                       body :: CoreFunBody,
+                       at :: Syntax):
+  extends CoreExpr
 class CoreFunctionSpec(name :: Symbol,
                        params :: List.of(CoreBinder),
-                       result_type :: Syntax,
+                       result_type :: maybe(Syntax),
                        measure :: maybe(CoreExpr),
                        body :: CoreFunBody,
                        at :: Syntax)
@@ -123,7 +189,8 @@ class CoreTactic(induct :: maybe(Symbol),
                  disabled_rule_names :: List.of(Symbol),
                  cases :: List.of(CoreExpr),
                  witnesses :: List.of(CoreExpr),
-                 search_steps :: maybe(NonnegInt))
+                 search_steps :: maybe(NonnegInt),
+                 extensionality :: maybe(Symbol))
 
 fun surface_error(who :: Symbol, message :: String, at :: Syntax):
   rb.#{raise-syntax-error}(who, message, at)
@@ -176,6 +243,38 @@ fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
       CoreForall([decode_binder(binder), ...], decode_expr(body, mode), stx)
   | '(core_exists [$binder, ...] $body)':
       CoreExists([decode_binder(binder), ...], decode_expr(body, mode), stx)
+  | '(core_function_expr [$binder, ...] #false $body)':
+      CoreFunctionExpr([decode_binder(binder), ...],
+                       #false,
+                       decode_body_mode(body, mode),
+                       stx)
+  | '(core_function_expr [$binder, ...] ($result_type ...) $body)':
+      CoreFunctionExpr([decode_binder(binder), ...],
+                       '$result_type ...',
+                       decode_body_mode(body, mode),
+                       stx)
+  | '(core_block_expr $body)':
+      CoreBlockExpr(decode_body_mode(body, mode), stx)
+  | '(core_match_expr $scrutinee [$clause, ...])':
+      CoreMatchExpr(decode_expr(scrutinee, mode),
+                    [decode_match_clause_mode(clause, mode), ...],
+                    stx)
+  | '(core_typed_expr $expr ($type ...))':
+      CoreTypedExpr(decode_expr(expr, mode), '$type ...', stx)
+  | '(core_list_expr [$element, ...] #false)':
+      CoreListExpr([decode_expr(element, mode), ...], #false, stx)
+  | '(core_list_expr [$element, ...] $tail)':
+      CoreListExpr([decode_expr(element, mode), ...],
+                   decode_expr(tail, mode),
+                   stx)
+  | '(core_pair_expr $first $second)':
+      CorePairExpr(decode_expr(first, mode),
+                   decode_expr(second, mode),
+                   stx)
+  | '(core_string_expr $(value :: String))':
+      CoreStringExpr(Syntax.unwrap(value), stx)
+  | '(core_set_expr [$element, ...])':
+      CoreSetExpr([decode_expr(element, mode), ...], stx)
   | '(core_rejected $_)':
       surface_error(
         (if mode == #'prop | #'theorem | #'function),
@@ -197,9 +296,11 @@ fun decode_prop(stx :: Syntax) :: CoreExpr:
 
 fun decode_binder(stx :: Syntax) :: CoreBinder:
   match stx
-  | '(core_binder $(name :: Identifier) ($ty ...))':
-      CoreBinder(Syntax.unwrap(name), '$ty ...', stx)
-  | ~else: surface_error(#'theorem, "a binder needs a name and a type", stx)
+  | '(core_binder $binder_pat #false)':
+      CoreBinder(decode_pattern(binder_pat), #false, stx)
+  | '(core_binder $binder_pat ($ty ...))':
+      CoreBinder(decode_pattern(binder_pat), '$ty ...', stx)
+  | ~else: surface_error(#'function, "malformed function binder", stx)
 
 fun decode_pattern(stx :: Syntax) :: CorePattern:
   match stx
@@ -208,44 +309,80 @@ fun decode_pattern(stx :: Syntax) :: CorePattern:
       CorePatVar(Syntax.unwrap(name), stx)
   | '(core_pat_ctor $(name :: Identifier) [$arg, ...])':
       CorePatCtor(Syntax.unwrap(name), [decode_pattern(arg), ...], stx)
+  | '(core_pat_literal $value)':
+      CorePatLiteral(value, stx)
+  | '(core_pat_list [$element, ...] #false)':
+      CorePatList([decode_pattern(element), ...], #false, stx)
+  | '(core_pat_list [$element, ...] $tail)':
+      CorePatList([decode_pattern(element), ...],
+                  decode_pattern(tail),
+                  stx)
+  | '(core_pat_pair $first $second)':
+      CorePatPair(decode_pattern(first), decode_pattern(second), stx)
+  | '(core_pat_typed $pat ($type ...))':
+      CorePatTyped(decode_pattern(pat), '$type ...', stx)
   | ~else: surface_error(#'function, "malformed pattern", stx)
 
-fun decode_body(stx :: Syntax) :: CoreFunBody:
+fun decode_body_mode(stx :: Syntax, mode :: Symbol) :: CoreFunBody:
   match stx
   | '(core_body_expr $expr)':
-      CoreBodyExpr(decode_expr(expr, #'function))
-  | '(core_body_let $(name :: Identifier) $init $body)':
-      CoreBodyLet(Syntax.unwrap(name),
-                  decode_expr(init, #'function),
-                  decode_body(body),
+      CoreBodyExpr(decode_expr(expr, mode))
+  | '(core_body_let $let_pat $init $body)':
+      CoreBodyLet(decode_pattern(let_pat),
+                  decode_expr(init, mode),
+                  decode_body_mode(body, mode),
                   stx)
   | '(core_body_match $(name :: Identifier) [$clause, ...])':
       CoreBodyMatch(Syntax.unwrap(name),
-                    [decode_match_clause(clause), ...],
+                    [decode_match_clause_mode(clause, mode), ...],
                     stx)
   | '(core_body_rows [$row, ...])':
-      CoreBodyRows([decode_row(row), ...])
+      CoreBodyRows([decode_row_mode(row, mode), ...])
   | ~else: surface_error(#'function, "malformed parsed function body", stx)
 
-fun decode_match_clause(stx :: Syntax) :: CoreMatchClause:
+fun decode_body(stx :: Syntax) :: CoreFunBody:
+  decode_body_mode(stx, #'function)
+
+fun decode_match_clause_mode(stx :: Syntax, mode :: Symbol)
+    :: CoreMatchClause:
   match stx
   | '(core_match_clause $pat $body)':
-      CoreMatchClause(decode_pattern(pat), decode_body(body), stx)
+      CoreMatchClause(decode_pattern(pat), decode_body_mode(body, mode), stx)
   | ~else: surface_error(#'function, "malformed match clause", stx)
 
-fun decode_row(stx :: Syntax) :: CoreRow:
+fun decode_match_clause(stx :: Syntax) :: CoreMatchClause:
+  decode_match_clause_mode(stx, #'function)
+
+fun decode_row_mode(stx :: Syntax, mode :: Symbol) :: CoreRow:
   match stx
   | '(core_row [$pat, ...] $body)':
-      CoreRow([decode_pattern(pat), ...], decode_body(body), stx)
+      CoreRow([decode_pattern(pat), ...], decode_body_mode(body, mode), stx)
   | ~else: surface_error(#'function, "malformed function clause", stx)
+
+fun decode_row(stx :: Syntax) :: CoreRow:
+  decode_row_mode(stx, #'function)
 
 fun decode_function(stx :: Syntax) :: CoreFunctionSpec:
   match stx
+  | '(core_function $(name :: Identifier) [$param, ...] #false #false $body)':
+      CoreFunctionSpec(Syntax.unwrap(name),
+                       [decode_binder(param), ...],
+                       #false,
+                       #false,
+                       decode_body(body),
+                       stx)
   | '(core_function $(name :: Identifier) [$param, ...] ($result_type ...) #false $body)':
       CoreFunctionSpec(Syntax.unwrap(name),
                        [decode_binder(param), ...],
                        '$result_type ...',
                        #false,
+                       decode_body(body),
+                       stx)
+  | '(core_function $(name :: Identifier) [$param, ...] #false $measure $body)':
+      CoreFunctionSpec(Syntax.unwrap(name),
+                       [decode_binder(param), ...],
+                       #false,
+                       decode_expr(measure, #'function),
                        decode_body(body),
                        stx)
   | '(core_function $(name :: Identifier) [$param, ...] ($result_type ...) $measure $body)':
@@ -284,12 +421,13 @@ fun decode_optional_steps(stx :: Syntax) :: maybe(NonnegInt):
 
 fun decode_tactic(stx :: Syntax) :: CoreTactic:
   match stx
-  | '(core_tactic $induct $using $skipped_stages $disabled_rules [$case, ...] [$witness, ...] $steps)':
+  | '(core_tactic $induct $using $skipped_stages $disabled_rules [$case, ...] [$witness, ...] $steps $extensionality)':
       CoreTactic(decode_optional_symbol(induct),
                  symbol_list(using),
                  symbol_list(skipped_stages),
                  symbol_list(disabled_rules),
                  [decode_expr(case, #'prop), ...],
                  [decode_expr(witness, #'expr), ...],
-                 decode_optional_steps(steps))
+                 decode_optional_steps(steps),
+                 decode_optional_symbol(extensionality))
   | ~else: surface_error(#'proof, "malformed parsed proof options", stx)

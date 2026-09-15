@@ -12,12 +12,23 @@
 // only what the ten primitive rules need.
 
 import:
+  lib("racket/base.rkt") as rb
   rhombus/hol/htype open
   rhombus/hol/effect/core open
   rhombus/hol/effect/syntax open
 
+
 export:
   type_unify
+
+// `Symbol.gen` mints uninterned symbols for call-site metavariables
+// (`fresh_type` and friends); ordinary source identifiers, including a
+// function's own declared type variables, are interned. When two still-open
+// metavariables meet during unification, keeping the interned one as the
+// surviving representative is what lets a derived theorem's printed type
+// read back the name the author wrote instead of an internal generated one.
+fun is_generated_tyvar(name :: Symbol) :: Boolean:
+  !rb.#{symbol-interned?}(name)
 
 class.together:
   class UnifyError():
@@ -83,7 +94,13 @@ fun unify(a :: HType, b :: HType) :: Computation:
   fun after_left(left :: HType) :: Computation:
     fun after_right(right :: HType) :: Computation:
       match left
-      | TyVar(name): bind_variable(name, right)
+      | TyVar(lname):
+          match right
+          | TyVar(rname) when is_generated_tyvar(lname) && !is_generated_tyvar(rname):
+              bind_variable(lname, right)
+          | TyVar(rname) when is_generated_tyvar(rname):
+              bind_variable(rname, left)
+          | ~else: bind_variable(lname, right)
       | TyApp(left_name, left_args):
           match right
           | TyVar(name): bind_variable(name, left)

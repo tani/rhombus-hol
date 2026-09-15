@@ -170,6 +170,10 @@ operator_order.def hol_equivalence:
     hol_set_intersection
     hol_application
 
+operator_order.def hol_ascription:
+  ~associativity: ~none
+  ~weaker_than: hol_equivalence
+
 space.enforest hol_expr:
   space_path rhombus/hol/expr
   macro_definer macro
@@ -190,14 +194,31 @@ space.enforest hol_expr:
     private parsed_packer do_pack
     private parsed_unpacker do_unpack
 
+    // `track_origin` only records macro-expansion history (for tools like
+    // the macro stepper); it does not change a syntax object's own reported
+    // source location. Relocating the combined `core_allowed` wrapper alone
+    // is not enough either: quasi-syntax splicing embeds `node` as its own
+    // sub-object, keeping whatever location `node` already had, so a later
+    // decode step that pattern-matches back down to `node` still reports
+    // the literal template text in this file instead of the user's source.
+    // Relocating `node` itself before wrapping fixes every node this meta
+    // API builds -- `make_ref`, `make_call`, `make_numeral`, and every
+    // `hol_expr.macro` production below that calls `wrap_allowed` directly.
+    fun relocate_to(stx :: Syntax, track) :: Syntax:
+      cond
+      | track is_a List && track.length() == 0: stx
+      | track is_a List: stx.relocate_span(track)
+      | ~else: stx.relocate(track :~ Syntax)
+
     fun pack(s :: Syntax, ~track: track = []) :: Syntax:
-      syntax_meta.track_origin(do_pack(s), track)
+      relocate_to(syntax_meta.track_origin(do_pack(s), track), track)
 
     fun unpack(stx :: Syntax) :: Syntax:
       do_unpack(stx, #false)
 
     fun wrap_allowed(policy :: Syntax, node :: Syntax,
                      ~track: track = []) :: Syntax:
+      let node = relocate_to(node, track)
       pack('(core_allowed $policy $node)', ~track: track)
 
     fun make_ref(name :: Syntax, policy :: Syntax,
@@ -235,11 +256,14 @@ export:
   hol_prefix_arithmetic
   hol_power
   hol_application
+  hol_ascription
   only_space hol_expr:
     names:
       #%literal
       #%parens
       #%call
+      #%brackets
+      #%braces
     ===
     <=>
     ==>
@@ -266,11 +290,22 @@ export:
     cond
     forall
     exists
+    exists1
+    select
+    function
+    block
+    match
+    Pair
+    Set
+    ::
 
 module meta:
   export:
     meta:
       hol_expr_meta
+      encode_binder
+      encode_pattern
+      encode_function_body
 
 meta:
   fun binary(name :: Syntax, left :: Syntax, right :: Syntax,
@@ -285,13 +320,142 @@ meta:
 
   fun encode_binder(b :: Syntax) :: Syntax:
     match b
-    | '$(name :: Identifier) :: $ty ...':
-        '(core_binder $name ($ty ...))'.relocate_span([b])
-    | ~else: syntax_meta.error("a binder needs a name and a type", b)
+    | '$pat ... :: $ty ...':
+        let encoded = encode_pattern('$pat ...')
+        '(core_binder $encoded ($ty ...))'.relocate_span([b])
+    | '$pat ...':
+        let encoded = encode_pattern('$pat ...')
+        '(core_binder $encoded #false)'.relocate_span([b])
 
   fun parse_group(g :: Syntax) :: Syntax:
     let '$(parsed :: hol_expr_meta.Parsed)' = g
     hol_expr_meta.unpack(parsed)
+
+  fun local_function_signature(rest :: Syntax, at :: Syntax) :: List:
+    match rest
+    | ':: $result_type ...: $body; ...':
+        ['$result_type ...', '$body; ...']
+    | ': $body; ...':
+        [#false, '$body; ...']
+    | ~else:
+        syntax_meta.error("malformed local function body", at)
+
+
+  fun encode_pattern(pat :: Syntax) :: Syntax:
+    match pat
+    | '$inner ... :: $type ...':
+        let encoded = encode_pattern('$inner ...')
+        '(core_pat_typed $encoded ($type ...))'.relocate_span([pat])
+    | '_': '(core_pat_wildcard)'.relocate(pat)
+    | 'Pair($first, $second)':
+        '(core_pat_pair $(encode_pattern(first)) $(encode_pattern(second)))'.relocate_span([pat])
+    | '[$element, ..., & $tail]':
+        let [e, ...] = [element, ...].map(encode_pattern)
+        '(core_pat_list [$e, ...] $(encode_pattern(tail)))'.relocate_span([pat])
+    | '[$element, ...]':
+        let [e, ...] = [element, ...].map(encode_pattern)
+        '(core_pat_list [$e, ...] #false)'.relocate_span([pat])
+    | '$(name :: Identifier)($arg, ...)':
+        let [a, ...] = [arg, ...].map(encode_pattern)
+        '(core_pat_ctor $name [$a, ...])'.relocate_span([pat])
+    | '$(name :: Identifier)':
+        '(core_pat_var $name)'.relocate(pat)
+    | '$(value :: Term)':
+        let raw = Syntax.unwrap(value)
+        cond
+        | raw == #true || raw == #false
+            || raw is_a NonnegInt || raw is_a String:
+            '(core_pat_literal $value)'.relocate(pat)
+        | ~else: syntax_meta.error("unsupported literal pattern", pat)
+    | ~else: syntax_meta.error("malformed pattern", pat)
+
+  fun encode_match_clause(one :: Syntax) :: Syntax:
+    match one
+    | '$pat ...: $clause_body; ...':
+        let p = encode_pattern('$pat ...')
+        let b = encode_function_body('$clause_body; ...')
+        '(core_match_clause $p $b)'.relocate_span([one])
+    | ~else: syntax_meta.error("malformed match clause", one)
+
+  fun encode_match_clauses(clauses :: List.of(Syntax)) :: List.of(Syntax):
+    clauses.map(encode_match_clause)
+
+  fun encode_function_body(body :: Syntax) :: Syntax:
+    match body
+    | 'match $(name :: Identifier)
+       | $clause
+       | ...':
+        let [encoded, ...] = encode_match_clauses([clause, ...])
+        '(core_body_match $name [$encoded, ...])'.relocate_span([body])
+    | 'match $scrutinee ...
+       | $clause
+       | ...':
+        let target = parse_group('$scrutinee ...')
+        let [encoded, ...] = encode_match_clauses([clause, ...])
+        '(core_body_expr (core_allowed both (core_match_expr $target [$encoded, ...])))'.relocate_span([body])
+    | 'let $pat ... = $rhs ...
+       $more; ...':
+        let init = parse_group('$rhs ...')
+        let tail = encode_function_body('$more; ...')
+        let encoded = encode_pattern('$pat ...')
+        '(core_body_let $encoded $init $tail)'.relocate_span([body])
+    | 'function $(name :: Identifier)
+       | $case
+       | ...
+       $more; ...':
+        let [binders, rows] = encode_case_function([case, ...], body)
+        let [binder, ...] = binders :~ List
+        let [row, ...] = rows :~ List
+        let init = '(core_function_expr [$binder, ...] #false (core_body_rows [$row, ...]))'.relocate_span([body])
+        let tail = encode_function_body('$more; ...')
+        '(core_body_let (core_pat_var $name) $init $tail)'.relocate_span([body])
+    | 'function $(name :: Identifier)($param, ...) $rest ...
+       $more; ...':
+        let [result_type, function_body] = local_function_signature(
+                                                   '$rest ...', body)
+        let [binder, ...] = [param, ...].map(encode_binder)
+        let encoded_body = encode_function_body(function_body :~ Syntax)
+        let result:
+          match result_type
+          | #false: '#false'
+          | ty: '($((ty :~ Syntax)))'
+        let init = '(core_function_expr [$binder, ...] $result $encoded_body)'.relocate_span([body])
+        let tail = encode_function_body('$more; ...')
+        '(core_body_let (core_pat_var $name) $init $tail)'.relocate_span([body])
+    | 'proof: $proof_body; ...
+       $more; ...':
+        syntax_meta.error("a local function cannot have a `proof:` block",
+                          body)
+    | ~else:
+        let expr = parse_group(body)
+        '(core_body_expr $expr)'.relocate_span([body])
+  fun encode_case_row(one :: Syntax) :: List:
+    match one
+    | '($pat, ...): $case_body; ...':
+        let [p, ...] = [pat, ...].map(encode_pattern)
+        let body = encode_function_body('$case_body; ...')
+        [[p, ...],
+         '(core_row [$p, ...] $body)'.relocate_span([one])]
+    | ~else:
+        syntax_meta.error(
+          "a function case must have `(pattern, ...): body` form", one)
+
+  fun encode_case_function(cases :: List.of(Syntax),
+                           at :: Syntax) :: List:
+    when cases.length() == 0
+    | syntax_meta.error("a case function needs at least one case", at)
+    let parsed = cases.map(encode_case_row)
+    let arity = ((parsed[0] :~ List)[0] :~ List).length()
+    for (entry in parsed):
+      unless ((entry :~ List)[0] :~ List).length() == arity
+      | syntax_meta.error(
+          "all cases of a function must have the same arity", at)
+    let binders:
+      for List (_ in List.iota(arity)):
+        '(core_binder (core_pat_wildcard) #false)'
+    let rows = parsed.map(fun (entry :: List): entry[1] :~ Syntax)
+    [binders, rows]
+
 
   fun encode_cond_clause(c :: Syntax) :: List:
     match c
@@ -323,6 +487,9 @@ hol_expr.macro '#%literal $(value :: Term)':
       unary('negate',
             hol_expr_meta.make_numeral(magnitude, ~track: value),
             'both')
+  | _ :: String:
+      hol_expr_meta.wrap_allowed(
+        'both', '(core_string_expr $value)', ~track: value)
   | ~else:
       hol_expr_meta.wrap_allowed('both', '(core_rejected $value)',
                                  ~track: value)
@@ -334,6 +501,51 @@ hol_expr.macro '$left #%call ($(arg :: hol_expr_meta.Parsed), ...)':
   ~order: hol_application
   ~all_stx: stx
   hol_expr_meta.make_call(left, [arg, ...], 'both', ~track: [left, arg, ...])
+
+hol_expr.macro
+| '#%brackets [$element, ..., & $tail]':
+    let [e, ...] = [element, ...].map(parse_group)
+    let rest = parse_group(tail)
+    hol_expr_meta.wrap_allowed(
+      'both', '(core_list_expr [$e, ...] $rest)',
+      ~track: [element, ..., tail])
+| '#%brackets [$(item :: hol_expr_meta.Parsed), ...]':
+    let [e, ...] = [item, ...].map(hol_expr_meta.unpack)
+    hol_expr_meta.wrap_allowed(
+      'both', '(core_list_expr [$e, ...] #false)',
+      ~track: [item, ...])
+
+hol_expr.macro 'Pair($(first :: hol_expr_meta.Parsed), $(second :: hol_expr_meta.Parsed))':
+  ~all_stx: stx
+  let first_core = hol_expr_meta.unpack(first)
+  let second_core = hol_expr_meta.unpack(second)
+  hol_expr_meta.wrap_allowed(
+    'both', '(core_pair_expr $first_core $second_core)',
+    ~track: [first, second])
+
+hol_expr.macro
+| 'Set{$(binder :: Group) | $(body :: hol_expr_meta.Parsed)}':
+    ~all_stx: stx
+    let b = encode_binder(binder)
+    let e = hol_expr_meta.unpack(body)
+    hol_expr_meta.wrap_allowed(
+      'both',
+      '(core_function_expr [$b] (Boolean) (core_body_expr $e))')
+| 'Set{$(element :: hol_expr_meta.Parsed), ...}':
+    ~all_stx: stx
+    let [e, ...] = [element, ...].map(hol_expr_meta.unpack)
+    hol_expr_meta.wrap_allowed(
+      'both', '(core_set_expr [$e, ...])',
+      ~track: [element, ...])
+
+hol_expr.macro '#%braces {$(element :: hol_expr_meta.Parsed), ...}':
+  ~all_stx: stx
+  when [element, ...].length() == 0
+  | syntax_meta.error("use `Set{}` for an empty HOL set", stx)
+  let [e, ...] = [element, ...].map(hol_expr_meta.unpack)
+  hol_expr_meta.wrap_allowed(
+    'both', '(core_set_expr [$e, ...])',
+    ~track: [element, ...])
 
 hol_expr.macro '$left === $right':
   ~order: hol_equality
@@ -461,6 +673,53 @@ hol_expr.macro 'cond | $clause | ...':
   ~all_stx: stx
   hol_expr_meta.pack(encode_cond([clause, ...], stx))
 
+hol_expr.macro '$left :: $type ...':
+  ~order: hol_ascription
+  ~all_stx: stx
+  let expr = hol_expr_meta.unpack(left)
+  hol_expr_meta.wrap_allowed(
+    'both', '(core_typed_expr $expr ($type ...))',
+    ~track: left)
+
+hol_expr.macro 'block: $body; ...':
+  ~all_stx: stx
+  let encoded = encode_function_body('$body; ...')
+  hol_expr_meta.wrap_allowed(
+    'both', '(core_block_expr $encoded)',
+    ~track: encoded)
+
+hol_expr.macro 'match $scrutinee ... | $clause | ...':
+  ~all_stx: stx
+  let target = parse_group('$scrutinee ...')
+  let [encoded, ...] = encode_match_clauses([clause, ...])
+  hol_expr_meta.wrap_allowed(
+    'both', '(core_match_expr $target [$encoded, ...])',
+    ~track: target)
+
+hol_expr.macro
+| 'function
+   | $case
+   | ...':
+    ~all_stx: stx
+    let [binders, rows] = encode_case_function([case, ...], stx)
+    let [binder, ...] = binders :~ List
+    let [row, ...] = rows :~ List
+    hol_expr_meta.wrap_allowed(
+      'both',
+      '(core_function_expr [$binder, ...] #false (core_body_rows [$row, ...]))')
+| 'function ($param, ...) $rest ...':
+    ~all_stx: stx
+    let [result_type, body] = local_function_signature('$rest ...', stx)
+    let [binder, ...] = [param, ...].map(encode_binder)
+    let encoded_body = encode_function_body(body :~ Syntax)
+    let result:
+      match result_type
+      | #false: '#false'
+      | ty: '($((ty :~ Syntax)))'
+    hol_expr_meta.wrap_allowed(
+      'both',
+      '(core_function_expr [$binder, ...] $result $encoded_body)')
+
 hol_expr.macro
 | 'forall ($(binder :: Group), ...): $(body :: hol_expr_meta.Parsed)':
     ~all_stx: stx
@@ -484,3 +743,45 @@ hol_expr.macro
     let [b, ...] = [binder, ...].map(encode_binder)
     let e = parse_group('$body ...')
     hol_expr_meta.wrap_allowed('prop', '(core_exists [$b, ...] $e)', ~track: e)
+
+hol_expr.macro
+| 'exists1 ($(first :: Group), $(second :: Group), $(more :: Group), ...): $body ...':
+    ~all_stx: stx
+    syntax_meta.error("`exists1` accepts exactly one binder", stx)
+| 'exists1 ($(binder :: Group)): $(body :: hol_expr_meta.Parsed)':
+    ~all_stx: stx
+    let b = encode_binder(binder)
+    let e = hol_expr_meta.unpack(body)
+    hol_expr_meta.wrap_allowed(
+      'prop',
+      '(core_call (core_ref exists1) [(core_function_expr [$b] #false (core_body_expr $e))])',
+      ~track: body)
+| 'exists1 ($(binder :: Group)) $body ...':
+    ~all_stx: stx
+    let b = encode_binder(binder)
+    let e = parse_group('$body ...')
+    hol_expr_meta.wrap_allowed(
+      'prop',
+      '(core_call (core_ref exists1) [(core_function_expr [$b] #false (core_body_expr $e))])',
+      ~track: e)
+
+hol_expr.macro
+| 'select ($(first :: Group), $(second :: Group), $(more :: Group), ...): $body ...':
+    ~all_stx: stx
+    syntax_meta.error("`select` accepts exactly one binder", stx)
+| 'select ($(binder :: Group)): $(body :: hol_expr_meta.Parsed)':
+    ~all_stx: stx
+    let b = encode_binder(binder)
+    let e = hol_expr_meta.unpack(body)
+    hol_expr_meta.wrap_allowed(
+      'prop',
+      '(core_call (core_ref select) [(core_function_expr [$b] #false (core_body_expr $e))])',
+      ~track: body)
+| 'select ($(binder :: Group)) $body ...':
+    ~all_stx: stx
+    let b = encode_binder(binder)
+    let e = parse_group('$body ...')
+    hol_expr_meta.wrap_allowed(
+      'prop',
+      '(core_call (core_ref select) [(core_function_expr [$b] #false (core_body_expr $e))])',
+      ~track: e)

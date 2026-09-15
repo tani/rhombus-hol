@@ -45,13 +45,31 @@ fun make_surface_state(functions :: List,
   SurfaceState(OverloadRegistry(arity_map, methods), constant_map,
                runtime_arity_map, type_registry)
 
+fun canonical_method_types(method :: OverloadMethod) :: List.of(HType):
+  let tys = method.argument_types ++ [method.result_type]
+  let renaming:
+    for values(out :~ Map = {}) (ty in tys):
+      for values(inner :~ Map = out) (name in type_vars(ty :~ HType)):
+        (if inner.get(name, #false)
+         | inner
+         | inner ++ {name: mk_tyvar(Symbol.from_string("t" ++ to_string(inner.length())))})
+  tys.map(fun (ty): type_subst(renaming, ty :~ HType))
+
+// Two overload methods are the same declaration -- and thus a harmless
+// duplicate registration reachable through diamond imports -- when they
+// share a function and implementation constant and their signatures agree
+// up to renaming of type variables. Comparing `argument_types`/`result_type`
+// literally is unsound: each importer's own compile-time expansion of the
+// defining module freshens polymorphic type variables independently (see
+// `fresh_type` in `overload.rhm`), so alpha-equivalent methods reached via
+// two different import paths carry different, but equivalent, type-variable
+// names.
 fun same_overload_method(left :: OverloadMethod,
                          right :: OverloadMethod) :: Boolean:
   left.function == right.function
-    && left.argument_types == right.argument_types
-    && left.result_type == right.result_type
     && left.constant == right.constant
     && left.argument_order == right.argument_order
+    && canonical_method_types(left) == canonical_method_types(right)
 
 fun contains_overload_method(registry :: OverloadRegistry,
                              method :: OverloadMethod) :: Boolean:

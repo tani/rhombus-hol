@@ -152,7 +152,13 @@ datatype's other rules.
  @item{@bold{Mutual recursion.} Two functions that call each other cannot be
   declared; neither is complete when the other is checked.}
 
- @item{@bold{Recursion under a binder.} There are no lambdas in the body
-  grammar, so this cannot arise, and it is reported if it somehow does.}
+ @item{@bold{Recursion under a binder.} A local or anonymous
+  @rhombus(function) inside a recursive definition's body is an ordinary
+  non-recursive lambda (@secref("local-function")): it has no binding of
+  its own name, and a call from inside it back to the enclosing definition
+  currently being checked is a recursive call reached through that
+  lambda's binder. The checker walks into every @tt{Abs} node of the
+  elaborated term, so this is caught and reported the same way any other
+  unstated recursive call is, not silently accepted.}
 
 )

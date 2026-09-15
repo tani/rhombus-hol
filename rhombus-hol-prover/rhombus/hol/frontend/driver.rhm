@@ -23,6 +23,7 @@ import:
   rhombus/hol/names open
   rhombus/hol/kernel open
   rhombus/hol/logic/bool open
+  rhombus/hol/datatype/bool_datatype open
   rhombus/hol/datatype/datatype open
   rhombus/hol/datatype/datatype_gen open
   rhombus/hol/datatype/datatype_rec open
@@ -105,7 +106,17 @@ def initial_context:
              add_thm(thy, d, #'propositional, th)
   let db = for values(d :~ RuleDB = db) (th in conditionals(thy)):
              add_thm(thy, d, #'conditional, th)
-  mk_context(thy, ~rules: db)
+  // `bool` is a datatype like any other as far as pattern matching is
+  // concerned -- `#true` and `#false` are its two nullary constructors --
+  // but it is primitive, so its facts are derived from `BOOL_CASES_AX`
+  // rather than from a declaration (`bool_datatype.rhm`). Registering it
+  // here is what makes a Boolean literal pattern compile, and it adds no
+  // axiom: the two discriminator constants are definitions.
+  let (bool_thy, bool_thms) = build_bool_datatype_thms(thy)
+  let db = for values(d :~ RuleDB = db) (th in bool_thms.distinctness
+                                                 ++ bool_thms.discriminators):
+             add_thm(bool_thy, d, #'bool, th)
+  mk_context(bool_thy, ~rules: db, ~datatypes: {#'bool: bool_thms})
 
 fun initial_state() :: HolState:
   HolState(initial_context, {}, standard_overload_registry(),
@@ -185,13 +196,14 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
 // statement for the ordinary declaration form.
 fun add_function(st :: HolState, core :: CoreFunctionSpec,
                  at :: Syntax) :: HolState:
+  let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
+                   m ++ {n: (thms :~ DatatypeThms).spec}
   let spec :~ FunSpec = try:
                           elab.elaborate_function_decl(
                             st.ctx.thy, core, ~operators: st.operators,
-                            ~type_constructors: st.type_constructors)
+                            ~type_constructors: st.type_constructors,
+                            ~datatypes: dt_specs)
                           ~catch e :: Exn.Fail: hol_reraise(e, at)
-  let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
-                   m ++ {n: (thms :~ DatatypeThms).spec}
   let prepared :~ PreparedFunction = try:
                                       prepare_function(
                                         st.ctx.thy, spec, dt_specs,
@@ -328,10 +340,13 @@ fun discharger(st :: HolState) :: Function:
 fun add_theorem(st :: HolState, name :: Symbol,
                 stmt :: CoreExpr, tactic :: CoreTactic,
                 at :: Syntax) :: HolState:
+  let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
+                   m ++ {n: (thms :~ DatatypeThms).spec}
   let (statement, names) = try:
                              elab.elaborate_theorem_statement(
                                st.ctx.thy, stmt, ~operators: st.operators,
-                               ~type_constructors: st.type_constructors)
+                               ~type_constructors: st.type_constructors,
+                               ~datatypes: dt_specs)
                              ~catch e :: Exn.Fail: hol_reraise(e, at)
   let induct = tactic.induct
   let using_names = tactic.using_names
@@ -340,6 +355,7 @@ fun add_theorem(st :: HolState, name :: Symbol,
   let case_exprs = tactic.cases
   let witness_exprs = tactic.witnesses
   let search_steps = tactic.search_steps
+  let extensionality = tactic.extensionality
   let using:
     for List (u in (using_names :~ List)):
       match st.thms.get(u, #false)
@@ -359,14 +375,16 @@ fun add_theorem(st :: HolState, name :: Symbol,
       try:
         elab.parse_core_prop(
           st.ctx.thy, tyvars, env, c, ~operators: st.operators,
-          ~type_constructors: st.type_constructors)
+          ~type_constructors: st.type_constructors,
+          ~datatypes: dt_specs)
         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let witnesses:
     for List (w in witness_exprs):
       try:
         elab.parse_core_prop(
           st.ctx.thy, tyvars, env, w, ~operators: st.operators,
-          ~type_constructors: st.type_constructors)
+          ~type_constructors: st.type_constructors,
+          ~datatypes: dt_specs)
         ~catch e :: Exn.Fail: hol_reraise(e, at)
   let limits :~ SearchLimits:
     match search_steps
@@ -375,7 +393,9 @@ fun add_theorem(st :: HolState, name :: Symbol,
   let (proved, node) = prove(st.ctx, statement, ~names: names,
                              ~induct: (induct :~ maybe(Symbol)),
                              ~scope: scope, ~cases: cases,
-                             ~witnesses: witnesses, ~limits: limits)
+                             ~witnesses: witnesses, ~limits: limits,
+                             ~extensionality:
+                               (extensionality :~ maybe(Symbol)))
   match proved
   | #false: hol_error(#'theorem, residue_message(name, node), at)
   | th :~ Thm:

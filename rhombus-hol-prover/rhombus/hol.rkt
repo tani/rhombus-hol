@@ -46,9 +46,12 @@ export:
   hol_prefix_arithmetic
   hol_power
   hol_application
+  hol_ascription
   only_space hol_expr:
     names:
       #%literal
       #%parens
       #%call
-    === <=> ==> and or not == && || ! + - * ** < <= > >= ++ in union intersect if cond forall exists
+      #%brackets
+      #%braces
+    === <=> ==> and or not == && || ! + - * ** < <= > >= ++ in union intersect if cond forall exists exists1 select function block match Pair Set ::

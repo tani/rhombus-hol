@@ -117,6 +117,30 @@ fun extensionalize_concl(thy :: Theory, g :: Goal) :: maybe(Step):
                [FunctionExtensionalized()])
   | ~else: #false
 
+// Rewrite with the database, then beta-normalize whatever that exposed.
+//
+// The two must stay separate. A beta redex has no head constant, so no
+// rewrite rule can ever be indexed for one and the simplifier alone will
+// never reduce it -- yet unfolding a function whose argument is a lambda
+// (or whose body came from surface sugar: an anonymous `function`, an
+// expression-position `let`, a `Set` comprehension) creates redexes as it
+// goes. Adding `BETA_CONV` to the simplifier's own step instead is sound
+// but wrong: that step also runs while a recursive definition's equations
+// are being derived, where reducing the redex replaces each folded
+// recursive call with the raw `WFREC` encoding and the search stops
+// terminating. Applying beta only to a goal the waterfall is holding
+// keeps it away from that derivation.
+fun simp_then_beta(db :: RuleDB):
+  fun (thy :: Theory, t :: Term) :: Computation:
+    effect:
+      let rewritten <- simp_conv_effect(db)(thy, t)
+      let current = (if rewritten | rhs_of(rewritten :~ Thm) | t)
+      let beta = TOP_DEPTH_CONV(BETA_CONV)(thy, current)
+      return (cond
+              | !beta: rewritten
+              | rewritten: TRANS(rewritten :~ Thm, beta :~ Thm)
+              | ~else: beta)
+
 fun simplify_concl(thy :: Theory, db :: RuleDB, g :: Goal) :: Computation:
   cond
   | g.concl == tm_true:
@@ -124,7 +148,7 @@ fun simplify_concl(thy :: Theory, db :: RuleDB, g :: Goal) :: Computation:
   | ~else:
       let db2 = with_assumptions(thy, db, g.asms)
       effect:
-        let rewritten <- simp_conv_effect(db2)(thy, g.concl)
+        let rewritten <- simp_then_beta(db2)(thy, g.concl)
         match rewritten
         | #false: return extensionalize_concl(thy, g)
         | eqth :~ Thm:

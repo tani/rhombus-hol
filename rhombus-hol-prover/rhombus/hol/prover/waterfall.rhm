@@ -30,6 +30,7 @@ import:
   rhombus/hol/printer open
   rhombus/hol/logic/bool open
   rhombus/hol/prover/search/limits open
+  rhombus/hol/logic/conv open
   rhombus/hol/logic/drule open
   rhombus/hol/prover/goal open
   rhombus/hol/logic/taut open
@@ -182,6 +183,7 @@ fun prove(ctx :: Context, statement :: Term,
           ~cases: cases :: List.of(Term) = [],
           ~witnesses: witnesses :: List.of(Term) = [],
           ~limits: limits :: SearchLimits = SearchLimits(),
+          ~extensionality: extensionality :: maybe(Symbol) = #false,
           ~executor: executor :: ProofExecutor = sequential_executor())
      :: values(maybe(Thm), ProofNode):
   let result :~ ProofResult:
@@ -193,14 +195,16 @@ fun prove(ctx :: Context, statement :: Term,
           executor.run,
           Trace.handle(
             prove_impl(statement, ~names: names, ~induct: hint,
-                       ~cases: cases, ~witnesses: witnesses)))))
+                       ~cases: cases, ~witnesses: witnesses,
+                       ~extensionality: extensionality)))))
   values(result.proved, result.node)
 
 fun prove_impl(statement :: Term,
                ~names: names :: List.of(Symbol) = [],
                ~induct: hint :: maybe(Symbol) = #false,
                ~cases: cases :: List.of(Term) = [],
-               ~witnesses: witnesses :: List.of(Term) = [])
+               ~witnesses: witnesses :: List.of(Term) = [],
+               ~extensionality: extensionality :: maybe(Symbol) = #false)
      :: Computation:
   effect:
     let env :: ProofEnv <- ProofEnv.ask()
@@ -225,13 +229,27 @@ fun prove_impl(statement :: Term,
                           | List.cons(v, rest):
                               (if (v :~ FVar).name == hint | v | loop(rest))
                     | ~else: #false)
-    let node <- apply_witnesses(witnesses, cases, mk_goal([], matrix),
-                                hint_var)
+    // Beta-normalize the goal before the waterfall sees it. The surface
+    // desugarings -- an anonymous or local `function`, a `let` in expression
+    // position, `exists1`/`select`/`Set`-comprehension -- all elaborate to a
+    // lambda applied to its argument, and nothing downstream reduces one: a
+    // redex has no head constant, so no rewrite rule can be indexed for it.
+    // Doing it here rather than inside the simplifier keeps it away from the
+    // derived equations of a recursive definition, whose folded recursive
+    // calls are themselves redexes that must stay unreduced.
+    let beta = TOP_DEPTH_CONV(BETA_CONV)(thy, matrix)
+    let reduced = (if beta | rhs_of(beta :~ Thm) | matrix)
+    let node <- apply_explicit_extensionality(
+                  extensionality, witnesses, cases,
+                  mk_goal([], reduced), hint_var)
     let executed <- ProofExecutor.execute(node)
     match executed
     | #false: return ProofResult(#false, node)
     | th :~ Thm:
-        let closed = GENL(thy, vars, th)
+        let restored = (if beta
+                        | EQ_MP(SYM(thy, beta :~ Thm), th)
+                        | th)
+        let closed = GENL(thy, vars, restored)
         // The prover is not trusted to have proved what was asked: check it.
         cond
         | hyps_of(closed).length() != 0:
@@ -242,6 +260,64 @@ fun prove_impl(statement :: Term,
                   error.val(~label: "asked", show(statement)),
                   error.val(~label: "got", show(concl_of(closed))))
         | ~else: return ProofResult(closed, node)
+
+// An explicit extensionality request is one derived `EXT` step before the
+// ordinary proof controls. It is accepted only for equality at function type;
+// set equality is the same case because sets are predicates.
+fun apply_explicit_extensionality(
+      requested :: maybe(Symbol),
+      witnesses :: List.of(Term), cases :: List.of(Term),
+      g :: Goal, hint :: maybe(FVar)) :: Computation:
+  match requested
+  | #false: apply_witnesses(witnesses, cases, g, hint)
+  | name:
+      match dest_imp(g.concl)
+      | [antecedent, consequent]:
+          let subgoal = Goal(g.asms ++ [antecedent], consequent)
+          let event = Assumed(antecedent)
+          effect:
+            let env :: ProofEnv <- ProofEnv.ask()
+            fun discharge(ths :: List.of(Thm)) :: Thm:
+              DISCH(env.base.thy, antecedent, ths[0])
+            let step = Step([subgoal], discharge, [event])
+            let child <- Trace.note(
+                           event,
+                           apply_explicit_extensionality(
+                             requested, witnesses, cases, subgoal, hint))
+            return Derived(step, [child])
+      | #false:
+          match dest_eq(g.concl)
+          | [left, right]:
+              let function_type = type_of(left)
+              unless is_fun(function_type)
+              | error(
+                  ~who: #'proof,
+                  "`~extensionality` requires an equality between functions",
+                  error.val(~label: "goal", show(g.concl)))
+              let (domain, _) = dest_fun(function_type)
+              let variable = variant(
+                               g.asms ++ [g.concl],
+                               mk_var(name :~ Symbol, domain))
+              let pointwise = mk_eq(
+                                mk_comb(left, variable),
+                                mk_comb(right, variable))
+              let subgoal = Goal(g.asms, pointwise)
+              let event = FunctionExtensionalized()
+              effect:
+                let env :: ProofEnv <- ProofEnv.ask()
+                fun justify(ths :: List.of(Thm)) :: Thm:
+                  EXT(env.base.thy, variable, ths[0])
+                let step = Step([subgoal], justify, [event])
+                let child <- Trace.note(
+                               event,
+                               apply_witnesses(
+                                 witnesses, cases, subgoal, hint))
+                return Derived(step, [child])
+          | #false:
+              error(
+                ~who: #'proof,
+                "`~extensionality` requires an equality between functions",
+                error.val(~label: "goal", show(g.concl)))
 
 // Apply explicit existential witnesses before Boolean case splits. Each step
 // is justified by the derived EXISTS rule, and mismatched hints fail loudly

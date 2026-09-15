@@ -44,6 +44,7 @@ export:
   NatArith
   NatMul
   NatOrder
+  NatSub
   nat_arith
 
 // Multiplication's own equations, at the module's multiplication constant.
@@ -64,6 +65,13 @@ class NatMul(mul_term :: Term,
 //   `le_add`           `|- forall a d. le(a, add(a, d))`
 //   `not_le_add_succ`  `|- forall a d. not le(add(a, succ d), a)`
 class NatOrder(le_term :: Term, le_add :: Thm, not_le_add_succ :: Thm)
+
+// What decides a truncated difference, again from addition alone: taking `b`
+// off `b + r` leaves `r`, and taking more off than there is leaves nothing.
+//
+//   `sub_add`    `|- forall b r. sub(add(b, r), b) === r`
+//   `sub_below`  `|- forall a d. sub(a, add(a, succ d)) === zero()`
+class NatSub(sub_term :: Term, sub_add :: Thm, sub_below :: Thm)
 
 // The derived equations, at the module's own addition constant.
 //
@@ -86,7 +94,8 @@ class NatArith(shape :: NumeralShape,
                b0_zero :: Thm,
                ne_add_succ :: Thm,
                mul :: maybe(NatMul),
-               order :: maybe(NatOrder))
+               order :: maybe(NatOrder),
+               sub :: maybe(NatSub))
 
 // One derivation per module, keyed by the digit definition the driver
 // installed -- the one value every context descending from that installation
@@ -94,12 +103,26 @@ class NatArith(shape :: NumeralShape,
 // actually meets arithmetic on literals rather than at every declaration.
 def derivations = WeakMutableMap.by(===)()
 
+// And one lookup per theory in front of it. The simplifier asks this question
+// about every subterm of every goal, and finding the digit definition means
+// reading the theory's definition table, which is not free; the theory a
+// proof runs against does not change while it runs.
+def by_theory = WeakMutableMap.by(===)()
+
 // Each derived equation is a short induction over one variable; a budget this
 // size is several times what any of them needs, and small enough that a
 // module whose addition the prover cannot handle finds out quickly.
 def derivation_steps :: NonnegInt = 40000
 
 fun nat_arith(ctx :: Context) :: maybe(NatArith):
+  match by_theory.maybe[ctx.thy]
+  | cached :: Box: cached.value
+  | #false:
+      let derived = derive_for_theory(ctx)
+      by_theory[ctx.thy] := Box(derived)
+      derived
+
+fun derive_for_theory(ctx :: Context) :: maybe(NatArith):
   match definition_of(ctx.thy, bit0_name)
   | #false: #false
   | key :: Thm:
@@ -238,7 +261,8 @@ fun derive_with(ctx :: Context, shape :: NumeralShape,
          sz :: Thm, s0 :: Thm, s1 :: Thm, bz :: Thm, ne :: Thm]:
           NatArith(shape, add, zl, zr, e00, e01, e10, e11, sz, s0, s1, bz, ne,
                    derive_mul(ctx, shape, add, attempt, base, m, n),
-                   derive_order(ctx, shape, add, attempt, base, a, d))
+                   derive_order(ctx, shape, add, attempt, base, a, d),
+                   derive_sub(ctx, shape, add, attempt, base, a, d))
       | ~else: #false
   | ~else: #false
 
@@ -336,4 +360,38 @@ fun derive_order(ctx :: Context, shape :: NumeralShape, add :: Term,
                      [#'a, #'d], #'a, base)
       match [le_add, not_le]
       | [yes :: Thm, no :: Thm]: NatOrder(le, yes, no)
+      | ~else: #false
+
+// Truncated subtraction, if the module declared it. Both facts are ordinary
+// inductions; a module without it keeps working, with differences left
+// unevaluated.
+fun derive_sub(ctx :: Context, shape :: NumeralShape, add :: Term,
+               attempt :: Function, base :: List.of(RuleBinding),
+               a :: FVar, d :: FVar) :: maybe(NatSub):
+  let ty = shape.ty
+  let binary = mk_fun(ty, mk_fun(ty, ty))
+  let ctors = PeanoCtors(shape.zero_name, shape.succ_name)
+  let found:
+    for values(found :: maybe(Term) = #false) ((name, info) in ctx.funs):
+      cond
+      | found: found
+      | const_type(ctx.thy, name) != binary: #false
+      | !is_peano_sub(ctors, name, (info :~ FunInfo).equations): #false
+      | ~else: mk_const(name, binary)
+  match found
+  | #false: #false
+  | sub :: Term:
+      fun minus(x :: Term, y :: Term) :: Term: mk_comb(mk_comb(sub, x), y)
+      fun plus(x :: Term, y :: Term) :: Term: mk_comb(mk_comb(add, x), y)
+      fun suc(x :: Term) :: Term: mk_comb(shape.succ_term, x)
+      let sub_add = attempt(
+                      mk_forall_list([a, d], mk_eq(minus(plus(a, d), a), d)),
+                      [#'a, #'d], #'a, base)
+      let sub_below = attempt(
+                        mk_forall_list([a, d],
+                                       mk_eq(minus(a, plus(a, suc(d))),
+                                             shape.zero_term)),
+                        [#'a, #'d], #'a, base)
+      match [sub_add, sub_below]
+      | [above :: Thm, below :: Thm]: NatSub(sub, above, below)
       | ~else: #false

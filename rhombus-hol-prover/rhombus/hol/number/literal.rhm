@@ -54,6 +54,7 @@ export:
   is_numeral
   peano_add_equations
   peano_mul_equations
+  is_peano_sub
   is_peano_le
   install_numeral_constants
   NumeralDefs
@@ -261,6 +262,35 @@ fun peano_mul_equations(ctors :: PeanoCtors, name :: Symbol,
     | ~else: #false
   peano_clauses(equations, at_zero, at_succ)
 
+// Truncated subtraction, by the same double recursion:
+//
+//   `f(zero(), n) === zero()`
+//   `f(succ a, zero()) === succ a`
+//   `f(succ a, succ b) === f(a, b)`
+fun is_peano_sub(ctors :: PeanoCtors, name :: Symbol,
+                 equations :: List.of(Thm)) :: Boolean:
+  fun at_zero(t :: Term) :: Boolean:
+    match dest_eq(t)
+    | [Comb(Comb(Const(f, _), Const(z, _)), BVar(_, _)), Const(z2, _)]:
+        f == name && z == ctors.zero && z2 == ctors.zero
+    | ~else: #false
+  fun at_succ_zero(t :: Term) :: Boolean:
+    match dest_eq(t)
+    | [Comb(Comb(Const(f, _), Comb(Const(s, _), BVar(k, _))), Const(z, _)),
+       Comb(Const(s2, _), BVar(k2, _))]:
+        f == name && s == ctors.succ && s2 == ctors.succ
+          && z == ctors.zero && k == k2
+    | ~else: #false
+  fun at_succ_succ(t :: Term) :: Boolean:
+    match dest_eq(t)
+    | [Comb(Comb(Const(f, _), Comb(Const(s, _), BVar(k, _))),
+            Comb(Const(s2, _), BVar(n, _))),
+       Comb(Comb(Const(f2, _), BVar(k2, _)), BVar(n2, _))]:
+        f == name && f2 == name && s == ctors.succ && s2 == ctors.succ
+          && k == k2 && n == n2
+    | ~else: #false
+  three_clauses(equations, at_zero, at_succ_zero, at_succ_succ)
+
 // The comparison defined by the usual double recursion, recognized the same
 // way:
 //
@@ -273,11 +303,6 @@ fun peano_mul_equations(ctors :: PeanoCtors, name :: Symbol,
 // rather than handing the equations back.
 fun is_peano_le(ctors :: PeanoCtors, name :: Symbol,
                 equations :: List.of(Thm)) :: Boolean:
-  fun body(th :: Thm) :: Term:
-    recur peel (t :~ Term = concl_of(th)):
-      match t
-      | Comb(Const(#'forall, _), Abs(_, inner)): peel(inner :~ Term)
-      | ~else: t
   fun at_zero(t :: Term) :: Boolean:
     match dest_eq(t)
     | [Comb(Comb(Const(f, _), Const(z, _)), BVar(_, _)), Const(#'true, _)]:
@@ -297,6 +322,20 @@ fun is_peano_le(ctors :: PeanoCtors, name :: Symbol,
         f == name && f2 == name && s == ctors.succ && s2 == ctors.succ
           && k == k2 && n == n2
     | ~else: #false
+  three_clauses(equations, at_zero, at_succ_zero, at_succ_succ)
+
+// `#true` when the equations contain one clause of each of the three given
+// shapes. A function defined by recursion on both arguments has exactly
+// those three, and which theorem is which does not matter to the caller:
+// the conversions decide these operations from addition.
+fun three_clauses(equations :: List.of(Thm),
+                  at_zero :: Function, at_succ_zero :: Function,
+                  at_succ_succ :: Function) :: Boolean:
+  fun body(th :: Thm) :: Term:
+    recur peel (t :~ Term = concl_of(th)):
+      match t
+      | Comb(Const(#'forall, _), Abs(_, inner)): peel(inner :~ Term)
+      | ~else: t
   let seen = for values(acc :~ Set = Set()) (th in equations):
                let b = body(th :~ Thm)
                cond

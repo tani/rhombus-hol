@@ -683,17 +683,40 @@ meta:
     | ~else: #false
 
   fun runtime_numeral(state :: SurfaceContext, value :: NonnegInt,
-                      expected :: HType, at :: Syntax) :: RuntimeExpr:
+                      expected :: HType, at :: Syntax,
+                      ~pattern: as_pattern :: Boolean = #false) :: RuntimeExpr:
     let nat_ty = mk_tyapp(#'Nat, [])
     let int_ty = mk_tyapp(#'Integer, [])
     let rational_ty = mk_tyapp(#'Rational, [])
+    // The executable reading of a literal is the value `succ` applied that
+    // many times to `zero()`, but the *code* for it need not be that deep:
+    // the expander walks generated syntax, so a nested chain made compiling
+    // `function f() :: Nat: 800` quadratic long before anything ran. A
+    // counted loop builds the same value from syntax of constant size.
+    //
+    // A pattern gets the nested chain instead: it is matched, not evaluated,
+    // so it cannot call a helper -- and a literal written in pattern position
+    // is small, exactly as on the logical side (`elab.rhm`).
     fun nat_syntax() :: Syntax:
-      recur build (remaining = value,
-                   term = runtime_call_syntax(#'zero, [], at)):
-        if remaining == 0
-        | term
-        | build(remaining - 1,
-                runtime_call_syntax(#'succ, [term], at))
+      cond
+      | as_pattern:
+          recur build (remaining = value,
+                       term = runtime_call_syntax(#'zero, [], at)):
+            if remaining == 0
+            | term
+            | build(remaining - 1, runtime_call_syntax(#'succ, [term], at))
+      | ~else:
+          let go = source_id(Symbol.gen("_hol_numeral"), at)
+          let count = source_id(Symbol.gen("_hol_count"), at)
+          let zero_case = runtime_call_syntax(#'zero, [], at)
+          let succ_case = runtime_call_syntax(#'succ, ['$go($count - 1)'], at)
+          let literal = Syntax.make(value, runtime_context())
+          '(block:
+              fun $go($count):
+                if $count == 0
+                | $zero_case
+                | $succ_case
+              $go($literal))'
     cond
     | expected == nat_ty: RuntimeExpr(nat_syntax(), nat_ty)
     | expected == int_ty:
@@ -1276,7 +1299,9 @@ meta:
             | syntax_meta.error(
                 "a numeral pattern needs a type annotation or an unambiguous context",
                 at)
-            values(runtime_numeral(state, raw, expected, at).stx, {})
+            values(runtime_numeral(state, raw, expected, at,
+                                   ~pattern: #true).stx,
+                   {})
         | raw is_a String:
             runtime_unify(
               expected, mk_tyapp(#'String, []), at,

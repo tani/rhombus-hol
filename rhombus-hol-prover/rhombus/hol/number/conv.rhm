@@ -28,6 +28,8 @@ import:
   rhombus/hol/logic/bool open
   rhombus/hol/logic/drule open
   rhombus/hol/logic/conv open
+  rhombus/hol/logic/ruledb open
+  rhombus/hol/logic/tmatch open
   rhombus/hol/prover/context open
   rhombus/hol/number/literal open
   rhombus/hol/number/nat open
@@ -299,23 +301,136 @@ fun nat_le_conv(arith :: NatArith, thy :: Theory,
                           EQF_INTRO(thy, EQ_MP(negated, fact))
           | ~else: #false
 
-// The one conversion the simplifier asks for: whichever of the above applies
-// to this term, or `#false`.
-fun nat_literal_conv(arith :: NatArith, thy :: Theory,
+// `|- sub(a, b) === <a-b>` for literals, truncated at zero.
+//
+// Above `b` the difference `r` satisfies `b + r === a`, so `sub_add` gives it
+// once the sum is rewritten to `a`; at or below `b` the answer is zero by
+// `sub_below`, whose shape is `a - (a + succ d)`.
+fun nat_sub_conv(arith :: NatArith, thy :: Theory,
+                 t :: Term) :: maybe(Thm):
+  match arith.sub
+  | #false: #false
+  | sub :: NatSub:
+      let shape = arith.shape
+      match dest_binary(sub.sub_term, t)
+      | #false: #false
+      | [l, r]:
+          match [canonical_numeral(shape, l), canonical_numeral(shape, r)]
+          | [lv :: NonnegInt, rv :: NonnegInt]:
+              cond
+              | lv >= rv:
+                  let rest = encode_numeral(shape, lv - rv)
+                  match add_of(arith, thy, r, rest)
+                  | #false: #false
+                  | summed :: Thm:
+                      let fact = SPEC(thy, rest, SPEC(thy, r, sub.sub_add))
+                      // `sub(r + rest, r) === rest` with the sum made `l`.
+                      let at_sub = AP_THM(thy,
+                                          AP_TERM(thy, sub.sub_term, summed),
+                                          r)
+                      TRANS(SYM(thy, at_sub), fact)
+              | ~else:
+                  let gap = encode_numeral(shape, rv - lv - 1)
+                  match succ_of(arith, thy, gap)
+                  | #false: #false
+                  | bumped :: Thm:
+                      match add_of(arith, thy, l, rhs_of(bumped))
+                      | #false: #false
+                      | summed :: Thm:
+                          let sum_eq = TRANS(
+                                         AP_TERM(thy,
+                                                 mk_comb(arith.add_term, l),
+                                                 bumped),
+                                         summed)
+                          let fact = SPEC(thy, gap,
+                                          SPEC(thy, l, sub.sub_below))
+                          let at_sub = AP_TERM(thy,
+                                               mk_comb(sub.sub_term, l),
+                                               sum_eq)
+                          TRANS(SYM(thy, at_sub), fact)
+          | ~else: #false
+
+// `|- u === <canonical>` when `u` is a numeral written some other way --
+// `succ` of a digit chain, which is what an argument looks like after a
+// definition unfolded one constructor. `#false` when `u` is already
+// canonical, or is not a numeral at all.
+fun canonicalize(arith :: NatArith, thy :: Theory, u :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  cond
+  | canonical_numeral(shape, u) != #false: #false
+  | ~else:
+      match u
+      | Comb(Const(s, _), v) when s == shape.succ_name:
+          match canonicalize(arith, thy, v :~ Term)
+          | #false: succ_of(arith, thy, v :~ Term)
+          | inner :: Thm:
+              match succ_of(arith, thy, rhs_of(inner))
+              | #false: #false
+              | bumped :: Thm:
+                  TRANS(AP_TERM(thy, shape.succ_term, inner), bumped)
+      | ~else: #false
+
+// The one conversion the simplifier asks for.
+//
+// Two jobs, and the head decides which one this term gets, once and for all.
+//
+// An arithmetic head -- the module's addition, multiplication, comparison or
+// difference, `succ`, or equality -- is a closed question this module can
+// answer, so its arguments are put in digit form and the answer derived. Any
+// other head is an ordinary definition, which computes by matching `zero()`
+// and `succ(k)`: there the literal is *un*-compacted by one constructor,
+// which is what lets the definition unfold against it, exactly as it did
+// when every literal was a `succ` chain.
+//
+// Splitting by head is what keeps the two directions from chasing each
+// other: no term is ever a candidate for both.
+fun nat_literal_conv(arith :: NatArith, ctx :: Context, thy :: Theory,
                      t :: Term) :: maybe(Thm):
   let shape = arith.shape
-  fun literal(x :: Term) :: Boolean:
+  fun canonical(x :: Term) :: Boolean:
     canonical_numeral(shape, x) != #false
+  let (head, args) = strip_comb(t)
+  cond
+  | !arithmetic_head(arith, head :~ Term, args :~ List):
+      destructure_for_rule(arith, ctx, thy, t)
+  | ~else:
+      recur over_args (i = 0):
+        cond
+        | i >= args.length(): decide(arith, thy, t)
+        | canonical(args[i] :~ Term): over_args(i + 1)
+        | ~else:
+            // One argument back into digit form; the rest follow on the next
+            // visit, and then the question can be answered.
+            match canonicalize(arith, thy, args[i] :~ Term)
+            | #false: over_args(i + 1)
+            | eq :: Thm:
+                congruence_at(thy, head :~ Term, args :~ List, i, eq)
+
+fun arithmetic_head(arith :: NatArith, head :: Term,
+                    args :: List) :: Boolean:
+  match head
+  | Const(name, _):
+      cond
+      | args.length() == 2:
+          head == arith.add_term || is_mul(arith, head)
+            || is_le(arith, head) || is_sub(arith, head) || name == #'eq
+      | args.length() == 1: name == arith.shape.succ_name
+      | ~else: #false
+  | ~else: #false
+
+fun decide(arith :: NatArith, thy :: Theory, t :: Term) :: maybe(Thm):
+  let shape = arith.shape
   match t
-  | Comb(Comb(f, x), y) when literal(x :~ Term) && literal(y :~ Term):
+  | Comb(Comb(f, _), _):
       cond
       | f == arith.add_term: nat_add_conv(arith, thy, t)
       | is_mul(arith, f :~ Term): nat_mul_conv(arith, thy, t)
       | is_le(arith, f :~ Term): nat_le_conv(arith, thy, t)
+      | is_sub(arith, f :~ Term): nat_sub_conv(arith, thy, t)
       | ~else: nat_eq_conv(arith, thy, t)
-  | Comb(Const(s, _), x) when s == shape.succ_name && literal(x :~ Term):
+  | Comb(Const(s, _), _) when s == shape.succ_name:
       nat_succ_conv(arith, thy, t)
-  | ~else: nat_eq_conv(arith, thy, t)
+  | ~else: #false
 
 fun is_mul(arith :: NatArith, f :: Term) :: Boolean:
   match arith.mul
@@ -326,6 +441,11 @@ fun is_le(arith :: NatArith, f :: Term) :: Boolean:
   match arith.order
   | #false: #false
   | order :: NatOrder: f == order.le_term
+
+fun is_sub(arith :: NatArith, f :: Term) :: Boolean:
+  match arith.sub
+  | #false: #false
+  | sub :: NatSub: f == sub.sub_term
 
 // What the driver installs in the `Context` as its numeral capability, and
 // what the simplifier calls on every subterm it is about to rewrite.
@@ -341,16 +461,81 @@ fun numeral_conv(ctx :: Context, thy :: Theory, t :: Term) :: maybe(Thm):
   | ~else:
       match nat_arith(ctx)
       | #false: #false
-      | arith :: NatArith: nat_literal_conv(arith, thy, t)
+      | arith :: NatArith: nat_literal_conv(arith, ctx, thy, t)
 
-// A digit constant in an immediate argument. Cheap, and true exactly of the
-// terms the conversions can do anything with.
+// A literal is not a constructor application, so a function defined by
+// matching on `zero()` and `succ(k)` cannot reduce when it is applied to one.
+// This writes the literal back as `succ(<one less>)` -- but only where a rule
+// is then going to fire, which is what keeps it from undoing the compact
+// representation and from cycling against the successor conversion.
+//
+// The rewriter takes the step immediately afterwards, so the exposed `succ`
+// is consumed before the traversal ever looks at it. This is how an ordinary
+// Peano-recursive function still computes on a literal argument -- one
+// constructor at a time, as its own definition says, and no faster.
+fun destructure_for_rule(arith :: NatArith, ctx :: Context, thy :: Theory,
+                         t :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  let (head, args) = strip_comb(t)
+  match head
+  | Const(name, _):
+      recur over_args (i = 0):
+        cond
+        | i >= args.length(): #false
+        | ~else:
+            let arg = args[i] :~ Term
+            match canonical_numeral(shape, arg)
+            | #false: over_args(i + 1)
+            | 0: over_args(i + 1)
+            | value :: NonnegInt:
+                let peeled = mk_comb(shape.succ_term,
+                                     encode_numeral(shape, value - 1))
+                let stepped = replace_argument(head :~ Term, args :~ List,
+                                               i, peeled)
+                cond
+                | !some_rule_matches(ctx, name, stepped): over_args(i + 1)
+                | ~else:
+                    match succ_of(arith, thy, encode_numeral(shape, value - 1))
+                    | #false: over_args(i + 1)
+                    | bumped :: Thm:
+                        // `|- <literal> === succ(<literal - 1>)`, lifted to
+                        // the argument's position.
+                        congruence_at(thy, head :~ Term, args :~ List, i,
+                                      SYM(thy, bumped))
+  | ~else: #false
+
+fun replace_argument(head :: Term, args :: List, i :: NonnegInt,
+                     replacement :: Term) :: Term:
+  for values(acc :~ Term = head) (arg in args, j in List.iota(args.length())):
+    mk_comb(acc, (if j == i | replacement | arg :~ Term))
+
+// `|- f(.. a ..) === f(.. b ..)` from `|- a === b`.
+fun congruence_at(thy :: Theory, head :: Term, args :: List, i :: NonnegInt,
+                  eq :: Thm) :: Thm:
+  for values(acc :~ Thm = REFL(thy, head)) (arg in args,
+                                            j in List.iota(args.length())):
+    MK_COMB(acc, (if j == i | eq | REFL(thy, arg :~ Term)))
+
+// Whether the rule database has a rule for `name` whose left-hand side
+// matches `t`. Peeling a literal is only worth a step if the step that
+// follows it is there.
+fun some_rule_matches(ctx :: Context, name :: Symbol, t :: Term) :: Boolean:
+  for any (rule in rules_of(ctx.db, name)):
+    let rule :~ RewriteRule = rule
+    // Unconditional only: the step after the peel has to be certain, or the
+    // exposed `succ` would be left for the traversal to fold back up.
+    rule.conds == [] && term_match(rule.vars, rule.lhs, t) != #false
+
+// Whether a digit constant occurs anywhere in `t`.
+//
+// This is the gate in front of everything else, so it has to be both cheap
+// and complete. Cheap because a compact literal is small -- the whole point
+// of the representation -- and complete because missing an occurrence means
+// the rewriter unfolds a definition against a numeral one constructor at a
+// time instead, which is the cost the representation exists to avoid.
 fun mentions_digit(t :: Term) :: Boolean:
-  fun digit_headed(x :: Term) :: Boolean:
-    match x
-    | Comb(Const(d, _), _): d == bit0_name || d == bit1_name
-    | ~else: #false
   match t
-  | Comb(Comb(_, x), y): digit_headed(x :~ Term) || digit_headed(y :~ Term)
-  | Comb(_, x): digit_headed(x :~ Term)
+  | Const(name, _): name == bit0_name || name == bit1_name
+  | Comb(f, x): mentions_digit(f :~ Term) || mentions_digit(x :~ Term)
+  | Abs(_, body): mentions_digit(body :~ Term)
   | ~else: #false

@@ -98,3 +98,96 @@ check axioms_of(final.ctx.thy).length() ~is axioms_of(base.ctx.thy).length()
 // And the digit constants really are there, defined, in that module's theory.
 check definition_of(final.ctx.thy, #'nat_bit0) is_a Thm ~is #true
 check definition_of(final.ctx.thy, #'nat_bit1) is_a Thm ~is #true
+
+// -- the conversions against native arithmetic ------------------------------
+
+// The evaluator that is not trusted, checked against the theorems that are.
+//
+// For each pair, the conversion is asked what the sum, product, difference or
+// comparison is, and the theorem it returns is read back: its left-hand side
+// must be the term that was asked about, and its right-hand side must decode
+// to what Racket's own arithmetic says. A conversion that computed the wrong
+// answer could not produce a theorem at all -- the kernel would reject the
+// step -- so what this really pins down is that it produces one at all, for
+// every shape of carry and borrow these cases reach.
+import:
+  rhombus/hol/number/nat open
+  rhombus/hol/number/conv open
+  rhombus/hol/logic/bool open
+  rhombus/hol/logic/conv open
+
+def arith :~ NatArith:
+  match nat_arith(final.ctx)
+  | #false: error("the arithmetic fixture has no numeral arithmetic")
+  | derived :: NatArith: derived
+
+def thy = final.ctx.thy
+def nat_shape :~ NumeralShape = arith.shape
+
+fun literal(n :: NonnegInt) :: Term: encode_numeral(nat_shape, n)
+
+// The right-hand side of `conv(op(a, b))`, as a number.
+fun computed(op :: Term, a :: NonnegInt, b :: NonnegInt) :: maybe(NonnegInt):
+  let t = mk_comb(mk_comb(op, literal(a)), literal(b))
+  match nat_literal_conv(arith, final.ctx, thy, t)
+  | #false: #false
+  | th :: Thm:
+      cond
+      | lhs_of(th) != t: #false
+      | ~else: dest_numeral(nat_shape, rhs_of(th))
+
+def samples :~ List:
+  [[0, 0], [0, 1], [1, 0], [1, 1], [2, 3], [7, 8], [15, 1], [16, 16],
+   [255, 1], [256, 255], [1023, 1025], [123456, 654321], [654321, 123456],
+   [99999, 99999], [1, 1048576]]
+
+check:
+  for all (pair in samples):
+    let [a, b] = pair
+    computed(arith.add_term, a, b) == a + b
+  ~is #true
+
+check:
+  for all (pair in samples):
+    let [a, b] = pair
+    match arith.mul
+    | #false: #true
+    | mul :: NatMul: computed(mul.mul_term, a, b) == a * b
+  ~is #true
+
+check:
+  for all (pair in samples):
+    let [a, b] = pair
+    match arith.sub
+    | #false: #true
+    | sub :: NatSub:
+        computed(sub.sub_term, a, b) == math.max(0, a - b)
+  ~is #true
+
+// A comparison answers with a truth value rather than a number, so it is read
+// back from the theorem's right-hand side directly.
+check:
+  for all (pair in samples):
+    let [a, b] = pair
+    match arith.order
+    | #false: #true
+    | order :: NatOrder:
+        let t = mk_comb(mk_comb(order.le_term, literal(a)), literal(b))
+        match nat_literal_conv(arith, final.ctx, thy, t)
+        | #false: #false
+        | th :: Thm:
+            lhs_of(th) == t
+              && rhs_of(th) == (if a <= b | tm_true | tm_false)
+  ~is #true
+
+// Equality and disequality, both orientations.
+check:
+  for all (pair in samples):
+    let [a, b] = pair
+    let t = mk_eq(literal(a), literal(b))
+    match nat_literal_conv(arith, final.ctx, thy, t)
+    | #false: #false
+    | th :: Thm:
+        lhs_of(th) == t
+          && rhs_of(th) == (if a == b | tm_true | tm_false)
+  ~is #true

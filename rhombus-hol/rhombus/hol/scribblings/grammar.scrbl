@@ -139,6 +139,46 @@ overload argument, function domain, or checked result. The lexical form
 @tt{1}; it therefore requires an expected type with an applicable
 @tt{negate} overload clause.
 
+@subsection(~tag: "numerals"){Numerals}
+
+A numeral at type @tt{Nat} is a chain of binary digits, not a chain of
+@tt{succ}: the module's own Peano addition defines two constants, where
+@tt{nat_bit0(n)} is @tt{n + n} and @tt{nat_bit1(n)} is @tt{succ(n + n)},
+so @tt{123456} is seventeen digits deep rather than a hundred and
+twenty-three thousand @tt{succ}s deep. Both are ordinary definitions, so no
+axiom is added, and they are recognized by the shape of the addition's
+equations rather than by a reserved name --- a module that calls its
+addition @tt{plus} gets the same treatment. A module that declares no Peano
+addition has nothing to define them from and keeps the @tt{succ} chains the
+language always had.
+
+The encoding is canonical --- no chain ends in @tt{nat_bit0(zero())} --- so
+two literals are equal exactly when their terms are.
+
+Closed arithmetic on numerals is then decided directly rather than by
+unfolding a definition one constructor at a time. Addition,
+multiplication, truncated subtraction, comparison and equality each
+recurse on digits, and every step is one instance of an equation derived
+from the module's own definitions, so the kernel checks the arithmetic:
+
+@rhombusblock(
+  theorem product:
+    nat_mul(123456, 654321) === (80779853376 :: Nat)
+)
+
+It applies to a closed subterm of an open statement as readily as to a
+whole one, so @tt{nat_add(x, nat_mul(123, 456))} simplifies to
+@tt{nat_add(x, 56088)} with @tt{x} still free. Integers and rationals
+built over @tt{Nat} inherit all of it: their own definitions reduce to
+@tt{Nat} arithmetic.
+
+An ordinary function defined by matching @tt{zero()} and @tt{succ(k)}
+still computes on a literal --- the literal is un-compacted one
+constructor at a time to let the definition unfold --- so it costs what it
+always did, proportional to the number rather than to its digits.
+Division, remainder, greatest common divisor and exponentiation have no
+digit-level decision yet and are in that second category.
+
 @subsection{Local definitions}
 
 A @rhombus(let) is @emph{substituted} in the logical reading: the equation is
@@ -193,6 +233,10 @@ constructor patterns over whatever datatype provides them --- the pattern
 counterpart of a bracket list literal expression --- and a nonnegative
 numeral, which desugars to the matched constructor chain of whatever
 datatype the scrutinee's type declares (so @tt{| 0: ... | succ(k): ...}
+is an ordinary pair of constructor patterns). A numeral in pattern
+position is the @tt{succ} chain even where the expression form of the
+same literal is compact (@secref("numerals")): a pattern is matched
+against constructors, and a digit is not one. A pair
 pattern (@tt{Pair(x, y)}) matches the language's one product type.
 
 A @tt{#true} or @tt{#false} pattern matches @tt{Boolean}. The kernel's

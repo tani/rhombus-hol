@@ -372,35 +372,38 @@ fun canonicalize(arith :: NatArith, thy :: Theory, u :: Term) :: maybe(Thm):
 
 // The one conversion the simplifier asks for.
 //
-// Two jobs, and the head decides which one this term gets, once and for all.
+// Two jobs, and a term is a candidate for exactly one of them.
 //
-// An arithmetic head -- the module's addition, multiplication, comparison or
-// difference, `succ`, or equality -- is a closed question this module can
-// answer, so its arguments are put in digit form and the answer derived. Any
-// other head is an ordinary definition, which computes by matching `zero()`
-// and `succ(k)`: there the literal is *un*-compacted by one constructor,
-// which is what lets the definition unfold against it, exactly as it did
-// when every literal was a `succ` chain.
+// A closed arithmetic question -- the module's addition, multiplication,
+// comparison or difference, `succ`, or an equation, with a number in every
+// argument -- is answered outright, after putting any argument written as
+// `succ` of a literal back into digit form.
 //
-// Splitting by head is what keeps the two directions from chasing each
-// other: no term is ever a candidate for both.
+// Anything else is an ordinary definition computing by matching `zero()` and
+// `succ(k)`, which a digit chain does not answer to. There the literal is
+// *un*-compacted by one constructor, so the definition can unfold against it
+// exactly as it did when every literal was a `succ` chain -- one constructor
+// at a time, and no faster.
+//
+// The two directions cannot chase each other: canonicalizing happens only
+// where the answer follows immediately, peeling only where it cannot.
 fun nat_literal_conv(arith :: NatArith, ctx :: Context, thy :: Theory,
                      t :: Term) :: maybe(Thm):
   let shape = arith.shape
   fun canonical(x :: Term) :: Boolean:
     canonical_numeral(shape, x) != #false
   let (head, args) = strip_comb(t)
+  let closed_question:
+    arithmetic_head(arith, head :~ Term, args :~ List)
+      && (for all (arg in args): dest_numeral(shape, arg :~ Term) != #false)
   cond
-  | !arithmetic_head(arith, head :~ Term, args :~ List):
-      destructure_for_rule(arith, ctx, thy, t)
+  | !closed_question: destructure_for_rule(arith, ctx, thy, t)
   | ~else:
       recur over_args (i = 0):
         cond
         | i >= args.length(): decide(arith, thy, t)
         | canonical(args[i] :~ Term): over_args(i + 1)
         | ~else:
-            // One argument back into digit form; the rest follow on the next
-            // visit, and then the question can be answered.
             match canonicalize(arith, thy, args[i] :~ Term)
             | #false: over_args(i + 1)
             | eq :: Thm:

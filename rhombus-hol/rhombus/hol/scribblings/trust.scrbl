@@ -187,6 +187,23 @@ None of these derivations change the statements consumed downstream, so the
 rule database, the waterfall, and @rhombus(match) compilation are unaffected
 by how those statements were proved.
 
+@bold{Numerals.} A compact numeral literal (@secref("numerals")) rests on
+two definitions --- @tt{nat_bit0} and @tt{nat_bit1}, written from the
+module's own Peano addition --- and the same axiom check runs on the
+declaration that installs them.
+
+The arithmetic that computes with them is not trusted either. A native
+integer never becomes a theorem: every sum, product, difference,
+comparison and equality between literals is built by instantiating
+equations derived, when the module's numerals are first used, from that
+module's own definitions, and chaining them with @tt{TRANS},
+@tt{AP_TERM} and @tt{EQ_MP}. The recursion in
+@tt{rhombus/hol/number/conv} only decides @emph{which} equation to
+instantiate next; if it decided wrongly, the kernel would reject the
+step and no theorem would come out. A module whose definitions the
+prover cannot derive those equations from simply gets no numeral
+arithmetic.
+
 @section{Theories}
 
 A theorem carries a stamp identifying the theory it was proved in, and a theory

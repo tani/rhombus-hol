@@ -889,10 +889,15 @@ meta:
       runtime_resolve_type(
         prod_ty(first_value.ty, second_value.ty)))
 
+  // A string is `text` applied to the list of its codepoints. The runtime
+  // reading builds each codepoint with `runtime_numeral`, whose emitted
+  // syntax is O(1) deep whatever the value, so a CJK literal costs no more
+  // than an ASCII one. The logical reading builds the same value from the
+  // unary `succ`/`zero` chain (`elab.rhm`'s `nat_numeral`); the two
+  // readings agree on the number, which is what has to agree.
   fun runtime_string_expr(state :: SurfaceContext, value :: String,
                           at :: Syntax) :: RuntimeExpr:
     let nat_type = mk_tyapp(#'Nat, [])
-    let list_type = mk_tyapp(#'List, [nat_type])
     let codes:
       for List (character in value.to_list()):
         runtime_numeral(state, character.to_int(), nat_type, at).stx
@@ -1306,16 +1311,21 @@ meta:
             runtime_unify(
               expected, mk_tyapp(#'String, []), at,
               "a string pattern needs a String value")
-            // The executable reading could match any literal, but the two
-            // readings of one declaration must agree, and the logical one
-            // cannot: see `elab.rhm`'s literal-pattern case.
+            // The two readings of one declaration must agree, and the
+            // logical one only admits `""`: see `elab.rhm`'s
+            // literal-pattern case. `""` is `text(nil())`, which is a
+            // constructor application and so is also a pattern.
             unless (raw :~ String) == ""
             | syntax_meta.error(
-                "a non-empty string literal pattern is not supported: it "
-                  ++ "expands to one constructor per codepoint; match on "
-                  ++ "`text(codes)` and compare `codes` instead",
+                "a non-empty string literal pattern is not supported: "
+                  ++ "a codepoint pattern is as deep as the codepoint; "
+                  ++ "match on `text(codes)` and compare `codes` instead",
                 at)
-            values(runtime_string_expr(state, raw, at).stx, {})
+            values(
+              runtime_named_apply(
+                state, #'text,
+                [runtime_named_apply(state, #'nil, [], at)], at),
+              {})
         | ~else:
             syntax_meta.error("unsupported literal pattern", at)
     | CorePatCtor(name, args, at):

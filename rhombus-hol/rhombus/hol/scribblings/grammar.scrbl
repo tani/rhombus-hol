@@ -129,11 +129,21 @@ because every function in this grammar is total.
 
 Anything outside the grammar is a compile error that names the offending
 expression. Ordinary runtime-only operators are outside it. A string
-literal is admitted as an expression (it desugars to @tt{text} applied to
-a @tt{List.of(Nat)} of character codes, over whatever datatypes provide
-@tt{Nat}, @tt{List.of(?a)}, and @tt{text}), but not yet as a pattern in a
-@rhombus(match) clause or row (see "Matching" below). A bare numeral
-is also rejected when its numeric type cannot be determined from an
+literal is admitted as an expression --- it desugars to @tt{text} applied
+to a @tt{List.of(Nat)} of codepoints, over whatever datatypes provide
+@tt{Nat}, @tt{List.of(?a)}, and @tt{text} --- and, restricted to
+@tt{""}, as a pattern in a @rhombus(match) clause or row (see "Matching"
+below).
+
+A numeral literal elaborates to the unary @tt{succ}/@tt{zero} chain a
+Peano @tt{Nat} declaration provides, so a term's size equals its value
+rather than the logarithm of it. The kernel's own type checker is a
+single bottom-up pass, so checking a term of that size costs time
+proportional to it rather than to its square, which is what keeps a
+numeral of ordinary size --- and the codepoints a non-ASCII string
+literal is made of --- practical without changing the representation.
+A bare numeral
+is rejected when its numeric type cannot be determined from an
 overload argument, function domain, or checked result. The lexical form
 @tt{-1} is the @tt{negate} call applied to the nonnegative numeral
 @tt{1}; it therefore requires an expected type with an applicable

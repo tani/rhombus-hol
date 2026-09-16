@@ -476,20 +476,32 @@ fun refl_conv(thy :: Theory, t :: Term) :: maybe(Thm):
 // entry point instead, where only the user's own statement is touched; see
 // `prove_impl` in `prover/waterfall.rhm`.
 //
+// `refl_conv` is tried before the rule database, not after: an injectivity
+// rule for a datatype like `Nat` is indexed under `#'eq` and fires on
+// `succ^N(zero()) === succ^N(zero())`, peeling one `succ` per iteration
+// instead of recognizing the two sides are already identical. Trying
+// `refl_conv` first still reaches the same normal form any rule chain would
+// (`<term> <=> true`), and `#false` still means "nothing fired", so
+// `REPEATC_BOUNDED` stops exactly where it did before.
+//
 // `~decide` is an optional decision procedure -- a `(Theory, Term) ->
 // maybe(Thm)` the caller supplies, used by `prover/stage.rhm` for arithmetic
-// on numeral literals. It is tried before the rule database, because the
-// questions it answers are exactly the ones an indexed rule would answer one
-// slow constructor at a time, and it returns `#false` for everything else, so
-// nothing else changes when one is installed.
+// on numeral literals. It comes first of all, because the questions it answers
+// are exactly the ones an indexed rule would answer one slow constructor at a
+// time, and it returns `#false` for everything else, so nothing else changes
+// when one is installed.
 fun simp_step(db :: RuleDB, ~decide: decide :: maybe(Function) = #false):
   fun (thy :: Theory, t :: Term) :: Computation:
     match (if decide | decide(thy, t) | #false)
     | th :: Thm: effect: return th
     | ~else:
-        effect:
-          let result <- db_conv(db)(thy, t)
-          return (if result | result | refl_conv(thy, t))
+        match refl_conv(thy, t)
+        | #false:
+            effect:
+              let result <- db_conv(db)(thy, t)
+              return result
+        | th:
+            effect: return th
 // The simplifier's effectful conversion: rewrite top-down, revisiting after
 // each change. It performs SearchBudget requests but installs no handler, so a
 // nested conditional rewrite consumes the caller's allowance.

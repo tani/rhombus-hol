@@ -56,6 +56,7 @@ fun inst_type :: "(hname \<Rightarrow> htype option) \<Rightarrow> hterm \<Right
   "inst_type \<theta> (FVar n ty) = FVar n (type_subst \<theta> ty)"
 | "inst_type \<theta> (BVar i ty) = BVar i (type_subst \<theta> ty)"
 | "inst_type \<theta> (Const n ty) = Const n (type_subst \<theta> ty)"
+| "inst_type \<theta> (NatLit n) = NatLit n"
 | "inst_type \<theta> (Comb f x) = Comb (inst_type \<theta> f) (inst_type \<theta> x)"
 | "inst_type \<theta> (Abs aty b) = Abs (type_subst \<theta> aty) (inst_type \<theta> b)"
 

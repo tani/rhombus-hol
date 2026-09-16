@@ -11,7 +11,10 @@ section \<open>Deep syntax and provenance\<close>
 
 text \<open>Rhombus correspondence: kernel.rhm's names, types, terms, stamps, theorems, and theories. The final name constructor records both generative identity and display text.\<close>
 
-datatype hname = NFun | NBool | NEq | NAlpha | NRepVar | NUser nat string
+datatype hname =
+    NFun | NBool | NEq | NAlpha | NRepVar
+  | NNat | NZero | NSucc | NNatN | NNatM | NNatP
+  | NUser nat string
 
 datatype htype = TyVar hname | TyApp hname "htype list"
 
@@ -21,6 +24,12 @@ datatype hterm =
   | Const hname htype
   | Comb hterm hterm
   | Abs htype hterm
+  | NatLit nat
+
+definition nat_ty_name :: hname where "nat_ty_name = NNat"
+definition nat_zero_name :: hname where "nat_zero_name = NZero"
+definition nat_succ_name :: hname where "nat_succ_name = NSucc"
+definition nat_aty :: htype where "nat_aty = TyApp nat_ty_name []"
 
 record stamp =
   sid :: nat
@@ -46,6 +55,8 @@ definition bool_ty :: htype where
 
 definition mk_fun :: "htype \<Rightarrow> htype \<Rightarrow> htype" where
   "mk_fun a b = TyApp NFun [a, b]"
+
+definition nat_sty :: htype where "nat_sty = mk_fun nat_aty nat_aty"
 
 fun dest_fun :: "htype \<Rightarrow> (htype \<times> htype) option" where
   "dest_fun (TyApp NFun [a, b]) = Some (a, b)"
@@ -73,6 +84,9 @@ fun type_operator_occurs :: "hname \<Rightarrow> htype \<Rightarrow> bool" where
 fun type_subst :: "(hname \<Rightarrow> htype option) \<Rightarrow> htype \<Rightarrow> htype" where
   "type_subst \<theta> (TyVar n) = (case \<theta> n of None \<Rightarrow> TyVar n | Some ty \<Rightarrow> ty)"
 | "type_subst \<theta> (TyApp n args) = TyApp n (map (type_subst \<theta>) args)"
+
+lemma type_subst_nat_aty [simp]: "type_subst \<theta> nat_aty = nat_aty"
+  by (simp add: nat_aty_def)
 
 lemma type_subst_component_avoids_operator:
   assumes occurs: "type_var_occurs v generic"
@@ -121,6 +135,7 @@ fun type_of :: "hterm \<Rightarrow> htype option" where
   "type_of (FVar _ ty) = Some ty"
 | "type_of (BVar _ ty) = Some ty"
 | "type_of (Const _ ty) = Some ty"
+| "type_of (NatLit _) = Some nat_aty"
 | "type_of (Abs aty body) = map_option (mk_fun aty) (type_of body)"
 | "type_of (Comb f x) =
     (case (type_of f, type_of x) of
@@ -140,6 +155,7 @@ fun term_type_vars_acc :: "hterm \<Rightarrow> hname list \<Rightarrow> hname li
   "term_type_vars_acc (FVar _ ty) acc = type_vars_acc ty acc"
 | "term_type_vars_acc (BVar _ ty) acc = type_vars_acc ty acc"
 | "term_type_vars_acc (Const _ ty) acc = type_vars_acc ty acc"
+| "term_type_vars_acc (NatLit _) acc = acc"
 | "term_type_vars_acc (Comb f x) acc = term_type_vars_acc x (term_type_vars_acc f acc)"
 | "term_type_vars_acc (Abs aty b) acc = term_type_vars_acc b (type_vars_acc aty acc)"
 
@@ -219,6 +235,11 @@ fun check_open_term :: "htheory \<Rightarrow> htype list \<Rightarrow> hterm \<R
     (check_type thy ty \<and>
       (case const_tab thy n of None \<Rightarrow> False
        | Some generic \<Rightarrow> type_match generic ty (\<lambda>_. None) \<noteq> None))"
+| "check_open_term thy env (NatLit _) =
+    (check_type thy nat_aty \<and>
+      check_type thy nat_sty \<and>
+      const_tab thy nat_zero_name = Some nat_aty \<and>
+      const_tab thy nat_succ_name = Some nat_sty)"
 | "check_open_term thy env (Comb f x) =
     (check_open_term thy env f \<and> check_open_term thy env x \<and> type_of (Comb f x) \<noteq> None)"
 | "check_open_term thy env (Abs aty body) =
@@ -351,6 +372,9 @@ next
   case (Const n ty)
   then show ?case by (simp add: term_type_vars_def set_type_vars_acc)
 next
+  case (NatLit n)
+  then show ?case by (simp add: term_type_vars_def)
+next
   case (Comb f x)
   have first: "set (term_type_vars_acc f acc) =
       set (term_type_vars f) \<union> set acc"
@@ -386,6 +410,10 @@ lemma set_term_type_vars_BVar [simp]:
 lemma set_term_type_vars_Const [simp]:
   "set (term_type_vars (Const n ty)) = set (type_vars ty)"
   by (simp add: term_type_vars_def type_vars_def)
+
+lemma set_term_type_vars_NatLit [simp]:
+  "set (term_type_vars (NatLit n)) = {}"
+  by (simp add: term_type_vars_def)
 
 lemma set_term_type_vars_Comb [simp]:
   "set (term_type_vars (Comb f x)) =
@@ -429,6 +457,9 @@ next
   case (Const n ty)
   then show ?case by (simp add: free_vars_def)
 next
+  case (NatLit n)
+  then show ?case by (simp add: free_vars_def)
+next
   case (Comb f x)
   have first: "set (free_vars_acc f acc) =
       set (free_vars f) \<union> set acc" using Comb.IH(1) .
@@ -457,6 +488,9 @@ lemma set_free_vars_BVar [simp]: "set (free_vars (BVar i ty)) = {}"
   by (simp add: free_vars_def)
 
 lemma set_free_vars_Const [simp]: "set (free_vars (Const n ty)) = {}"
+  by (simp add: free_vars_def)
+
+lemma set_free_vars_NatLit [simp]: "set (free_vars (NatLit n)) = {}"
   by (simp add: free_vars_def)
 
 lemma set_free_vars_Comb [simp]:

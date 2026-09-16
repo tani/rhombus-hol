@@ -216,11 +216,17 @@ next
   qed
 qed
 
+fun nat_lit_denote :: "frame \<Rightarrow> (hname \<Rightarrow> ZF) \<Rightarrow> nat \<Rightarrow> ZF" where
+  "nat_lit_denote F \<rho> 0 = const_sem F \<rho> nat_zero_name nat_aty"
+| "nat_lit_denote F \<rho> (Suc n) =
+     app (const_sem F \<rho> nat_succ_name nat_sty) (nat_lit_denote F \<rho> n)"
+
 fun eval_term ::
   "frame \<Rightarrow> (hname \<Rightarrow> ZF) \<Rightarrow> ((hname \<times> htype) \<Rightarrow> ZF) \<Rightarrow> ZF list \<Rightarrow> hterm \<Rightarrow> ZF" where
   "eval_term F \<rho> \<nu> env (FVar n ty) = \<nu> (n, ty)"
 | "eval_term F \<rho> \<nu> env (BVar i ty) = (if i < length env then env ! i else Empty)"
 | "eval_term F \<rho> \<nu> env (Const n ty) = const_sem F \<rho> n ty"
+| "eval_term F \<rho> \<nu> env (NatLit n) = nat_lit_denote F \<rho> n"
 | "eval_term F \<rho> \<nu> env (Comb f x) =
      app (eval_term F \<rho> \<nu> env f) (eval_term F \<rho> \<nu> env x)"
 | "eval_term F \<rho> \<nu> env (Abs aty body) =
@@ -401,6 +407,37 @@ lemma type_of_comb_Some:
   by (auto simp: mk_fun_def
       split: htype.splits hname.splits option.splits list.splits if_splits)
 
+lemma non_eq_const_sem_type:
+  assumes frame_ok: "frame_wf F" and type_ok: "type_valuation_ok \<rho>"
+    and const_ok: "const_interpretation_ok F thy \<rho>"
+    and distinct: "n \<noteq> NEq"
+    and checked: "check_open_term thy env (Const n ty)"
+  shows "Elem (const_sem F \<rho> n ty) (interp_type F \<rho> ty)"
+proof -
+  obtain generic where tab: "const_tab thy n = Some generic"
+    using checked by (auto split: option.splits)
+  obtain \<theta> where match: "type_match generic ty (\<lambda>_. None) = Some \<theta>"
+    using checked tab by (auto split: option.splits)
+  have sigma_ok: "type_valuation_ok (subst_valuation F \<rho> \<theta>)"
+    using subst_valuation_ok[OF frame_ok type_ok] .
+  have scheme: "const_scheme F n = Some generic"
+    and member: "Elem (const_denote F n (subst_valuation F \<rho> \<theta>))
+      (interp_type F (subst_valuation F \<rho> \<theta>) generic)"
+    using const_ok sigma_ok tab by (auto simp: const_interpretation_ok_def)
+  have instantiated: "type_subst \<theta> generic = ty"
+    using type_match_sound[OF match] .
+  have carrier: "interp_type F (subst_valuation F \<rho> \<theta>) generic =
+      interp_type F \<rho> ty"
+  proof -
+    have "interp_type F (subst_valuation F \<rho> \<theta>) generic =
+        interp_type F \<rho> (type_subst \<theta> generic)"
+      using interp_type_subst[of F \<rho> \<theta> generic] by simp
+    then show ?thesis using instantiated by simp
+  qed
+  show ?thesis using distinct scheme match member carrier
+    by (simp add: const_sem_def)
+qed
+
 lemma eval_type_sound:
   assumes thy_wf: "wf_theory thy" and frame_ok: "frame_wf F"
     and type_ok: "type_valuation_ok \<rho>"
@@ -459,6 +496,32 @@ next
     qed
     show ?thesis using False result_ty scheme match member carrier
       by (simp add: const_sem_def)
+  qed
+next
+  case (NatLit n)
+  have result_ty: "ty = nat_aty" using NatLit.prems(3) by simp
+  have zero_checked: "check_open_term thy tys (Const nat_zero_name nat_aty)"
+    using NatLit.prems(2) by (simp add: type_match_def nat_aty_def)
+  have succ_checked: "check_open_term thy tys (Const nat_succ_name nat_sty)"
+    using NatLit.prems(2) thy_wf
+    by (simp add: type_match_def nat_aty_def nat_sty_def mk_fun_def wf_theory_def)
+  have zero_in: "Elem (const_sem F \<rho> nat_zero_name nat_aty)
+      (interp_type F \<rho> nat_aty)"
+    using non_eq_const_sem_type[OF frame_ok type_ok const_ok,
+        of nat_zero_name tys nat_aty] zero_checked
+    by (simp add: nat_zero_name_def)
+  have succ_in: "Elem (const_sem F \<rho> nat_succ_name nat_sty)
+      (Fun (interp_type F \<rho> nat_aty) (interp_type F \<rho> nat_aty))"
+    using non_eq_const_sem_type[OF frame_ok type_ok const_ok,
+        of nat_succ_name tys nat_sty] succ_checked
+    by (simp add: nat_succ_name_def nat_sty_def mk_fun_def)
+  show ?case unfolding result_ty
+  proof (induction n)
+    case 0
+    then show ?case using zero_in by simp
+  next
+    case (Suc n)
+    then show ?case using app_in_fun[OF succ_in] by simp
   qed
 next
   case (Comb f x)
@@ -558,6 +621,9 @@ next
   case (Const n ty)
   then show ?case by simp
 next
+  case (NatLit n)
+  then show ?case by simp
+next
   case (Comb f x)
   have checks: "check_open_term thy (prefix @ [aty]) f"
       "check_open_term thy (prefix @ [aty]) x"
@@ -602,6 +668,9 @@ next
   then show ?case by simp
 next
   case (Const m u)
+  then show ?case by simp
+next
+  case (NatLit n)
   then show ?case by simp
 next
   case (Comb f x)
@@ -778,6 +847,37 @@ next
     by (simp add: const_sem_def)
 qed
 
+lemma nat_lit_denote_type_subst:
+  assumes thy_wf: "wf_theory thy" and frame_ok: "frame_wf F"
+    and subst_ok: "type_subst_ok thy \<theta>"
+    and const_ok: "const_interpretation_ok F thy \<rho>"
+    and checked: "check_open_term thy envty (NatLit n)"
+  shows "nat_lit_denote F \<rho> n =
+    nat_lit_denote F (subst_valuation F \<rho> \<theta>) n"
+proof -
+  have zero_checked: "check_open_term thy [] (Const nat_zero_name nat_aty)"
+    using checked by (simp add: type_match_def nat_aty_def)
+  have succ_checked: "check_open_term thy [] (Const nat_succ_name nat_sty)"
+    using checked thy_wf
+    by (simp add: type_match_def nat_aty_def nat_sty_def mk_fun_def wf_theory_def)
+  have zero_eq: "const_sem F \<rho> nat_zero_name nat_aty =
+      const_sem F (subst_valuation F \<rho> \<theta>) nat_zero_name nat_aty"
+    using const_sem_type_subst[OF thy_wf frame_ok subst_ok const_ok zero_checked]
+    by simp
+  have succ_eq: "const_sem F \<rho> nat_succ_name nat_sty =
+      const_sem F (subst_valuation F \<rho> \<theta>) nat_succ_name nat_sty"
+    using const_sem_type_subst[OF thy_wf frame_ok subst_ok const_ok succ_checked]
+    by (simp add: nat_sty_def mk_fun_def)
+  show ?thesis
+  proof (induction n)
+    case 0
+    then show ?case using zero_eq by simp
+  next
+    case (Suc n)
+    then show ?case using succ_eq by simp
+  qed
+qed
+
 lemma eval_inst_type:
   assumes thy_wf: "wf_theory thy" and frame_ok: "frame_wf F"
     and subst_ok: "type_subst_ok thy \<theta>"
@@ -797,6 +897,10 @@ next
   have closed: "check_open_term thy [] (Const n ty)"
     using Const.prems by simp
   show ?case using const_sem_type_subst[OF thy_wf frame_ok subst_ok const_ok closed]
+    by simp
+next
+  case (NatLit n)
+  show ?case using nat_lit_denote_type_subst[OF thy_wf frame_ok subst_ok const_ok NatLit.prems]
     by simp
 next
   case (Comb f x)
@@ -841,6 +945,9 @@ next
   then show ?case by simp
 next
   case (Const m u)
+  then show ?case by simp
+next
+  case (NatLit k)
   then show ?case by simp
 next
   case (Comb f x)
@@ -1066,6 +1173,24 @@ lemma interp_type_cong_type_vars:
   shows "interp_type F \<rho> ty = interp_type F \<sigma> ty"
   using assms interp_type_cong_occurs set_type_vars by auto
 
+lemma nat_lit_denote_cong_type_vars:
+  assumes frame_ok: "frame_wf F"
+  shows "nat_lit_denote F \<rho> n = nat_lit_denote F \<sigma> n"
+proof (induction n)
+  case 0
+  show ?case
+    by (simp only: nat_lit_denote.simps;
+        rule const_sem_cong_type_vars[OF frame_ok])
+       (simp add: nat_aty_def type_vars_def)
+next
+  case (Suc n)
+  have succ: "const_sem F \<rho> nat_succ_name nat_sty =
+      const_sem F \<sigma> nat_succ_name nat_sty"
+    by (rule const_sem_cong_type_vars[OF frame_ok])
+       (simp add: nat_sty_def nat_aty_def mk_fun_def type_vars_def)
+  then show ?case using Suc.IH by simp
+qed
+
 lemma eval_term_cong_type_vars:
   assumes frame_ok: "frame_wf F"
     and agree: "\<And>v. v \<in> set (term_type_vars t) \<Longrightarrow> \<rho> v = \<sigma> v"
@@ -1082,6 +1207,10 @@ next
   have type_agree: "\<And>v. v \<in> set (type_vars ty) \<Longrightarrow> \<rho> v = \<sigma> v"
     using Const.prems by simp
   show ?case using const_sem_cong_type_vars[OF frame_ok type_agree] by simp
+next
+  case (NatLit n)
+  show ?case using nat_lit_denote_cong_type_vars[OF frame_ok, of \<rho> n \<sigma>]
+    by simp
 next
   case (Comb f x)
   have f: "eval_term F \<rho> \<nu> env f = eval_term F \<sigma> \<nu> env f"
@@ -1113,6 +1242,9 @@ next
   then show ?case by simp
 next
   case (Const n ty)
+  then show ?case by simp
+next
+  case (NatLit n)
   then show ?case by simp
 next
   case (Comb f x)

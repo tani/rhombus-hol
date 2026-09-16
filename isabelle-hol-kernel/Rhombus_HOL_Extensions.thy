@@ -131,6 +131,24 @@ proof (induction t arbitrary: envty env)
   show ?case using const_sem_add_type_unchanged[OF fresh ty_checked frame_ok]
     by simp
 next
+  case (NatLit k)
+  have nat_check: "check_type thy nat_aty" using NatLit.prems by simp
+  have succ_check: "check_type thy nat_sty" using NatLit.prems by simp
+  have zero: "const_sem (add_type_frame F n D) \<rho> nat_zero_name nat_aty =
+      const_sem F \<rho> nat_zero_name nat_aty"
+    using const_sem_add_type_unchanged[OF fresh nat_check frame_ok] .
+  have succ: "const_sem (add_type_frame F n D) \<rho> nat_succ_name nat_sty =
+      const_sem F \<rho> nat_succ_name nat_sty"
+    using const_sem_add_type_unchanged[OF fresh succ_check frame_ok] .
+  show ?case
+  proof (induction k)
+    case 0
+    then show ?case using zero by simp
+  next
+    case (Suc k)
+    then show ?case using succ by simp
+  qed
+next
   case (Abs ty body)  have ty_checked: "check_type thy ty" using Abs.prems by simp
   have carrier: "interp_type (add_type_frame F n D) \<rho> ty = interp_type F \<rho> ty"
     using interp_type_add_type_unchanged[OF fresh ty_checked] .
@@ -255,6 +273,24 @@ proof (induction t arbitrary: envty env)
   case (Const m ty)
   then have "m \<noteq> n" by auto
   then show ?case using const_sem_add_constant_other by simp
+next
+  case (NatLit k)
+  have zero_ne: "nat_zero_name \<noteq> n" using NatLit.prems by auto
+  have succ_ne: "nat_succ_name \<noteq> n" using NatLit.prems by auto
+  have zero: "const_sem (add_constant_frame F n generic) \<rho> nat_zero_name nat_aty =
+      const_sem F \<rho> nat_zero_name nat_aty"
+    using const_sem_add_constant_other[OF zero_ne] .
+  have succ: "const_sem (add_constant_frame F n generic) \<rho> nat_succ_name nat_sty =
+      const_sem F \<rho> nat_succ_name nat_sty"
+    using const_sem_add_constant_other[OF succ_ne] .
+  show ?case
+  proof (induction k)
+    case 0
+    then show ?case using zero by simp
+  next
+    case (Suc k)
+    then show ?case using succ by simp
+  qed
 qed auto
 
 lemma check_type_tyops_cong:
@@ -422,6 +458,24 @@ proof (induction t arbitrary: envty env)
   case (Const m ty)
   then have "m \<noteq> n" by auto
   then show ?case using const_sem_add_definition_other by simp
+next
+  case (NatLit k)
+  have zero_ne: "nat_zero_name \<noteq> n" using NatLit.prems by auto
+  have succ_ne: "nat_succ_name \<noteq> n" using NatLit.prems by auto
+  have zero: "const_sem (add_definition_frame F n generic C) \<rho> nat_zero_name nat_aty =
+      const_sem F \<rho> nat_zero_name nat_aty"
+    using const_sem_add_definition_other[OF zero_ne] .
+  have succ: "const_sem (add_definition_frame F n generic C) \<rho> nat_succ_name nat_sty =
+      const_sem F \<rho> nat_succ_name nat_sty"
+    using const_sem_add_definition_other[OF succ_ne] .
+  show ?case
+  proof (induction k)
+    case 0
+    then show ?case using zero by simp
+  next
+    case (Suc k)
+    then show ?case using succ by simp
+  qed
 qed auto
 
 lemma const_sem_add_definition_same:
@@ -453,6 +507,9 @@ next
   then show ?case by simp
 next
   case (Const n aty)
+  then show ?case by simp
+next
+  case (NatLit n)
   then show ?case by simp
 next
   case (Comb f x)

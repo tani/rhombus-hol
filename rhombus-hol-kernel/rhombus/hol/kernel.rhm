@@ -28,6 +28,8 @@ export:
   check_type
   check_term
   is_bool
+  mk_nat_lit
+  NAT_LIT_CONV
   mk_eq
   dest_eq
   is_eq
@@ -41,6 +43,7 @@ export:
   DEDUCT_ANTISYM_RULE
   INST
   INST_TYPE
+  new_nat_type
   initial_theory
   new_type
   new_constant
@@ -72,6 +75,20 @@ fun check_term(thy :: Theory, t :: Term) :: Void:
   match generated.check_term_result(raw_theory(thy))(t)
   | generated.Success(_): #void
   | generated.Failure(failure): raise_generated_failure(#'check_term, failure)
+
+fun mk_nat_lit(thy :: Theory, value :: NonnegInt) :: NatLit:
+  let literal = unsafe.raw_nat_lit(value)
+  check_term(thy, literal)
+  literal
+fun NAT_LIT_CONV(thy :: Theory, value :: NonnegInt) :: Thm:
+  let literal = mk_nat_lit(thy, value)
+  let res = generated_thm(#'NAT_LIT_CONV,
+                          generated.nat_lit_conv(raw_theory(thy))(value),
+                          thy.stamp,
+                          raw_theory(thy))
+  note(#'NAT_LIT_CONV, thy.stamp.id, [], [literal], #false, [res])
+  res
+
 
 fun is_bool(t :: Term) :: Boolean:
   generated.is_bool(t)
@@ -226,6 +243,24 @@ fun new_type(thy :: Theory, n :: Symbol, arity :: NonnegInt) :: Theory:
     generated.new_type(fresh_generation())(raw_theory(thy))(n)(arity))
   note(#'new_type, thy.stamp.id, [], [n, arity], res.stamp.id, [])
   res
+
+fun new_nat_type(thy :: Theory) :: values(Theory, Thm, Thm, Thm):
+  match generated.new_nat_type(fresh_generation())(raw_theory(thy))
+  | generated.Success(result):
+      match result
+      | generated.PairValue(raw, rest):
+          match rest
+          | generated.PairValue(raw_zns, tail):
+              match tail
+              | generated.PairValue(raw_si, raw_ind):
+                  let res = wrap_new_theory(thy, raw)
+                  let zns = wrap_raw_thm(raw_zns, res.stamp, raw)
+                  let si = wrap_raw_thm(raw_si, res.stamp, raw)
+                  let ind = wrap_raw_thm(raw_ind, res.stamp, raw)
+                  note(#'new_nat_type, thy.stamp.id, [], [], res.stamp.id,
+                       [zns, si, ind])
+                  values(res, zns, si, ind)
+  | generated.Failure(failure): raise_generated_failure(#'new_nat_type, failure)
 
 fun new_constant(thy :: Theory, n :: Symbol, ty :: HType) :: Theory:
   let res = raise_or_theory(

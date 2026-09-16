@@ -16,12 +16,6 @@ is about these three names, never a bound variable ranging over names, so
 there is nothing to instantiate wrongly and no shape-recognition to get
 wrong either.\<close>
 
-definition nat_ty_name :: hname where "nat_ty_name = NUser 900 ''Nat''"
-definition nat_zero_name :: hname where "nat_zero_name = NUser 901 ''zero''"
-definition nat_succ_name :: hname where "nat_succ_name = NUser 902 ''succ''"
-
-definition nat_aty :: htype where "nat_aty = TyApp nat_ty_name []"
-definition nat_sty :: htype where "nat_sty = mk_fun nat_aty nat_aty"
 definition nat_zero_c :: hterm where "nat_zero_c = Const nat_zero_name nat_aty"
 definition nat_succ_c :: hterm where "nat_succ_c = Const nat_succ_name nat_sty"
 
@@ -41,9 +35,9 @@ model built directly below, using HOLZF's Nat as the domain, exactly as
 @{term new_basic_type_definition} hands back th1/th2 without a def_tab
 lookup.\<close>
 
-definition nat_n0 :: hname where "nat_n0 = NUser 903 ''n''"
-definition nat_m0 :: hname where "nat_m0 = NUser 904 ''m''"
-definition nat_p0 :: hname where "nat_p0 = NUser 905 ''P''"
+definition nat_n0 :: hname where "nat_n0 = NNatN"
+definition nat_m0 :: hname where "nat_m0 = NNatM"
+definition nat_p0 :: hname where "nat_p0 = NNatP"
 definition nat_pty :: htype where "nat_pty = mk_fun nat_aty bool_ty"
 
 lemma nat_vars_distinct [simp]:
@@ -1373,5 +1367,24 @@ proof -
     qed
   qed
 qed
+
+section \<open>Compact native numeral conversion\<close>
+
+text \<open>A compact numeral is semantically the same constructor spine as its
+one-step expansion.  The conversion below is the only kernel entry point that
+reveals that spine; clients can inspect one successor without constructing an
+@{term "NatLit n"}-deep term.\<close>
+
+fun nat_lit_rhs :: "nat \<Rightarrow> hterm" where
+  "nat_lit_rhs 0 = nat_zero_c"
+| "nat_lit_rhs (Suc n) = Comb nat_succ_c (NatLit n)"
+
+definition nat_lit_conv :: "htheory \<Rightarrow> nat \<Rightarrow> hthm option" where
+  "nat_lit_conv thy n =
+    checked_eq_thm thy [] (NatLit n) (nat_lit_rhs n) (thy_stamp thy)"
+
+lemma eval_nat_lit_rhs:
+  "eval_term F \<rho> \<nu> env (nat_lit_rhs n) = eval_term F \<rho> \<nu> env (NatLit n)"
+  by (cases n) (simp_all add: nat_zero_c_def nat_succ_c_def)
 
 end

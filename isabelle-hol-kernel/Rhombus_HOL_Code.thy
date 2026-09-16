@@ -23,6 +23,9 @@ definition check_open_term_uncached :: "htheory \<Rightarrow> hterm \<Rightarrow
      | Const n ty \<Rightarrow> check_type thy ty \<and>
          (case const_tab thy n of None \<Rightarrow> False
           | Some generic \<Rightarrow> type_match generic ty empty_type_subst \<noteq> None)
+     | NatLit _ \<Rightarrow> check_type thy nat_aty \<and> check_type thy nat_sty \<and>
+         const_tab thy nat_zero_name = Some nat_aty \<and>
+         const_tab thy nat_succ_name = Some nat_sty
      | Comb f x \<Rightarrow> check_open_term thy env f \<and> check_open_term thy env x \<and>
          type_of (Comb f x) \<noteq> None
      | Abs aty body \<Rightarrow> check_type thy aty \<and> check_open_term thy (aty # env) body)"
@@ -285,7 +288,9 @@ code_identifier
 | constant code_deduct_antisym \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.deduct_antisym"
 | constant code_inst \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.inst"
 | constant code_inst_type \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.inst_type"
+| constant code_nat_lit_conv \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.nat_lit_conv"
 | constant code_new_type \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_type"
+| constant code_new_nat_type \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_nat_type"
 | constant code_new_constant \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_constant"
 | constant code_new_axiom \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_axiom"
 | constant code_new_basic_definition \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_basic_definition"
@@ -308,7 +313,7 @@ export_code CodeUndeclaredType CodeTypeArity CodeInvalidType CodeUnboundIndex
   code_check_type code_check_term
   code_refl code_trans code_mk_comb code_abs code_beta code_assume code_eq_mp
   code_deduct_antisym code_inst code_inst_type
-  code_new_type code_new_constant code_new_axiom
+  code_nat_lit_conv code_new_nat_type code_new_type code_new_constant code_new_axiom
   code_new_basic_definition code_new_basic_type_definition
   initial_theory check_type check_open_term check_term is_bool mk_eq dest_eq
   sid gen ancestors hyps concl thm_stamp tyops const_tab axiom_list def_tab thy_stamp
@@ -328,8 +333,7 @@ export_code CodeUndeclaredType CodeTypeArity CodeInvalidType CodeUnboundIndex
   CodeSuccess CodeFailure Pair None Some
   code_check_type code_check_term
   code_refl code_trans code_mk_comb code_abs code_beta code_assume code_eq_mp
-  code_deduct_antisym code_inst code_inst_type
-  code_new_type code_new_constant code_new_axiom
+  code_nat_lit_conv code_new_nat_type code_new_type code_new_constant code_new_axiom
   code_new_basic_definition code_new_basic_type_definition
   initial_theory check_type check_open_term check_term is_bool mk_eq dest_eq
   sid gen ancestors hyps concl thm_stamp tyops const_tab axiom_list def_tab thy_stamp

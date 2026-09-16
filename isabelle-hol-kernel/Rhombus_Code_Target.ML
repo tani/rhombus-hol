@@ -43,7 +43,7 @@ datatype mapped_constructor =
     Mapped_Call of {expression: string, pattern: string}
   | Mapped_Fixed of {expression: string, pattern: string}
   | Mapped_Identity
-  | Mapped_User_Name;
+  | Mapped_User_Name of string;
 
 fun mapped_constructor_of c =
   (case Long_Name.base_name c of
@@ -57,7 +57,19 @@ fun mapped_constructor_of c =
       SOME (Mapped_Fixed {expression = "abi.name_alpha", pattern = "#'a"})
   | "NRepVar" =>
       SOME (Mapped_Fixed {expression = "abi.name_rep", pattern = "#'r"})
-  | "NUser" => SOME Mapped_User_Name
+  | "NNat" =>
+      SOME (Mapped_Fixed {expression = "abi.name_nat", pattern = "#'Nat"})
+  | "NZero" =>
+      SOME (Mapped_Fixed {expression = "abi.name_zero", pattern = "#'zero"})
+  | "NSucc" =>
+      SOME (Mapped_Fixed {expression = "abi.name_succ", pattern = "#'succ"})
+  | "NNatN" =>
+      SOME (Mapped_Fixed {expression = "abi.name_nat_n", pattern = "#'n"})
+  | "NNatM" =>
+      SOME (Mapped_Fixed {expression = "abi.name_nat_m", pattern = "#'m"})
+  | "NNatP" =>
+      SOME (Mapped_Fixed {expression = "abi.name_nat_p", pattern = "#'P"})
+  | "NUser" => SOME (Mapped_User_Name "abi.user_name")
   | "TyVar" =>
       SOME (Mapped_Call {expression = "abi.raw.tyvar", pattern = "abi.TyVar"})
   | "TyApp" =>
@@ -72,6 +84,8 @@ fun mapped_constructor_of c =
       SOME (Mapped_Call {expression = "abi.raw.comb", pattern = "abi.Comb"})
   | "Abs" =>
       SOME (Mapped_Call {expression = "abi.raw.abs", pattern = "abi.Abs"})
+  | "NatLit" =>
+      SOME (Mapped_Call {expression = "abi.raw.nat_lit", pattern = "abi.NatLit"})
   | "Nil" =>
       SOME (Mapped_Fixed {expression = "abi.list_nil()", pattern = "[]"})
   | "Cons" =>
@@ -186,13 +200,14 @@ fun print_rhombus_program ctxt reserved const_syntax program deresolve =
               | SOME (Mapped_Fixed {expression, pattern}) =>
                   if null ts then Pretty.str (if is_pat then pattern else expression)
                   else error ("Rhombus target: bad mapped nullary constructor " ^ c)
+              | SOME (Mapped_User_Name expression) =>
+                  if is_pat then Pretty.str "_"
+                  else Pretty.block [Pretty.str expression, Pretty.enclose "(" ")"
+                    [comma (map (print_term false some_thm vars NOBR) ts)]]
               | SOME Mapped_Identity =>
                   (case ts of
                     [t] => print_term is_pat some_thm vars NOBR t
-                  | _ => error ("Rhombus target: bad mapped identity constructor " ^ c))
-              | SOME Mapped_User_Name =>
-                  if is_pat then Pretty.str "_"
-                  else error "Rhombus target: NUser construction is unreachable");
+                  | _ => error ("Rhombus target: bad mapped identity constructor " ^ c)));
           in
             if Code_Thingol.is_constr program sym then
               let

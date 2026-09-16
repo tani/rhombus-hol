@@ -2,7 +2,7 @@
 (* Original executable API and diagnostic refinement proofs. *)
 
 theory Rhombus_HOL_Code_API
-  imports Rhombus_HOL_Audit
+  imports Rhombus_HOL_Audit NatExt
 begin
 
 section \<open>Finite code-generation façade\<close>
@@ -435,6 +435,19 @@ fun diagnose_open_term_failure ::
          None \<Rightarrow> Some (CodeUndeclaredConstant n)
        | Some generic \<Rightarrow> if type_match generic ty (\<lambda>_. None) = None
            then Some (CodeConstantTypeMismatch n generic ty) else None))"
+| "diagnose_open_term_failure thy env (NatLit _) =
+    (case diagnose_type_failure thy nat_aty of
+       Some failure \<Rightarrow> Some failure
+     | None \<Rightarrow> (case diagnose_type_failure thy nat_sty of
+         Some failure \<Rightarrow> Some failure
+       | None \<Rightarrow> (case const_tab thy nat_zero_name of
+           None \<Rightarrow> Some (CodeUndeclaredConstant nat_zero_name)
+         | Some zero_ty \<Rightarrow> if zero_ty \<noteq> nat_aty
+             then Some (CodeConstantTypeMismatch nat_zero_name zero_ty nat_aty)
+             else (case const_tab thy nat_succ_name of
+               None \<Rightarrow> Some (CodeUndeclaredConstant nat_succ_name)
+             | Some succ_ty \<Rightarrow> if succ_ty = nat_sty then None
+                 else Some (CodeConstantTypeMismatch nat_succ_name succ_ty nat_sty)))))"
 | "diagnose_open_term_failure thy env (Comb f x) =
     (case diagnose_open_term_failure thy env f of
        Some failure \<Rightarrow> Some failure
@@ -745,6 +758,27 @@ definition code_new_basic_type_definition ::
        Some result \<Rightarrow> CodeSuccess result
      | None \<Rightarrow> CodeFailure
          (diagnose_type_definition_failure thy tyname absname repname witness))"
+
+definition code_nat_lit_conv :: "htheory \<Rightarrow> nat \<Rightarrow> hthm code_result" where
+  "code_nat_lit_conv thy n =
+    (case nat_lit_conv thy n of
+       Some th \<Rightarrow> CodeSuccess th
+     | None \<Rightarrow> CodeFailure CodeExtensionRejected)"
+
+lemma code_nat_lit_conv_erasure [simp]:
+  "erase_code_result (code_nat_lit_conv thy n) = nat_lit_conv thy n"
+  by (simp add: code_nat_lit_conv_def)
+
+definition code_new_nat_type ::
+  "nat \<Rightarrow> htheory \<Rightarrow> (htheory \<times> hthm \<times> hthm \<times> hthm) code_result" where
+  "code_new_nat_type fresh thy =
+    (case new_nat_type fresh thy of
+       Some result \<Rightarrow> CodeSuccess result
+     | None \<Rightarrow> CodeFailure CodeExtensionRejected)"
+
+lemma code_new_nat_type_erasure [simp]:
+  "erase_code_result (code_new_nat_type fresh thy) = new_nat_type fresh thy"
+  by (simp add: code_new_nat_type_def)
 
 lemma code_new_type_erasure [simp]:
   "erase_code_result (code_new_type fresh thy n arity) =

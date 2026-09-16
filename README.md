@@ -1,47 +1,25 @@
 # Rhombus/HOL
 
-Rhombus/HOL is a theorem prover embedded in Rhombus as `#lang rhombus/hol`:
-an LCF-style higher-order-logic kernel with an ACL2-style automatic prover on
-top, where a definition is simultaneously a logical declaration and
-executable Rhombus code.
+Rhombus/HOL is an LCF-style higher-order-logic kernel embedded in Rhombus,
+with a machine-checked Isabelle/HOL development behind it.
 
-```rhombus
-#lang rhombus/hol
-
-datatype List.of(?a)
-| Nil()
-| Cons(head :: ?a, tail :: List.of(?a))
-
-function app(xs :: List.of(?a), ys :: List.of(?a)) :: List.of(?a):
-  match xs
-  | Nil(): ys
-  | Cons(x, rest): Cons(x, app(rest, ys))
-
-theorem app_nil_r:
-  forall (xs :: List.of(?a)): app(xs, Nil()) === xs
-```
-
-That module exports a working `app` function, and it does not compile unless
-`app_nil_r` is proved. Proofs run while the module compiles, not when it is
-run: a failed proof, or a definition that cannot be shown to terminate, is a
-compile error with the goals left over.
+This branch (`rhombus-hol-native-arith`) carries only the kernel: the
+prover, standard library, and `#lang rhombus/hol` surface language are being
+rebuilt on top of it with a native (not Peano-unary) arithmetic
+representation, and are not present here. See `main` for the working
+language and prover.
 
 ## Packages
 
 - `rhombus-hol-kernel` — the LCF kernel: the whole trust boundary.
-- `rhombus-hol-quickcheck` — standalone runtime property-checking support.
-- `rhombus-hol-prover` — the derived rules, the prover, and `#lang rhombus/hol`.
-- `rhombus-hol-stdlib` — the proved standard library.
-- `rhombus-hol` — the distribution metapackage, documentation, and test suite.
+- `isabelle-hol-kernel` — the Isabelle/HOL formalization the kernel is
+  generated from and checked against.
 
 ## Building
 
 ```sh
-raco pkg install --link \
-  ./rhombus-hol-kernel ./rhombus-hol-quickcheck ./rhombus-hol-prover \
-  ./rhombus-hol-stdlib ./rhombus-hol
-raco make rhombus-hol-prover/rhombus/hol.rkt
-raco test rhombus-hol/rhombus/hol/tests
+raco pkg install --link ./rhombus-hol-kernel
+raco make rhombus-hol-kernel/rhombus/hol/kernel.rhm
 ```
 
 ## Formal kernel generation
@@ -59,16 +37,8 @@ committed artifact exactly matches the Isabelle export.
 
 ## Documentation
 
-```sh
-raco setup --pkgs rhombus-hol
-```
-
-builds the manual at `rhombus-hol/rhombus/hol/doc/rhombus-hol/index.html`,
-which covers the declaration forms, the surface grammar, termination
-checking, the prover, and what the system does and does not trust.
-
-The published documentation includes both the user manual and the
-machine-checked Isabelle development:
+The published documentation for the full system (kernel, prover, standard
+library) is built from `main`:
 
 - [Rhombus/HOL manual](https://tani.github.io/rhombus-hol/rhombus-hol/index.html)
 - [Isabelle/HOL kernel verification](https://tani.github.io/rhombus-hol/isabelle/Unsorted/Rhombus_HOL_Kernel/index.html)

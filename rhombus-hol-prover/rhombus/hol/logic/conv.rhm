@@ -280,41 +280,21 @@ fun TOP_DEPTH_CONV(c):
           TRY_CONV(THENC(CHANGED_CONV(SUB_CONV(TOP_DEPTH_CONV(c))),
                          TRY_CONV(THENC(c, TOP_DEPTH_CONV(c))))))(thy, t)
 
-// `TOP_DEPTH_CONV` with a step budget and cycle detection.
-//
-// The unbounded version loops forever on a rule that neither terminates nor
-// fails, and simplification runs while a module compiles, so the loop hangs
-// the build instead of failing it.
-//
-// Cycle detection is *per position*, not global.  A term can legitimately be
-// rewritten twice in one traversal -- `pair(f(x), f(x))` rewrites `f(x)` on
-// each side -- so "seen this term before" is only evidence of a loop when it
-// recurs on the chain of rewrites at one position.
-//
-// Both limits raise.  Returning `#false` would be indistinguishable from "no
-// rule applies", which is an ordinary answer, and the proof would carry on
-// past a search that had actually been abandoned.
 // `TOP_DEPTH_CONV` with a shared step budget and cycle detection.
 //
 // The unbounded version loops forever on a rule that neither terminates nor
 // fails, and simplification runs while a module compiles, so the loop hangs
-// the build instead of failing it.
+// the build instead of failing it. Cycle detection is per position: a term
+// can legitimately be rewritten again at a distinct position.
 //
-// This is `TOP_DEPTH_CONV`'s own structure with `REPEATC` replaced, rather
-// than a second traversal written from scratch: the congruence idiom needs a
-// `REFL` for every unchanged subterm, and duplicating that is how the two
-// copies drift apart.
-//
-// Cycle detection sits exactly at the repetition point, which is the only
-// place a position rewrites to something it has already been.  It is per
-// position, not global: `pair(f(x), f(x))` legitimately rewrites `f(x)` twice
-// in one traversal, and a global "seen this term" check would reject it.
+// This preserves `TOP_DEPTH_CONV`'s structure with only its repetition step
+// bounded, avoiding a second traversal implementation.
 fun REPEATC_BOUNDED(c):
   fun (thy :: Theory, t :: Term) :: Computation:
-    recur loop (acc :: maybe(Thm) = #false, t = t, seen :~ Set = Set()):
+    recur loop (acc :: maybe(Thm) = #false, t = t, seen :~ List = []):
       effect:
         let _ <- SearchBudget.spend(#'simplify)
-        when t in seen
+        when seen.contains(t)
         | error(~who: #'simplify, "rewrite cycle detected",
                 error.val(~label: "term", show(t)))
         let result <- c(thy, t)
@@ -325,7 +305,7 @@ fun REPEATC_BOUNDED(c):
             let acc2 = (if acc | TRANS(acc :~ Thm, th) | th)
             (if next == t
              | return acc2
-             | loop(acc2, next, seen ++ {t}))
+             | loop(acc2, next, seen ++ [t]))
 
 // Normalize each immediate subterm under the same ambient budget.
 fun bounded_subterms(c, thy :: Theory, t :: Term) :: Computation:

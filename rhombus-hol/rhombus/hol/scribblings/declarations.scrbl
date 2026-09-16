@@ -123,20 +123,20 @@ definition Id :: Type:
 }
 
 Declares one non-recursive constant with an explicit type. The right-hand side
-is checked as an expression of that type and installed through HOL's basic
+is checked as a HOL term of that type and installed through HOL's basic
 definition principle. Its resulting equation enters the rewriter, so later
 theorems unfold uses of the definition normally.
 
 @rhombusblock(
-  definition identity :: Nat -> Nat:
-    function (n :: Nat) :: Nat:
-      n
+  definition choose_zero :: Nat:
+    select (n :: Nat): n === zero()
 )
 
-Executably this emits an ordinary Rhombus @rhombus(def) with the same value.
-Use @rhombus(function, ~datum) for pattern clauses or recursion: unlike a
-function declaration, @rhombus(definition, ~datum) has exactly one expression
-right-hand side and no termination analysis.
+Definitions are logical only: they emit no Rhombus binding and may use
+noncomputable HOL terms such as @rhombus(select, ~datum). Use
+@rhombus(function, ~datum) for a definition that must run: it has an
+executable reading, supports pattern clauses and recursion, and therefore
+accepts only the executable expression subset.
 
 @subsection(~tag: "local-function"){Local and anonymous @rhombus(function, ~datum)}
 

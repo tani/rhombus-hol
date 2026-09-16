@@ -199,20 +199,36 @@ fun surface_error(who :: Symbol, message :: String, at :: Syntax):
 
 // Macros in `surface_space.rhm` produce a location-preserving syntax encoding.
 // Decoding is structural only: enforestation and precedence have already run.
+fun decoder_who(mode :: Symbol) :: Symbol:
+  cond
+  | mode == #'definition: #'definition
+  | mode == #'prop: #'theorem
+  | ~else: #'function
+
+fun logical_mode(mode :: Symbol) :: Boolean:
+  mode == #'prop || mode == #'definition
+
 fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
   match stx
   | '(core_allowed $(policy :: Identifier) $inner)':
       let p = Syntax.unwrap(policy)
-      unless p == #'both || p == mode || (p == #'logical && mode == #'prop)
+      let permitted:
+        cond
+        | p == #'both || p == mode: #true
+        | p == #'logical && (mode == #'prop || mode == #'definition): #true
+        | p == #'prop && mode == #'definition: #true
+        | ~else: #false
+      unless permitted
       | cond
         | p == #'logical:
-            surface_error(#'function,
-                          "proposition-only syntax cannot appear in a function body",
-                          stx)
-        | mode == #'prop:
             surface_error(
-              #'theorem,
-              "a proposition admits variables, named function applications, "
+              (if mode == #'function | #'function | #'definition),
+              "proposition-only syntax cannot appear in an executable function body",
+              stx)
+        | mode == #'prop || mode == #'definition:
+            surface_error(
+              (if mode == #'prop | #'theorem | #'definition),
+              "a logical term admits variables, named function applications, "
                 ++ "HOL notation, nonnegative numerals, `not`, `and`, `or`, "
                 ++ "`===`, `<=>`, `==>`, `forall`, `exists` and `if`",
               stx)
@@ -278,9 +294,9 @@ fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
       CoreSetExpr([decode_expr(element, mode), ...], stx)
   | '(core_rejected $_)':
       surface_error(
-        (if mode == #'prop | #'theorem | #'function),
-        (if mode == #'prop
-         | "a proposition admits variables, named function applications, HOL "
+        decoder_who(mode),
+        (if logical_mode(mode)
+         | "a logical term admits variables, named function applications, HOL "
              ++ "notation, nonnegative numerals, `not`, `and`, `or`, `===`, "
              ++ "`<=>`, `==>`, `forall`, `exists` and `if`"
          | "this version admits only variables, named function applications, "
@@ -288,9 +304,7 @@ fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
              ++ "Boolean operators `!`, `&&`, `||` and `==` in a function body"),
         stx)
   | ~else:
-      surface_error((if mode == #'prop | #'theorem | #'function),
-                    "malformed parsed HOL expression",
-                    stx)
+      surface_error(decoder_who(mode), "malformed parsed HOL expression", stx)
 
 fun decode_prop(stx :: Syntax) :: CoreExpr:
   decode_expr(stx, #'prop)

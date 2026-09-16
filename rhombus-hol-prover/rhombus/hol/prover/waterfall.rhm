@@ -138,10 +138,16 @@ fun prove_goal_impl(g :: Goal,
                   match induction
                   | #false: open_goal(g)
                   | induction :~ Step:
-                      descend(induction, inducted ++ [key])
-      | step :~ Step: descend(step, inducted)
+                      descend(induction, inducted ++ [key], #false)
+      | step :~ Step: descend(step, inducted, hint)
 
-  fun descend(step :: Step, inducted :: List) :: Computation:
+  // `hint` is the user's `~induct` variable, and it survives a step that is
+  // not an induction: a goal that simplifies once before the induction stage
+  // is reached would otherwise lose it and fall back to the heuristic, which
+  // is not what the option says. An induction consumes it; deeper ones choose
+  // for themselves.
+  fun descend(step :: Step, inducted :: List,
+              hint :: maybe(FVar)) :: Computation:
     unless step.subgoals.length() == step.events.length()
     | error(~who: #'proof, "proof step has unpaired trace events")
     recur loop (remaining_goals :~ List = step.subgoals,
@@ -150,10 +156,17 @@ fun prove_goal_impl(g :: Goal,
       match [remaining_goals, remaining_events]
       | [[], []]: return Derived(step, children_rev.reverse())
       | [List.cons(subgoal, rest), List.cons(event, event_rest)]:
+          let subgoal :~ Goal = subgoal
+          // Only where the variable is still there to induct on.
+          let carried = (cond
+                         | !hint: #false
+                         | free_vars(subgoal.concl).contains(hint :~ Term):
+                             hint
+                         | ~else: #false)
           effect:
             let child <- Trace.note(
                            event :~ TraceEvent,
-                           go(subgoal :~ Goal, inducted, #false))
+                           go(subgoal, inducted, carried))
             loop(rest, event_rest, List.cons(child, children_rev))
 
   effect:

@@ -48,6 +48,7 @@ import:
 export:
   module_block
   datatype
+  definition
   function
   theorem
   proof
@@ -269,6 +270,24 @@ meta:
         ready.surface.constants ++ {spec.name: full_type},
         ready.surface.runtime_arities
           ++ {spec.name: spec.params.length()},
+        ready.surface.type_constructors),
+      [])
+
+  fun runtime_arity(ty :: HType) :: NonnegInt:
+    recur loop(current :: HType = ty, arity = 0):
+      (if is_fun(current)
+       | let (_, result) = dest_fun(current)
+         loop(result, arity + 1)
+       | arity)
+
+  fun surface_add_definition(context :: SurfaceContext, name :: Symbol,
+                             ty :: HType) :: SurfaceContext:
+    let ready = force_surface_context(context)
+    SurfaceContext(
+      SurfaceState(
+        ready.surface.operators,
+        ready.surface.constants ++ {name: ty},
+        ready.surface.runtime_arities ++ {name: runtime_arity(ty)},
         ready.surface.type_constructors),
       [])
 
@@ -1655,6 +1674,14 @@ meta:
                            _hol_driver.hol_reraise(e, '$at')
            _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
                                    statement, proof, '$at')']
+    | '(~definition $cur $nxt [$name] [$type] [$core] [$at])':
+        ['def $nxt:
+           let expression = try:
+                            _hol_surface.decode_expr('$core', #'function)
+                            ~catch e :: Exn.Fail:
+                              _hol_driver.hol_reraise(e, '$at')
+           _hol_driver.add_definition(
+             $cur, Syntax.unwrap('$name'), '$type', expression, '$at')']
     | '(~overload_method $cur $nxt [$function_name] [$signature] [$constant] [$order, ...] [$at])':
         ['def $nxt = _hol_driver.add_overload_method_encoded(
                        $cur, Syntax.unwrap('$function_name'), '$signature',
@@ -1748,6 +1775,25 @@ meta:
                              ready_runtime, spec, emitted.ty)
         values([emitted.stx],
                ['(~function $cur $nxt [$core] [$at])'],
+               n + 1, next_runtime)
+    | #'definition:
+        let [name, type_stx, stmt] = d.parts
+        let at = head_term(d.form)
+        let gs :~ List = stmt
+        let [g, ...] = gs
+        let core = parse_hol_encoding('$g; ...')
+        let expr = decode_expr(core, #'function)
+        let ready = force_surface_context(runtime_state)
+        let ty = type_parser.parse_open_type(
+                   type_stx :~ Syntax, ready.surface.type_constructors)
+        let emitted:
+          parameterize { runtime_context: name }:
+            parameterize { runtime_inference: Box({}) }:
+              runtime_expr(ready, {}, expr, ty)
+        let next_runtime = surface_add_definition(
+                             ready, Syntax.unwrap(name), ty)
+        values(['def $name = $((emitted.stx))'],
+               ['(~definition $cur $nxt [$name] [$type_stx] [$core] [$at])'],
                n + 1, next_runtime)
     | #'theorem:
         let [name, stmt, tactic] = d.parts
@@ -1881,6 +1927,11 @@ decl.macro 'hol_finalize':
   finish_expansion()
 
 decl.macro 'datatype $term ...':
+  ~all_stx use
+  let head = macro_use_head(use)
+  declaration_expansion(['$head $term ...'])
+
+decl.macro 'definition $term ...':
   ~all_stx use
   let head = macro_use_head(use)
   declaration_expansion(['$head $term ...'])

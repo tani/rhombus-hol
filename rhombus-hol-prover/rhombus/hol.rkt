@@ -23,6 +23,7 @@ export:
   rename:
     mb.module_block as #%module_block
     mb.datatype as datatype
+    mb.definition as definition
     mb.function as function
     mb.theorem as theorem
     mb.proof as proof

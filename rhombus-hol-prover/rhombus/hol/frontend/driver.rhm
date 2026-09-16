@@ -54,6 +54,7 @@ export:
   HolState
   initial_state
   add_datatype
+  add_definition
   add_function
   add_theorem
   add_overload_method_encoded
@@ -405,6 +406,54 @@ fun add_function(st0 :: HolState, core :: CoreFunctionSpec,
   require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
   let db2 = add_thms(thy2, st.ctx.db, spec.name, info.equations)
   let ctx2 = context_add_function(st.ctx, thy2, db2, spec.name, info)
+  HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
+
+// A `definition` is one kernel basic definition, not a one-clause `function`.
+// The latter needs pattern/termination machinery and records a FunInfo; this
+// form has neither. Its applied equation is nevertheless indexed so that
+// later proofs can simplify calls to a function-valued definition.
+fun definition_rewrite_equation(thy :: Theory, def_th :: Thm,
+                                ty :: HType) :: Thm:
+  recur bind(remaining :: HType = ty, vars :~ List.of(FVar) = []):
+    cond
+    | is_fun(remaining):
+        let (domain, result) = dest_fun(remaining)
+        let variable = mk_var(Symbol.gen("_definition_arg"), domain)
+        bind(result, vars ++ [variable])
+    | ~else:
+        let args = vars.map(fun (variable :: FVar): variable :~ Term)
+        let unfolded = unfold_def(thy, def_th, args)
+        (if vars == [] | unfolded | GENL(thy, vars, unfolded))
+
+fun definition_type_vars(type_stx :: Syntax, expr :: CoreExpr)
+    :: List.of(Symbol):
+  for values(out :~ List = type_parser.collect_type_vars(type_stx)) (
+        name in elab.core_type_vars(expr)):
+    (if out.contains(name) | out | out ++ [name])
+
+fun add_definition(st :: HolState, name :: Symbol, type_stx :: Syntax,
+                   expr :: CoreExpr, at :: Syntax) :: HolState:
+  let tyvars = definition_type_vars(type_stx, expr)
+  let ty = try:
+             type_parser.parse_type(type_stx, tyvars, st.type_constructors)
+             ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
+                   m ++ {n: (thms :~ DatatypeThms).spec}
+  let rhs = try:
+              elab.run_checked_elaboration(
+                elab.ElabEnv(st.ctx.thy, tyvars, {}, #'function, #false,
+                             #false, st.operators, st.type_constructors,
+                             dt_specs),
+                expr, ty)
+              ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let (thy2, def_th) = try:
+                         new_basic_definition(
+                           st.ctx.thy, mk_eq(mk_var(name, ty), rhs))
+                         ~catch e :: Exn.Fail: hol_reraise(e, at)
+  require_no_new_axioms(#'definition, st.ctx.thy, thy2, name, at)
+  let equation = definition_rewrite_equation(thy2, def_th, ty)
+  let db2 = add_thm(thy2, st.ctx.db, name, equation)
+  let ctx2 = context_with_rules(context_with_theory(st.ctx, thy2), db2)
   HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
 
 // Derive one function from an already elaborated specification: directly when

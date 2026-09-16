@@ -115,6 +115,29 @@ descend structurally. It is checked only when no structural descent can be
 found, so a measure on a definition that already descends is not examined.
 
 
+@section{@rhombus(definition, ~datum)}
+
+@verbatim{
+definition Id :: Type:
+  expr
+}
+
+Declares one non-recursive constant with an explicit type. The right-hand side
+is checked as an expression of that type and installed through HOL's basic
+definition principle. Its resulting equation enters the rewriter, so later
+theorems unfold uses of the definition normally.
+
+@rhombusblock(
+  definition identity :: Nat -> Nat:
+    function (n :: Nat) :: Nat:
+      n
+)
+
+Executably this emits an ordinary Rhombus @rhombus(def) with the same value.
+Use @rhombus(function, ~datum) for pattern clauses or recursion: unlike a
+function declaration, @rhombus(definition, ~datum) has exactly one expression
+right-hand side and no termination analysis.
+
 @subsection(~tag: "local-function"){Local and anonymous @rhombus(function, ~datum)}
 
 @verbatim{

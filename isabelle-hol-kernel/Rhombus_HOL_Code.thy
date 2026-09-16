@@ -235,7 +235,6 @@ code_identifier
 | type_constructor htheory_ext \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.HTheory"
 | type_constructor code_failure \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.FailureCode"
 | type_constructor code_result \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Result"
-| type_constructor extension_delta \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.ExtensionDelta"
 | constant check_open_term_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.check_open_term_uncached"
 | constant type_match_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.type_match_uncached"
 | constant check_term_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.check_term_uncached"
@@ -274,11 +273,6 @@ code_identifier
 | constant CodeExtensionRejected \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.ExtensionRejected"
 | constant CodeSuccess \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Success"
 | constant CodeFailure \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Failure"
-| constant DeltaType \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.TypeDelta"
-| constant DeltaConstant \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.ConstantDelta"
-| constant DeltaAxiom \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.AxiomDelta"
-| constant DeltaDefinition \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.DefinitionDelta"
-| constant DeltaTypeDefinition \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.TypeDefinitionDelta"
 | constant code_check_type \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.check_type_result"
 | constant code_check_term \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.check_term_result"
 | constant code_refl \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.refl"
@@ -291,11 +285,11 @@ code_identifier
 | constant code_deduct_antisym \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.deduct_antisym"
 | constant code_inst \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.inst"
 | constant code_inst_type \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.inst_type"
-| constant code_new_type_with_delta \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_type"
-| constant code_new_constant_with_delta \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_constant"
-| constant code_new_axiom_with_delta \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_axiom"
-| constant code_new_basic_definition_with_delta \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_basic_definition"
-| constant code_new_basic_type_definition_with_delta \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_basic_type_definition"
+| constant code_new_type \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_type"
+| constant code_new_constant \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_constant"
+| constant code_new_axiom \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_axiom"
+| constant code_new_basic_definition \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_basic_definition"
+| constant code_new_basic_type_definition \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_basic_type_definition"
 | constant Pair \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.PairValue"
 section \<open>Generated Rhombus module\<close>
 
@@ -310,13 +304,12 @@ export_code CodeUndeclaredType CodeTypeArity CodeInvalidType CodeUnboundIndex
   CodeTypeDefinitionSameConstants CodeTypeDefinitionHasHypotheses
   CodeTypeDefinitionOpenPredicate CodeTypeDefinitionExtraTypeVariables
   CodeTypeDefinitionBadWitness CodeRuleRejected CodeExtensionRejected
-  CodeSuccess CodeFailure DeltaType DeltaConstant DeltaAxiom DeltaDefinition
-  DeltaTypeDefinition Pair
+  CodeSuccess CodeFailure Pair None Some
   code_check_type code_check_term
   code_refl code_trans code_mk_comb code_abs code_beta code_assume code_eq_mp
   code_deduct_antisym code_inst code_inst_type
-  code_new_type_with_delta code_new_constant_with_delta code_new_axiom_with_delta
-  code_new_basic_definition_with_delta code_new_basic_type_definition_with_delta
+  code_new_type code_new_constant code_new_axiom
+  code_new_basic_definition code_new_basic_type_definition
   initial_theory check_type check_open_term check_term is_bool mk_eq dest_eq
   sid gen ancestors hyps concl thm_stamp tyops const_tab axiom_list def_tab thy_stamp
   in Rhombus module_name Rhombus_HOL_Generated file_prefix rhombus_hol_kernel
@@ -332,13 +325,12 @@ export_code CodeUndeclaredType CodeTypeArity CodeInvalidType CodeUnboundIndex
   CodeTypeDefinitionSameConstants CodeTypeDefinitionHasHypotheses
   CodeTypeDefinitionOpenPredicate CodeTypeDefinitionExtraTypeVariables
   CodeTypeDefinitionBadWitness CodeRuleRejected CodeExtensionRejected
-  CodeSuccess CodeFailure DeltaType DeltaConstant DeltaAxiom DeltaDefinition
-  DeltaTypeDefinition Pair
+  CodeSuccess CodeFailure Pair None Some
   code_check_type code_check_term
   code_refl code_trans code_mk_comb code_abs code_beta code_assume code_eq_mp
   code_deduct_antisym code_inst code_inst_type
-  code_new_type_with_delta code_new_constant_with_delta code_new_axiom_with_delta
-  code_new_basic_definition_with_delta code_new_basic_type_definition_with_delta
+  code_new_type code_new_constant code_new_axiom
+  code_new_basic_definition code_new_basic_type_definition
   initial_theory check_type check_open_term check_term is_bool mk_eq dest_eq
   sid gen ancestors hyps concl thm_stamp tyops const_tab axiom_list def_tab thy_stamp
   checking Rhombus

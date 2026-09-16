@@ -214,16 +214,13 @@ fun INST_TYPE(thy :: Theory, tyin :: Map.of(Symbol, HType), th :: Thm) :: Thm:
   note(#'INST_TYPE, thy.stamp.id, [th], [tyin], #false, [res])
   res
 
-fun generated_extension(who :: Symbol, thy :: Theory, result)
-    :: values(Theory, List.of(Thm)):
+fun raise_or_theory(who :: Symbol, thy :: Theory, result) :: Theory:
   match result
-  | generated.Success(generated.PairValue(raw, delta)):
-      let (theory, theorems) = extend_with_delta(thy, raw, delta)
-      values(theory, theorems)
+  | generated.Success(raw): wrap_new_theory(thy, raw)
   | generated.Failure(failure): raise_generated_failure(who, failure)
 
 fun new_type(thy :: Theory, n :: Symbol, arity :: NonnegInt) :: Theory:
-  let (res, _) = generated_extension(
+  let res = raise_or_theory(
     #'new_type,
     thy,
     generated.new_type(fresh_generation())(raw_theory(thy))(n)(arity))
@@ -231,7 +228,7 @@ fun new_type(thy :: Theory, n :: Symbol, arity :: NonnegInt) :: Theory:
   res
 
 fun new_constant(thy :: Theory, n :: Symbol, ty :: HType) :: Theory:
-  let (res, _) = generated_extension(
+  let res = raise_or_theory(
     #'new_constant,
     thy,
     generated.new_constant(fresh_generation())(raw_theory(thy))(n)(ty))
@@ -239,20 +236,22 @@ fun new_constant(thy :: Theory, n :: Symbol, ty :: HType) :: Theory:
   res
 
 fun new_axiom(thy :: Theory, p :: Term) :: values(Theory, Thm):
-  let (res, [th]) = generated_extension(
-    #'new_axiom,
-    thy,
-    generated.new_axiom(fresh_generation())(raw_theory(thy))(p))
-  note(#'new_axiom, thy.stamp.id, [], [p], res.stamp.id, [th])
-  values(res, th)
+  match generated.new_axiom(fresh_generation())(raw_theory(thy))(p)
+  | generated.Success(generated.PairValue(raw, raw_th)):
+      let res = wrap_new_theory(thy, raw)
+      let th = wrap_raw_thm(raw_th, res.stamp, raw)
+      note(#'new_axiom, thy.stamp.id, [], [p], res.stamp.id, [th])
+      values(res, th)
+  | generated.Failure(failure): raise_generated_failure(#'new_axiom, failure)
 
 fun new_basic_definition(thy :: Theory, tm :: Term) :: values(Theory, Thm):
-  let (res, [th]) = generated_extension(
-    #'new_basic_definition,
-    thy,
-    generated.new_basic_definition(fresh_generation())(raw_theory(thy))(tm))
-  note(#'new_basic_definition, thy.stamp.id, [], [tm], res.stamp.id, [th])
-  values(res, th)
+  match generated.new_basic_definition(fresh_generation())(raw_theory(thy))(tm)
+  | generated.Success(generated.PairValue(raw, raw_th)):
+      let res = wrap_new_theory(thy, raw)
+      let th = wrap_raw_thm(raw_th, res.stamp, raw)
+      note(#'new_basic_definition, thy.stamp.id, [], [tm], res.stamp.id, [th])
+      values(res, th)
+  | generated.Failure(failure): raise_generated_failure(#'new_basic_definition, failure)
 
 fun new_basic_type_definition(thy :: Theory,
                               tyname :: Symbol,
@@ -260,12 +259,15 @@ fun new_basic_type_definition(thy :: Theory,
                               repname :: Symbol,
                               th :: Thm) :: values(Theory, Thm, Thm):
   in_theory(#'new_basic_type_definition, thy, th)
-  let (res, [abs_rep, pred_th]) = generated_extension(
-    #'new_basic_type_definition,
-    thy,
-    generated.new_basic_type_definition(
-      fresh_generation())(raw_theory(thy))(tyname)(absname)(repname)(raw_thm(th)))
-  note(#'new_basic_type_definition, thy.stamp.id, [th],
-       [tyname, absname, repname], res.stamp.id,
-       [abs_rep, pred_th])
-  values(res, abs_rep, pred_th)
+  match generated.new_basic_type_definition(
+      fresh_generation())(raw_theory(thy))(tyname)(absname)(repname)(raw_thm(th))
+  | generated.Success(generated.PairValue(raw, generated.PairValue(raw_th1, raw_th2))):
+      let res = wrap_new_theory(thy, raw)
+      let abs_rep = wrap_raw_thm(raw_th1, res.stamp, raw)
+      let pred_th = wrap_raw_thm(raw_th2, res.stamp, raw)
+      note(#'new_basic_type_definition, thy.stamp.id, [th],
+           [tyname, absname, repname], res.stamp.id,
+           [abs_rep, pred_th])
+      values(res, abs_rep, pred_th)
+  | generated.Failure(failure):
+      raise_generated_failure(#'new_basic_type_definition, failure)

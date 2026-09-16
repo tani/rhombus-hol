@@ -20,7 +20,7 @@ export:
   later_raw_theory
   wrap_raw_thm
   make_initial_theory
-  extend_with_delta
+  wrap_new_theory
   hyps_of
   concl_of
   stamp_of
@@ -57,12 +57,13 @@ class Thm(hyps :: List.of(Term),
     let hs = for values(acc = 0) (h in hyps): acc + recur(h)
     Equatable.hash_code_combine(recur(concl), hyps.length(), hs)
 
-class Theory(private tyops :: Map.of(Symbol, Int),
-             private consts :: Map.of(Symbol, HType),
-             private axioms :: List.of(Thm),
-             private defs :: Map.of(Symbol, Thm),
-             stamp :: Stamp,
-             private raw):
+// The theory's contents are queried straight from the Isabelle-generated
+// value on every call, not cached here. Isabelle's `fun_upd`-built lookup
+// functions (`tyops`/`const_tab`/`def_tab`) are code-printed to a persistent
+// per-base map (`Rhombus_HOL_Code.thy`'s `rhombus_fun_upd`), so a direct call
+// is already an O(1) amortized lookup; keeping a second, hand-synchronized
+// cache here would just be two representations of the same fact.
+class Theory(stamp :: Stamp, private raw):
   constructor ~none
   reconstructor ~none
   internal _Theory
@@ -70,11 +71,6 @@ class Theory(private tyops :: Map.of(Symbol, Int),
 fun raw_thm(th :: Thm): _Thm.raw(th)
 fun raw_thm_theory(th :: Thm): _Thm.raw_theory(th)
 fun raw_theory(thy :: Theory): _Theory.raw(thy)
-
-fun theory_tyops(thy :: Theory) :: Map.of(Symbol, Int): _Theory.tyops(thy)
-fun theory_consts(thy :: Theory) :: Map.of(Symbol, HType): _Theory.consts(thy)
-fun theory_axioms(thy :: Theory) :: List.of(Thm): _Theory.axioms(thy)
-fun theory_defs(thy :: Theory) :: Map.of(Symbol, Thm): _Theory.defs(thy)
 
 fun fresh_stamp(raw) :: Stamp:
   let id = Symbol.uninterned_from_string("thy")
@@ -116,56 +112,35 @@ fun concl_of(th :: Thm) :: Term: th.concl
 fun stamp_of(th :: Thm) :: Stamp: th.stamp
 
 fun type_arity(thy :: Theory, n :: Symbol) :: maybe(Int):
-  theory_tyops(thy).get(n, #false)
+  match (generated.tyops(raw_theory(thy)))(n)
+  | generated.None(): #false
+  | generated.Some(arity): arity
 
 fun const_type(thy :: Theory, n :: Symbol) :: maybe(HType):
-  theory_consts(thy).get(n, #false)
+  match (generated.const_tab(raw_theory(thy)))(n)
+  | generated.None(): #false
+  | generated.Some(ty): ty
 
-fun axioms_of(thy :: Theory) :: List.of(Thm): theory_axioms(thy)
+fun axioms_of(thy :: Theory) :: List.of(Thm):
+  let raw_axioms :~ List = generated.axiom_list(raw_theory(thy))
+  for List (raw_th in raw_axioms):
+    wrap_raw_thm(raw_th, thy.stamp, raw_theory(thy))
+
 fun definition_of(thy :: Theory, n :: Symbol) :: maybe(Thm):
-  theory_defs(thy).get(n, #false)
+  match (generated.def_tab(raw_theory(thy)))(n)
+  | generated.None(): #false
+  | generated.Some(raw_th): wrap_raw_thm(raw_th, thy.stamp, raw_theory(thy))
 
 fun make_initial_theory() :: Theory:
   let raw = generated.initial_theory(fresh_generation())
-  let a = mk_tyvar(v_alpha)
-  _Theory({ty_bool: 0, ty_fun: 2},
-          {c_eq: mk_fun(a, mk_fun(a, mk_tyapp(ty_bool, [])))},
-          [],
-          {},
-          fresh_stamp(generated.thy_stamp(raw)),
-          raw)
+  _Theory(fresh_stamp(generated.thy_stamp(raw)), raw)
 
-fun extend_with_delta(thy :: Theory, raw, delta) :: values(Theory, List.of(Thm)):
-  let st = next_stamp(thy.stamp, generated.thy_stamp(raw))
-  match delta
-  | generated.TypeDelta(n, arity):
-      values(_Theory(theory_tyops(thy) ++ {n: arity},
-                     theory_consts(thy), theory_axioms(thy), theory_defs(thy),
-                     st, raw),
-             [])
-  | generated.ConstantDelta(n, ty):
-      values(_Theory(theory_tyops(thy), theory_consts(thy) ++ {n: ty},
-                     theory_axioms(thy), theory_defs(thy), st, raw),
-             [])
-  | generated.AxiomDelta(raw_th):
-      let th = wrap_raw_thm(raw_th, st, raw)
-      values(_Theory(theory_tyops(thy), theory_consts(thy),
-                     List.cons(th, theory_axioms(thy)), theory_defs(thy), st, raw),
-             [th])
-  | generated.DefinitionDelta(n, ty, raw_th):
-      let th = wrap_raw_thm(raw_th, st, raw)
-      values(_Theory(theory_tyops(thy), theory_consts(thy) ++ {n: ty},
-                     theory_axioms(thy), theory_defs(thy) ++ {n: th}, st, raw),
-             [th])
-  | generated.TypeDefinitionDelta(tyname, arity,
-                                  absname, abs_ty, repname, rep_ty,
-                                  raw_abs_rep, raw_pred):
-      let abs_rep = wrap_raw_thm(raw_abs_rep, st, raw)
-      let pred_th = wrap_raw_thm(raw_pred, st, raw)
-      values(_Theory(theory_tyops(thy) ++ {tyname: arity},
-                     theory_consts(thy) ++ {absname: abs_ty, repname: rep_ty},
-                     theory_axioms(thy), theory_defs(thy), st, raw),
-             [abs_rep, pred_th])
+// Every `new_*` kernel primitive hands back a fresh raw theory value; this
+// wraps it with a `Stamp` descending from `thy`'s. Callers that also get a
+// theorem back wrap it separately with `wrap_raw_thm`, using the same new
+// stamp and this same new raw theory as its provenance.
+fun wrap_new_theory(thy :: Theory, raw) :: Theory:
+  _Theory(next_stamp(thy.stamp, generated.thy_stamp(raw)), raw)
 
 fun in_theory(who :: Symbol, thy :: Theory, th :: Thm) :: Void:
   unless descends(th.stamp, thy.stamp)

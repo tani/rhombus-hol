@@ -661,13 +661,6 @@ lemma code_result_failure_iff [simp]:
 
 section \<open>Direct code-generation extension façade\<close>
 
-datatype extension_delta =
-    DeltaType hname nat
-  | DeltaConstant hname htype
-  | DeltaAxiom hthm
-  | DeltaDefinition hname htype hthm
-  | DeltaTypeDefinition hname nat hname htype hname htype hthm hthm
-
 definition diagnose_new_type_failure :: "htheory \<Rightarrow> hname \<Rightarrow> code_failure" where
   "diagnose_new_type_failure thy n =
     (if tyops thy n = None then CodeExtensionRejected else CodeDuplicateType n)"
@@ -716,22 +709,6 @@ definition diagnose_type_definition_failure ::
            else CodeExtensionRejected)
      | _ \<Rightarrow> CodeTypeDefinitionBadWitness)"
 
-fun definition_delta_of :: "hterm \<Rightarrow> hthm \<Rightarrow> extension_delta" where
-  "definition_delta_of (Comb (Comb (Const _ _) (FVar n ty)) rhs) th =
-    DeltaDefinition n ty th"
-| "definition_delta_of _ th = DeltaAxiom th"
-
-definition type_definition_delta_of ::
-  "hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> extension_delta" where
-  "type_definition_delta_of tyname absname repname wit th1 th2 =
-    (case concl wit of
-       Comb pred witness \<Rightarrow> (case type_of witness of
-         Some rty \<Rightarrow> let tvs = term_type_vars pred;
-             aty = TyApp tyname (map TyVar tvs)
-           in DeltaTypeDefinition tyname (length tvs)
-             absname (mk_fun rty aty) repname (mk_fun aty rty) th1 th2
-       | None \<Rightarrow> DeltaAxiom th1)
-     | _ \<Rightarrow> DeltaAxiom th1)"
 definition code_new_type ::
   "nat \<Rightarrow> htheory \<Rightarrow> hname \<Rightarrow> nat \<Rightarrow> htheory code_result" where
   "code_new_type fresh thy n arity =
@@ -769,43 +746,6 @@ definition code_new_basic_type_definition ::
      | None \<Rightarrow> CodeFailure
          (diagnose_type_definition_failure thy tyname absname repname witness))"
 
-definition code_new_type_with_delta ::
-  "nat \<Rightarrow> htheory \<Rightarrow> hname \<Rightarrow> nat \<Rightarrow> (htheory \<times> extension_delta) code_result" where
-  "code_new_type_with_delta fresh thy n arity =
-    (case code_new_type fresh thy n arity of
-       CodeFailure failure \<Rightarrow> CodeFailure failure
-     | CodeSuccess thy' \<Rightarrow> CodeSuccess (thy', DeltaType n arity))"
-
-definition code_new_constant_with_delta ::
-  "nat \<Rightarrow> htheory \<Rightarrow> hname \<Rightarrow> htype \<Rightarrow> (htheory \<times> extension_delta) code_result" where
-  "code_new_constant_with_delta fresh thy n ty =
-    (case code_new_constant fresh thy n ty of
-       CodeFailure failure \<Rightarrow> CodeFailure failure
-     | CodeSuccess thy' \<Rightarrow> CodeSuccess (thy', DeltaConstant n ty))"
-
-definition code_new_axiom_with_delta ::
-  "nat \<Rightarrow> htheory \<Rightarrow> hterm \<Rightarrow> (htheory \<times> extension_delta) code_result" where
-  "code_new_axiom_with_delta fresh thy p =
-    (case code_new_axiom fresh thy p of
-       CodeFailure failure \<Rightarrow> CodeFailure failure
-     | CodeSuccess (thy', th) \<Rightarrow> CodeSuccess (thy', DeltaAxiom th))"
-
-definition code_new_basic_definition_with_delta ::
-  "nat \<Rightarrow> htheory \<Rightarrow> hterm \<Rightarrow> (htheory \<times> extension_delta) code_result" where
-  "code_new_basic_definition_with_delta fresh thy tm =
-    (case code_new_basic_definition fresh thy tm of
-       CodeFailure failure \<Rightarrow> CodeFailure failure
-     | CodeSuccess (thy', th) \<Rightarrow>
-         CodeSuccess (thy', definition_delta_of tm th))"
-
-definition code_new_basic_type_definition_with_delta ::
-  "nat \<Rightarrow> htheory \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hthm \<Rightarrow>
-    (htheory \<times> extension_delta) code_result" where
-  "code_new_basic_type_definition_with_delta fresh thy tn an rn witness =
-    (case code_new_basic_type_definition fresh thy tn an rn witness of
-       CodeFailure failure \<Rightarrow> CodeFailure failure
-     | CodeSuccess (thy', th1, th2) \<Rightarrow>
-         CodeSuccess (thy', type_definition_delta_of tn an rn witness th1 th2))"
 lemma code_new_type_erasure [simp]:
   "erase_code_result (code_new_type fresh thy n arity) =
     new_type fresh thy n arity"

@@ -37,6 +37,9 @@ committed artifact exactly matches the Isabelle export.
 
 ## Documentation
 
+The language decisions for that rebuild are recorded in
+[`LANGUAGE_SPEC.md`](LANGUAGE_SPEC.md).
+
 The published documentation for the full system (kernel, prover, standard
 library) is built from `main`:
 

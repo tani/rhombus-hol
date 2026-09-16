@@ -6,20 +6,22 @@
 
 // Proof-producing arithmetic on compact numerals.
 //
-// Each conversion here answers a closed arithmetic question -- what is
-// `a + b`, is `a` equal to `b` -- with a theorem, never with a value. The
-// answer is computed the fast way, by recursion on the digit chains, but every
-// step of that recursion is an instantiation of one of the derived equations
-// in `number/nat.rhm`, chained with `TRANS`, `AP_TERM` and `EQ_MP`. The
+// Each conversion here answers a closed question about literals -- are these
+// two the same number, what is their sum -- with a theorem, never with a
+// value. The answer is found the fast way, by recursion on the digit chains,
+// but every step of that recursion instantiates one of the derived equations
+// in `number/nat.rhm` and chains it with `TRANS`, `AP_TERM` and `EQ_MP`. The
 // kernel therefore checks the arithmetic: a bug in the recursion below can
 // only fail to produce a theorem, never produce a wrong one.
 //
-//   `nat_add_conv`  `add(a, b)`  ->  `|- add(a, b) === <a+b>`
-//   `nat_succ_conv` `succ(a)`    ->  `|- succ(a) === <a+1>`
 //   `nat_eq_conv`   `a === b`    ->  `|- (a === b) <=> true` or `<=> false`
+//   `nat_succ_conv` `succ(a)`    ->  `|- succ(a) === <a+1>`
+//   `nat_add_conv`  `add(a, b)`  ->  `|- add(a, b) === <a+b>`
+//   `nat_mul_conv`, `nat_sub_conv`, `nat_le_conv` likewise
 //
-// All three take literals only, and return `#false` for anything else: an
-// open term is not their business.
+// Equality and successor need only the digit layer, so they work in a module
+// that declared no arithmetic at all. The rest appear with the module's
+// addition.
 
 import:
   rhombus/hol/htype open
@@ -37,20 +39,25 @@ import:
 export:
   nat_succ_conv
   nat_add_conv
+  nat_mul_conv
+  nat_sub_conv
+  nat_le_conv
   nat_eq_conv
   nat_literal_conv
   numeral_conv
 
+// -- successor --------------------------------------------------------------
+
 // `|- succ(a) === <a+1>` for a literal `a`.
 //
-//   `succ(zero())` is `b1(zero())`, `succ(b0 n)` is `b1 n`, and `succ(b1 n)`
-//   carries: `b0(succ n)`, whose inner successor is the same problem one digit
-//   shorter.
+// `succ(zero())` is `b1(zero())`, `succ(b0 n)` is `b1 n`, and `succ(b1 n)`
+// carries: `b0(succ n)`, whose inner successor is the same problem one digit
+// shorter.
 fun nat_succ_conv(arith :: NatArith, thy :: Theory,
                   t :: Term) :: maybe(Thm):
-  let shape = arith.shape
   match t
-  | Comb(Const(s, _), x) when s == shape.succ_name: succ_of(arith, thy, x)
+  | Comb(Const(s, _), x) when s == arith.shape.succ_name:
+      succ_of(arith, thy, x)
   | ~else: #false
 
 fun succ_of(arith :: NatArith, thy :: Theory, x :: Term) :: maybe(Thm):
@@ -60,7 +67,6 @@ fun succ_of(arith :: NatArith, thy :: Theory, x :: Term) :: maybe(Thm):
   | Comb(Const(digit, _), inner) when digit == bit0_name:
       SPEC(thy, inner, arith.suc_b0)
   | Comb(Const(digit, _), inner) when digit == bit1_name:
-      // `succ(b1 n) === b0(succ n)`, then the carry, then congruence.
       match succ_of(arith, thy, inner)
       | #false: #false
       | carried :: Thm:
@@ -68,19 +74,162 @@ fun succ_of(arith :: NatArith, thy :: Theory, x :: Term) :: maybe(Thm):
                 AP_TERM(thy, shape.bit0_term, carried))
   | ~else: #false
 
-// `|- add(a, b) === <a+b>` for literals `a` and `b`.
-fun nat_add_conv(arith :: NatArith, thy :: Theory,
-                 t :: Term) :: maybe(Thm):
-  match dest_binary(arith.add_term, t)
+// `|- b0(x) === <canonical>` given `|- x === s`: doubling the chain is one
+// congruence step, except that doubling zero is zero, which a canonical chain
+// must not spell as `b0(zero())`.
+fun double_of(arith :: NatArith, thy :: Theory, inner :: Thm) :: Thm:
+  let doubled = AP_TERM(thy, arith.shape.bit0_term, inner)
+  (if rhs_of(inner) == arith.shape.zero_term
+   | TRANS(doubled, arith.b0_zero)
+   | doubled)
+
+// -- equality ---------------------------------------------------------------
+
+// `|- (a === b) <=> true` when two literals are the same number, `<=> false`
+// when they are not.
+//
+// Canonical chains are equal exactly when they are the same term, so the
+// first case is reflexivity. The second walks the two chains together: a
+// digit is injective because `half` takes it apart again, an even digit
+// differs from an odd one because otherwise a number would be its own
+// successor, and a chain that has ended differs from one that has not.
+fun nat_eq_conv(arith :: NatArith, thy :: Theory,
+                t :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  match dest_eq(t)
   | #false: #false
-  | [a, b]: add_of(arith, thy, a, b)
+  | [l, r]:
+      match [canonical_numeral(shape, l), canonical_numeral(shape, r)]
+      | [_ :: NonnegInt, _ :: NonnegInt]:
+          cond
+          | l == r: EQT_INTRO(thy, REFL(thy, l))
+          | ~else:
+              match distinct(arith, thy, l, r)
+              | #false: #false
+              | ne :: Thm: EQF_INTRO(thy, ne)
+      | ~else: #false
+
+// `|- not (a === b)` for two canonical chains that are different terms.
+fun distinct(arith :: NatArith, thy :: Theory,
+             a :: Term, b :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  fun digit(t :: Term) :: maybe(List):
+    match t
+    | Comb(Const(d, _), inner) when d == bit0_name: [#'b0, inner :~ Term]
+    | Comb(Const(d, _), inner) when d == bit1_name: [#'b1, inner :~ Term]
+    | ~else: #false
+  match [digit(a), digit(b)]
+  | [#false, #false]: #false
+  | [#false, [db, bi]]:
+      // `a` is `zero()`; whether `b` has ended is the whole difference.
+      match not_zero(arith, thy, db :~ Symbol, bi :~ Term)
+      | #false: #false
+      | ne :: Thm: flip_disequality(thy, ne)
+  | [[da, ai], #false]: not_zero(arith, thy, da :~ Symbol, ai :~ Term)
+  | [[da, ai], [db, bi]]:
+      cond
+      | da == db:
+          // Same digit: injective, so the difference is one chain shorter.
+          match distinct(arith, thy, ai :~ Term, bi :~ Term)
+          | #false: #false
+          | inner :: Thm:
+              let law = (if da == #'b0 | arith.half_b0 | arith.half_b1)
+              let digit_term = (if da == #'b0
+                                | shape.bit0_term
+                                | shape.bit1_term)
+              injective_distinct(arith, thy, digit_term, law,
+                                 ai :~ Term, bi :~ Term, inner)
+      | da == #'b0: parity_distinct(arith, thy, ai :~ Term, bi :~ Term)
+      | ~else:
+          match parity_distinct(arith, thy, bi :~ Term, ai :~ Term)
+          | #false: #false
+          | ne :: Thm: flip_disequality(thy, ne)
+
+// `|- not (<digit> inner === zero())` for a canonical chain, which is never
+// zero: an odd digit says so outright, an even one because its argument is
+// not zero either.
+fun not_zero(arith :: NatArith, thy :: Theory,
+             digit :: Symbol, inner :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  cond
+  | digit == #'b1: SPEC(thy, inner, arith.b1_ne_zero)
+  | ~else:
+      match distinct(arith, thy, inner, shape.zero_term)
+      | #false: #false
+      | inner_ne :: Thm:
+          // `b0 m === zero() <=> m === zero()`, so a nonzero argument makes a
+          // nonzero chain.
+          not_from_iff(thy, SPEC(thy, inner, arith.b0_zero_iff), inner_ne)
+
+// `|- not (d x === d y)` from `|- not (x === y)`, where `law` is
+// `|- forall n. half(d n) === n`: halving both sides of the assumed equation
+// recovers `x === y`.
+fun injective_distinct(arith :: NatArith, thy :: Theory,
+                       digit :: Term, law :: Thm,
+                       x :: Term, y :: Term, ne :: Thm) :: maybe(Thm):
+  let assumed = mk_eq(mk_comb(digit, x), mk_comb(digit, y))
+  let halved = AP_TERM(thy, arith.half_term, ASSUME(thy, assumed))
+  let recovered = TRANS(SYM(thy, SPEC(thy, x, law)),
+                        TRANS(halved, SPEC(thy, y, law)))
+  NOT_INTRO(thy, DISCH(thy, assumed, MP(thy, NOT_ELIM(thy, ne), recovered)))
+
+// `|- not (b0 x === b1 y)`: halving gives `x === y`, and then `b1 y` is
+// `succ(b0 y)` while `b0 x` is `b0 y`, so a number would be its own
+// successor.
+fun parity_distinct(arith :: NatArith, thy :: Theory,
+                    x :: Term, y :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  let even = mk_comb(shape.bit0_term, x)
+  let odd = mk_comb(shape.bit1_term, y)
+  let assumed = mk_eq(even, odd)
+  let h = ASSUME(thy, assumed)
+  // `x === y`, by halving both sides.
+  let halved = AP_TERM(thy, arith.half_term, h)
+  let same = TRANS(SYM(thy, SPEC(thy, x, arith.half_b0)),
+                   TRANS(halved, SPEC(thy, y, arith.half_b1)))
+  // `b0 y === succ(b0 y)`, which `not_self_succ` refutes.
+  let shifted = TRANS(SYM(thy, AP_TERM(thy, shape.bit0_term, same)),
+                      TRANS(h, SPEC(thy, y, arith.b1_succ_b0)))
+  let refuted = SPEC(thy, mk_comb(shape.bit0_term, y), arith.not_self_succ)
+  NOT_INTRO(thy, DISCH(thy, assumed, MP(thy, NOT_ELIM(thy, refuted), shifted)))
+
+// `|- not p` from `|- p <=> q` and `|- not q`.
+fun not_from_iff(thy :: Theory, iff :: Thm, not_right :: Thm) :: Thm:
+  let left = lhs_of(iff)
+  let assumed = ASSUME(thy, left)
+  NOT_INTRO(thy,
+            DISCH(thy, left,
+                  MP(thy, NOT_ELIM(thy, not_right), EQ_MP(iff, assumed))))
+
+// `|- not (b === a)` from `|- not (a === b)`.
+fun flip_disequality(thy :: Theory, th :: Thm) :: Thm:
+  match dest_eq(dest_neg(concl_of(th)))
+  | [a, b]:
+      let flipped = mk_eq(b, a)
+      NOT_INTRO(thy,
+                DISCH(thy, flipped,
+                      MP(thy, NOT_ELIM(thy, th),
+                         SYM(thy, ASSUME(thy, flipped)))))
+  | ~else: error(~who: #'numeral, "not a disequality")
+
+// -- addition ---------------------------------------------------------------
 
 fun dest_binary(op :: Term, t :: Term) :: maybe(List.of(Term)):
   match t
   | Comb(Comb(f, x), y) when f == op: [x :~ Term, y :~ Term]
   | ~else: #false
 
-fun add_of(arith :: NatArith, thy :: Theory,
+// `|- add(a, b) === <a+b>` for literals `a` and `b`.
+fun nat_add_conv(arith :: NatArith, thy :: Theory,
+                 t :: Term) :: maybe(Thm):
+  match arith.add
+  | #false: #false
+  | sum :: NatAdd:
+      match dest_binary(sum.add_term, t)
+      | #false: #false
+      | [a, b]: add_of(arith, sum, thy, a, b)
+
+fun add_of(arith :: NatArith, sum :: NatAdd, thy :: Theory,
            a :: Term, b :: Term) :: maybe(Thm):
   let shape = arith.shape
   fun digit_of(t :: Term) :: maybe(List):
@@ -89,134 +238,57 @@ fun add_of(arith :: NatArith, thy :: Theory,
     | Comb(Const(d, _), inner) when d == bit1_name: [#'b1, inner :~ Term]
     | ~else: #false
   cond
-  | a == shape.zero_term: SPEC(thy, b, arith.zero_left)
-  | b == shape.zero_term: SPEC(thy, a, arith.zero_right)
+  | a == shape.zero_term: SPEC(thy, b, sum.zero_left)
+  | b == shape.zero_term: SPEC(thy, a, sum.zero_right)
   | ~else:
       match [digit_of(a), digit_of(b)]
       | [[da, ai], [db, bi]]:
           let carry = da == #'b1 && db == #'b1
           let law:
             cond
-            | da == #'b0 && db == #'b0: arith.b0b0
-            | da == #'b0: arith.b0b1
-            | db == #'b0: arith.b1b0
-            | ~else: arith.b1b1
+            | da == #'b0 && db == #'b0: sum.b0b0
+            | da == #'b0: sum.b0b1
+            | db == #'b0: sum.b1b0
+            | ~else: sum.b1b1
           let result_digit = (if da == db | shape.bit0_term | shape.bit1_term)
-          match add_of(arith, thy, ai :~ Term, bi :~ Term)
+          match add_of(arith, sum, thy, ai :~ Term, bi :~ Term)
           | #false: #false
           | inner :: Thm:
-              // `|- add(a, b) === <digit>(...)`, with the inner sum still
-              // written as an addition; rewriting it to its value is one
-              // congruence step, plus the carry's successor when there is one.
+              // The inner sum is still written as an addition; rewriting it
+              // to its value is one congruence step, plus the carry's
+              // successor when there is one.
               let stepped:
                 cond
                 | carry:
                     match succ_of(arith, thy, rhs_of(inner))
                     | #false: #false
                     | bumped :: Thm:
-                        TRANS(AP_TERM(thy, arith.shape.succ_term, inner),
-                              bumped)
+                        TRANS(AP_TERM(thy, shape.succ_term, inner), bumped)
                 | ~else: inner
               match stepped
               | #false: #false
               | step :: Thm:
-                  TRANS(SPEC(thy, bi :~ Term,
-                             SPEC(thy, ai :~ Term, law)),
+                  TRANS(SPEC(thy, bi :~ Term, SPEC(thy, ai :~ Term, law)),
                         AP_TERM(thy, result_digit, step))
       | ~else: #false
 
-// `|- (a === b) <=> true` when the two literals are the same number, and
-// `|- (a === b) <=> false` when they are not.
-//
-// Distinct literals differ by some `succ d`, and `ne_add_succ` says nothing
-// equals itself plus a successor. Which way round the difference goes decides
-// which of the two orientations is used; both are derived.
-fun nat_eq_conv(arith :: NatArith, thy :: Theory,
-                t :: Term) :: maybe(Thm):
-  let shape = arith.shape
-  match dest_eq(t)
-  | #false: #false
-  | [l, r]:
-      match [canonical_numeral(shape, l), canonical_numeral(shape, r)]
-      | [lv :: NonnegInt, rv :: NonnegInt]:
-          cond
-          | l == r: EQT_INTRO(thy, REFL(thy, l))
-          | lv < rv: not_equal(arith, thy, l, r, rv - lv - 1, #true)
-          | ~else: not_equal(arith, thy, r, l, lv - rv - 1, #false)
-      | ~else: #false
+// -- multiplication ---------------------------------------------------------
 
-// `small` plus `succ <gap>` is `large`; `forward` says whether the goal is
-// `small === large` or `large === small`.
-fun not_equal(arith :: NatArith, thy :: Theory,
-              small :: Term, large :: Term, gap :: NonnegInt,
-              forward :: Boolean) :: maybe(Thm):
-  let shape = arith.shape
-  let gap_term = encode_numeral(shape, gap)
-  let ne = SPEC(thy, gap_term, SPEC(thy, small, arith.ne_add_succ))
-  // `|- small + succ gap === large`: the successor first, then the sum.
-  match succ_of(arith, thy, gap_term)
-  | #false: #false
-  | bumped :: Thm:
-      let add_at_small = mk_comb(arith.add_term, small)
-      match add_of(arith, thy, small, rhs_of(bumped))
-      | #false: #false
-      | summed :: Thm:
-          let sum_eq = TRANS(AP_TERM(thy, add_at_small, bumped), summed)
-          // Rewrite the sum inside `not (small === small + succ gap)`.
-          let eq_at_small = mk_comb(mk_const(#'eq,
-                                             mk_fun(shape.ty,
-                                                    mk_fun(shape.ty, bool))),
-                                    small)
-          let inner = AP_TERM(thy, eq_at_small, sum_eq)
-          let neg_ty = mk_fun(bool, bool)
-          let negated = AP_TERM(thy, mk_const(#'neg, neg_ty), inner)
-          let ne_at_large = EQ_MP(negated, ne)
-          let oriented = (if forward
-                          | ne_at_large
-                          | flip_disequality(thy, ne_at_large, small, large))
-          EQF_INTRO(thy, oriented)
-
-// `|- not (a === b)` from `|- not (b === a)`, by congruence on the two
-// orientations of the same equation.
-fun flip_disequality(thy :: Theory, th :: Thm,
-                     small :: Term, large :: Term) :: Thm:
-  let ty = type_of(small)
-  let eq_ty = mk_fun(ty, mk_fun(ty, bool))
-  let x = mk_var(Symbol.gen("_num_x"), ty)
-  let y = mk_var(Symbol.gen("_num_y"), ty)
-  // `|- (x === y) <=> (y === x)` at these two terms, from the derived
-  // symmetry of equality.
-  let sym_iff = IMP_ANTISYM_RULE(
-                  thy,
-                  DISCH(thy, mk_eq(large, small),
-                        SYM(thy, ASSUME(thy, mk_eq(large, small)))),
-                  DISCH(thy, mk_eq(small, large),
-                        SYM(thy, ASSUME(thy, mk_eq(small, large)))))
-  let negated = AP_TERM(thy, mk_const(#'neg, mk_fun(bool, bool)),
-                        SYM(thy, sym_iff))
-  EQ_MP(negated, th)
-
-// `|- b0(x) === <canonical>` given `|- x === s`: doubling the chain is one
-// congruence step, except that doubling zero is zero, which the chain must
-// not spell as `b0(zero())`.
-fun double_of(arith :: NatArith, thy :: Theory, inner :: Thm) :: Thm:
-  let doubled = AP_TERM(thy, arith.shape.bit0_term, inner)
-  (if rhs_of(inner) == arith.shape.zero_term
-   | TRANS(doubled, arith.b0_zero)
-   | doubled)
-
-// `|- mul(a, b) === <a*b>` for literals `a` and `b`, by recursion on `a`'s
-// digits: an even `a` doubles the product, an odd one doubles it and adds `b`.
+// `|- mul(a, b) === <a*b>`, by recursion on `a`'s digits: an even `a` doubles
+// the product, an odd one doubles it and adds `b`.
 fun nat_mul_conv(arith :: NatArith, thy :: Theory,
                  t :: Term) :: maybe(Thm):
-  match arith.mul
+  match arith.add
   | #false: #false
-  | mul :: NatMul:
-      match dest_binary(mul.mul_term, t)
+  | sum :: NatAdd:
+      match sum.mul
       | #false: #false
-      | [a, b]: mul_of(arith, mul, thy, a, b)
+      | mul :: NatMul:
+          match dest_binary(mul.mul_term, t)
+          | #false: #false
+          | [a, b]: mul_of(arith, sum, mul, thy, a, b)
 
-fun mul_of(arith :: NatArith, mul :: NatMul, thy :: Theory,
+fun mul_of(arith :: NatArith, sum :: NatAdd, mul :: NatMul, thy :: Theory,
            a :: Term, b :: Term) :: maybe(Thm):
   let shape = arith.shape
   cond
@@ -226,7 +298,7 @@ fun mul_of(arith :: NatArith, mul :: NatMul, thy :: Theory,
       match a
       | Comb(Const(digit, _), ai) when digit == bit0_name
                                          || digit == bit1_name:
-          match mul_of(arith, mul, thy, ai :~ Term, b)
+          match mul_of(arith, sum, mul, thy, ai :~ Term, b)
           | #false: #false
           | inner :: Thm:
               let law = (if digit == bit0_name | mul.at_b0 | mul.at_b1)
@@ -237,118 +309,115 @@ fun mul_of(arith :: NatArith, mul :: NatMul, thy :: Theory,
               | ~else:
                   // The odd case still owes one `b +`, written on the left,
                   // which is the shape `at_b1` states.
-                  match add_of(arith, thy, b, rhs_of(doubled))
+                  match add_of(arith, sum, thy, b, rhs_of(doubled))
                   | #false: #false
                   | total :: Thm:
-                      let rebuilt = AP_TERM(thy,
-                                            mk_comb(arith.add_term, b),
+                      let rebuilt = AP_TERM(thy, mk_comb(sum.add_term, b),
                                             doubled)
                       TRANS(instance, TRANS(rebuilt, total))
       | ~else: #false
 
-// `|- le(a, b) <=> true` or `<=> false` for literals `a` and `b`.
-//
-// Which it is comes from the difference, the same way disequality does: `a`
-// is at most `a + d` for any `d`, and `b + succ d` is never at most `b`.
+// -- comparison and difference ----------------------------------------------
+
+// `|- le(a, b) <=> true` or `<=> false`, from the difference: `a` is at most
+// `a + d` for any `d`, and `b + succ d` is never at most `b`.
 fun nat_le_conv(arith :: NatArith, thy :: Theory,
                 t :: Term) :: maybe(Thm):
-  match arith.order
+  match arith.add
   | #false: #false
-  | order :: NatOrder:
-      let shape = arith.shape
-      match dest_binary(order.le_term, t)
+  | sum :: NatAdd:
+      match sum.order
       | #false: #false
-      | [l, r]:
-          match [canonical_numeral(shape, l), canonical_numeral(shape, r)]
-          | [lv :: NonnegInt, rv :: NonnegInt]:
-              cond
-              | lv <= rv:
-                  // `le(l, l + <r-l>)`, with the sum rewritten to `r`.
-                  let gap = encode_numeral(shape, rv - lv)
-                  match add_of(arith, thy, l, gap)
-                  | #false: #false
-                  | summed :: Thm:
-                      let fact = SPEC(thy, gap, SPEC(thy, l, order.le_add))
-                      EQT_INTRO(thy,
-                                EQ_MP(AP_TERM(thy, mk_comb(order.le_term, l),
-                                              summed),
-                                      fact))
-              | ~else:
-                  // `not le(r + succ <l-r-1>, r)`, with the sum rewritten
-                  // to `l`.
-                  let gap = encode_numeral(shape, lv - rv - 1)
-                  match succ_of(arith, thy, gap)
-                  | #false: #false
-                  | bumped :: Thm:
-                      match add_of(arith, thy, r, rhs_of(bumped))
+      | order :: NatOrder:
+          let shape = arith.shape
+          match dest_binary(order.le_term, t)
+          | #false: #false
+          | [l, r]:
+              match [canonical_numeral(shape, l), canonical_numeral(shape, r)]
+              | [lv :: NonnegInt, rv :: NonnegInt]:
+                  cond
+                  | lv <= rv:
+                      let gap = encode_numeral(shape, rv - lv)
+                      match add_of(arith, sum, thy, l, gap)
                       | #false: #false
                       | summed :: Thm:
-                          let sum_eq = TRANS(
-                                         AP_TERM(thy,
-                                                 mk_comb(arith.add_term, r),
-                                                 bumped),
-                                         summed)
+                          let fact = SPEC(thy, gap, SPEC(thy, l, order.le_add))
+                          EQT_INTRO(
+                            thy,
+                            EQ_MP(AP_TERM(thy, mk_comb(order.le_term, l),
+                                          summed),
+                                  fact))
+                  | ~else:
+                      let gap = encode_numeral(shape, lv - rv - 1)
+                      match difference_sum(arith, sum, thy, r, gap)
+                      | #false: #false
+                      | sum_eq :: Thm:
                           let fact = SPEC(thy, gap,
                                           SPEC(thy, r, order.not_le_add_succ))
                           let inner = AP_THM(thy,
                                              AP_TERM(thy, order.le_term,
                                                      sum_eq),
                                              r)
-                          let negated = AP_TERM(thy,
-                                                mk_const(#'neg,
-                                                         mk_fun(bool, bool)),
-                                                inner)
-                          EQF_INTRO(thy, EQ_MP(negated, fact))
-          | ~else: #false
+                          EQF_INTRO(thy,
+                                    EQ_MP(AP_TERM(thy,
+                                                  mk_const(#'neg,
+                                                           mk_fun(bool, bool)),
+                                                  inner),
+                                          fact))
+              | ~else: #false
 
-// `|- sub(a, b) === <a-b>` for literals, truncated at zero.
-//
-// Above `b` the difference `r` satisfies `b + r === a`, so `sub_add` gives it
-// once the sum is rewritten to `a`; at or below `b` the answer is zero by
-// `sub_below`, whose shape is `a - (a + succ d)`.
+// `|- add(base, succ gap) === <base + gap + 1>`, the shape the order and
+// difference facts are stated over.
+fun difference_sum(arith :: NatArith, sum :: NatAdd, thy :: Theory,
+                   base :: Term, gap :: Term) :: maybe(Thm):
+  match succ_of(arith, thy, gap)
+  | #false: #false
+  | bumped :: Thm:
+      match add_of(arith, sum, thy, base, rhs_of(bumped))
+      | #false: #false
+      | summed :: Thm:
+          TRANS(AP_TERM(thy, mk_comb(sum.add_term, base), bumped), summed)
+
+// `|- sub(a, b) === <a-b>`, truncated at zero.
 fun nat_sub_conv(arith :: NatArith, thy :: Theory,
                  t :: Term) :: maybe(Thm):
-  match arith.sub
+  match arith.add
   | #false: #false
-  | sub :: NatSub:
-      let shape = arith.shape
-      match dest_binary(sub.sub_term, t)
+  | sum :: NatAdd:
+      match sum.sub
       | #false: #false
-      | [l, r]:
-          match [canonical_numeral(shape, l), canonical_numeral(shape, r)]
-          | [lv :: NonnegInt, rv :: NonnegInt]:
-              cond
-              | lv >= rv:
-                  let rest = encode_numeral(shape, lv - rv)
-                  match add_of(arith, thy, r, rest)
-                  | #false: #false
-                  | summed :: Thm:
-                      let fact = SPEC(thy, rest, SPEC(thy, r, sub.sub_add))
-                      // `sub(r + rest, r) === rest` with the sum made `l`.
-                      let at_sub = AP_THM(thy,
-                                          AP_TERM(thy, sub.sub_term, summed),
-                                          r)
-                      TRANS(SYM(thy, at_sub), fact)
-              | ~else:
-                  let gap = encode_numeral(shape, rv - lv - 1)
-                  match succ_of(arith, thy, gap)
-                  | #false: #false
-                  | bumped :: Thm:
-                      match add_of(arith, thy, l, rhs_of(bumped))
+      | sub :: NatSub:
+          let shape = arith.shape
+          match dest_binary(sub.sub_term, t)
+          | #false: #false
+          | [l, r]:
+              match [canonical_numeral(shape, l), canonical_numeral(shape, r)]
+              | [lv :: NonnegInt, rv :: NonnegInt]:
+                  cond
+                  | lv >= rv:
+                      let rest = encode_numeral(shape, lv - rv)
+                      match add_of(arith, sum, thy, r, rest)
                       | #false: #false
                       | summed :: Thm:
-                          let sum_eq = TRANS(
-                                         AP_TERM(thy,
-                                                 mk_comb(arith.add_term, l),
-                                                 bumped),
-                                         summed)
-                          let fact = SPEC(thy, gap,
-                                          SPEC(thy, l, sub.sub_below))
+                          let fact = SPEC(thy, rest, SPEC(thy, r, sub.sub_add))
+                          let at_sub = AP_THM(thy,
+                                              AP_TERM(thy, sub.sub_term,
+                                                      summed),
+                                              r)
+                          TRANS(SYM(thy, at_sub), fact)
+                  | ~else:
+                      let gap = encode_numeral(shape, rv - lv - 1)
+                      match difference_sum(arith, sum, thy, l, gap)
+                      | #false: #false
+                      | sum_eq :: Thm:
+                          let fact = SPEC(thy, gap, SPEC(thy, l, sub.sub_below))
                           let at_sub = AP_TERM(thy,
                                                mk_comb(sub.sub_term, l),
                                                sum_eq)
                           TRANS(SYM(thy, at_sub), fact)
-          | ~else: #false
+              | ~else: #false
+
+// -- what the simplifier asks for -------------------------------------------
 
 // `|- u === <canonical>` when `u` is a numeral written some other way --
 // `succ` of a digit chain, which is what an argument looks like after a
@@ -374,10 +443,10 @@ fun canonicalize(arith :: NatArith, thy :: Theory, u :: Term) :: maybe(Thm):
 //
 // Two jobs, and a term is a candidate for exactly one of them.
 //
-// A closed arithmetic question -- the module's addition, multiplication,
-// comparison or difference, `succ`, or an equation, with a number in every
-// argument -- is answered outright, after putting any argument written as
-// `succ` of a literal back into digit form.
+// A closed question this module can answer -- an equation, a successor, or
+// one of the module's arithmetic operations, with a number in every argument
+// -- is answered outright, after putting any argument written as `succ` of a
+// literal back into digit form.
 //
 // Anything else is an ordinary definition computing by matching `zero()` and
 // `succ(k)`, which a digit chain does not answer to. There the literal is
@@ -390,8 +459,6 @@ fun canonicalize(arith :: NatArith, thy :: Theory, u :: Term) :: maybe(Thm):
 fun nat_literal_conv(arith :: NatArith, ctx :: Context, thy :: Theory,
                      t :: Term) :: maybe(Thm):
   let shape = arith.shape
-  fun canonical(x :: Term) :: Boolean:
-    canonical_numeral(shape, x) != #false
   let (head, args) = strip_comb(t)
   let closed_question:
     arithmetic_head(arith, head :~ Term, args :~ List)
@@ -402,7 +469,8 @@ fun nat_literal_conv(arith :: NatArith, ctx :: Context, thy :: Theory,
       recur over_args (i = 0):
         cond
         | i >= args.length(): decide(arith, thy, t)
-        | canonical(args[i] :~ Term): over_args(i + 1)
+        | canonical_numeral(shape, args[i] :~ Term) != #false:
+            over_args(i + 1)
         | ~else:
             match canonicalize(arith, thy, args[i] :~ Term)
             | #false: over_args(i + 1)
@@ -415,67 +483,60 @@ fun arithmetic_head(arith :: NatArith, head :: Term,
   | Const(name, _):
       cond
       | args.length() == 2:
-          head == arith.add_term || is_mul(arith, head)
-            || is_le(arith, head) || is_sub(arith, head) || name == #'eq
+          name == #'eq || is_add(arith, head) || is_mul(arith, head)
+            || is_le(arith, head) || is_sub(arith, head)
       | args.length() == 1: name == arith.shape.succ_name
       | ~else: #false
   | ~else: #false
 
 fun decide(arith :: NatArith, thy :: Theory, t :: Term) :: maybe(Thm):
-  let shape = arith.shape
   match t
   | Comb(Comb(f, _), _):
       cond
-      | f == arith.add_term: nat_add_conv(arith, thy, t)
+      | is_add(arith, f :~ Term): nat_add_conv(arith, thy, t)
       | is_mul(arith, f :~ Term): nat_mul_conv(arith, thy, t)
       | is_le(arith, f :~ Term): nat_le_conv(arith, thy, t)
       | is_sub(arith, f :~ Term): nat_sub_conv(arith, thy, t)
       | ~else: nat_eq_conv(arith, thy, t)
-  | Comb(Const(s, _), _) when s == shape.succ_name:
+  | Comb(Const(s, _), _) when s == arith.shape.succ_name:
       nat_succ_conv(arith, thy, t)
   | ~else: #false
 
-fun is_mul(arith :: NatArith, f :: Term) :: Boolean:
-  match arith.mul
+fun is_add(arith :: NatArith, f :: Term) :: Boolean:
+  match arith.add
   | #false: #false
-  | mul :: NatMul: f == mul.mul_term
+  | sum :: NatAdd: f == sum.add_term
+
+fun is_mul(arith :: NatArith, f :: Term) :: Boolean:
+  match arith.add
+  | #false: #false
+  | sum :: NatAdd:
+      match sum.mul
+      | #false: #false
+      | mul :: NatMul: f == mul.mul_term
 
 fun is_le(arith :: NatArith, f :: Term) :: Boolean:
-  match arith.order
+  match arith.add
   | #false: #false
-  | order :: NatOrder: f == order.le_term
+  | sum :: NatAdd:
+      match sum.order
+      | #false: #false
+      | order :: NatOrder: f == order.le_term
 
 fun is_sub(arith :: NatArith, f :: Term) :: Boolean:
-  match arith.sub
+  match arith.add
   | #false: #false
-  | sub :: NatSub: f == sub.sub_term
-
-// What the driver installs in the `Context` as its numeral capability, and
-// what the simplifier calls on every subterm it is about to rewrite.
-//
-// The derivation behind `nat_arith` costs a few seconds, so it must not
-// happen in a module that never computes with a literal: the syntactic
-// pre-check below is what keeps it from being paid for. Only a term that
-// already mentions a digit constant can be decided here, since `zero()` and
-// `succ` alone are what the rewriter has always handled by itself.
-fun numeral_conv(ctx :: Context, thy :: Theory, t :: Term) :: maybe(Thm):
-  cond
-  | !mentions_digit(t): #false
-  | ~else:
-      match nat_arith(ctx)
+  | sum :: NatAdd:
+      match sum.sub
       | #false: #false
-      | arith :: NatArith: nat_literal_conv(arith, ctx, thy, t)
+      | sub :: NatSub: f == sub.sub_term
 
 // A literal is not a constructor application, so a function defined by
 // matching on `zero()` and `succ(k)` cannot reduce when it is applied to one.
-// This writes the literal back as `succ(<one less>)` -- but only where a rule
-// is then going to fire, which is what keeps it from undoing the compact
-// representation and from cycling against the successor conversion.
-//
-// The rewriter takes the step immediately afterwards, so the exposed `succ`
-// is consumed before the traversal ever looks at it. This is how an ordinary
-// Peano-recursive function still computes on a literal argument -- one
-// constructor at a time, as its own definition says, and no faster.
+// This writes the literal back as `succ(<one less>)` -- but only where an
+// unconditional rule is then going to fire, which is what keeps it from
+// undoing the compact representation and from cycling against the successor
+// conversion.
 fun destructure_for_rule(arith :: NatArith, ctx :: Context, thy :: Theory,
                          t :: Term) :: maybe(Thm):
   let shape = arith.shape
@@ -491,18 +552,16 @@ fun destructure_for_rule(arith :: NatArith, ctx :: Context, thy :: Theory,
             | #false: over_args(i + 1)
             | 0: over_args(i + 1)
             | value :: NonnegInt:
-                let peeled = mk_comb(shape.succ_term,
-                                     encode_numeral(shape, value - 1))
+                let smaller = encode_numeral(shape, value - 1)
+                let peeled = mk_comb(shape.succ_term, smaller)
                 let stepped = replace_argument(head :~ Term, args :~ List,
                                                i, peeled)
                 cond
                 | !some_rule_matches(ctx, name, stepped): over_args(i + 1)
                 | ~else:
-                    match succ_of(arith, thy, encode_numeral(shape, value - 1))
+                    match succ_of(arith, thy, smaller)
                     | #false: over_args(i + 1)
                     | bumped :: Thm:
-                        // `|- <literal> === succ(<literal - 1>)`, lifted to
-                        // the argument's position.
                         congruence_at(thy, head :~ Term, args :~ List, i,
                                       SYM(thy, bumped))
   | ~else: #false
@@ -519,15 +578,27 @@ fun congruence_at(thy :: Theory, head :: Term, args :: List, i :: NonnegInt,
                                             j in List.iota(args.length())):
     MK_COMB(acc, (if j == i | eq | REFL(thy, arg :~ Term)))
 
-// Whether the rule database has a rule for `name` whose left-hand side
-// matches `t`. Peeling a literal is only worth a step if the step that
-// follows it is there.
+// Whether the rule database has an unconditional rule for `name` whose
+// left-hand side matches `t`. Peeling a literal is only worth a step if the
+// step that follows it is certain.
 fun some_rule_matches(ctx :: Context, name :: Symbol, t :: Term) :: Boolean:
   for any (rule in rules_of(ctx.db, name)):
     let rule :~ RewriteRule = rule
-    // Unconditional only: the step after the peel has to be certain, or the
-    // exposed `succ` would be left for the traversal to fold back up.
     rule.conds == [] && term_match(rule.vars, rule.lhs, t) != #false
+
+// What the driver installs in the `Context` as its numeral capability, and
+// what the simplifier calls on every subterm it is about to rewrite.
+//
+// The derivation behind `nat_arith` costs a couple of seconds, so the
+// syntactic pre-check keeps a proof that never meets a numeral from paying
+// for it.
+fun numeral_conv(ctx :: Context, thy :: Theory, t :: Term) :: maybe(Thm):
+  cond
+  | !mentions_digit(t): #false
+  | ~else:
+      match nat_arith(ctx)
+      | #false: #false
+      | arith :: NatArith: nat_literal_conv(arith, ctx, thy, t)
 
 // Whether a digit constant occurs anywhere in `t`.
 //

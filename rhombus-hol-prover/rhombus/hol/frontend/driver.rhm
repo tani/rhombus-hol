@@ -42,6 +42,7 @@ import:
   rhombus/hol/number/literal open
   rhombus/hol/number/conv open
   rhombus/hol/frontend/surface_core open
+  rhombus/hol/frontend/numeral_use open
   rhombus/hol/frontend/elab as elab
   rhombus/hol/frontend/overload open
   rhombus/hol/frontend/type/registry open
@@ -216,8 +217,11 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
 // naming what about the recursion the deriver could not handle, so that
 // "this module compiled" and "this module assumed nothing new" are the same
 // statement for the ordinary declaration form.
-fun add_function(st :: HolState, core :: CoreFunctionSpec,
+fun add_function(st0 :: HolState, core :: CoreFunctionSpec,
                  at :: Syntax) :: HolState:
+  let st = (if function_uses_numeral(core)
+            | install_numerals(st0, at)
+            | st0)
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
   let spec :~ FunSpec = try:
@@ -226,11 +230,26 @@ fun add_function(st :: HolState, core :: CoreFunctionSpec,
                             ~type_constructors: st.type_constructors,
                             ~datatypes: dt_specs)
                           ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let (thy2, info) = define_from_spec(st, spec, dt_specs,
+                                      prepare_measure(st, spec), at)
+  require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
+  let db2 = add_thms(thy2, st.ctx.db, spec.name, info.equations)
+  let ctx2 = context_add_function(st.ctx, thy2, db2, spec.name, info)
+  HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
+
+// Derive one function from an already elaborated specification: directly when
+// it does not call itself, from the well-founded recursion theorem when it
+// does. Shared by `function` and by the numeral definitions below, which are
+// ordinary definitions that happen to have no source text.
+fun define_from_spec(st :: HolState, spec :: FunSpec,
+                     dt_specs :: Map.of(Symbol, DatatypeSpec),
+                     measure :: maybe(Measure),
+                     at :: Syntax) :: values(Theory, FunInfo):
   let prepared :~ PreparedFunction = try:
-                                      prepare_function(
-                                        st.ctx.thy, spec, dt_specs,
-                                        ~measure: prepare_measure(st, spec))
-                                      ~catch e :: Exn.Fail: hol_reraise(e, at)
+                                       prepare_function(st.ctx.thy, spec,
+                                                        dt_specs,
+                                                        ~measure: measure)
+                                       ~catch e :: Exn.Fail: hol_reraise(e, at)
   let (thy2, info0) = try:
                         cond
                         | prepared.recursion is_a NoRecursion:
@@ -242,49 +261,63 @@ fun add_function(st :: HolState, core :: CoreFunctionSpec,
                               st.ctx.thy, st.wfrec_def, plan, st.ctx.dts,
                               algebra_base_thms())
                         ~catch e :: Exn.Fail: hol_reraise(e, at)
-  let info :~ FunInfo = info0
   require_no_new_axioms(#'function, st.ctx.thy, thy2, spec.name, at)
-  require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
-  let db2 = add_thms(thy2, st.ctx.db, spec.name, info.equations)
-  let ctx2 = context_add_function(st.ctx, thy2, db2, spec.name, info)
-  let ctx3 = install_numerals(ctx2, spec.name, info, at)
-  HolState(ctx3, st.thms, st.operators, st.type_constructors, st.wfrec_def)
+  values(thy2, info0 :~ FunInfo)
 
-// A literal is compact only once the module has said what addition is: the
-// digit constants are defined as `n + n` and `succ (n + n)`, so they cannot
-// exist before the function they are defined from. Recognizing Peano addition
-// by its equations rather than by a reserved name means a module that calls
-// it `plus` gets compact numerals too, and a module that declares no addition
-// keeps the unary literals it always had.
+// Make this module's numerals compact, if they are not already.
 //
-// The two definitions add no axiom, and they stay out of the rule database:
-// a rewrite unfolding `nat_bit0` would turn every numeral back into the
-// `succ` chain the representation exists to avoid.
-fun install_numerals(ctx :: Context, name :: Symbol, info :: FunInfo,
-                     at :: Syntax) :: Context:
+// A literal is a chain of binary digits over three definitions -- `nat_bit0`,
+// `nat_bit1` and `nat_half` (`number/literal.rhm`) -- which are derived from
+// the datatype alone, so a module needs no arithmetic to write a number.
+//
+// Deriving them costs a second or two, and most modules that declare Peano
+// naturals never write a literal, so this runs on the first declaration that
+// does. The theory cannot be extended while that declaration is being
+// elaborated, which is why the driver asks beforehand (`numeral_use.rhm`)
+// rather than the elaborator asking when it meets the numeral.
+//
+// The equations stay out of the rule database: a rewrite unfolding
+// `nat_bit0` would turn every numeral back into the `succ` chain the
+// representation exists to avoid. They remain reachable as the functions'
+// equations, which is what the arithmetic derivations use.
+fun install_numerals(st :: HolState, at :: Syntax) :: HolState:
   let ty = mk_tyapp(nat_type_name, [])
-  match ctx.dts.get(nat_type_name, #false)
-  | #false: ctx
+  match st.ctx.dts.get(nat_type_name, #false)
+  | #false: st
   | dt :~ DatatypeThms:
       match peano_ctors(dt.spec)
-      | #false: ctx
+      | #false: st
       | ctors :~ PeanoCtors:
           cond
-          | const_type(ctx.thy, bit0_name) != #false: ctx
-          | const_type(ctx.thy, name) != mk_fun(ty, mk_fun(ty, ty)): ctx
-          | !peano_add_equations(ctors, name, info.equations): ctx
+          | const_type(st.ctx.thy, bit0_name) != #false: st
           | ~else:
-              let (thy3, _) = try:
-                                install_numeral_constants(ctx.thy, ctors, ty,
-                                                          name)
-                                ~catch e :: Exn.Fail: hol_reraise(e, at)
-              require_no_new_axioms(#'function, ctx.thy, thy3, bit0_name, at)
+              let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
+                               m ++ {n: (thms :~ DatatypeThms).spec}
+              let installed:
+                for values(state :~ HolState = st) (
+                      spec in numeral_function_specs(ctors, ty)):
+                  let spec :~ FunSpec = spec
+                  when const_type(state.ctx.thy, spec.name) != #false
+                  | hol_error(#'function,
+                              "the name of this module's numeral support, "
+                                ++ to_string(spec.name)
+                                ++ ", is already taken",
+                              at)
+                  let (thy2, info) = define_from_spec(state, spec, dt_specs,
+                                                      #false, at)
+                  require_closed_theorems(#'function, thy2, spec.name,
+                                          info.equations, at)
+                  let ctx2 = context_add_function(state.ctx, thy2,
+                                                  state.ctx.db, spec.name, info)
+                  HolState(ctx2, state.thms, state.operators,
+                           state.type_constructors, state.wfrec_def)
               // The capability is the decision procedure itself, as a value:
               // the simplifier calls it without knowing what arithmetic is,
               // and its derivation happens the first time a proof actually
               // meets a literal (`number/nat.rhm`).
-              context_with_numerals(context_with_theory(ctx, thy3),
-                                    numeral_conv)
+              HolState(context_with_numerals(installed.ctx, numeral_conv),
+                       installed.thms, installed.operators,
+                       installed.type_constructors, installed.wfrec_def)
 
 // A path that claims to derive must not have added an axiom.  Every
 // declaration below that is documented as derived runs through this, so the
@@ -396,9 +429,12 @@ fun discharger(st :: HolState) :: Function:
 // A theorem is retained by name for explicit proof-local `use`, but never
 // enters the shared RuleDB. Adding a theorem therefore cannot change the
 // automation seen by later declarations.
-fun add_theorem(st :: HolState, name :: Symbol,
+fun add_theorem(st0 :: HolState, name :: Symbol,
                 stmt :: CoreExpr, tactic :: CoreTactic,
                 at :: Syntax) :: HolState:
+  let st = (if expr_uses_numeral(stmt) || tactic_uses_numeral(tactic)
+            | install_numerals(st0, at)
+            | st0)
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
   let (statement, names) = try:

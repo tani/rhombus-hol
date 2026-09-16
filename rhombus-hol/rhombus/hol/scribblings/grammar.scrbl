@@ -142,24 +142,38 @@ overload argument, function domain, or checked result. The lexical form
 @subsection(~tag: "numerals"){Numerals}
 
 A numeral at type @tt{Nat} is a chain of binary digits, not a chain of
-@tt{succ}: the module's own Peano addition defines two constants, where
-@tt{nat_bit0(n)} is @tt{n + n} and @tt{nat_bit1(n)} is @tt{succ(n + n)},
-so @tt{123456} is seventeen digits deep rather than a hundred and
-twenty-three thousand @tt{succ}s deep. Both are ordinary definitions, so no
-axiom is added, and they are recognized by the shape of the addition's
-equations rather than by a reserved name --- a module that calls its
-addition @tt{plus} gets the same treatment. A module that declares no Peano
-addition has nothing to define them from and keeps the @tt{succ} chains the
-language always had.
+@tt{succ}, so @tt{123456} is seventeen digits deep rather than a hundred and
+twenty-three thousand @tt{succ}s deep. Three definitions over the datatype
+carry it:
+
+@verbatim{
+nat_bit0(zero()) = zero()      nat_bit0(succ k) = succ(succ(nat_bit0(k)))
+nat_bit1(n)      = succ(nat_bit0(n))
+nat_half(zero()) = zero()      nat_half(succ(zero())) = zero()
+                               nat_half(succ(succ j)) = succ(nat_half(j))
+}
+
+They mention no arithmetic, so a module gets numerals by declaring the
+datatype and writing one; the compiler installs them at the first
+declaration that does, and a module that never writes a number never pays
+for them. They are ordinary definitions, so no axiom is added, and their
+equations are deliberately kept out of the rewriter --- unfolding a digit
+would turn every numeral back into the chain the representation exists to
+avoid.
 
 The encoding is canonical --- no chain ends in @tt{nat_bit0(zero())} --- so
-two literals are equal exactly when their terms are.
+two literals are equal exactly when their terms are, and two different ones
+are provably different: a digit is injective because @tt{nat_half} takes it
+apart again, and an even digit differs from an odd one because otherwise a
+number would be its own successor. Equality therefore costs the number of
+digits, with no arithmetic in the module at all.
 
-Closed arithmetic on numerals is then decided directly rather than by
-unfolding a definition one constructor at a time. Addition,
-multiplication, truncated subtraction, comparison and equality each
-recurse on digits, and every step is one instance of an equation derived
-from the module's own definitions, so the kernel checks the arithmetic:
+Closed arithmetic appears once the module declares Peano addition,
+recognized by the shape of its equations rather than by a reserved name ---
+a module that calls it @tt{plus} gets the same treatment. Addition,
+multiplication, truncated subtraction and comparison each recurse on
+digits, every step being one instance of an equation derived from the
+module's own definitions, so the kernel checks the arithmetic:
 
 @rhombusblock(
   theorem product:

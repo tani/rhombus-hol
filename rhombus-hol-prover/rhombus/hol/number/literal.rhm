@@ -36,11 +36,13 @@ import:
   rhombus/hol/term open
   rhombus/hol/kernel open
   rhombus/hol/datatype/datatype open
+  rhombus/hol/recursion/recdef open
 
 export:
   nat_type_name
   bit0_name
   bit1_name
+  half_name
   PeanoCtors
   peano_ctors
   NumeralShape
@@ -56,14 +58,14 @@ export:
   peano_mul_equations
   is_peano_sub
   is_peano_le
-  install_numeral_constants
-  NumeralDefs
+  numeral_function_specs
 
 // The numeral type and its digit constants are recognized by name, the same
 // way `elaborate_numeral` already recognizes `Nat`, `zero` and `succ`.
 def nat_type_name :: Symbol = #'Nat
 def bit0_name :: Symbol = #'nat_bit0
 def bit1_name :: Symbol = #'nat_bit1
+def half_name :: Symbol = #'nat_half
 
 // The two constructors of a Peano-shaped datatype: one nullary, one taking a
 // single field of the type itself.
@@ -194,33 +196,41 @@ fun expand_numerals(shape :: NumeralShape, t :: Term) :: Term:
         | Comb(f, x): mk_comb(go(f :~ Term), go(x :~ Term))
         | ~else: t
 
-// What the driver installs: the two digit constants and their definitions.
-// The definitions are kept so the arithmetic conversions can unfold a digit
-// when they need to reason about it; they are deliberately never added to the
-// rule database, since unfolding a digit is exactly what must not happen
-// while simplifying a numeral.
-class NumeralDefs(bit0 :: Thm, bit1 :: Thm)
-
-// `nat_bit0 = \n. add(n, n)` and `nat_bit1 = \n. succ(add(n, n))` over the
-// module's own Peano addition. Two definitions, no axiom.
-fun install_numeral_constants(thy :: Theory, ctors :: PeanoCtors,
-                              ty :: HType,
-                              add_name :: Symbol) :: values(Theory, NumeralDefs):
+// The three definitions a numeral needs, as ordinary function
+// specifications for the driver to derive. None mentions addition:
+//
+//   `bit0(zero()) = zero()`        `bit0(succ k) = succ(succ(bit0 k))`
+//   `bit1(n) = succ(bit0 n)`
+//   `half(zero()) = zero()`        `half(succ(zero())) = zero()`
+//                                  `half(succ(succ j)) = succ(half j)`
+//
+// `half` is what makes a digit provably injective -- it takes a chain apart
+// again -- and injectivity is what decides equality between two literals in a
+// module that declared no arithmetic at all.
+fun numeral_function_specs(ctors :: PeanoCtors,
+                           ty :: HType) :: List.of(FunSpec):
   let fn_ty = mk_fun(ty, ty)
-  let add_term = mk_const(add_name, mk_fun(ty, fn_ty))
-  let succ_term = mk_const(ctors.succ, fn_ty)
+  let zero = mk_const(ctors.zero, ty)
+  let succ = mk_const(ctors.succ, fn_ty)
+  let bit0 = mk_const(bit0_name, fn_ty)
+  let half = mk_const(half_name, fn_ty)
+  fun s(x :: Term) :: Term: mk_comb(succ, x)
+  let k = mk_var(#'k, ty)
+  let j = mk_var(#'j, ty)
   let n = mk_var(#'n, ty)
-  let doubled = mk_comb(mk_comb(add_term, n), n)
-  let bit0_eq = mk_eq(mk_var(bit0_name, fn_ty), mk_abs(n, doubled))
-  let bit1_eq = mk_eq(mk_var(bit1_name, fn_ty),
-                      mk_abs(n, mk_comb(succ_term, doubled)))
-  let (thy1, bit0_def) = new_basic_definition(thy, bit0_eq)
-  let (thy2, bit1_def) = new_basic_definition(thy1, bit1_eq)
-  values(thy2, NumeralDefs(bit0_def, bit1_def))
+  [FunSpec(bit0_name, [ty], ty,
+           [DefClause([zero], zero),
+            DefClause([s(k)], s(s(mk_comb(bit0, k))))]),
+   FunSpec(bit1_name, [ty], ty,
+           [DefClause([n :~ Term], s(mk_comb(bit0, n)))]),
+   FunSpec(half_name, [ty], ty,
+           [DefClause([zero], zero),
+            DefClause([s(zero)], zero),
+            DefClause([s(s(j))], s(mk_comb(half, j)))])]
 
 // A function defined by Peano recursion on its first argument is recognized
 // by its equations rather than by a reserved name, so a module that calls its
-// addition `plus` gets numerals too.
+// addition `plus` gets the arithmetic too.
 //
 //   addition        `f(zero(), n) === n`
 //                   `f(succ k, n) === succ(f(k, n))`

@@ -1,0 +1,108 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+
+// Does this declaration write a number?
+//
+// The digit constants a compact numeral is built from (`number/literal.rhm`)
+// are derived definitions, and deriving them costs a couple of seconds. A
+// module that declares Peano naturals and never writes a literal -- most of
+// them -- must not pay that, and the theory cannot be extended in the middle
+// of elaborating the declaration that needs them. So the driver asks this
+// first, on the decoded surface, and installs the constants before elaborating
+// a declaration that will want them.
+//
+// A string literal counts: it is a list of codepoints, and each codepoint is a
+// number.
+
+import:
+  rhombus/hol/frontend/surface_core open
+
+export:
+  expr_uses_numeral
+  body_uses_numeral
+  function_uses_numeral
+  tactic_uses_numeral
+
+fun expr_uses_numeral(e :: CoreExpr) :: Boolean:
+  match e
+  | CoreNumeral(_, _): #true
+  | CoreStringExpr(_, _): #true
+  | CoreRef(_, _): #false
+  | CoreCall(func, args, _):
+      expr_uses_numeral(func) || any_expr(args)
+  | CoreIf(test, then_expr, else_expr, _):
+      expr_uses_numeral(test) || expr_uses_numeral(then_expr)
+        || expr_uses_numeral(else_expr)
+  | CoreTypedExpr(inner, _, _): expr_uses_numeral(inner)
+  | CoreListExpr(elements, tail, _):
+      any_expr(elements) || optional_expr(tail)
+  | CorePairExpr(first, second, _):
+      expr_uses_numeral(first) || expr_uses_numeral(second)
+  | CoreSetExpr(elements, _): any_expr(elements)
+  | CoreForall(binders, body, _): any_binder(binders) || expr_uses_numeral(body)
+  | CoreExists(binders, body, _): any_binder(binders) || expr_uses_numeral(body)
+  | CoreBlockExpr(body, _): body_uses_numeral(body)
+  | CoreMatchExpr(scrutinee, clauses, _):
+      expr_uses_numeral(scrutinee) || any_clause(clauses)
+  | CoreFunctionExpr(params, _, body, _):
+      any_binder(params) || body_uses_numeral(body)
+  | ~else: #false
+
+fun body_uses_numeral(b :: CoreFunBody) :: Boolean:
+  match b
+  | CoreBodyExpr(e): expr_uses_numeral(e)
+  | CoreBodyLet(pat, init, body, _):
+      pattern_uses_numeral(pat) || expr_uses_numeral(init)
+        || body_uses_numeral(body)
+  | CoreBodyMatch(_, clauses, _): any_clause(clauses)
+  | CoreBodyRows(rows):
+      for any (row in rows):
+        let row :~ CoreRow = row
+        any_pattern(row.patterns) || body_uses_numeral(row.body)
+  | ~else: #false
+
+fun function_uses_numeral(spec :: CoreFunctionSpec) :: Boolean:
+  any_binder(spec.params)
+    || optional_expr(spec.measure)
+    || body_uses_numeral(spec.body)
+
+fun tactic_uses_numeral(tactic :: CoreTactic) :: Boolean:
+  any_expr(tactic.cases) || any_expr(tactic.witnesses)
+
+// A literal pattern is a numeral when what it holds is a number or a string;
+// `#true` and `#false` are literal patterns too and are not.
+fun pattern_uses_numeral(p :: CorePattern) :: Boolean:
+  match p
+  | CorePatLiteral(value_stx, _):
+      let raw = Syntax.unwrap(value_stx)
+      raw is_a NonnegInt || raw is_a String
+  | CorePatCtor(_, args, _): any_pattern(args)
+  | CorePatList(elements, tail, _):
+      any_pattern(elements)
+        || (match tail
+            | #false: #false
+            | inner: pattern_uses_numeral(inner :~ CorePattern))
+  | CorePatPair(first, second, _):
+      pattern_uses_numeral(first) || pattern_uses_numeral(second)
+  | CorePatTyped(inner, _, _): pattern_uses_numeral(inner)
+  | ~else: #false
+
+fun any_expr(es :: List.of(CoreExpr)) :: Boolean:
+  for any (e in es): expr_uses_numeral(e :~ CoreExpr)
+
+fun any_pattern(ps :: List.of(CorePattern)) :: Boolean:
+  for any (p in ps): pattern_uses_numeral(p :~ CorePattern)
+
+fun any_clause(cs :: List.of(CoreMatchClause)) :: Boolean:
+  for any (c in cs):
+    let c :~ CoreMatchClause = c
+    pattern_uses_numeral(c.pattern) || body_uses_numeral(c.body)
+
+fun any_binder(bs :: List.of(CoreBinder)) :: Boolean:
+  for any (b in bs): pattern_uses_numeral((b :~ CoreBinder).pattern)
+
+fun optional_expr(e :: maybe(CoreExpr)) :: Boolean:
+  match e
+  | #false: #false
+  | inner: expr_uses_numeral(inner :~ CoreExpr)

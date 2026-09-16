@@ -188,9 +188,10 @@ rule database, the waterfall, and @rhombus(match) compilation are unaffected
 by how those statements were proved.
 
 @bold{Numerals.} A compact numeral literal (@secref("numerals")) rests on
-two definitions --- @tt{nat_bit0} and @tt{nat_bit1}, written from the
-module's own Peano addition --- and the same axiom check runs on the
-declaration that installs them.
+three definitions over the datatype --- @tt{nat_bit0}, @tt{nat_bit1} and
+@tt{nat_half} --- derived the same way any @rhombus(function, ~datum) is,
+and checked by the same axiom count. Nothing about them is postulated, and
+they mention no arithmetic.
 
 The arithmetic that computes with them is not trusted either. A native
 integer never becomes a theorem: every sum, product, difference,

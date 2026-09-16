@@ -94,7 +94,24 @@ fun induction_step(thy :: Theory, dtms :: DatatypeThms, v :: FVar,
                         error.val(~label: "datatype", spec.name))
               | m: m)
   let ax = INST_TYPE(thy, tyin, dtms.induction)
-  let pred = mk_abs(v, g.concl)
+  // The induction hypothesis is about the goal's *other* variables too.
+  //
+  // Inducting on `v` with everything else held fixed gives a hypothesis at a
+  // subterm of `v` and the same other arguments, which is not enough for any
+  // fact whose proof has to descend two of them at once -- the whole order
+  // theory of a comparison defined by recursion on both sides. Quantifying
+  // them into the predicate gives the hypothesis at every instance instead.
+  //
+  // A variable free in a hypothesis stays fixed: the hypothesis constrains
+  // that one particular value, so generalizing it would be claiming more
+  // than the goal does. `SPECL` below puts the quantifiers back, so the step
+  // still proves exactly the goal it was given.
+  let assumed = for values(acc :~ List = []) (a in g.asms):
+                  acc ++ free_vars(a :~ Term)
+  let others = free_vars(g.concl).filter(
+                 ~keep: fun (u :: FVar):
+                          u != v && !assumed.contains(u :~ Term))
+  let pred = mk_abs(v, mk_forall_list(others, g.concl))
   let sp = BETA_RULE(thy, SPEC(thy, pred, ax))
   let [cases_term, _] = (match dest_imp(concl_of(sp))
                          | #false:
@@ -121,7 +138,8 @@ fun induction_step(thy :: Theory, dtms :: DatatypeThms, v :: FVar,
   fun rebuild_induction(ths :: List.of(Thm)) :: Thm:
     let case_thms = for List (th in ths, pr in prepared):
                       close_case(th, (pr :~ List)[0], (pr :~ List)[1])
-    SPEC(thy, v, MP(thy, sp, LIST_CONJ(thy, case_thms)))
+    SPECL(thy, others.map(fun (u :: FVar): u :~ Term),
+          SPEC(thy, v, MP(thy, sp, LIST_CONJ(thy, case_thms))))
   Step(subgoals, rebuild_induction, events)
 
 // Free variables of the goal that could be inducted on, best first.

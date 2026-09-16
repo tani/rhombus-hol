@@ -7,6 +7,9 @@
 import:
   rhombus/hol/term open
   rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/logic/drule open
+  rhombus/hol/prover/trace open
   rhombus/hol/prover/goal open
   rhombus/hol/effect/core open
   rhombus/hol/effect/syntax open
@@ -45,6 +48,34 @@ fun simplify_stage() :: Stage:
               decider(env.base, thy, t)
       simplify_goal(env.base.thy, env.db, goal, ~decide: decide)
   Stage(#'simplify, apply)
+
+// A goal whose conclusion is universally quantified, at a fresh variable.
+//
+// The prover's entry point strips the quantifiers a user wrote, so this is
+// about the ones induction introduces: strengthening the induction predicate
+// to hold for every *other* variable of the goal (`tactic/induct.rhm`) is
+// what lets a fact about two naturals descend on both, and it puts a
+// quantifier in front of each case. Nothing else in the waterfall can attack
+// one, so the case would be stuck the moment it appeared.
+//
+// `GEN` puts it back, so this proves the goal it was given and not a weaker
+// one: the variable is fresh in the goal, hypotheses included.
+fun specialize_stage() :: Stage:
+  fun apply(goal :: Goal) :: Computation:
+    effect:
+      let env :: ProofEnv <- ProofEnv.ask()
+      return specialize_goal(env.base.thy, goal)
+  Stage(#'specialize, apply)
+
+fun specialize_goal(thy :: Theory, g :: Goal) :: maybe(Step):
+  match dest_forall(g.concl)
+  | #false: #false
+  | [v, body]:
+      let fresh = variant(g.asms ++ [g.concl], v :~ FVar)
+      let opened = subst_bvar(fresh :~ Term, body :~ Term)
+      fun close(ths :: List.of(Thm)) :: Thm:
+        GEN(thy, fresh, ths[0])
+      Step([Goal(g.asms, opened)], close, [Specialized(fresh.name)])
 
 fun eliminate_stage() :: Stage:
   fun apply(goal :: Goal) :: Computation:
@@ -96,8 +127,8 @@ fun induction_stage(hint :: maybe(FVar)) :: Stage:
   Stage(#'induct, apply)
 
 fun standard_stages() :: List.of(Stage):
-  [simplify_stage(), eliminate_stage(), fertilize_stage(), generalize_stage(),
-   irrelevance_stage()]
+  [simplify_stage(), specialize_stage(), eliminate_stage(), fertilize_stage(),
+   generalize_stage(), irrelevance_stage()]
 
 fun run_stage(stage :: Stage, goal :: Goal) :: Computation:
   stage.apply(goal)

@@ -148,7 +148,9 @@ fun mk_snd(p :: Term) :: Term:
 // `surjective`: |- !p. ?a b. p = PAIR(a,b)
 // `fst_pair`  : |- !a b. FST(PAIR(a,b)) = a
 // `snd_pair`  : |- !a b. SND(PAIR(a,b)) = b
-class ProdThms(pair_eq :: Thm, surjective :: Thm, fst_pair :: Thm, snd_pair :: Thm)
+// `eta`       : |- !p. PAIR(FST(p), SND(p)) = p
+class ProdThms(pair_eq :: Thm, surjective :: Thm,
+               fst_pair :: Thm, snd_pair :: Thm, eta :: Thm)
 
 fun build_prod(thy :: Theory) :: values(Theory, ProdThms):
   let tyA :: HType = mk_tyvar(#'a)
@@ -344,7 +346,33 @@ fun build_prod(thy :: Theory) :: values(Theory, ProdThms):
     let bv_eq_snd = SYM(thy, CONJUNCT2(thy, conj_th))
     GENL(thy, [av, bv], CHOOSE(thy, gw, holds_at_select, bv_eq_snd))
 
-  values(thy, ProdThms(pair_eq, surjective, fst_pair, snd_pair))
+  // `|- !p. PAIR(FST p, SND p) = p`, the equation a proof about a pair
+  // actually needs: `surjective` says a pair came from somewhere, but says it
+  // with an existential, which no rewrite can use. Choosing the components
+  // once, here, turns it into an equation that can.
+  let eta:
+    let sp = SPEC(thy, pv, surjective)
+    let [oa, obody] = (match dest_exists(concl_of(sp)) | l: l)
+    let oa :~ FVar = oa
+    let va = genvar(tyA)
+    let obody_va = inst_fvar([[va, oa]], obody)
+    let asm_outer = ASSUME(thy, obody_va)
+    let [ob, ibody] = (match dest_exists(obody_va) | l: l)
+    let ob :~ FVar = ob
+    let vb = genvar(tyB)
+    // `p = PAIR(va, vb)`, from which each projection is one of the
+    // components and the pair of them is `p` again.
+    let p_is_pair = ASSUME(thy, inst_fvar([[vb, ob]], ibody))
+    let fst_is_a = TRANS(AP_TERM(thy, fst_c, p_is_pair),
+                         SPECL(thy, [va, vb], fst_pair))
+    let snd_is_b = TRANS(AP_TERM(thy, snd_c, p_is_pair),
+                         SPECL(thy, [va, vb], snd_pair))
+    let rebuilt = MK_COMB(AP_TERM(thy, pair_c, fst_is_a), snd_is_b)
+    let at_p = TRANS(rebuilt, SYM(thy, p_is_pair))
+    GEN(thy, pv,
+        CHOOSE(thy, va, sp, CHOOSE(thy, vb, asm_outer, at_p)))
+
+  values(thy, ProdThms(pair_eq, surjective, fst_pair, snd_pair, eta))
 
 // -- sum -------------------------------------------------------------
 //

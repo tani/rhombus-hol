@@ -43,8 +43,19 @@ export:
   NatAdd
   NatMul
   NatOrder
+  NatPow
   NatSub
   nat_arith
+// Exponentiation's equations, at the module's power constant. The exponent's
+// digits drive the recursion: doubling it squares the power, and the odd
+// digit multiplies by the base once more.
+//
+//   `at_zero` `|- forall x. pow(x, zero()) === succ(zero())`
+//   `at_b0`   `|- forall x n. pow(x, b0 n) === mul(pow(x, n), pow(x, n))`
+//   `at_b1`   `|- forall x n. pow(x, b1 n)
+//                               === mul(x, mul(pow(x, n), pow(x, n)))`
+class NatPow(pow_term :: Term,
+             at_zero :: Thm, at_b0 :: Thm, at_b1 :: Thm)
 
 // Multiplication's own equations, at the module's multiplication constant.
 //
@@ -54,7 +65,8 @@ export:
 //   `at_b1`      `|- forall m n. mul(b1 m, n) === add(n, b0 (mul(m, n)))`
 class NatMul(mul_term :: Term,
              zero_left :: Thm, zero_right :: Thm,
-             at_b0 :: Thm, at_b1 :: Thm)
+             at_b0 :: Thm, at_b1 :: Thm,
+             pow :: maybe(NatPow))
 
 // What decides a comparison between two literals: `a <= a + d` always, and
 // `a + succ d <= a` never, and every pair of literals is of one of those two
@@ -107,16 +119,20 @@ class NatArith(shape :: NumeralShape,
                b0_zero_iff :: Thm, b1_ne_zero :: Thm,
                add :: maybe(NatAdd))
 
-// One derivation per module, keyed by the digit equations the driver
-// installed -- the one value every context descending from that installation
-// shares. Deriving costs a few seconds, so it happens the first time a proof
-// actually meets a numeral rather than at every declaration.
+// One derivation per module *and* per set of arithmetic operations it has
+// declared so far. A module usually writes its first numeral before it has
+// declared everything -- the fixture that declares `nat_pow` after a theorem
+// about a sum is ordinary -- and what was derived then says nothing about
+// the operations that came later, so the key has to notice them arriving.
+//
+// The outer key is the digit definition itself, which identifies the module;
+// the inner one is the list of operation names, which is cheap to compute and
+// changes exactly when there is something new to derive.
 def derivations = WeakMutableMap.by(===)()
 
-// And one lookup per theory in front of it. The simplifier asks this question
-// about every subterm of every goal, and finding the digit equations means
-// reading the context's function table; the theory a proof runs against does
-// not change while it runs.
+// And one lookup per theory in front of both. The simplifier asks this
+// question about every subterm of every goal, and the theory a proof runs
+// against does not change while it runs.
 def by_theory = WeakMutableMap.by(===)()
 
 // Each derived equation is a short induction over one variable; a budget this
@@ -135,19 +151,43 @@ fun nat_arith(ctx :: Context) :: maybe(NatArith):
 fun derive_for_theory(ctx :: Context) :: maybe(NatArith):
   match ctx.funs.get(bit0_name, #false)
   | #false: #false
-  | key :: FunInfo:
-      match derivations.maybe[key]
-      | #false:
+  | digits :: FunInfo:
+      let per_module :~ MutableMap:
+        match derivations.maybe[digits]
+        | table :: MutableMap: table
+        | ~else:
+            let table = MutableMap()
+            derivations[digits] := table
+            table
+      let key = operation_names(ctx)
+      match per_module.get(key, #false)
+      | cached :: Box: cached.value
+      | ~else:
           // The derivation proves its equations with the ordinary prover,
           // whose simplifier asks this same question about every subterm it
           // meets. Publishing "nothing yet" before starting is what stops
           // that from being infinite: the proofs below run with the plain
           // rewriter, which is all they need.
-          derivations[key] := Box(#false)
+          per_module[key] := Box(#false)
           let derived = derive_nat_arith(ctx)
-          derivations[key] := Box(derived)
+          per_module[key] := Box(derived)
           derived
-      | cached :: Box: cached.value
+
+// Every function name the module has declared over the numeral type, sorted.
+// Cheap, and it changes exactly when a declaration could add an operation the
+// derivation would want.
+fun operation_names(ctx :: Context) :: List.of(Symbol):
+  let ty = mk_tyapp(nat_type_name, [])
+  let binary = mk_fun(ty, mk_fun(ty, ty))
+  let compare = mk_fun(ty, mk_fun(ty, bool))
+  let names:
+    for values(acc :~ List = []) ((name, _) in ctx.funs):
+      let declared = const_type(ctx.thy, name)
+      (if declared == binary || declared == compare
+       | acc ++ [name]
+       | acc)
+  names.sort(fun (a :: Symbol, b :: Symbol):
+               to_string(a) < to_string(b))
 
 fun derive_nat_arith(ctx :: Context) :: maybe(NatArith):
   let ty = mk_tyapp(nat_type_name, [])
@@ -370,8 +410,81 @@ fun derive_mul(ctx :: Context, shape :: NumeralShape, add :: Term,
                         [#'m, #'n], #false, with_dist)
           match [zero_left, zero_right, at_b0, at_b1]
           | [zl :: Thm, zr :: Thm, d0 :: Thm, d1 :: Thm]:
-              NatMul(mul, zl, zr, d0, d1)
+              NatMul(mul, zl, zr, d0, d1,
+                     derive_pow(ctx, shape, add, mul, with_dist, m, n, c))
           | ~else: #false
+
+// Exponentiation, if the module declared it. `x^(m+n) = x^m * x^n` is what
+// lets the exponent's digits drive the recursion; it needs associativity of
+// multiplication and `1 * y = y`, which are themselves ordinary inductions.
+fun derive_pow(ctx :: Context, shape :: NumeralShape, add :: Term,
+               mul :: Term, base :: List.of(RuleBinding),
+               x :: FVar, m :: FVar, n :: FVar) :: maybe(NatPow):
+  let ty = shape.ty
+  let binary = mk_fun(ty, mk_fun(ty, ty))
+  let mul_name = (match mul | Const(name, _): name | ~else: #false)
+  let ctors = PeanoCtors(shape.zero_name, shape.succ_name)
+  let found:
+    for values(found :: maybe(Term) = #false) ((name, info) in ctx.funs):
+      cond
+      | found: found
+      | const_type(ctx.thy, name) != binary: #false
+      | !is_peano_pow(ctors, name, mul_name :~ Symbol,
+                      (info :~ FunInfo).equations): #false
+      | ~else: mk_const(name, binary)
+  match found
+  | #false: #false
+  | pow :: Term:
+      let zero = shape.zero_term
+      let one = mk_comb(shape.succ_term, zero)
+      fun power(p :: Term, q :: Term) :: Term: mk_comb(mk_comb(pow, p), q)
+      fun times(p :: Term, q :: Term) :: Term: mk_comb(mk_comb(mul, p), q)
+      fun plus(p :: Term, q :: Term) :: Term: mk_comb(mk_comb(add, p), q)
+      fun b0(t :: Term) :: Term: mk_comb(shape.bit0_term, t)
+      fun b1(t :: Term) :: Term: mk_comb(shape.bit1_term, t)
+      let one_left = attempt(ctx, mk_forall(n, mk_eq(times(one, n), n)),
+                             [#'n], #false, base)
+      let assoc = attempt(
+                    ctx,
+                    mk_forall_list([x, m, n],
+                                   mk_eq(times(times(x, m), n),
+                                         times(x, times(m, n)))),
+                    [#'x, #'m, #'n], #'x, base)
+      match [one_left, assoc]
+      | [unit :: Thm, associative :: Thm]:
+          let with_assoc = base ++ [RuleBinding(#'mul_associative, associative),
+                                    RuleBinding(#'mul_one_left, unit)]
+          let pow_add = attempt(
+                          ctx,
+                          mk_forall_list([x, m, n],
+                                         mk_eq(power(x, plus(m, n)),
+                                               times(power(x, m), power(x, n)))),
+                          [#'x, #'m, #'n], #'m, with_assoc)
+          match pow_add
+          | #false: #false
+          | split :: Thm:
+              let with_split = with_assoc ++ [RuleBinding(#'pow_add, split)]
+              let at_zero = attempt(ctx, mk_forall(x, mk_eq(power(x, zero), one)),
+                                    [#'x], #false, with_split)
+              let at_b0 = attempt(
+                            ctx,
+                            mk_forall_list([x, n],
+                                           mk_eq(power(x, b0(n)),
+                                                 times(power(x, n),
+                                                       power(x, n)))),
+                            [#'x, #'n], #false, with_split)
+              let at_b1 = attempt(
+                            ctx,
+                            mk_forall_list([x, n],
+                                           mk_eq(power(x, b1(n)),
+                                                 times(x,
+                                                       times(power(x, n),
+                                                             power(x, n))))),
+                            [#'x, #'n], #false, with_split)
+              match [at_zero, at_b0, at_b1]
+              | [z :: Thm, d0 :: Thm, d1 :: Thm]: NatPow(pow, z, d0, d1)
+              | ~else: #false
+      | ~else: #false
 
 // Comparison, if the module declared it. Both facts are ordinary inductions
 // over the definitions of `le` and of addition.

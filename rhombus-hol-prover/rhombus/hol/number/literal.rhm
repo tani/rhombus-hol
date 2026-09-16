@@ -58,6 +58,7 @@ export:
   peano_mul_equations
   is_peano_sub
   is_peano_le
+  is_peano_pow
   numeral_function_specs
 
 // The numeral type and its digit constants are recognized by name, the same
@@ -227,6 +228,43 @@ fun numeral_function_specs(ctors :: PeanoCtors,
            [DefClause([zero], zero),
             DefClause([s(zero)], zero),
             DefClause([s(s(j))], s(mk_comb(half, j)))])]
+
+// Exponentiation, which recurses on its *second* argument rather than its
+// first:
+//
+//   `f(x, zero()) === succ(zero())`
+//   `f(x, succ k) === mul(x, f(x, k))`
+//
+// Only whether it is present matters; the conversions compute a power from
+// the exponent's digits, not from these equations.
+fun is_peano_pow(ctors :: PeanoCtors, name :: Symbol, mul_name :: Symbol,
+                 equations :: List.of(Thm)) :: Boolean:
+  fun body(th :: Thm) :: Term:
+    recur peel (t :~ Term = concl_of(th)):
+      match t
+      | Comb(Const(#'forall, _), Abs(_, inner)): peel(inner :~ Term)
+      | ~else: t
+  fun at_zero(t :: Term) :: Boolean:
+    match dest_eq(t)
+    | [Comb(Comb(Const(f, _), BVar(_, _)), Const(z, _)),
+       Comb(Const(s, _), Const(z2, _))]:
+        f == name && z == ctors.zero && z2 == ctors.zero && s == ctors.succ
+    | ~else: #false
+  fun at_succ(t :: Term) :: Boolean:
+    match dest_eq(t)
+    | [Comb(Comb(Const(f, _), BVar(b, _)), Comb(Const(s, _), BVar(k, _))),
+       Comb(Comb(Const(mul, _), BVar(b2, _)),
+            Comb(Comb(Const(f2, _), BVar(b3, _)), BVar(k2, _)))]:
+        f == name && f2 == name && s == ctors.succ && mul == mul_name
+          && b == b2 && b == b3 && k == k2
+    | ~else: #false
+  let seen = for values(acc :~ Set = Set()) (th in equations):
+               let inner = body(th :~ Thm)
+               cond
+               | at_zero(inner): acc ++ {#'zero}
+               | at_succ(inner): acc ++ {#'succ}
+               | ~else: acc
+  seen == {#'zero, #'succ}
 
 // A function defined by Peano recursion on its first argument is recognized
 // by its equations rather than by a reserved name, so a module that calls its

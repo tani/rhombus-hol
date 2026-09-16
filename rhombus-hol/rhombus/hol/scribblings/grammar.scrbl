@@ -172,12 +172,17 @@ Closed arithmetic appears once the module declares Peano addition,
 recognized by the shape of its equations rather than by a reserved name ---
 a module that calls it @tt{plus} gets the same treatment. Addition,
 multiplication, truncated subtraction and comparison each recurse on
-digits, every step being one instance of an equation derived from the
-module's own definitions, so the kernel checks the arithmetic:
+digits, and exponentiation recurses on the @emph{exponent's} digits,
+doubling the exponent by squaring the power. Every step is one instance of
+an equation derived from the module's own definitions, so the kernel checks
+the arithmetic:
 
 @rhombusblock(
   theorem product:
     nat_mul(123456, 654321) === (80779853376 :: Nat)
+
+  theorem power:
+    nat_pow(2, 64) === (18446744073709551616 :: Nat)
 )
 
 It applies to a closed subterm of an open statement as readily as to a
@@ -189,9 +194,13 @@ built over @tt{Nat} inherit all of it: their own definitions reduce to
 An ordinary function defined by matching @tt{zero()} and @tt{succ(k)}
 still computes on a literal --- the literal is un-compacted one
 constructor at a time to let the definition unfold --- so it costs what it
-always did, proportional to the number rather than to its digits.
-Division, remainder, greatest common divisor and exponentiation have no
-digit-level decision yet and are in that second category.
+always did, proportional to the number rather than to its digits. Past a
+thousand or so the rewriter stops doing that and leaves the term alone,
+because a hundred thousand rewrites is not a step it should take on its
+own; the operations listed above are decided directly and are never
+affected. Division and remainder are in neither category: this version
+cannot define them at all, since the termination argument they need cannot
+be discharged (see @secref("termination")).
 
 @subsection{Local definitions}
 

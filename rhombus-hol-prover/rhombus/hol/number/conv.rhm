@@ -40,6 +40,7 @@ export:
   nat_succ_conv
   nat_add_conv
   nat_mul_conv
+  nat_pow_conv
   nat_sub_conv
   nat_le_conv
   nat_eq_conv
@@ -317,6 +318,67 @@ fun mul_of(arith :: NatArith, sum :: NatAdd, mul :: NatMul, thy :: Theory,
                       TRANS(instance, TRANS(rebuilt, total))
       | ~else: #false
 
+// -- exponentiation ---------------------------------------------------------
+
+// `|- pow(x, e) === <x^e>`, by recursion on the *exponent's* digits: doubling
+// the exponent squares the power, and the odd digit multiplies by the base
+// once more. The exponent's digits, not its magnitude, bound the work -- but
+// the numbers themselves grow, so `2^1000` is a large answer however it is
+// reached.
+fun nat_pow_conv(arith :: NatArith, thy :: Theory,
+                 t :: Term) :: maybe(Thm):
+  match arith.add
+  | #false: #false
+  | sum :: NatAdd:
+      match sum.mul
+      | #false: #false
+      | mul :: NatMul:
+          match mul.pow
+          | #false: #false
+          | pow :: NatPow:
+              match dest_binary(pow.pow_term, t)
+              | #false: #false
+              | [x, e]: pow_of(arith, sum, mul, pow, thy, x, e)
+
+fun pow_of(arith :: NatArith, sum :: NatAdd, mul :: NatMul, pow :: NatPow,
+           thy :: Theory, x :: Term, e :: Term) :: maybe(Thm):
+  let shape = arith.shape
+  cond
+  | e == shape.zero_term:
+      // `pow(x, 0) === succ(zero())`, and the canonical spelling of one is a
+      // digit chain.
+      TRANS(SPEC(thy, x, pow.at_zero), arith.suc_zero)
+  | ~else:
+      match e
+      | Comb(Const(digit, _), inner) when digit == bit0_name
+                                            || digit == bit1_name:
+          match pow_of(arith, sum, mul, pow, thy, x, inner :~ Term)
+          | #false: #false
+          | smaller :: Thm:
+              let value = rhs_of(smaller)
+              let instance = SPEC(thy, inner :~ Term, SPEC(thy, x, 
+                                                           (if digit == bit0_name
+                                                            | pow.at_b0
+                                                            | pow.at_b1)))
+              // The square, with the inner power rewritten to its value.
+              let squared_terms = MK_COMB(AP_TERM(thy, mul.mul_term, smaller),
+                                          smaller)
+              match mul_of(arith, sum, mul, thy, value, value)
+              | #false: #false
+              | squared :: Thm:
+                  let square = TRANS(squared_terms, squared)
+                  cond
+                  | digit == bit0_name: TRANS(instance, square)
+                  | ~else:
+                      match mul_of(arith, sum, mul, thy, x, rhs_of(square))
+                      | #false: #false
+                      | total :: Thm:
+                          TRANS(instance,
+                                TRANS(AP_TERM(thy, mk_comb(mul.mul_term, x),
+                                              square),
+                                      total))
+      | ~else: #false
+
 // -- comparison and difference ----------------------------------------------
 
 // `|- le(a, b) <=> true` or `<=> false`, from the difference: `a` is at most
@@ -485,6 +547,7 @@ fun arithmetic_head(arith :: NatArith, head :: Term,
       | args.length() == 2:
           name == #'eq || is_add(arith, head) || is_mul(arith, head)
             || is_le(arith, head) || is_sub(arith, head)
+            || is_pow(arith, head)
       | args.length() == 1: name == arith.shape.succ_name
       | ~else: #false
   | ~else: #false
@@ -497,6 +560,7 @@ fun decide(arith :: NatArith, thy :: Theory, t :: Term) :: maybe(Thm):
       | is_mul(arith, f :~ Term): nat_mul_conv(arith, thy, t)
       | is_le(arith, f :~ Term): nat_le_conv(arith, thy, t)
       | is_sub(arith, f :~ Term): nat_sub_conv(arith, thy, t)
+      | is_pow(arith, f :~ Term): nat_pow_conv(arith, thy, t)
       | ~else: nat_eq_conv(arith, thy, t)
   | Comb(Const(s, _), _) when s == arith.shape.succ_name:
       nat_succ_conv(arith, thy, t)
@@ -531,6 +595,30 @@ fun is_sub(arith :: NatArith, f :: Term) :: Boolean:
       | #false: #false
       | sub :: NatSub: f == sub.sub_term
 
+fun is_pow(arith :: NatArith, f :: Term) :: Boolean:
+  match arith.add
+  | #false: #false
+  | sum :: NatAdd:
+      match sum.mul
+      | #false: #false
+      | mul :: NatMul:
+          match mul.pow
+          | #false: #false
+          | pow :: NatPow: f == pow.pow_term
+
+// How large a literal the rewriter will take apart one constructor at a time.
+//
+// Unfolding an ordinary Peano definition against a literal costs one rewrite
+// per unit, so `nat_add(3, x)` is three steps and `nat_add(123456, x)` is a
+// hundred and twenty-three thousand. Past this point the rewriter leaves the
+// term alone rather than embarking on that: the goal gets stuck, with a
+// legible residue, instead of appearing to hang.
+//
+// Nothing above the bound is *unprovable* -- the operations this module
+// decides (sums, products, differences, comparisons, equalities) never go
+// through here, at any size.
+def destructuring_bound :: NonnegInt = 1024
+
 // A literal is not a constructor application, so a function defined by
 // matching on `zero()` and `succ(k)` cannot reduce when it is applied to one.
 // This writes the literal back as `succ(<one less>)` -- but only where an
@@ -556,14 +644,22 @@ fun destructure_for_rule(arith :: NatArith, ctx :: Context, thy :: Theory,
                 let peeled = mk_comb(shape.succ_term, smaller)
                 let stepped = replace_argument(head :~ Term, args :~ List,
                                                i, peeled)
-                cond
-                | !some_rule_matches(ctx, name, stepped): over_args(i + 1)
-                | ~else:
-                    match succ_of(arith, thy, smaller)
-                    | #false: over_args(i + 1)
-                    | bumped :: Thm:
-                        congruence_at(thy, head :~ Term, args :~ List, i,
-                                      SYM(thy, bumped))
+                match matching_rule(ctx, name, stepped)
+                | #false: over_args(i + 1)
+                | rule :: RewriteRule:
+                    cond
+                    // One step is one step; it is a *recursive* definition
+                    // that turns a large literal into as many steps as the
+                    // number is large.
+                    | mentions_const(rule.rhs, name)
+                        && value > destructuring_bound:
+                        over_args(i + 1)
+                    | ~else:
+                        match succ_of(arith, thy, smaller)
+                        | #false: over_args(i + 1)
+                        | bumped :: Thm:
+                            congruence_at(thy, head :~ Term, args :~ List, i,
+                                          SYM(thy, bumped))
   | ~else: #false
 
 fun replace_argument(head :: Term, args :: List, i :: NonnegInt,
@@ -578,13 +674,27 @@ fun congruence_at(thy :: Theory, head :: Term, args :: List, i :: NonnegInt,
                                             j in List.iota(args.length())):
     MK_COMB(acc, (if j == i | eq | REFL(thy, arg :~ Term)))
 
-// Whether the rule database has an unconditional rule for `name` whose
-// left-hand side matches `t`. Peeling a literal is only worth a step if the
-// step that follows it is certain.
-fun some_rule_matches(ctx :: Context, name :: Symbol, t :: Term) :: Boolean:
-  for any (rule in rules_of(ctx.db, name)):
-    let rule :~ RewriteRule = rule
-    rule.conds == [] && term_match(rule.vars, rule.lhs, t) != #false
+// The unconditional rule for `name` whose left-hand side matches `t`, if
+// there is one. Peeling a literal is only worth a step if the step that
+// follows it is certain.
+fun matching_rule(ctx :: Context, name :: Symbol,
+                  t :: Term) :: maybe(RewriteRule):
+  recur scan (rules :~ List = rules_of(ctx.db, name)):
+    match rules
+    | []: #false
+    | List.cons(rule, rest):
+        let rule :~ RewriteRule = rule
+        cond
+        | rule.conds == [] && term_match(rule.vars, rule.lhs, t) != #false:
+            rule
+        | ~else: scan(rest :~ List)
+
+fun mentions_const(t :: Term, name :: Symbol) :: Boolean:
+  match t
+  | Const(n, _): n == name
+  | Comb(f, x): mentions_const(f :~ Term, name) || mentions_const(x :~ Term, name)
+  | Abs(_, body): mentions_const(body :~ Term, name)
+  | ~else: #false
 
 // What the driver installs in the `Context` as its numeral capability, and
 // what the simplifier calls on every subterm it is about to rewrite.

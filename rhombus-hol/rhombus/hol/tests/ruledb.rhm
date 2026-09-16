@@ -1,0 +1,451 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/names open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/logic/conv open
+  rhombus/hol/logic/drule open
+  rhombus/hol/logic/order open
+  rhombus/hol/logic/tmatch open
+  rhombus/hol/logic/ruledb open
+  rhombus/hol/datatype/datatype open
+  rhombus/hol/recursion/recdef open
+  rhombus/hol/prover/goal open
+  rhombus/hol/prover/tactic/simp open
+  rhombus/hol/prover/tactic/general open
+  rhombus/hol/prover/search/limits open
+  "spec_prelude.rhm" open
+
+def P = prelude
+def thy = P.thy
+def LN = list_ty(nat_ty)
+
+// the prelude's list functions, at `List.of(Nat)`
+def appN = at(P.app, nat_ty)
+def revN = at(P.rev, nat_ty)
+def lenN = at(P.length, nat_ty)
+def consN = at(P.cons, nat_ty)
+def nil_n = at(P.nil, nat_ty)
+
+def xs = v(#'xs, LN)
+def ys = v(#'ys, LN)
+def zs = v(#'zs, LN)
+def n = v(#'n, nat_ty)
+def m = v(#'m, nat_ty)
+
+fun app_(a, b): ap2(appN, a, b)
+fun cons_(a, b): ap2(consN, a, b)
+fun rev_(a): ap1(revN, a)
+fun len_(a): ap1(lenN, a)
+fun plus_(a, b): ap2(P.plus, a, b)
+
+// The definitional equations of everything in the prelude.
+def defs :: RuleDB:
+  for values(d :~ RuleDB = empty_db) ((nm, fi) in P.funs):
+    add_thms(thy, d, nm, (fi :~ FunInfo).equations)
+
+// ==========================================================================
+// matching
+// ==========================================================================
+
+check:
+  // a polymorphic pattern matches a monomorphic term, producing both a type
+  // and a term instantiation
+  let pv = v(#'ys, list_ty(A))
+  let pat = ap2(P.app, mk_const(#'nil, list_ty(A)), pv)
+  let m = term_match([pv], pat, app_(nil_n, xs)) :~ MatchResult
+  [m.tyin, m.theta.length()]
+  ~is [{#'a: nat_ty}, 1]
+check:
+  let pv = v(#'ys, list_ty(A))
+  let pat = ap2(P.app, mk_const(#'nil, list_ty(A)), pv)
+  term_match([pv], pat, app_(xs, ys))
+  ~is #false
+check:
+  // a repeated pattern variable has to match consistently
+  let pv = v(#'q, LN)
+  let pat = app_(pv, pv)
+  [term_match([pv], pat, app_(xs, xs)) != #false,
+   term_match([pv], pat, app_(xs, ys)) != #false]
+  ~is [#true, #false]
+check:
+  // a non-pattern variable must appear literally
+  term_match([], app_(xs, ys), app_(xs, zs))
+  ~is #false
+
+// ==========================================================================
+// orienting theorems into rules
+// ==========================================================================
+
+// every clause of every definition is one rule, and they share the function's
+// name so that `disable` can switch a whole definition off
+check rule_names(defs).length() ~is 12
+check Set(& rule_names(defs)).length() ~is 6
+check rules_of(defs, #'app).length() ~is 2
+check rules_of(defs, #'nope) ~is []
+
+check:
+  // An unquantified assumption is an exact local rewrite, not a wildcard:
+  // its matcher has no quantified pattern variables.
+  let th = ASSUME(thy, mk_eq(xs, nil_n))
+  mk_rule(thy, #'assumption, th)
+  ~is_a RewriteRule
+check:
+  // A *quantified* right-hand side variable the left side does not determine
+  // cannot be a rule: matching would leave it uninstantiated.
+  let (t2, th) = new_axiom(thy, mk_forall_list([xs, n], mk_eq(len_(xs), n)))
+  mk_rule(t2, #'bad, th)
+  ~is #false
+check:
+  // The same statement as an *assumption* is fine, and means something else:
+  // its variables are particular, not schematic, so it rewrites exactly the
+  // term `length(xs)` and nothing else.
+  let r = mk_rule(thy, #'asm, ASSUME(thy, mk_eq(len_(xs), n))) :~ RewriteRule
+  [r.lhs, r.rhs, r.vars]
+  ~is [len_(xs), n, []]
+check:
+  // and so it does not match a different list
+  let d = add_thm(thy, empty_db, #'asm, ASSUME(thy, mk_eq(len_(xs), n)))
+  [SearchBudget.run(SearchLimits(), db_conv(d)(thy, len_(xs))) != #false,
+   SearchBudget.run(SearchLimits(), db_conv(d)(thy, len_(ys))) != #false]
+  ~is [#true, #false]
+check:
+  let th = REFL(thy, len_(xs))
+  mk_rule(thy, #'bad, th)
+  ~is #false
+check:
+  // a non-equation becomes `p === true`
+  let r = mk_rule(thy, #'fact, ASSUME(thy, mk_eq(len_(xs), n)
+                                        |> mk_neg(_))) :~ RewriteRule
+  [r.lhs, r.rhs]
+  ~is [mk_eq(len_(xs), n), tm_false]
+check:
+  let dt = P.thms[#'List] :~ DatatypeThms
+  let r = mk_rule(thy, #'distinct, dt.distinctness[0]) :~ RewriteRule
+  let [xv, yv] = r.vars
+  [r.lhs == mk_eq(at(P.nil, type_of(xv)), ap2(at(P.cons, type_of(xv)), xv, yv)),
+   r.rhs, r.head]
+  ~is [#true, tm_false, #'eq]
+
+// ==========================================================================
+// rewriting
+// ==========================================================================
+
+// `TOP_DEPTH_CONV` never fails -- it returns a reflexive theorem when nothing
+// applied -- so "no change" is represented here by `#false`.
+fun norm_with(d :: RuleDB, t :: Term) :: maybe(Term):
+  match simp_conv(d)(thy, t)
+  | #false: #false
+  | th :~ Thm: (if is_refl_thm(th) | #false | rhs_of(th))
+
+fun norm(t :: Term) :: maybe(Term): norm_with(defs, t)
+
+check norm(app_(nil_n, xs)) ~is xs
+check norm(app_(cons_(n, nil_n), xs)) ~is cons_(n, xs)
+check norm(rev_(cons_(n, nil_n))) ~is cons_(n, nil_n)
+check norm(rev_(cons_(n, cons_(m, nil_n)))) ~is cons_(m, cons_(n, nil_n))
+check norm(len_(cons_(n, cons_(m, nil_n)))) ~is ap1(P.succ, ap1(P.succ, P.zero))
+check:
+  norm(plus_(ap1(P.succ, P.zero), ap1(P.succ, P.zero)))
+  ~is ap1(P.succ, ap1(P.succ, P.zero))
+// rewriting is congruent: it works under any context
+check norm(len_(app_(cons_(n, nil_n), cons_(m, nil_n)))) ~is ap1(P.succ, ap1(P.succ, P.zero))
+// nothing to do
+check norm(app_(xs, ys)) ~is #false
+
+// every rewrite is justified by a theorem, and the theorem says what the
+// rewrite claims
+check:
+  let input = rev_(cons_(n, nil_n))
+  let th = simp_conv(defs)(thy, input) :~ Thm
+  [concl_of(th) == mk_eq(input, cons_(n, nil_n)), hyps_of(th)]
+  ~is [#true, []]
+
+// -- reflexivity closes an equation ----------------------------------------
+
+check norm(mk_eq(app_(nil_n, xs), xs)) ~is tm_true
+check norm(mk_eq(xs, ys)) ~is #false
+
+// -- disabling -------------------------------------------------------------
+
+check norm(app_(nil_n, xs)) ~is xs
+check norm_with(disable(defs, [#'app]), app_(nil_n, xs)) ~is #false
+check norm_with(enable(disable(defs, [#'app]), [#'app]), app_(nil_n, xs)) ~is xs
+
+// ==========================================================================
+// permutative rules cannot oscillate
+// ==========================================================================
+
+check:
+  // `plus(m, n) === plus(n, m)` is a variant of itself, so it is permutative
+  let comm = mk_forall_list([m, n], mk_eq(plus_(m, n), plus_(n, m)))
+  let (t2, th) = new_axiom(thy, comm)
+  let r = mk_rule(t2, #'plus_comm, th) :~ RewriteRule
+  r.permutative
+  ~is #true
+check:
+  // it fires in the direction that decreases the term, and only that one
+  let comm = mk_forall_list([m, n], mk_eq(plus_(m, n), plus_(n, m)))
+  let (t2, th) = new_axiom(thy, comm)
+  let d = add_thm(t2, empty_db, #'plus_comm, th)
+  let down = SearchBudget.run(SearchLimits(), db_conv(d)(t2, plus_(n, m)))
+  let up = SearchBudget.run(SearchLimits(), db_conv(d)(t2, plus_(m, n)))
+  [down != #false, up != #false]
+  ~is [#true, #false]
+check:
+  // so normalising terminates rather than looping between the two orientations
+  let comm = mk_forall_list([m, n], mk_eq(plus_(m, n), plus_(n, m)))
+  let (t2, th) = new_axiom(thy, comm)
+  let d = add_thm(t2, empty_db, #'plus_comm, th)
+  let r = simp_conv(d)(t2, plus_(n, m)) :~ Thm
+  rhs_of(r)
+  ~is plus_(m, n)
+
+// ==========================================================================
+// the first real theorem, by simplification alone
+// ==========================================================================
+
+fun run_simplify(g :: Goal):
+  SearchBudget.run(SearchLimits(), simplify_goal(thy, defs, g))
+
+check:
+  let g = mk_goal([], mk_eq(app_(nil_n, ys), ys))
+  let st = run_simplify(g) :~ Step
+  let th = st.justify([])
+  [concl_of(th) == g.concl, hyps_of(th), st.subgoals.length()]
+  ~is [#true, [], 0]
+check:
+  // and it really is a kernel theorem in the prelude's theory
+  let g = mk_goal([], mk_eq(app_(nil_n, ys), ys))
+  let th = (run_simplify(g) :~ Step).justify([])
+  descends(stamp_of(th), thy.stamp)
+  ~is #true
+check:
+  let g = mk_goal([], mk_eq(len_(cons_(n, nil_n)), ap1(P.succ, P.zero)))
+  let th = (run_simplify(g) :~ Step).justify([])
+  concl_of(th) == g.concl
+  ~is #true
+
+// an assumption is available to the simplifier as a rewrite rule -- this is
+// how an induction hypothesis does its work
+check:
+  let ih = mk_eq(app_(xs, nil_n), xs)
+  let g = mk_goal([ih], mk_eq(cons_(n, app_(xs, nil_n)), cons_(n, xs)))
+  let st = run_simplify(g) :~ Step
+  let th = st.justify([])
+  [concl_of(th) == g.concl, st.subgoals.length(), hyps_of(th).length()]
+  ~is [#true, 0, 1]
+
+// a goal that only partly simplifies leaves a smaller goal behind
+check:
+  let g = mk_goal([], mk_eq(app_(cons_(n, nil_n), ys), ys))
+  let st = run_simplify(g) :~ Step
+  [st.subgoals.length(), (st.subgoals[0] :~ Goal).concl]
+  ~is [1, mk_eq(cons_(n, ys), ys)]
+check:
+  let g = mk_goal([], mk_eq(app_(xs, ys), app_(xs, ys)))
+  run_simplify(mk_goal([], mk_eq(xs, ys)))
+  ~is #false
+
+// ==========================================================================
+// rule classes: type-prescription facts
+// ==========================================================================
+//
+// `Q := \n. #true`, so `|- forall xs. Q(length(xs))` is provable with no new
+// axiom -- `Q(length(xs))` unfolds to `true` and `EQT_INTRO` closes it -- but
+// registering it as a rule keeps the term as written, `Q(length(xs))`,
+// exactly the shape a type-prescription fact about `length` has.
+
+def (thy_q2, def_q) = new_basic_definition(thy, mk_eq(mk_var(#'Q, mk_fun(nat_ty, bool)), mk_abs(n, tm_true)))
+def qc = mk_const(#'Q, mk_fun(nat_ty, bool))
+
+def q_len_fact:
+  let unf = TRANS(AP_THM(thy_q2, def_q, ap1(lenN, xs)),
+                  (match BETA_CONV(thy_q2, mk_comb(mk_abs(n, tm_true), ap1(lenN, xs)))
+                   | th :~ Thm: th))
+  GEN(thy_q2, xs, EQT_ELIM(thy_q2, unf))
+
+check SPEC(thy_q2, xs, q_len_fact).concl ~is mk_comb(qc, len_(xs))
+
+def db_with_q = add_thm(thy_q2, defs, #'q_len_fact, q_len_fact)
+
+// classified as a type-prescription about `length`, keyed by its head symbol
+check:
+  type_facts_of(db_with_q, #'length).length()
+  ~is 1
+// and *also* still an ordinary rewrite rule -- the two classifications are
+// not exclusive, and every existing rewrite behavior is unaffected
+check:
+  simp_conv(db_with_q)(thy_q2, mk_comb(qc, ap1(lenN, nil_n)))
+  ~is_a Thm
+
+// generalizing `length(xs)` in a goal now carries `Q(g)` along as a fresh
+// hypothesis about the generalized variable -- exactly what a proof that
+// needs to know something about what `length` produces would otherwise
+// lose by hiding it behind a bare variable.
+check:
+  let ctors = Set(#'zero, #'succ, #'nil, #'cons)
+  let g = mk_goal([], mk_eq(ap1(lenN, xs), ap1(lenN, xs)))
+  let st = generalize_goal(thy_q2, db_with_q, ctors, g) :~ Step
+  let sub :~ Goal = st.subgoals[0]
+  let [fresh, _] = (match dest_eq(sub.concl) | pair: pair)
+  [sub.asms.length(), sub.asms[0] == mk_comb(qc, fresh)]
+  ~is [1, #true]
+// and the reconstructed proof is a real theorem, not a shortcut: closing
+// the generalized subgoal (trivially, `g === g`) under the extra hypothesis
+// still comes back as a proof of the *original*, ungeneralized goal, with
+// no leftover hypotheses -- `Q(g)` was discharged by `q_len_fact`, not
+// smuggled through.
+check:
+  let ctors = Set(#'zero, #'succ, #'nil, #'cons)
+  let g = mk_goal([], mk_eq(ap1(lenN, xs), ap1(lenN, xs)))
+  let st = generalize_goal(thy_q2, db_with_q, ctors, g) :~ Step
+  let sub :~ Goal = st.subgoals[0]
+  let sub_proof = (match dest_eq(sub.concl) | [l, _]: REFL(thy_q2, l))
+  let final = st.justify([sub_proof])
+  [concl_of(final) == g.concl, hyps_of(final).length()]
+  ~is [#true, 0]
+
+// `disable` silences a name's type-prescription fact as well as its rewrite
+// rule: ACL2's `disable` takes a name and switches off every rune wearing it,
+// and proof-local `~disable: [q_len_fact]` means "stop using what you know under
+// that name", not "stop rewriting with it but keep consulting it while
+// generalizing".
+def db_q_off = disable(db_with_q, [#'q_len_fact])
+check type_facts_of(db_q_off, #'q_len_fact).length() ~is 0
+// observable where it matters: the generalization no longer carries `Q(g)`
+check:
+  let ctors = Set(#'zero, #'succ, #'nil, #'cons)
+  let g = mk_goal([], mk_eq(ap1(lenN, xs), ap1(lenN, xs)))
+  let st = generalize_goal(thy_q2, db_q_off, ctors, g) :~ Step
+  (st.subgoals[0] :~ Goal).asms.length()
+  ~is 0
+// and switching it back on restores it
+check:
+  let ctors = Set(#'zero, #'succ, #'nil, #'cons)
+  let g = mk_goal([], mk_eq(ap1(lenN, xs), ap1(lenN, xs)))
+  let st = generalize_goal(thy_q2, enable(db_q_off, [#'q_len_fact]), ctors, g) :~ Step
+  let sub :~ Goal = st.subgoals[0]
+  let [fresh, _] = (match dest_eq(sub.concl) | pair: pair)
+  [sub.asms.length(), sub.asms[0] == mk_comb(qc, fresh)]
+  ~is [1, #true]
+
+// ==========================================================================
+// conditional rewriting
+// ==========================================================================
+//
+// `c === zero ==> plus(c, m) === m`, for a fresh constant `c` defined (not
+// postulated) to be `zero`: true because `plus`'s own base clause says
+// exactly this for the literal `zero`, but as *stated* the left side is
+// `plus(c, m)`, which does not match either of `plus`'s own two clauses --
+// their left sides are `plus(zero, _)` and `plus(succ(_), _)`, and `c` is a
+// different constant, not the literal `zero`, even though it equals it.
+
+def plus_zero_eq = (P.funs.get(#'plus, #false) :~ FunInfo).equations[0]
+check SPEC(thy, m, plus_zero_eq).concl ~is mk_eq(plus_(P.zero, m), m)
+
+def (thy_c, def_c) = new_basic_definition(thy, mk_eq(mk_var(#'c, nat_ty), P.zero))
+def cc = mk_const(#'c, nat_ty)
+
+def cond_plus_thm:
+  let h = ASSUME(thy_c, mk_eq(cc, P.zero))
+  let cong = AP_THM(thy_c, AP_TERM(thy_c, P.plus, h), m)
+  let base = SPEC(thy_c, m, plus_zero_eq)
+  GENL(thy_c, [m], DISCH(thy_c, mk_eq(cc, P.zero), TRANS(cong, base)))
+
+check:
+  SPEC(thy_c, m, cond_plus_thm).concl
+  ~is mk_imp(mk_eq(cc, P.zero), mk_eq(plus_(cc, m), m))
+
+def cond_rule = mk_rule(thy_c, #'cond_plus, cond_plus_thm) :~ RewriteRule
+check cond_rule.conds.length() ~is 1
+check:
+  let rv = cond_rule.vars[0]
+  [cond_rule.lhs == plus_(cc, rv), cond_rule.rhs == rv]
+  ~is [#true, #true]
+
+// `c`'s own definition, registered as an ordinary (unconditional) rule --
+// `c` is a bare constant, not a pattern variable, so `mk_rule` accepts it
+// exactly the way it accepts any other left-hand side headed by a declared
+// symbol.
+def db_c_only = add_thm(thy_c, empty_db, #'def_c, def_c)
+def db_cond = add_rule(db_c_only, cond_rule)
+
+fun norm_c(d :: RuleDB, t :: Term) :: maybe(Term):
+  match simp_conv(d)(thy_c, t)
+  | #false: #false
+  | th :~ Thm: (if is_refl_thm(th) | #false | rhs_of(th))
+
+// The conditional rule alone (its condition undischargeable -- nothing here
+// says `c === zero`) does not fire; `plus`'s own two clauses are
+// deliberately *not* in this database, so there is no other route either.
+check norm_c(add_rule(empty_db, cond_rule), plus_(cc, m)) ~is #false
+// knowing `c === zero` but only that -- still no unconditional rule for
+// `plus` is in this database -- gets no further than rewriting the `c`
+// inside it (ordinary congruence rewriting, not the conditional rule): it
+// does not reach `m`, because that needs `plus`'s own zero-clause, which is
+// deliberately absent here too.
+check norm_c(db_c_only, plus_(cc, m)) ~is plus_(P.zero, m)
+// with both registered, the condition discharges (`c` rewrites to `zero`
+// via its own definition, closing `c === zero` by reflexivity) and the
+// conditional rule fires directly on `plus(c, m)` -- `plus`'s own clauses
+// are still absent from this database, so reaching `m` is the conditional
+// rule's doing alone, not a `c`-then-zero-clause chain.
+check norm_c(db_cond, plus_(cc, m)) ~is m
+
+// ==========================================================================
+// a conditional rule at a type other than the one it was stated at
+// ==========================================================================
+//
+// The side conditions used to be instantiated separately from the theorem,
+// and in the opposite order: `inst_type(tyin, inst_fvar(theta, c))` against
+// the theorem's own `INST(theta, INST_TYPE(tyin, src))`.  `theta`'s
+// replacements are already at the instantiated types, so for a polymorphic
+// rule the separately built condition came out at the wrong type and could
+// never be discharged -- the rule simply never fired at a concrete type, even
+// with its condition in the database.  A monomorphic test cannot see this,
+// because there the two orders agree.
+//
+// Conditions are now read off the instantiated theorem, so there is no second
+// copy to get out of step.
+
+def polyA :: HType = mk_tyvar(#'a)
+def pnat_ty = mk_tyapp(#'pnat, [])
+def pthy:
+  let t0 = new_type(base_theory(), #'pnat, 0)
+  let t1 = new_constant(t0, #'Pp, mk_fun(polyA, bool))
+  let t2 = new_constant(t1, #'fp, mk_fun(polyA, polyA))
+  let t3 = new_constant(t2, #'gp, mk_fun(polyA, polyA))
+  new_constant(t3, #'pcc, pnat_ty)
+
+def poly_rule:
+  let xv = mk_var(#'x, polyA)
+  ASSUME(pthy,
+         mk_forall(xv,
+                   mk_imp(mk_comb(mk_const(#'Pp, mk_fun(polyA, bool)), xv),
+                          mk_eq(mk_comb(mk_const(#'fp, mk_fun(polyA, polyA)), xv),
+                                mk_comb(mk_const(#'gp, mk_fun(polyA, polyA)), xv)))))
+
+def pcc = mk_const(#'pcc, pnat_ty)
+def f_cc = mk_comb(mk_const(#'fp, mk_fun(pnat_ty, pnat_ty)), pcc)
+def g_cc = mk_comb(mk_const(#'gp, mk_fun(pnat_ty, pnat_ty)), pcc)
+def poly_db = add_thm(pthy, empty_db, #'poly_rule, poly_rule)
+
+// without the condition, the rule must not fire
+check:
+  match simp_conv(poly_db)(pthy, f_cc)
+  | #false: #false
+  | th :: Thm: is_refl_thm(th)
+  ~is #true
+
+// with the condition at the concrete type, it must
+check:
+  let db2 = add_thm(pthy, poly_db, #'p_cc,
+                    ASSUME(pthy, mk_comb(mk_const(#'Pp, mk_fun(pnat_ty, bool)), pcc)))
+  match simp_conv(db2)(pthy, f_cc)
+  | #false: #false
+  | th :: Thm: rhs_of(th)
+  ~is g_cc

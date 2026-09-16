@@ -1,0 +1,209 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+// Registry-based elaboration of surface type syntax into kernel HType values.
+
+import:
+  rhombus/meta open
+  rhombus/hol/htype open
+  rhombus/hol/datatype/datatype open
+  rhombus/hol/frontend/type/constructor open
+  rhombus/hol/frontend/type/registry open
+
+export:
+  parse_type
+  parse_open_type
+  collect_type_vars
+  parse_datatype_decl
+  datatype_decl_shape
+
+fun syntax_error(message :: String, at :: Syntax):
+  error(~who: #'datatype, message, error.val(~label: "in", to_string(at)))
+
+fun split_arrow(stx :: Syntax) :: maybe(List.of(Syntax)):
+  recur loop (before :~ List.of(Syntax) = [],
+              remaining :~ List.of(Syntax) = stx.unwrap_group()):
+    match remaining
+    | []: #false
+    | List.cons(term, rest):
+        match term
+        | '->':
+            when before.length() == 0 || rest.length() == 0
+            | syntax_error("a function arrow needs a type on both sides", stx)
+            [Syntax.make_group(before), Syntax.make_group(rest)]
+        | ~else: loop(before ++ [term], rest)
+
+fun qualified_name(base :: Symbol) :: Symbol:
+  Symbol.from_string(to_string(base) ++ ".of")
+
+fun resolve_bare_type(registry :: TypeConstructorRegistry,
+                      name :: Symbol, at :: Syntax) :: HType:
+  match lookup_type_constructor(registry, name)
+  | constructor :: TypeConstructor:
+      apply_type_constructor(constructor, [], at)
+  | #false:
+      match lookup_type_constructor_namespace(registry, name)
+      | constructor :: TypeConstructor:
+          syntax_error(
+            "`" ++ to_string(name) ++ "` is a type constructor of arity "
+              ++ to_string(constructor.arity)
+              ++ "; use `" ++ to_string(constructor.surface_name)
+              ++ "(...)` to construct a HOL type",
+            at)
+      | #false:
+          syntax_error("unknown type constructor `" ++ to_string(name) ++ "`",
+                       at)
+
+fun parse_atomic_type(stx :: Syntax, params :: List.of(Symbol),
+                      registry :: TypeConstructorRegistry) :: HType:
+  match stx
+  | '? $(id :: Identifier)':
+      let name = Syntax.unwrap(id)
+      unless params.contains(name)
+      | syntax_error("unbound type variable", stx)
+      mk_tyvar(name)
+  | '($inner ...)':
+      parse_type('$inner ...', params, registry)
+  | '$(base :: Identifier).of($arg, ...)':
+      let surface_name = qualified_name(Syntax.unwrap(base))
+      match lookup_type_constructor(registry, surface_name)
+      | #false:
+          syntax_error("unknown type constructor `"
+                         ++ to_string(surface_name) ++ "`",
+                       stx)
+      | constructor:
+          apply_type_constructor(
+            constructor :~ TypeConstructor,
+            [parse_type(arg, params, registry), ...], stx)
+  | 'Function($domain, $range)':
+      syntax_error(
+        "function types use `->`; write `A -> B` instead of `Function(A, B)`",
+        stx)
+  | '$(name :: Identifier)($arg, ...)':
+      syntax_error(
+        "parameterized HOL types use `.of`; write `"
+          ++ to_string(Syntax.unwrap(name)) ++ ".of(...)` instead of `"
+          ++ to_string(Syntax.unwrap(name)) ++ "(...)`",
+        stx)
+  | '$(name :: Identifier)':
+      resolve_bare_type(registry, Syntax.unwrap(name), stx)
+  | ~else:
+      syntax_error("not a type", stx)
+
+fun parse_type(stx :: Syntax, params :: List.of(Symbol),
+               registry :: TypeConstructorRegistry) :: HType:
+  match split_arrow(stx)
+  | [domain, range]:
+      mk_fun(parse_type(domain, params, registry),
+             parse_type(range, params, registry))
+  | #false: parse_atomic_type(stx, params, registry)
+
+fun add_unique(base :: List.of(Symbol),
+               more :: List.of(Symbol)) :: List.of(Symbol):
+  for values(out :~ List = base) (name in more):
+    (if out.contains(name) | out | out ++ [name])
+
+fun collect_type_vars(stx :: Syntax) :: List.of(Symbol):
+  match split_arrow(stx)
+  | [domain, range]:
+      add_unique(collect_type_vars(domain), collect_type_vars(range))
+  | #false:
+      match stx
+      | '? $(id :: Identifier)': [Syntax.unwrap(id)]
+      | '($inner ...)': collect_type_vars('$inner ...')
+      | '$(base :: Identifier).of($arg, ...)':
+          for values(out :~ List = []) (argument in [arg, ...]):
+            add_unique(out, collect_type_vars(argument))
+      | '$(name :: Identifier)($arg, ...)':
+          for values(out :~ List = []) (argument in [arg, ...]):
+            add_unique(out, collect_type_vars(argument))
+      | ~else: []
+
+fun parse_open_type(stx :: Syntax,
+                    registry :: TypeConstructorRegistry) :: HType:
+  parse_type(stx, collect_type_vars(stx), registry)
+
+fun parse_param(stx :: Syntax) :: Symbol:
+  match stx
+  | '? $(id :: Identifier)': Syntax.unwrap(id)
+  | ~else:
+      syntax_error("a type parameter is written `?a`, not a plain name", stx)
+
+fun parse_ctor(stx :: Syntax, params :: List.of(Symbol),
+               registry :: TypeConstructorRegistry) :: Ctor:
+  match stx
+  | '$(name :: Identifier)($field, ...)':
+      Ctor(Syntax.unwrap(name),
+           [parse_field(field, params, registry), ...])
+  | '$(name :: Identifier)': Ctor(Syntax.unwrap(name), [])
+  | ~else: syntax_error("malformed constructor", stx)
+
+fun parse_field(stx :: Syntax, params :: List.of(Symbol),
+                registry :: TypeConstructorRegistry) :: Field:
+  match stx
+  | '$(name :: Identifier) :: $type ...':
+      Field(Syntax.unwrap(name), parse_type('$type ...', params, registry))
+  | ~else:
+      syntax_error("a constructor field needs a name and a type", stx)
+
+fun finish_datatype_decl(name :: Syntax, params :: List.of(Symbol),
+                         constructors :: List.of(Syntax),
+                         registry :: TypeConstructorRegistry) :: DatatypeSpec:
+  let kernel_name = Syntax.unwrap(name)
+  let local = add_declared_type_constructor(registry, kernel_name, params)
+  DatatypeSpec(kernel_name, params,
+               constructors.map(
+                 fun (constructor):
+                   parse_ctor(constructor, params, local)))
+
+fun parse_datatype_decl(stx :: Syntax,
+                        registry :: TypeConstructorRegistry) :: DatatypeSpec:
+  match stx
+  | 'datatype $(name :: Identifier).of($param, ...)
+     | $constructor
+     | ...':
+      let params = [parse_param(param), ...]
+      when params.length() == 0
+      | syntax_error("a nullary datatype declaration omits `.of`", stx)
+      finish_datatype_decl(name, params, [constructor, ...], registry)
+  | 'datatype $(name :: Identifier)($param, ...)
+     | $_
+     | ...':
+      syntax_error(
+        "parameterized datatype declarations use `.of`; write `datatype "
+          ++ to_string(Syntax.unwrap(name)) ++ ".of(...)`",
+        stx)
+  | 'datatype $(name :: Identifier)
+     | $constructor
+     | ...':
+      finish_datatype_decl(name, [], [constructor, ...], registry)
+  | ~else: syntax_error("malformed datatype declaration", stx)
+
+fun datatype_decl_shape(stx :: Syntax) :: List:
+  fun constructor_shape(constructor :: Syntax) :: List:
+    match constructor
+    | '$(name :: Identifier)($field, ...)':
+        [name, [field_name(field), ...]]
+    | '$(name :: Identifier)': [name, []]
+    | ~else: syntax_error("malformed constructor", constructor)
+  fun field_name(field :: Syntax) :: Syntax:
+    match field
+    | '$(name :: Identifier) :: $_ ...': name
+    | ~else: syntax_error("malformed constructor field", field)
+  match stx
+  | 'datatype $(name :: Identifier).of($_, ...)
+     | $constructor
+     | ...':
+      [name, [constructor_shape(constructor), ...]]
+  | 'datatype $(name :: Identifier)($_, ...)
+     | $_
+     | ...':
+      syntax_error(
+        "parameterized datatype declarations use `.of`; write `datatype "
+          ++ to_string(Syntax.unwrap(name)) ++ ".of(...)`",
+        stx)
+  | 'datatype $(name :: Identifier)
+     | $constructor
+     | ...':
+      [name, [constructor_shape(constructor), ...]]
+  | ~else: syntax_error("malformed datatype declaration", stx)

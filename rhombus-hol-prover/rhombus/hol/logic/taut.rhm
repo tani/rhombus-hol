@@ -1,0 +1,188 @@
+#lang rhombus/static
+
+// Propositional and conditional cleanup rules.
+//
+// The simplifier normalises a goal by rewriting, and `refl_conv` turns
+// `a === a` into `true`.  That is not enough on its own: a goal about a
+// constructor becomes `x === x and y === y` via injectivity, which reduces to
+// `true and true` -- and without a rule for that, a finished proof looks
+// stuck.
+//
+// These are derived, not postulated.  Each one is a short two-directional
+// argument closed with `IMP_ANTISYM_RULE`, so nothing here widens the trusted
+// base.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/names open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/logic/conv open
+  rhombus/hol/logic/drule open
+
+export:
+  tautologies
+  conditionals
+  NOT_TRUE_EQ_FALSE
+  excluded_middle
+
+def p :: FVar = mk_var(#'p, bool)
+def tyA :: HType = mk_tyvar(#'a)
+
+// `|- forall p. lhs <=> rhs`, from a proof each way.
+fun iff_rule(thy :: Theory, lhs :: Term, rhs :: Term,
+             fwd :: Thm, bwd :: Thm) :: Thm:
+  GEN(thy, p, IMP_ANTISYM_RULE(thy, DISCH(thy, lhs, fwd), DISCH(thy, rhs, bwd)))
+
+fun tautologies(thy :: Theory) :: List.of(Thm):
+  let tt = tm_true
+  let ff = tm_false
+  let truth = TRUTH(thy)
+
+  // conjunction
+  let and_tp = iff_rule(thy, mk_conj(tt, p), p,
+                        CONJUNCT2(thy, ASSUME(thy, mk_conj(tt, p))),
+                        CONJ(thy, truth, ASSUME(thy, p)))
+  let and_pt = iff_rule(thy, mk_conj(p, tt), p,
+                        CONJUNCT1(thy, ASSUME(thy, mk_conj(p, tt))),
+                        CONJ(thy, ASSUME(thy, p), truth))
+  let and_fp = iff_rule(thy, mk_conj(ff, p), ff,
+                        CONJUNCT1(thy, ASSUME(thy, mk_conj(ff, p))),
+                        CONTR(thy, mk_conj(ff, p), ASSUME(thy, ff)))
+  let and_pf = iff_rule(thy, mk_conj(p, ff), ff,
+                        CONJUNCT2(thy, ASSUME(thy, mk_conj(p, ff))),
+                        CONTR(thy, mk_conj(p, ff), ASSUME(thy, ff)))
+
+  // disjunction
+  let or_tp = iff_rule(thy, mk_disj(tt, p), tt,
+                       truth,
+                       DISJ1(thy, truth, p))
+  let or_pt = iff_rule(thy, mk_disj(p, tt), tt,
+                       truth,
+                       DISJ2(thy, p, truth))
+  let or_fp = iff_rule(thy, mk_disj(ff, p), p,
+                       DISJ_CASES(thy, ASSUME(thy, mk_disj(ff, p)),
+                                  CONTR(thy, p, ASSUME(thy, ff)),
+                                  ASSUME(thy, p)),
+                       DISJ2(thy, ff, ASSUME(thy, p)))
+  let or_pf = iff_rule(thy, mk_disj(p, ff), p,
+                       DISJ_CASES(thy, ASSUME(thy, mk_disj(p, ff)),
+                                  ASSUME(thy, p),
+                                  CONTR(thy, p, ASSUME(thy, ff))),
+                       DISJ1(thy, ASSUME(thy, p), ff))
+
+  // negation
+  let not_t = iff_rule(thy, mk_neg(tt), ff,
+                       MP(thy, NOT_ELIM(thy, ASSUME(thy, mk_neg(tt))), truth),
+                       CONTR(thy, mk_neg(tt), ASSUME(thy, ff)))
+  let not_f = iff_rule(thy, mk_neg(ff), tt,
+                       truth,
+                       NOT_INTRO(thy, DISCH(thy, ff, ASSUME(thy, ff))))
+
+  // Boolean equality against literals. These are both user-facing normal
+  // forms and what lets a case assumption reduce occurrences of its Boolean
+  // variable all the way through nested equivalences.
+  let eq_pt = iff_rule(thy, mk_eq(p, tt), p,
+                       EQT_ELIM(thy, ASSUME(thy, mk_eq(p, tt))),
+                       EQT_INTRO(thy, ASSUME(thy, p)))
+  let eq_pf = iff_rule(thy, mk_eq(p, ff), mk_neg(p),
+                       EQF_ELIM(thy, ASSUME(thy, mk_eq(p, ff))),
+                       EQF_INTRO(thy, ASSUME(thy, mk_neg(p))))
+
+  // implication
+  let imp_tp = iff_rule(thy, mk_imp(tt, p), p,
+                        MP(thy, ASSUME(thy, mk_imp(tt, p)), truth),
+                        DISCH(thy, tt, ASSUME(thy, p)))
+  let imp_pt = iff_rule(thy, mk_imp(p, tt), tt,
+                        truth,
+                        DISCH(thy, p, truth))
+  let imp_fp = iff_rule(thy, mk_imp(ff, p), tt,
+                        truth,
+                        DISCH(thy, ff, CONTR(thy, p, ASSUME(thy, ff))))
+
+  [and_tp, and_pt, and_fp, and_pf,
+   or_tp, or_pt, or_fp, or_pf,
+   not_t, not_f, eq_pt, eq_pf,
+   imp_tp, imp_pt, imp_fp]
+
+// -- the conditional ---------------------------------------------------------
+//
+// `if` is not primitive: `cond` is defined through choice, as
+//
+//   cond t t1 t2 = @x. (t = true ==> x = t1) and (t = false ==> x = t2)
+//
+// so `if true | a | b === a` has to be *derived* before the rewriter can
+// simplify a conditional at all.  Termination obligations are the reason this
+// matters: a measure argument for a definition written with `if` is stated
+// under the branch condition, and the waterfall cannot discharge it without
+// being able to collapse the conditional in the first place.
+
+// `|- ~(true = false)`.  Everything about `cond` rests on the two branch
+// conditions being exclusive, and this is where that fact enters.
+fun NOT_TRUE_EQ_FALSE(thy :: Theory) :: Thm:
+  let tf = mk_eq(tm_true, tm_false)
+  NOT_INTRO(thy, DISCH(thy, tf, EQ_MP(ASSUME(thy, tf), TRUTH(thy))))
+
+// `|- false` from an assumption that the branch condition is the other
+// literal.  `flipped` says the assumption reads `false = true`, which needs a
+// `SYM` before it lines up with `NOT_TRUE_EQ_FALSE`'s orientation.
+fun absurd_branch(thy :: Theory, flipped :: Boolean) :: Thm:
+  let asm = (if flipped | mk_eq(tm_false, tm_true) | mk_eq(tm_true, tm_false))
+  let as_th = ASSUME(thy, asm)
+  EQ_MP((if flipped | SYM(thy, as_th) | as_th), TRUTH(thy))
+
+// `|- forall t1 t2. (if c | t1 | t2) === t_i`, for `c` the literal `which`.
+//
+// The shape is: instantiate the choice axiom at the conditional's own
+// predicate, show the chosen branch satisfies it, and read the equation back
+// out of the surviving conjunct.
+fun cond_rule(thy :: Theory, which :: Boolean) :: Thm:
+  let t1 :: FVar = mk_var(#'t1, tyA)
+  let t2 :: FVar = mk_var(#'t2, tyA)
+  let xa :: FVar = mk_var(#'x, tyA)
+  let c = (if which | tm_true | tm_false)
+  let pick = (if which | t1 | t2)
+
+  fun body_at(u :: Term) :: Term:
+    mk_conj(mk_imp(mk_eq(c, tm_true), mk_eq(u, t1)),
+            mk_imp(mk_eq(c, tm_false), mk_eq(u, t2)))
+
+  let sel = mk_select(xa, body_at(xa))
+  let bigP = (match sel | Comb(_, a): a)
+
+  // `|- cond c t1 t2 = @x. ...`
+  let unf = unfold_def(thy, base_defs(c_cond), [c, t1, t2])
+
+  // `|- body(pick)`: one conjunct is reflexivity, the other is vacuous
+  // because its branch condition contradicts `c`.
+  let hit = DISCH(thy, mk_eq(c, c), REFL(thy, pick))
+  let miss:
+    let other = (if which | tm_false | tm_true)
+    DISCH(thy, mk_eq(c, other),
+          CONTR(thy, mk_eq(pick, (if which | t2 | t1)),
+                absurd_branch(thy, !which)))
+  let sat = (if which | CONJ(thy, hit, miss) | CONJ(thy, miss, hit))
+
+  // choice: what the chosen branch satisfies, the choice term satisfies too
+  let chosen = MP(thy,
+                  BETA_RULE(thy, SPECL(thy, [bigP, pick],
+                                       base_axiom(#'SELECT_AX))),
+                  sat)
+  let branch = (if which | CONJUNCT1(thy, chosen) | CONJUNCT2(thy, chosen))
+  let eq = TRANS(unf, MP(thy, branch, REFL(thy, c)))
+  GENL(thy, [t1, t2], eq)
+
+fun conditionals(thy :: Theory) :: List.of(Thm):
+  [cond_rule(thy, #true), cond_rule(thy, #false)]
+
+// `|- c or not c`, for an arbitrary Boolean `c` -- the classical `cases`
+// directive (see `waterfall.rhm`) needs it, derived from `BOOL_CASES_AX`
+// rather than assumed again: from `c === true`, `EQT_ELIM` recovers `c`; from
+// `c === false`, `EQF_ELIM` recovers `not c`; either way one side of the
+// disjunction holds.
+fun excluded_middle(thy :: Theory, c :: Term) :: Thm:
+  let cases = SPEC(thy, c, base_axiom(#'BOOL_CASES_AX))
+  let left = DISJ1(thy, EQT_ELIM(thy, ASSUME(thy, mk_eq(c, tm_true))), mk_neg(c))
+  let right = DISJ2(thy, c, EQF_ELIM(thy, ASSUME(thy, mk_eq(c, tm_false))))
+  DISJ_CASES(thy, cases, left, right)

@@ -1,0 +1,294 @@
+#lang rhombus/static
+
+// Static function-overload metadata. This layer is outside `Theory`: overload
+// declarations extend callable names, but the kernel receives only the
+// selected constant application.
+
+import:
+  rhombus/hol/htype open
+
+export:
+  OverloadMethod
+  OverloadRegistry
+  OverloadResolution
+  standard_overload_registry
+  ensure_overload_function
+  add_overload_method
+  valid_argument_order
+  build_overload_method
+  overload_arity
+  overload_candidates
+  resolve_overload
+
+class OverloadMethod(function :: Symbol,
+                     argument_types :: List.of(HType),
+                     result_type :: HType,
+                     constant :: Symbol,
+                     argument_order :: List.of(NonnegInt))
+
+class OverloadRegistry(arities :: Map.of(Symbol, NonnegInt),
+                       methods :: List.of(OverloadMethod))
+
+class OverloadResolution(method :: OverloadMethod,
+                         argument_types :: List.of(HType),
+                         result_type :: HType)
+
+fun standard_overload_registry() :: OverloadRegistry:
+  let functions = [
+    [#'add, 2],
+    [#'subtract, 2],
+    [#'negate, 1],
+    [#'multiply, 2],
+    [#'power, 2],
+    [#'less, 2],
+    [#'less_equal, 2],
+    [#'greater, 2],
+    [#'greater_equal, 2],
+    [#'append, 2],
+    [#'member, 2],
+    [#'union, 2],
+    [#'intersection, 2]
+  ]
+  OverloadRegistry(
+    for values(out :~ Map = {}) (entry in functions):
+      let [name :: Symbol, arity :: NonnegInt] = entry :~ List
+      out ++ {name: arity},
+    [])
+
+fun overload_arity(registry :: OverloadRegistry,
+                   name :: Symbol) :: maybe(NonnegInt):
+  registry.arities.get(name, #false)
+
+fun ensure_overload_function(registry :: OverloadRegistry,
+                             name :: Symbol,
+                             arity :: NonnegInt) :: OverloadRegistry:
+  match registry.arities.get(name, #false)
+  | #false:
+      OverloadRegistry(registry.arities ++ {name: arity},
+                       registry.methods)
+  | existing:
+      unless (existing :~ NonnegInt) == arity
+      | error(~who: #'overload,
+              "overload function conflicts with an existing arity",
+              error.val(~label: "function", name))
+      registry
+fun valid_argument_order(order :: List.of(NonnegInt), arity :: NonnegInt)
+     :: Boolean:
+  recur loop (remaining :~ List = order, seen :~ Set = Set()):
+    match remaining
+    | []: seen.length() == arity
+    | List.cons(position, rest):
+        position < arity
+          && !(position in seen)
+          && loop(rest, seen ++ {position})
+
+fun normalize_type(theta :: Map.of(Symbol, HType), ty :: HType) :: HType:
+  match ty
+  | TyVar(name):
+      match theta.get(name, #false)
+      | #false: ty
+      | replacement: normalize_type(theta, replacement :~ HType)
+  | TyApp(name, args):
+      mk_tyapp(name, args.map(fun (arg): normalize_type(theta, arg)))
+
+fun unify_type(left :: HType, right :: HType,
+               theta :: Map.of(Symbol, HType)) :: maybe(Map.of(Symbol, HType)):
+  let a = normalize_type(theta, left)
+  let b = normalize_type(theta, right)
+  cond
+  | a == b: theta
+  | a is_a TyVar:
+      let TyVar(name) = a
+      (if type_occurs(name, b)
+       | #false
+       | theta ++ {name: b})
+  | b is_a TyVar:
+      let TyVar(name) = b
+      (if type_occurs(name, a)
+       | #false
+       | theta ++ {name: a})
+  | ~else:
+      match a
+      | TyApp(name, args):
+          match b
+          | TyApp(other, other_args) when name == other
+                                            && args.length() == other_args.length():
+              recur loop (xs = args, ys = other_args, current = theta):
+                match xs
+                | []: current
+                | List.cons(x, more_x):
+                    match ys
+                    | List.cons(y, more_y):
+                        match unify_type(x, y, current)
+                        | #false: #false
+                        | next: loop(more_x, more_y, next :~ Map)
+                    | ~else: #false
+          | ~else: #false
+      | ~else: #false
+
+fun fresh_type(ty :: HType) :: HType:
+  let renaming:
+    for values(out :~ Map = {}) (name in type_vars(ty)):
+      out ++ {name: mk_tyvar(Symbol.gen(to_string(name))) :~ HType}
+  type_subst(renaming, ty)
+
+fun build_overload_method(
+      function :: Symbol,
+      argument_types :: List.of(HType),
+      declared_result :: maybe(HType),
+      constant :: Symbol,
+      constant_type :: HType,
+      argument_order :: List.of(NonnegInt)) :: OverloadMethod:
+  let arity = argument_types.length()
+  unless valid_argument_order(argument_order, arity)
+  | error(~who: #'overload,
+          "implementation arguments must use every overload argument "
+            ++ "exactly once")
+  let (domains, raw_result):
+    recur peel (current = fresh_type(constant_type),
+                remaining = arity,
+                out :~ List.of(HType) = []):
+      cond
+      | remaining == 0: values(out, current)
+      | is_fun(current):
+          let (domain, range) = dest_fun(current)
+          peel(range, remaining - 1, out ++ [domain])
+      | ~else:
+          error(~who: #'overload,
+                "implementation constant has fewer arguments than "
+                  ++ "the overload signature")
+  let domains :~ List.of(HType) = domains
+  let raw_result :~ HType = raw_result
+  let theta:
+    recur match_domains (index = 0, current :~ Map = {}):
+      cond
+      | index == arity: current
+      | ~else:
+          match unify_type(domains[index],
+                           argument_types[argument_order[index]],
+                           current)
+          | #false:
+              error(~who: #'overload,
+                    "overload signature does not match the "
+                      ++ "implementation constant")
+          | next: match_domains(index + 1, next :~ Map)
+  let final_theta:
+    match declared_result
+    | #false: theta
+    | expected:
+        match unify_type(raw_result, expected :~ HType, theta)
+        | #false:
+            error(~who: #'overload,
+                  "overload result type does not match the "
+                    ++ "implementation constant")
+        | next: next :~ Map
+  OverloadMethod(
+    function,
+    argument_types.map(
+      fun (ty): normalize_type(final_theta, ty)),
+    normalize_type(final_theta, raw_result),
+    constant,
+    argument_order)
+
+fun fresh_signature(method :: OverloadMethod)
+     :: values(List.of(HType), HType):
+  let variables:
+    for values(out :~ List.of(Symbol) = []) (
+          ty in method.argument_types ++ [method.result_type]):
+      for values(inner :~ List.of(Symbol) = out) (name in type_vars(ty)):
+        (if inner.contains(name) | inner | inner ++ [name])
+  let renaming:
+    for values(out :~ Map = {}) (name in variables):
+      out ++ {name: mk_tyvar(Symbol.gen(to_string(name))) :~ HType}
+  values(method.argument_types.map(fun (ty): type_subst(renaming, ty)),
+         type_subst(renaming, method.result_type))
+
+fun methods_overlap(left :: OverloadMethod, right :: OverloadMethod)
+     :: Boolean:
+  let (left_args, left_result) = fresh_signature(left)
+  let (right_args, right_result) = fresh_signature(right)
+  recur loop (xs = left_args ++ [left_result],
+              ys = right_args ++ [right_result],
+              theta :~ Map = {}):
+    match xs
+    | []: #true
+    | List.cons(x, more_x):
+        match ys
+        | List.cons(y, more_y):
+            match unify_type(x, y, theta)
+            | #false: #false
+            | next: loop(more_x, more_y, next :~ Map)
+        | ~else: #false
+
+fun add_overload_method(registry :: OverloadRegistry,
+                        method :: OverloadMethod) :: OverloadRegistry:
+  let arity = overload_arity(registry, method.function)
+  unless arity
+  | error(~who: #'overload,
+          "overload function is not declared",
+          error.val(~label: "function", method.function))
+  let arity :~ NonnegInt = arity
+  unless method.argument_types.length() == arity
+  | error(~who: #'overload,
+          "overload signature has the wrong arity")
+  unless valid_argument_order(method.argument_order, arity)
+  | error(~who: #'overload,
+          "implementation argument order must be a permutation")
+  for (existing in registry.methods):
+    let existing :~ OverloadMethod = existing
+    when existing.function == method.function
+           && methods_overlap(existing, method)
+    | error(~who: #'overload,
+            "overload method overlaps an existing method",
+            error.val(~label: "function", method.function))
+  OverloadRegistry(registry.arities,
+                   registry.methods ++ [method])
+
+fun overload_candidates(registry :: OverloadRegistry,
+                        function :: Symbol) :: List.of(OverloadMethod):
+  for values(out :~ List = []) (method in registry.methods):
+    (if (method :~ OverloadMethod).function == function
+     | out ++ [method]
+     | out)
+
+fun resolve_method(method :: OverloadMethod,
+                   argument_types :: List,
+                   expected_result :: maybe(HType))
+     :: maybe(OverloadResolution):
+  let (patterns, result_pattern) = fresh_signature(method)
+  unless patterns.length() == argument_types.length()
+  | #false
+  recur match_arguments (index = 0, theta :~ Map = {}):
+    cond
+    | index == argument_types.length():
+        let final_theta:
+          match expected_result
+          | #false: theta
+          | expected:
+              match unify_type(result_pattern, expected :~ HType, theta)
+              | #false: #false
+              | next: next :~ Map
+        if final_theta
+        | OverloadResolution(
+            method,
+            patterns.map(
+              fun (ty): normalize_type(final_theta :~ Map, ty)),
+            normalize_type(final_theta :~ Map, result_pattern))
+        | #false
+    | ~else:
+        match argument_types[index]
+        | #false: match_arguments(index + 1, theta)
+        | actual:
+            match unify_type(patterns[index], actual :~ HType, theta)
+            | #false: #false
+            | next: match_arguments(index + 1, next :~ Map)
+
+fun resolve_overload(registry :: OverloadRegistry,
+                     function :: Symbol,
+                     argument_types :: List,
+                     expected_result :: maybe(HType) = #false)
+     :: List.of(OverloadResolution):
+  for values(out :~ List = []) (method in overload_candidates(registry, function)):
+    match resolve_method(method, argument_types, expected_result)
+    | #false: out
+    | resolution: out ++ [resolution]

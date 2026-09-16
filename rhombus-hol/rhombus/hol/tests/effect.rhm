@@ -1,0 +1,126 @@
+#lang rhombus/static
+
+import:
+  rhombus/hol/effect/core open
+  rhombus/hol/effect/syntax open
+
+class TestUnhandled(value):
+  extends EffectOperation
+
+class TestInner(value):
+  extends EffectOperation
+
+class TestOuter():
+  extends EffectOperation
+
+class TestReaderA():
+  reader_effect
+
+class TestReaderB():
+  reader_effect
+
+class TestStateA():
+  state_effect
+
+class TestStateB():
+  state_effect
+
+class TestFailure():
+  failure_effect
+
+fun pure_value(computation :: Computation):
+  match computation
+  | Pure(value): value
+  | ~else: error(~who: #'pure_value, "expected a completed computation")
+
+fun state_result(initial, computation :: Computation) :: TestStateA.Result:
+  match TestStateA.handle(initial, computation)
+  | Pure(result): result :~ TestStateA.Result
+  | ~else: error(~who: #'state_result, "expected completed state computation")
+
+// `effect:` expands `<-` to `bind` and `return` to `pure`.
+check pure_value(return 17) ~is 17
+
+def effect_sequence_subject:
+  effect:
+    let start <- TestStateA.get()
+    let _ <- TestStateA.put(start + 3)
+    let _ <- TestStateA.modify(fun (value): value * 2)
+    TestStateA.get()
+check:
+  let result = state_result(5, effect_sequence_subject)
+  [result.value, result.state]
+  ~is [16, 16]
+
+// Identity handling preserves an operation rather than inventing a policy.
+check:
+  handle(perform(TestUnhandled(17)),
+         fun (_operation, _resume): #false)
+  ~matches Request(TestUnhandled(17), _)
+
+// An inner handler forwards operations owned by an enclosing handler.
+def nested_subject:
+  effect:
+    let value <- perform(TestInner(40))
+    let _ <- perform(TestOuter())
+    return value
+def nested:
+  handle(handle(nested_subject,
+                fun (operation, resume):
+                  match operation
+                  | TestInner(value): resume(value + 1)
+                  | ~else: #false),
+         fun (operation, resume):
+           match operation
+           | TestOuter(): resume(#void)
+           | ~else: #false)
+check pure_value(nested) ~is 41
+
+// Two expansions of `reader_effect` retain distinct operation identities.
+def dual_reader_subject:
+  effect:
+    let a <- TestReaderA.ask()
+    let b <- TestReaderB.ask()
+    return [a, b]
+check:
+  pure_value(TestReaderA.handle(5, TestReaderB.handle(8, dual_reader_subject)))
+  ~is [5, 8]
+
+// Two expansions of `state_effect` retain distinct operation identities.
+def dual_state_subject:
+  effect:
+    let a <- TestStateA.get()
+    let b <- TestStateB.get()
+    let _ <- TestStateA.put(a + 1)
+    let _ <- TestStateB.modify(fun (value): value * 2)
+    let next_a <- TestStateA.get()
+    let next_b <- TestStateB.get()
+    return [a, b, next_a, next_b]
+check:
+  match TestStateA.handle(1, TestStateB.handle(10, dual_state_subject))
+  | Pure(TestStateA.Result(TestStateB.Result(observed, state_b), state_a)):
+      [observed, state_a, state_b]
+  | ~else: #false
+  ~is [[1, 10, 2, 20], 2, 20]
+
+// `local` changes one capability temporarily and restores its environment.
+def local_reader_subject:
+  effect:
+    let inside <- TestReaderA.local(fun (value): value + 1,
+                                    TestReaderA.ask())
+    let outside <- TestReaderA.ask()
+    return [inside, outside]
+check pure_value(TestReaderA.handle(5, local_reader_subject)) ~is [6, 5]
+
+// State forwards a failure it does not own; the failure handler then aborts.
+def failed_state_subject:
+  effect:
+    let _ <- TestStateA.put(9)
+    let _ <- TestFailure.fail(#'unify_mismatch)
+    TestStateA.put(10)
+check:
+  TestStateA.handle(0, failed_state_subject)
+  ~matches Request(_, _)
+check:
+  TestFailure.handle(TestStateA.handle(0, failed_state_subject))
+  ~matches TestFailure.Failed(#'unify_mismatch)

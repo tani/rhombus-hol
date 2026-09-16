@@ -1,0 +1,79 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+// `bool` viewed as a two-constructor datatype, so that `#true` and
+// `#false` are usable as patterns.
+//
+// `bool` is a primitive type of the kernel, not a declaration, so there is
+// nothing to carve out of `unit`/`prod`/`sum` (`datatype_gen.rhm`) or out of
+// the labelled trees over `num` (`datatype_rec.rhm`). Everything a
+// `DatatypeSpec` needs is nonetheless *derivable*, because `BOOL_CASES_AX`
+// already says exactly what a nullary-constructor `cases` theorem says:
+//
+//   BOOL_CASES_AX   |- !t. (t === true) or (t === false)
+//   cases           |- !x. (x === C1) or ... or (x === Cn)
+//
+// so the axiom *is* the cases theorem at `n = 2`, and the rest follows from
+// it the same way it does for a declared datatype: distinctness from
+// `|- true` (a `true === false` hypothesis rewrites `|- true` to `|- false`),
+// induction by case analysis on `cases`, and the discriminators by the shared
+// `build_observers`. No `new_axiom` call happens here.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/logic/conv open
+  rhombus/hol/logic/drule open
+  rhombus/hol/datatype/datatype open
+  rhombus/hol/datatype/datatype_common open
+
+export:
+  bool_spec
+  build_bool_datatype_thms
+
+// The two kernel constants, in the order the `cases` axiom states them.
+def bool_spec:
+  DatatypeSpec(#'bool, [], [Ctor(#'true, []), Ctor(#'false, [])])
+
+fun ctor_term(i :: Int) :: Term:
+  (if i == 0 | tm_true | tm_false)
+
+// `|- not (true === false)`, from `|- true`: the hypothesis `true === false`
+// turns it into `|- false`.
+fun bool_distinct(thy :: Theory) :: Thm:
+  let eq = mk_eq(tm_true, tm_false)
+  NOT_INTRO(thy, DISCH(thy, eq, EQ_MP(ASSUME(thy, eq), TRUTH(thy))))
+
+// `|- !P. P(true) and P(false) ==> !x. P(x)`, by cases on `x`.
+fun bool_induction(thy :: Theory, cases :: Thm) :: Thm:
+  let bigP = mk_var(#'P, mk_fun(bool, bool))
+  fun at_ctor(i :: Int) :: Term: mk_comb(bigP, ctor_term(i))
+  let case_conj = mk_conj(at_ctor(0), at_ctor(1))
+  let per_ctor = CONJUNCTS(thy, ASSUME(thy, case_conj))
+  let xv = mk_var(#'x, bool)
+  let cases_x = SPEC(thy, xv, cases)
+  // From `x === Ci` and `P(Ci)`, congruence gives `P(x)`.
+  fun branch(i :: Int) :: Thm:
+    let eq = mk_eq(xv, ctor_term(i))
+    EQ_MP(AP_TERM(thy, bigP, SYM(thy, ASSUME(thy, eq))), per_ctor[i])
+  let px = DISJ_CASES(thy, cases_x, branch(0), branch(1))
+  GEN(thy, bigP, DISCH(thy, case_conj, GEN(thy, xv, px)))
+
+// `bool`'s facts, and the theory extended with the two discriminator
+// definitions `build_observers` introduces (`is_true`, `is_false`).
+fun build_bool_datatype_thms(thy :: Theory) :: values(Theory, DatatypeThms):
+  let cases = base_axiom(#'BOOL_CASES_AX)
+  let distinct = bool_distinct(thy)
+  // `build_observers` asks for the distinctness of an *ordered* pair of
+  // constructors; only the one orientation is derived, the other is its
+  // symmetric form.
+  fun ctor_distinct(i :: Int, j :: Int) :: Thm:
+    (if i < j | distinct | not_eq_sym(thy, distinct))
+  let (thy2, discriminators, selectors, elim_rules):
+    build_observers(thy, bool_spec, ctor_term, {}, ctor_distinct, cases)
+  values(thy2,
+         DatatypeThms(bool_spec, {}, [distinct],
+                      bool_induction(thy, cases), cases,
+                      discriminators, selectors, elim_rules))

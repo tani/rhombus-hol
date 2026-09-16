@@ -1,0 +1,213 @@
+#lang rhombus/static
+
+// The axiom of infinity and the natural numbers built on it. What this file
+// has to pin down is not that the three Peano
+// theorems are *stated* -- `new_axiom` could state them -- but that they are
+// derived, and what they cost: exactly one axiom beyond the base three, no
+// matter how much is built on top afterwards.
+
+import:
+  rhombus/hol/kernel open
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/logic/bool open
+  rhombus/hol/logic/drule open
+  rhombus/hol/logic/conv open
+  rhombus/hol/datatype/datatype open
+  "datatype_axiom_support.rhm" open
+  rhombus/hol/recursion/wellfounded open
+  rhombus/hol/frontend/driver open
+  "fixtures/nat_declared.rhm"!hol_theory as decl
+  rhombus/hol/datatype/infinity open
+
+def base = base_theory()
+def (thy, thms) = build_ind(base)
+
+// -- the price ---------------------------------------------------------------
+//
+// One axiom.  `IND_SUC`, `IND_0`, `NUM_REP`, `num`, `zero_num` and `suc_num`
+// all arrive through the definitional principles, so none of them adds to
+// this count, and neither do the three theorems below.
+check axioms_of(thy).length() ~is axioms_of(base).length() + 1
+
+
+// -- the three theorems ------------------------------------------------------
+//
+// Hypothesis-free: they hold outright, not under an assumption that some
+// earlier step quietly left open.
+check hyps_of(thms.suc_injective) ~is []
+check hyps_of(thms.suc_not_zero) ~is []
+check hyps_of(thms.induction) ~is []
+
+
+// -- the base theory is untouched --------------------------------------------
+//
+// `build_ind` extends the theory it is handed; it does not install anything
+// into the base every other module starts from.  Nothing pays for infinity
+// unless it asks for it.
+check axioms_of(base_theory()).length() ~is axioms_of(base).length()
+check type_arity(base_theory(), #'ind) ~is #false
+check type_arity(thy, #'ind) ~is 0
+check type_arity(thy, #'num) ~is 0
+
+// -- the theorems are usable -------------------------------------------------
+//
+// Induction specialised to a concrete predicate, and discharged: proving
+// `P zero` and the step really does give `!n. P n`, so the theorem is the
+// induction principle and not merely a term shaped like one.
+check:
+  let nty = mk_tyapp(#'num, [])
+  let n = mk_var(#'n, nty)
+  let zero = mk_const(#'zero_num, nty)
+  let p = mk_abs(n, mk_eq(n :~ Term, n))          // `\n. n = n`, trivially true
+  let at_p = SPEC(thy, p, thms.induction)
+  hyps_of(at_p)
+  ~is []
+
+// -- num is well-founded -----------------------------------------------------
+//
+// `num_pred m n` says `n` is `m`'s successor, so it is the relation recursion
+// on `num` descends along.  Its well-foundedness is what makes recursion on
+// `num` available at all, and it is derived from induction the same way a
+// datatype's subterm relation is -- via `prove_wf_from_induction`, not
+// postulated, so it costs nothing beyond the one axiom counted above.
+check hyps_of(thms.wf) ~is []
+
+// and it is usable by the machinery that consumes well-founded relations:
+// pulling it back along a measure is exactly what a `~measure` definition
+// needs, and yields a hypothesis-free theorem here.
+check:
+  let ity = mk_tyapp(#'ind, [])
+  let nty = mk_tyapp(#'num, [])
+  let mty = mk_fun(ity, nty)
+  let b = mk_var(#'b, ity)
+  let (thy2, _) = new_basic_definition(thy, mk_eq(mk_var(#'msr, mty),
+                                                  mk_abs(b, mk_const(#'zero_num, nty))))
+  let pulled = prove_wf_pullback(thy2, thms.wf, mk_const(#'msr, mty))
+  hyps_of(pulled)
+  ~is []
+
+// -- exhaustiveness ----------------------------------------------------------
+//
+// With this, every theorem a self-recursive `datatype` declaration postulates is
+// derived for `num`: constructors injective, constructors distinct, every
+// value built by one of them, and induction.
+check hyps_of(thms.cases) ~is []
+
+// -- what that is worth ------------------------------------------------------
+//
+// `fixtures/nat_declared.rhm` declares the same type the ordinary way, and
+// since the declaration is now *derived* too (`datatype_rec.rhm`, wired in
+// `driver.rhm`) the two routes have fully converged: both cost exactly the
+// shared infinity axiom, which is in the base theory once however many
+// datatypes a module declares.
+//
+// Before the wiring this figure was thirteen, the extra ten being the
+// characterisation the schema used to assume; it then stood at three until
+// the subterm relation's two equations were derived as well.
+check:
+  let declared :~ HolState = decl.theory
+  [axioms_of(declared.ctx.thy).length() - axioms_of(base).length(),
+   axioms_of(thy).length() - axioms_of(base).length()]
+  ~is [1, 1]
+
+// -- recursion over num ------------------------------------------------------
+//
+// The primitive recursion theorem, and the named combinator it comes with.
+// This is what makes `num` a base to build on rather than a type with some
+// theorems attached: every function defined by recursion on the naturals is
+// an instance of it.  It is `WFREC` -- already derived in `wfrec.rhm` --
+// applied to `num_pred` and a step function, so it adds no axiom either.
+def (rthy, rec) = build_num_recursion(thy, thms)
+
+check axioms_of(rthy).length() ~is axioms_of(base).length() + 1
+check hyps_of(rec.existence) ~is []
+check hyps_of(rec.at_zero) ~is []
+check hyps_of(rec.at_suc) ~is []
+
+
+// and it is usable: an actual recursive function over `num`, defined with
+// `new_basic_definition` and its two clausal equations *proved*.  Nothing
+// here is postulated, and the theory still carries the one axiom.
+check:
+  let nty = mk_tyapp(#'num, [])
+  let zero = mk_const(#'zero_num, nty)
+  let suc = mk_const(#'suc_num, mk_fun(nty, nty))
+  let a = mk_var(#'a, nty)
+  let n = mk_var(#'n, nty)
+  let step = mk_abs(a, mk_abs(n, mk_comb(suc, mk_comb(suc, a))))
+  let rec_ty = mk_fun(nty, mk_fun(mk_fun(nty, mk_fun(nty, nty)),
+                                  mk_fun(nty, nty)))
+  let num_rec = mk_const(#'num_rec, rec_ty)
+  let (dthy, def_dbl):
+    new_basic_definition(rthy, mk_eq(mk_var(#'double, mk_fun(nty, nty)),
+                                     list_mk_comb(num_rec, [zero, step])))
+  let at_n = SPEC(dthy, n,
+                  SPECL(dthy, [zero, step],
+                        INST_TYPE(dthy, {#'b: nty}, rec.at_suc)))
+  let eq_zero:
+    TRANS(unfold_def(dthy, def_dbl, [zero]),
+          SPECL(dthy, [zero, step],
+                INST_TYPE(dthy, {#'b: nty}, rec.at_zero)))
+  let eq_suc:
+    let unf_n = unfold_def(dthy, def_dbl, [n :~ Term])
+    TRANS(BETA_RULE(dthy, TRANS(unfold_def(dthy, def_dbl,
+                                           [mk_comb(suc, n)]), at_n)),
+          AP_TERM(dthy, suc, AP_TERM(dthy, suc, SYM(dthy, unf_n))))
+  [hyps_of(eq_zero).length(),
+   hyps_of(eq_suc).length(),
+   axioms_of(dthy).length() - axioms_of(base).length()]
+  ~is [0, 0, 1]
+
+// -- num packaged as a datatype ----------------------------------------------
+//
+// Everything a self-recursive `datatype` declaration installs, for `num`, derived:
+// the subterm relation with its equations and its well-foundedness, plus the
+// full `DatatypeThms`. This is not about `num` being special -- it is the
+// exact shape needed for an arbitrary recursive datatype,
+// built once by hand so that the target is a thing that exists rather than a
+// description of one.
+def (dthy, nd) = build_num_datatype(rthy, thms, rec)
+def dt :~ DatatypeThms = nd.thms
+
+// `wf_lt` comes from `subterm.rhm`'s own `prove_wf_t_lt`, unmodified: the
+// derived type does not merely resemble what the machinery consumes, it is
+// accepted by it.
+check hyps_of(nd.wf_lt) ~is []
+check nd.lt_equations.length() ~is 2
+
+// nothing in the package is conditional, and none of it cost an axiom
+check:
+  let all = [nd.wf_lt] ++ nd.lt_equations
+              ++ [dt.induction, dt.cases, dt.injectivity[#'suc_num]]
+              ++ dt.distinctness ++ dt.discriminators ++ dt.selectors
+              ++ dt.elim_rules
+  [all.length(),
+   for values(m = 0) (t in all): math.max(m, hyps_of(t :~ Thm).length()),
+   axioms_of(dthy).length() - axioms_of(base).length()]
+  ~is [14, 0, 1]
+
+// -- and it is the same package the axiom schema would postulate -------------
+//
+// The differential that makes the claim precise: run `datatype_axioms` on the
+// same spec and compare every statement. They agree exactly -- so this is the
+// same theory, reached by proof instead of by assumption. The schema adds 11
+// axioms to say it; the derivation adds none beyond the one for infinity,
+// which is shared and not per-type.
+def (athy, axiomatic0) = datatype_axioms(base, num_spec())
+def axiomatic :~ DatatypeThms = axiomatic0
+
+check axioms_of(athy).length() - axioms_of(base).length() ~is 11
+
+check:
+  let derived = [dt.induction, dt.cases, dt.injectivity[#'suc_num]]
+                  ++ dt.distinctness ++ dt.discriminators ++ dt.selectors
+                  ++ dt.elim_rules
+  let posited = [axiomatic.induction, axiomatic.cases,
+                 axiomatic.injectivity[#'suc_num]]
+                  ++ axiomatic.distinctness ++ axiomatic.discriminators
+                  ++ axiomatic.selectors ++ axiomatic.elim_rules
+  [derived.length() == posited.length(),
+   for values(same = #true) (a in derived, b in posited):
+     same && concl_of(a :~ Thm) == concl_of(b :~ Thm)]
+  ~is [#true, #true]

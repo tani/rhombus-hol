@@ -769,6 +769,80 @@ lemma code_nat_lit_conv_erasure [simp]:
   "erase_code_result (code_nat_lit_conv thy n) = nat_lit_conv thy n"
   by (simp add: code_nat_lit_conv_def)
 
+definition code_nat_lit_eq_conv ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> hthm code_result" where
+  "code_nat_lit_eq_conv thy zero_not_succ succ_injective m n =
+    (case nat_lit_eq_conv thy zero_not_succ succ_injective m n of
+       Some th \<Rightarrow> CodeSuccess th
+     | None \<Rightarrow> CodeFailure CodeExtensionRejected)"
+
+lemma code_nat_lit_eq_conv_erasure [simp]:
+  "erase_code_result (code_nat_lit_eq_conv thy zns si m n) =
+    nat_lit_eq_conv thy zns si m n"
+  by (simp add: code_nat_lit_eq_conv_def)
+
+definition code_nat_lit_add_conv ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> hthm code_result" where
+  "code_nat_lit_add_conv thy add_zero add_succ m n =
+    (case nat_lit_add_conv thy add_zero add_succ m n of
+       Some th \<Rightarrow> CodeSuccess th
+     | None \<Rightarrow> CodeFailure CodeExtensionRejected)"
+
+definition code_nat_lit_mul_conv ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> hthm code_result" where
+  "code_nat_lit_mul_conv thy add_zero add_succ mul_zero mul_succ m n =
+    (case nat_lit_mul_conv thy add_zero add_succ mul_zero mul_succ m n of
+       Some th \<Rightarrow> CodeSuccess th
+     | None \<Rightarrow> CodeFailure CodeExtensionRejected)"
+
+definition code_nat_lit_le_conv ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> hthm code_result" where
+  "code_nat_lit_le_conv thy le_zero le_succ_zero le_succ_succ m n =
+    (case nat_lit_le_conv thy le_zero le_succ_zero le_succ_succ m n of
+       Some th \<Rightarrow> CodeSuccess th
+     | None \<Rightarrow> CodeFailure CodeExtensionRejected)"
+
+definition code_nat_lit_sub_conv ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> hthm code_result" where
+  "code_nat_lit_sub_conv thy sub_zero sub_succ_zero sub_succ_succ m n =
+    (case nat_lit_sub_conv thy sub_zero sub_succ_zero sub_succ_succ m n of
+       Some th \<Rightarrow> CodeSuccess th
+     | None \<Rightarrow> CodeFailure CodeExtensionRejected)"
+
+definition code_nat_lit_pow_conv ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> hthm code_result" where
+  "code_nat_lit_pow_conv thy add_zero add_succ mul_zero mul_succ pow_zero pow_succ
+      base exponent =
+    (case nat_lit_pow_conv thy add_zero add_succ mul_zero mul_succ pow_zero pow_succ
+        base exponent of
+       Some th \<Rightarrow> CodeSuccess th
+     | None \<Rightarrow> CodeFailure CodeExtensionRejected)"
+
+lemma code_nat_lit_add_conv_erasure [simp]:
+  "erase_code_result (code_nat_lit_add_conv thy az ass m n) =
+    nat_lit_add_conv thy az ass m n"
+  by (simp add: code_nat_lit_add_conv_def)
+
+lemma code_nat_lit_mul_conv_erasure [simp]:
+  "erase_code_result (code_nat_lit_mul_conv thy az ass mz ms m n) =
+    nat_lit_mul_conv thy az ass mz ms m n"
+  by (simp add: code_nat_lit_mul_conv_def)
+
+lemma code_nat_lit_le_conv_erasure [simp]:
+  "erase_code_result (code_nat_lit_le_conv thy lz lsz lss m n) =
+    nat_lit_le_conv thy lz lsz lss m n"
+  by (simp add: code_nat_lit_le_conv_def)
+
+lemma code_nat_lit_sub_conv_erasure [simp]:
+  "erase_code_result (code_nat_lit_sub_conv thy sz ssz sss m n) =
+    nat_lit_sub_conv thy sz ssz sss m n"
+  by (simp add: code_nat_lit_sub_conv_def)
+
+lemma code_nat_lit_pow_conv_erasure [simp]:
+  "erase_code_result (code_nat_lit_pow_conv thy az ass mz ms pz ps b e) =
+    nat_lit_pow_conv thy az ass mz ms pz ps b e"
+  by (simp add: code_nat_lit_pow_conv_def)
+
 definition code_new_nat_type ::
   "nat \<Rightarrow> htheory \<Rightarrow> (htheory \<times> hthm \<times> hthm \<times> hthm) code_result" where
   "code_new_nat_type fresh thy =

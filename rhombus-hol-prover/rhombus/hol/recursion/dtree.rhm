@@ -1,0 +1,575 @@
+#lang rhombus/static
+
+// The pattern-matching decision tree, and the compiler that builds it.
+//
+// One IR, several consumers.  Before this module there were two separate
+// walks over a function's pattern matrix, each with its own idea of what a
+// pattern was allowed to look like:
+//
+//   `recdef.rhm`  checked exhaustiveness and non-overlap by splitting the
+//                 matrix, then threw the split away;
+//   `stepfn.rhm`  rebuilt a one-level-deep `cond` chain for `WFREC`'s step
+//                 function, zipping each clause's pattern variables against
+//                 its constructor's own fields -- which only works when the
+//                 pattern *is* one level deep, hence its shallow guard.
+//
+// Compiling once and sharing the result removes that guard: a nested
+// pattern is just a `Switch` whose branch holds another `Switch`, and the
+// step function reads a variable out of the scrutinee by following the
+// selector path the tree already recorded rather than by field position.
+//
+// The tree preserves source order. Constructor switches partition a declared
+// datatype exhaustively; literal switches test the listed atomic NatLits in
+// order and retain an explicit complement/default region. A row reaching
+// several regions can win in each, while a row shadowed everywhere is still
+// rejected as unreachable.
+//
+// Clauses are referred to by index rather than by value, so this module
+// sits below `recdef.rhm` (which owns `DefClause`) rather than beside it.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  rhombus/hol/logic/conv open
+  rhombus/hol/logic/bool open
+  rhombus/hol/datatype/datatype open
+
+export:
+  DTBinding
+  DecisionTree
+  DTLeaf
+  DTSwitch
+  DTBranch
+  DTLiteralSwitch
+  DTLiteralBranch
+  path_term
+  compile_patterns
+  literal_equality_thms
+  path_subterm
+  LeafShape
+  leaf_shapes
+  row_vars
+
+// -- paths ----------------------------------------------------------------
+
+// One selector application: read field `field` out of a value already known
+// to be a `ctor` of `self_ty`.  A path is a chain of these hanging off
+// argument `arg`.
+class DTStep(ctor :: Ctor, field :: Int, self_ty :: HType)
+
+class DTPath(arg :: Int, steps :: List.of(DTStep))
+
+// The term a path denotes, given the terms standing for the arguments:
+// `args[p.arg]` with one selector wrapped around it per step.  This is the
+// only place the IR touches selector constants, and it is what lets a
+// consumer read a deeply nested pattern variable out of the scrutinee
+// without ever looking at the patterns.
+fun path_term(dt_of :: Function.of_arity(1), args :: List.of(Term),
+              p :: DTPath) :: Term:
+  for values(t :~ Term = args[p.arg]) (s in p.steps):
+    let s :~ DTStep = s
+    let spec :~ DatatypeSpec = dt_of(s.self_ty)
+    let c :~ Ctor = s.ctor
+    let f :~ Field = c.fields[s.field]
+    let fld_ty = ctor_field_types(spec, s.self_ty, c)[s.field]
+    mk_comb(mk_const(selector_name(c, f), mk_fun(s.self_ty, fld_ty)), t)
+
+// -- the tree -------------------------------------------------------------
+
+// A pattern variable of the clause, and where in the scrutinee it lives.
+class DTBinding(var :: FVar, path :: DTPath)
+
+class DecisionTree():
+  nonfinal
+
+// Exactly one clause matches here; `clause` is its index in the list handed
+// to `compile_patterns`.  `bindings` covers every variable that clause's
+// patterns bind, including ones whose position a *sibling* clause forced a
+// split on: a bare `xs` still binds `xs` to the value as it stood before
+// the split, which is what the clause body means by it.
+class DTLeaf(clause :: Int, bindings :: List.of(DTBinding)):
+  extends DecisionTree
+
+// Test the value at `path` (of type `self_ty`) against each constructor of
+// its datatype.  `branches` lists every constructor of that type, in the
+// datatype's own declaration order -- exhaustiveness is a property of how
+// the tree was built, not something a consumer re-checks.
+//
+// `branches` is annotated as a plain `List` rather than
+// `List.of(DTBranch)`: annotations resolve at expansion time, and
+// `DTBranch` names a `DecisionTree` in turn, so the two cannot both be
+// annotated in terms of each other.  Every element is a `DTBranch`.
+class DTSwitch(path :: DTPath, self_ty :: HType, branches :: List):
+  extends DecisionTree
+
+class DTBranch(ctor :: Ctor, tree :: DecisionTree)
+
+// Test the value at `path` against a finite set of atomic natural literals.
+// Each branch refines the path to its literal. `default` is the complement
+// region, reached only when the value differs from every branch literal.
+// As with `DTSwitch`, the branch list is unannotated because it is mutually
+// recursive with `DecisionTree`; every element is a `DTLiteralBranch`.
+class DTLiteralSwitch(path :: DTPath, branches :: List,
+                      default :: DecisionTree):
+  extends DecisionTree
+
+class DTLiteralBranch(literal :: NatLit, tree :: DecisionTree)
+
+
+// -- compilation ----------------------------------------------------------
+
+// A row of the matrix being compiled: the patterns still to be examined,
+// the path to each, the bindings already settled, and which clause it is.
+class Row(nodes :: List.of(Term), paths :: List.of(DTPath),
+          bound :: List.of(DTBinding), clause :: Int)
+
+// `c`'s field types, instantiated at the concrete type arguments `self_ty`
+// actually carries -- `dt`'s own parameters name the constructor's generic
+// field types, so a positional substitution turns them concrete (`List.of(?a)`
+// instantiated at `List.of(Nat)` turns `Cons`'s `tail :: List.of(?a)` field into
+// `List.of(Nat)`).
+fun ctor_field_types(dt :: DatatypeSpec, self_ty :: HType,
+                     c :: Ctor) :: List.of(HType):
+  let args :~ List = (match self_ty | TyApp(_, a): a | ~else: [])
+  let theta = for values(m :~ Map = {}) (p in dt.params, a in args):
+                m ++ {p :~ Symbol: a :~ HType}
+  c.fields.map(fun (f :: Field): type_subst(theta, f.ty))
+
+// `c`'s own type at the concrete type arguments `self_ty` carries, rather
+// than at the datatype's schematic parameters: a definition may match on a
+// *instance* of a polymorphic datatype (`List.of(Nat)`), and a constructor
+// term built at the schematic type would not typecheck against it.
+fun ctor_type_at(dt :: DatatypeSpec, self_ty :: HType, c :: Ctor) :: HType:
+  for values(t :~ HType = self_ty) (f in ctor_field_types(dt, self_ty, c).reverse()):
+    mk_fun(f :~ HType, t)
+
+// The constructor a pattern matches, or `#false` for variables and atomic
+// literals. Literals are split by `DTLiteralSwitch`, not mistaken for
+// nullary constructors.
+fun pattern_ctor(p :: Term) :: maybe(Symbol):
+  match p
+  | FVar(_, _): #false
+  | NatLit(_): #false
+  | ~else:
+      let (head, _) = strip_comb(p)
+      match head
+      | Const(n, _): n
+      | ~else: #false
+
+// Compile a pattern matrix into a decision tree, raising on a matrix that
+// is not exhaustive, that has a clause no argument shape can ever reach, or
+// that matches on something which is not a declared datatype.
+// `clause_pats[i]` is clause `i`'s pattern row, one pattern per argument.
+// `show_clause(i)` renders clause `i` for the unreachable-clause message;
+// the caller owns clause syntax, this module does not.
+//
+// Clauses are *ordered*: where several match, the earliest wins, the same
+// way the executable `match` the same source compiles to resolves them.
+// Overlap is therefore not an error -- it is how a catch-all after a
+// specific case is written.  What is still an error is a clause that wins
+// nowhere, since that is a mistake in every case and silently dropping it
+// would leave a definition whose text says more than its equations do.
+fun compile_patterns(thy :: Theory, who :: Symbol, name :: Symbol,
+                     clause_pats :: List.of(List.of(Term)),
+                     dts :: Map.of(Symbol, DatatypeSpec),
+                     ~show_clause: show_clause :: Function.of_arity(1))
+     :: DecisionTree:
+  let rows = for List (pats in clause_pats, i in List.iota(clause_pats.length())):
+               Row(pats :~ List,
+                   for List (k in List.iota((pats :~ List).length())): DTPath(k, []),
+                   [],
+                   i)
+  let tree = compile_rows(thy, who, name, dts, rows, clause_pats, show_clause)
+  let winners = for values(acc :~ Set = Set()) (l in tree_leaves(tree)):
+                  acc ++ {(l :~ DTLeaf).clause}
+  for (i in List.iota(clause_pats.length())):
+    unless i in winners
+    | error(~who: who, "this clause can never match",
+            error.val(~label: "name", name),
+            error.val(~label: "clause", show_clause(i)),
+            error.val(~label: "hint",
+                      "an earlier clause already covers every argument "
+                        ++ "shape this one does"))
+  tree
+
+fun compile_rows(thy :: Theory, who :: Symbol, name :: Symbol,
+                 dts :: Map.of(Symbol, DatatypeSpec),
+                 rows :: List.of(Row),
+                 clause_pats :: List.of(List.of(Term)),
+                 show_clause) :: DecisionTree:
+  match find_splittable(rows)
+  | #false:
+      // Nothing left to split on: every row is a variable at every
+      // position, so every row here matches.  The first one wins.
+      //
+      // Rows are built in clause order and every filter below preserves
+      // it, so `rows[0]` is the earliest clause that reaches this leaf --
+      // which is exactly what the executable `match` does with the same
+      // clauses.  A clause that wins at no leaf at all is reported by
+      // `compile_patterns`, not here: unreachable is a mistake, but being
+      // shadowed at *some* argument shape is the point of ordering.
+      let r :~ Row = rows[0]
+      DTLeaf(r.clause, r.bound ++ leaf_bindings(who, r, clause_pats))
+  | idx:
+      let idx :~ Int = idx
+      let path = (rows[0] :~ Row).paths[idx]
+      cond
+      | (for any (r in rows):
+           pattern_ctor((r :~ Row).nodes[idx]) != #false):
+          let self_ty = type_of((rows[0] :~ Row).nodes[idx])
+          let dt = datatype_at_type(who, name, dts, self_ty)
+          let ctor_names = dt.ctors.map(fun (k :: Ctor): k.name)
+          for (r in rows):
+            let r :~ Row = r
+            match r.nodes[idx]
+            | NatLit(_):
+                unless self_ty == mk_tyapp(#'Nat, [])
+                       && ctor_names.length() == 2
+                       && ctor_names.contains(#'zero)
+                       && ctor_names.contains(#'succ)
+                | error(~who: who, "a natural literal pattern is mixed with "
+                                      ++ "constructors of a different datatype",
+                        error.val(~label: "name", name))
+            | ~else:
+                match pattern_ctor(r.nodes[idx])
+                | #false: #void
+                | c:
+                    unless (for any (k in dt.ctors):
+                              (k :~ Ctor).name == (c :~ Symbol))
+                    | error(~who: who,
+                            "a constructor that does not build the matched type",
+                            error.val(~label: "constructor", c))
+          let branches = for List (c in dt.ctors):
+                           let c :~ Ctor = c
+                           DTBranch(c, compile_branch(thy, who, name, dts, rows,
+                                                      idx, self_ty, dt, c,
+                                                      clause_pats, show_clause))
+          DTSwitch(path, self_ty, branches)
+      | ~else:
+          compile_literal_switch(thy, who, name, dts, rows, idx,
+                                 clause_pats, show_clause)
+
+fun compile_branch(thy :: Theory, who :: Symbol, name :: Symbol,
+                   dts :: Map.of(Symbol, DatatypeSpec), rows :: List.of(Row),
+                   idx :: Int, self_ty :: HType, dt :: DatatypeSpec,
+                   c :: Ctor, clause_pats :: List.of(List.of(Term)),
+                   show_clause) :: DecisionTree:
+  let field_tys = ctor_field_types(dt, self_ty, c)
+  let base :~ DTPath = (rows[0] :~ Row).paths[idx]
+  let sub_paths = for List (j in List.iota(c.fields.length())):
+                    DTPath(base.arg, base.steps ++ [DTStep(c, j, self_ty)])
+  let branch = for values(acc :~ List = []) (r in rows):
+                 let r :~ Row = r
+                 match r.nodes[idx]
+                 | FVar(_, _):
+                     // A variable here matches every constructor.  It is
+                     // refined into `c`'s shape with fresh placeholders so
+                     // the row keeps the same width as every other row in
+                     // this branch -- and the variable itself is settled
+                     // now, bound to the value as it stood before the split.
+                     let v :~ FVar = r.nodes[idx]
+                     // Generative, not a fixed name: two placeholders in
+                     // one row must not be the same variable, and none of
+                     // them may coincide with a source variable.
+                     let placeholders = field_tys.map(
+                       fun (ty): mk_var(Symbol.gen("_match"), ty :~ HType) :~ Term)
+                     acc ++ [Row(splice(r.nodes, idx, placeholders),
+                                 splice_paths(r.paths, idx, sub_paths),
+                                 r.bound ++ [DTBinding(v, r.paths[idx])],
+                                 r.clause)]
+                 | NatLit(value):
+                     // Route an atomic literal through one constructor layer.
+                     // The residual is another NatLit, never a successor chain.
+                     cond
+                     | c.name == #'zero && value == 0:
+                         acc ++ [Row(splice(r.nodes, idx, []),
+                                     splice_paths(r.paths, idx, []),
+                                     r.bound, r.clause)]
+                     | c.name == #'succ && value > 0:
+                         let residual :~ Term = mk_nat_lit(thy, value - 1)
+                         acc ++ [Row(splice(r.nodes, idx, [residual]),
+                                     splice_paths(r.paths, idx, sub_paths),
+                                     r.bound, r.clause)]
+                     | ~else: acc
+                 | ~else:
+                     match pattern_ctor(r.nodes[idx])
+                     | cn when cn == c.name:
+                         let (_, args) = strip_comb(r.nodes[idx])
+                         acc ++ [Row(splice(r.nodes, idx, args),
+                                     splice_paths(r.paths, idx, sub_paths),
+                                     r.bound, r.clause)]
+                     | ~else: acc
+  when branch.length() == 0
+  | error(~who: who, "definition is not exhaustive",
+          error.val(~label: "name", name),
+          error.val(~label: "missing constructor", c.name))
+  compile_rows(thy, who, name, dts, branch, clause_pats, show_clause)
+
+
+// Split a column containing literals (and variables) into one exact branch
+// per distinct literal plus a complement/default branch. Literal order is
+// first occurrence order, which keeps the generated conditional faithful to
+// the source matrix while deduplicating repeated tests.
+fun compile_literal_switch(thy :: Theory, who :: Symbol, name :: Symbol,
+                           dts :: Map.of(Symbol, DatatypeSpec),
+                           rows :: List.of(Row), idx :: Int,
+                           clause_pats :: List.of(List.of(Term)),
+                           show_clause) :: DecisionTree:
+  let base_path = (rows[0] :~ Row).paths[idx]
+  let literals:
+    for values(acc :~ List = []) (r in rows):
+      match (r :~ Row).nodes[idx]
+      | n :: NatLit: (if acc.contains(n) | acc | acc ++ [n])
+      | FVar(_, _): acc
+      | ~else:
+          error(~who: who, "not an atomic literal pattern",
+                error.val(~label: "pattern", show((r :~ Row).nodes[idx])))
+  let branches:
+    for List (literal in literals):
+      let literal :~ NatLit = literal
+      let selected:
+        for values(acc :~ List = []) (r in rows):
+          let r :~ Row = r
+          match r.nodes[idx]
+          | v :: FVar:
+              acc ++ [Row(splice(r.nodes, idx, []),
+                          splice_paths(r.paths, idx, []),
+                          r.bound ++ [DTBinding(v, r.paths[idx])],
+                          r.clause)]
+          | n :: NatLit when n == literal:
+              acc ++ [Row(splice(r.nodes, idx, []),
+                          splice_paths(r.paths, idx, []),
+                          r.bound, r.clause)]
+          | ~else: acc
+      DTLiteralBranch(
+        literal,
+        compile_rows(thy, who, name, dts, selected, clause_pats, show_clause))
+  let fallback:
+    for values(acc :~ List = []) (r in rows):
+      let r :~ Row = r
+      match r.nodes[idx]
+      | v :: FVar:
+          acc ++ [Row(splice(r.nodes, idx, []),
+                      splice_paths(r.paths, idx, []),
+                      r.bound ++ [DTBinding(v, r.paths[idx])],
+                      r.clause)]
+      | ~else: acc
+  when fallback.length() == 0
+  | error(~who: who, "definition is not exhaustive",
+          error.val(~label: "name", name),
+          error.val(~label: "missing case",
+                    "a value different from every listed literal"))
+  DTLiteralSwitch(
+    base_path, branches,
+    compile_rows(thy, who, name, dts, fallback, clause_pats, show_clause))
+
+// Every remaining node that is one of this clause's own pattern variables,
+// paired with where it sits.  Placeholders introduced for a wildcard row
+// are skipped: they are not the clause's variables and nothing refers to
+// them.
+fun leaf_bindings(who :: Symbol, r :: Row,
+                  clause_pats :: List.of(List.of(Term))) :: List.of(DTBinding):
+  let own = pattern_row_vars(who, clause_pats[r.clause])
+  for values(acc :~ List = []) (nd in r.nodes, p in r.paths):
+    match nd
+    | FVar(_, _) when own.contains(nd :~ FVar):
+        acc ++ [DTBinding(nd :~ FVar, p :~ DTPath)]
+    | ~else: acc
+
+// The variables a pattern row binds, nested patterns included.
+fun pattern_row_vars(who :: Symbol, pats :: List.of(Term)) :: List.of(FVar):
+  fun walk(p :: Term) :: List.of(FVar):
+    match p
+    | FVar(_, _): [p :~ FVar]
+    | NatLit(_): []
+    | ~else:
+        let (head, args) = strip_comb(p)
+        match head
+        | Const(_, _): for values(acc :~ List = []) (a in args): acc ++ walk(a)
+        | ~else:
+            error(~who: who, "not a pattern",
+                  error.val(~label: "pattern", show(p)))
+  for values(acc :~ List = []) (p in pats): acc ++ walk(p)
+
+// A position where some row has a constructor or literal test, or `#false`
+// if every row is a variable at every position.
+fun find_splittable(rows :: List.of(Row)) :: maybe(Int):
+  let width = (rows[0] :~ Row).nodes.length()
+  recur loop (i = 0):
+    cond
+    | i >= width: #false
+    | ~else:
+        let refutable = for any (r in rows):
+                           !((r :~ Row).nodes[i] is_a FVar)
+        (if refutable | i | loop(i + 1))
+
+fun splice(xs :: List.of(Term), i :: Int, repl :: List.of(Term)) :: List.of(Term):
+  for values(acc :~ List = []) (x in xs, k in List.iota(xs.length())):
+    (if k == i | acc ++ repl | acc ++ [x])
+
+fun splice_paths(xs :: List.of(DTPath), i :: Int,
+                 repl :: List.of(DTPath)) :: List.of(DTPath):
+  for values(acc :~ List = []) (x in xs, k in List.iota(xs.length())):
+    (if k == i | acc ++ repl | acc ++ [x])
+
+fun datatype_at_type(who :: Symbol, name :: Symbol,
+                     dts :: Map.of(Symbol, DatatypeSpec),
+                     ty :: HType) :: DatatypeSpec:
+  let tyname = (match ty
+                | TyApp(n, _): n
+                | ~else:
+                    error(~who: who,
+                          "cannot match on an argument of variable type",
+                          error.val(~label: "name", name)))
+  match dts.get(tyname, #false)
+  | #false:
+      error(~who: who, "no datatype declaration for the matched type",
+            error.val(~label: "type", tyname))
+  | d: d :~ DatatypeSpec
+
+// Every leaf of the tree, left to right.
+fun tree_leaves(t :: DecisionTree) :: List.of(DTLeaf):
+  match t
+  | DTLeaf(_, _): [t :~ DTLeaf]
+  | DTSwitch(_, _, branches):
+      for values(acc :~ List = []) (b in branches):
+        acc ++ tree_leaves((b :~ DTBranch).tree)
+  | DTLiteralSwitch(_, branches, default):
+      let from_branches:
+        for values(acc :~ List = []) (b in branches):
+          acc ++ tree_leaves((b :~ DTLiteralBranch).tree)
+      from_branches ++ tree_leaves(default)
+
+// Every closed literal comparison a term consumer can encounter while
+// reducing this tree. `decide` is deliberately an injected proof-producing
+// capability: the tree knows which literals are compared, but not which
+// primitive natural-number evidence the native conversion requires.
+fun literal_equality_thms(thy :: Theory, t :: DecisionTree,
+                          decide :: Function.of_arity(2)) :: List.of(Thm):
+  fun add_unique(acc :: List.of(Thm), th :: Thm) :: List.of(Thm):
+    let present = for any (old in acc):
+                    concl_of(old :~ Thm) == concl_of(th)
+    (if present | acc | acc ++ [th])
+  fun go(t :: DecisionTree, acc :: List.of(Thm)) :: List.of(Thm):
+    match t
+    | DTLeaf(_, _): acc
+    | DTSwitch(_, _, branches):
+        for values(out :~ List.of(Thm) = acc) (b in branches):
+          go((b :~ DTBranch).tree, out)
+    | DTLiteralSwitch(_, branches, default):
+        let with_here:
+          for values(out :~ List.of(Thm) = acc) (scrut in branches):
+            let scrut :~ DTLiteralBranch = scrut
+            for values(out2 :~ List.of(Thm) = out) (test in branches):
+              let test :~ DTLiteralBranch = test
+              match decide(thy, mk_eq(scrut.literal, test.literal))
+              | th :: Thm: add_unique(out2, th)
+              | #false:
+                  error(~who: #'function,
+                        "the natural-literal equality conversion did not "
+                          ++ "decide a closed literal comparison")
+        let with_branches:
+          for values(out :~ List.of(Thm) = with_here) (b in branches):
+            go((b :~ DTLiteralBranch).tree, out)
+        go(default, with_branches)
+  go(t, [])
+
+// -- the shapes the equations are stated at ---------------------------------
+
+// The concrete subterm a path points at, given the concrete argument terms
+// -- once each has been refined far enough that every step on the path is a
+// literal constructor application, which the tree guarantees: a path's
+// steps are exactly the splits its own ancestors performed.  The
+// counterpart of `path_term`: the same position, reached by taking a
+// constructor apart rather than by wrapping a selector around it.
+fun path_subterm(args :: List.of(Term), p :: DTPath) :: Term:
+  for values(cur :~ Term = args[p.arg]) (s in p.steps):
+    let (_, sub) = strip_comb(cur)
+    sub[(s :~ DTStep).field]
+
+
+// A leaf's fully refined argument row, and which clause it belongs to.
+class LeafShape(clause :: Int, patterns :: List.of(Term),
+                bindings :: List.of(DTBinding),
+                guards :: List.of(Term))
+
+// One shape per leaf. These, not the clauses as written, are where a
+// definition's derived equations are stated, so ordered clauses retain their
+// earliest-match meaning.
+//
+// Where each clause reaches exactly one leaf this is the clause rows back
+// again, which is the common case.  It differs in two ways, both forced:
+//
+//   * a sibling clause splitting *below* a clause's own variable gives that
+//     clause one shape per branch of the split -- there is no closed form
+//     for `f(Cons(x, ys))` while a sibling is asking whether `ys` is `Nil`;
+//   * a clause shadowed by an earlier one at some shapes keeps only the
+//     shapes where it actually wins, which is what makes ordered clauses
+//     consistent at all: postulating `f(x) = e` beside an earlier
+//     `f(Nil) = e'` would say `e = e'`.
+// `guards` are the exact disequalities defining any literal-default regions
+// crossed on the way to the leaf. They are part of the derived equation:
+// dropping them would turn an ordered catch-all into an unconditional rule
+// that overlaps (and can contradict) the earlier literal clauses.
+fun leaf_shapes(dts :: Map.of(Symbol, DatatypeSpec), tree :: DecisionTree,
+                roots :: List.of(Term)) :: List.of(LeafShape):
+  fun go(t :: DecisionTree, concretes :: List.of(Term),
+         guards :: List.of(Term)) :: List.of(LeafShape):
+    match t
+    | DTLeaf(ci, bindings):
+        // Hand the clause's own names back wherever the clause named the
+        // position; the fresh variables that survive stand for positions
+        // the clause left to a sibling's split and never refers to.
+        let rename = for values(acc :~ List = []) (b in bindings):
+                       let b :~ DTBinding = b
+                       let w = path_subterm(concretes, b.path)
+                       cond
+                       | w is_a FVar: acc ++ [[b.var :~ Term, w :~ FVar]]
+                       | ~else: acc
+        let final_patterns = concretes.map(
+                               fun (c :: Term): inst_fvar(rename, c))
+        let final_guards = guards.map(
+                             fun (g :: Term): inst_fvar(rename, g))
+        [LeafShape(ci, final_patterns, bindings, final_guards)]
+    | DTSwitch(path, self_ty, branches):
+        let v :~ FVar = path_subterm(concretes, path)
+        let dspec :~ DatatypeSpec = datatype_at_type(#'function, #'function,
+                                                     dts, self_ty)
+        for values(acc :~ List = []) (b in branches):
+          let b :~ DTBranch = b
+          let c :~ Ctor = b.ctor
+          let ws = for List (ty in ctor_field_types(dspec, self_ty, c)):
+                     genvar(ty :~ HType) :~ Term
+          let cterm = list_mk_comb(
+                        mk_const(c.name, ctor_type_at(dspec, self_ty, c)), ws)
+          let theta = [[cterm, v]]
+          let refined = for List (t2 in concretes):
+                          inst_fvar(theta, t2 :~ Term)
+          let refined_guards = guards.map(
+                                 fun (g :: Term): inst_fvar(theta, g))
+          acc ++ go(b.tree, refined, refined_guards)
+    | DTLiteralSwitch(path, branches, default):
+        let v :~ FVar = path_subterm(concretes, path)
+        let branch_shapes:
+          for values(acc :~ List = []) (b in branches):
+            let b :~ DTLiteralBranch = b
+            let theta = [[b.literal :~ Term, v]]
+            let refined = for List (t2 in concretes):
+                            inst_fvar(theta, t2 :~ Term)
+            let refined_guards = guards.map(
+                                   fun (g :: Term): inst_fvar(theta, g))
+            acc ++ go(b.tree, refined, refined_guards)
+        let default_guards:
+          for values(acc :~ List = guards) (b in branches):
+            let b :~ DTLiteralBranch = b
+            acc ++ [mk_neg(mk_eq(v, b.literal))]
+        branch_shapes ++ go(default, concretes, default_guards)
+  go(tree, roots, [])
+
+// The free variables of a whole pattern row, left to right, no duplicates.
+fun row_vars(pats :: List.of(Term)) :: List.of(FVar):
+  for values(acc :~ List = []) (p in pats):
+    for values(a :~ List = acc) (v in free_vars(p)):
+      (if a.contains(v :~ FVar) | a | a ++ [v])

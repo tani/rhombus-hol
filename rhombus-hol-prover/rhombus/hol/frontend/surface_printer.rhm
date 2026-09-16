@@ -1,0 +1,102 @@
+#lang rhombus/static
+
+// Frontend rendering layered over the kernel's canonical printer. Notation
+// tables are explicit inputs; the kernel never imports or stores them.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/printer as canonical
+  "overload.rhm" open
+  rhombus/hol/frontend/type/registry open
+  rhombus/hol/frontend/type/print open
+
+export:
+  SurfaceNotation
+  standard_surface_notations
+  show_surface
+
+class SurfaceNotation(function :: Symbol,
+                      spelling :: String,
+                      precedence :: Int,
+                      associativity :: Symbol,
+                      prefix :: Boolean)
+
+fun standard_surface_notations() :: Map.of(Symbol, SurfaceNotation):
+  let entries = [
+    SurfaceNotation(#'add, "+", 80, #'left, #false),
+    SurfaceNotation(#'subtract, "-", 80, #'left, #false),
+    SurfaceNotation(#'negate, "-", 90, #'right, #true),
+    SurfaceNotation(#'multiply, "*", 85, #'left, #false),
+    SurfaceNotation(#'power, "**", 95, #'right, #false),
+    SurfaceNotation(#'less, "<", 75, #'none, #false),
+    SurfaceNotation(#'less_equal, "<=", 75, #'none, #false),
+    SurfaceNotation(#'greater, ">", 75, #'none, #false),
+    SurfaceNotation(#'greater_equal, ">=", 75, #'none, #false),
+    SurfaceNotation(#'append, "++", 78, #'right, #false),
+    SurfaceNotation(#'member, "in", 75, #'none, #false),
+    SurfaceNotation(#'union, "union", 76, #'left, #false),
+    SurfaceNotation(#'intersection, "intersect", 77, #'left, #false)
+  ]
+  for values(out :~ Map = {}) (entry in entries):
+    let entry :~ SurfaceNotation = entry
+    out ++ {entry.function: entry}
+
+fun show_surface(
+      registry :: OverloadRegistry,
+      notations :: Map.of(Symbol, SurfaceNotation),
+      term :: Term,
+      ~type_constructors: type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry())
+     :: String:
+  fun canonical_show(value :: Term) :: String:
+    canonical.show_with_type(
+      value,
+      fun (type :: HType): type_to_surface_string(type_constructors, type))
+  fun parenthesize(text :: String, have :: Int, want :: Int) :: String:
+    if have < want | "(" ++ text ++ ")" | text
+  fun surface_arguments(method :: OverloadMethod,
+                        implementation_args :: List.of(Term)) :: List.of(Term):
+    for List (surface_index in 0 .. method.argument_order.length()):
+      recur locate (implementation_index = 0):
+        cond
+        | method.argument_order[implementation_index] == surface_index:
+            implementation_args[implementation_index]
+        | ~else: locate(implementation_index + 1)
+  fun method_for(name :: Symbol, arity :: NonnegInt)
+       :: maybe(OverloadMethod):
+    for values(found :~ maybe(OverloadMethod) = #false) (method in registry.methods):
+      let method :~ OverloadMethod = method
+      (if !found
+             && method.constant == name
+             && method.argument_types.length() == arity
+             && notations.get(method.function, #false)
+       | method
+       | found)
+  fun render(value :: Term, want :: Int) :: String:
+    let (head, args) = strip_comb(value)
+    match head
+    | Const(name, _):
+        match method_for(name, args.length())
+        | method :: OverloadMethod:
+            let notation :~ SurfaceNotation = notations[method.function]
+            let ordered = surface_arguments(method, args)
+            cond
+            | notation.prefix && ordered.length() == 1:
+                parenthesize(
+                  notation.spelling ++ render(ordered[0], notation.precedence),
+                  notation.precedence, want)
+            | !notation.prefix && ordered.length() == 2:
+                let left_want = (if notation.associativity == #'left
+                                 | notation.precedence
+                                 | notation.precedence + 1)
+                let right_want = (if notation.associativity == #'right
+                                  | notation.precedence
+                                  | notation.precedence + 1)
+                parenthesize(
+                  render(ordered[0], left_want) ++ " " ++ notation.spelling
+                    ++ " " ++ render(ordered[1], right_want),
+                  notation.precedence, want)
+            | ~else: canonical_show(value)
+        | #false: canonical_show(value)
+    | ~else: canonical_show(value)
+  render(term, 0)

@@ -1,0 +1,11 @@
+#lang info
+
+(define collection 'multi)
+(define deps '("base"
+               ["rhombus-lib" #:version "1.1"]
+               "rhombus-hol-kernel"
+               "rhombus-hol-quickcheck"))
+(define pkg-desc "the derived layer of \"rhombus-hol\": tactics, conversions and the language surface, built over rhombus-hol-kernel")
+(define license '(0BSD AND BSD-2-Clause))
+(define version "0.1")
+(define language-families '("Rhombus"))

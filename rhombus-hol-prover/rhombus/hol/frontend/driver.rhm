@@ -1,0 +1,709 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+// ACL2 hint handling is a design reference; see THIRD_PARTY_NOTICES.
+
+
+// The glue the generated phase-1 code calls.
+//
+// Declaration macros accumulate encoded logical transitions while the source
+// body expands. Their module finalizer emits `def _hol_st0 = initial_state()`
+// and then one phase-1 `def _hol_stN = <step>(_hol_stN-1, ...)` per
+// declaration in the private `hol_theory` submodule. The logical state is
+// therefore an ordinary value in the user's compilation unit; only its
+// expansion-local description is held by the macros.
+//
+// Surface syntax is enforested by each declaration macro into Core values.
+// Driver steps receive those Core values and perform only theory-dependent
+// name resolution, type elaboration, checking, and installation.
+
+import:
+  lib("racket/base.rkt") as rb
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/names open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/datatype/bool_datatype open
+  rhombus/hol/datatype/datatype open
+  rhombus/hol/datatype/datatype_common open
+  rhombus/hol/datatype/datatype_gen open
+  rhombus/hol/datatype/datatype_rec open
+  rhombus/hol/datatype/infinity open
+  rhombus/hol/datatype/algebra open
+  rhombus/hol/recursion/recdef open
+  rhombus/hol/recursion/funcases open
+  rhombus/hol/recursion/subterm open
+  rhombus/hol/logic/ruledb open
+  rhombus/hol/logic/drule open
+  rhombus/hol/logic/conv open
+  rhombus/hol/logic/taut open
+  rhombus/hol/prover/waterfall open
+  rhombus/hol/recursion/wfrec open
+  rhombus/hol/recursion/terminate open
+  rhombus/hol/recursion/stepfn open
+  rhombus/hol/number/conv open
+  rhombus/hol/frontend/surface_core open
+  rhombus/hol/frontend/elab as elab
+  rhombus/hol/frontend/overload open
+  rhombus/hol/frontend/type/registry open
+  rhombus/hol/frontend/type/parse as type_parser
+  rhombus/hol/frontend/type/print open
+
+export:
+  hol_reraise
+  HolState
+  initial_state
+  add_datatype
+  add_function
+  add_theorem
+  add_overload_method_encoded
+  adopt
+
+// Failures reported from here happen while the user's module is being visited
+// at phase 1, not inside a macro transformer, so `syntax_meta.error` is not
+// available -- it is bound only in meta contexts.  Raising a syntax error with
+// the offending form attached is what gets the user a line number rather than
+// just a module name.
+//
+// Pass the *head term* of a declaration, not the whole group: a group built by
+// a template carries the template's location, and the head still carries the
+// user's.
+fun hol_error(who :: Symbol, message :: String, at :: Syntax):
+  rb.#{raise-syntax-error}(who, message, at)
+
+// Re-raise a failure from the logical layer at the user's source location.
+//
+// The caught message already begins with its own `who: ` prefix, and
+// `raise-syntax-error` adds one of its own taken from the form -- so the
+// prefix has to be stripped or the reader sees `type: type: ...`.
+fun hol_reraise(e :: Exn.Fail, at :: Syntax):
+  rb.#{raise-syntax-error}(#false, strip_who(e.message), at)
+
+fun strip_who(msg :: String) :~ String:
+  match msg.find(": ")
+  | #false: msg
+  | i:
+      let head = msg.substring(0 .. i)
+      // Only a bare word is a `who` prefix; anything with a space in it is
+      // already part of the message.
+      (if head.contains(" ") || head.contains("\n")
+       | msg
+       | msg.substring((i + 2) .. msg.length()))
+
+class HolState(ctx :: Context,
+               thms :: Map.of(Symbol, Thm),
+               // Surface capabilities are import-scoped elaboration metadata.
+               // They never enter Theory or the theorem database.
+               operators :: OverloadRegistry,
+               type_constructors :: TypeConstructorRegistry,
+               // `wfrec_rel`'s definition (`wfrec.rhm`'s `build_wfrec_rel`),
+               // installed exactly once at the very start of the session so
+               // every structurally derived `function` can share it.
+               wfrec_def :: Thm)
+
+fun datatype_rules(thy :: Theory, thms :: DatatypeThms) :: List.of(Thm):
+  let inj = for values(acc :~ List = []) ((_, th) in thms.injectivity): acc ++ [th]
+  // Both orientations of every distinctness fact: a rule is indexed by its
+  // left-hand side, so one orientation leaves the other phrase unrewritten.
+  let flipped = thms.distinctness.map(
+                  fun (th :: Thm): forall_not_eq_sym(thy, th))
+  inj ++ thms.distinctness ++ flipped ++ thms.discriminators
+    ++ thms.selectors
+
+fun install_native_nat(thy0 :: Theory) :: values(Theory, DatatypeThms, Function):
+  let (thy1, raw_zero_not_succ, raw_succ_imp, raw_induction) = new_nat_type(thy0)
+  let nat_ty = mk_tyapp(#'Nat, [])
+  let zero = mk_const(#'zero, nat_ty)
+  let succ = mk_const(#'succ, mk_fun(nat_ty, nat_ty))
+  let m = mk_var(#'m, nat_ty)
+  let n = mk_var(#'n, nat_ty)
+  // Read the target-logic truth values from the native theorem, then derive
+  // their equivalence to the frontend's ordinary `true` and `false`.
+  let [raw_zero_quantifier, raw_truth_quantifier] = (match dest_eq(concl_of(raw_zero_not_succ))
+                                                     | pair: pair)
+  let (_, raw_true) = dest_abs(raw_truth_quantifier)
+  let [raw_truth_term, _] = (match dest_eq(raw_true) | pair: pair)
+  let true_eq = EQT_INTRO(thy1, REFL(thy1, raw_truth_term))
+  let (_, raw_zero_body) = dest_abs(raw_zero_quantifier)
+  let [_, raw_false] = (match dest_eq(raw_zero_body) | pair: pair)
+  let false_eq:
+    let assumed = ASSUME(thy1, raw_false)
+    let applied = BETA_RULE(
+                    thy1,
+                    AP_THM(thy1, AP_THM(thy1, assumed, tm_true), tm_false))
+    let true_is_false = EQ_MP(SYM(thy1, applied),
+                              REFL(thy1, raw_truth_term))
+    let proves_false = EQ_MP(true_is_false, TRUTH(thy1))
+    let forward = DISCH(thy1, raw_false, proves_false)
+    let backward = DISCH(
+                     thy1, tm_false,
+                     CONTR(thy1, raw_false, ASSUME(thy1, tm_false)))
+    IMP_ANTISYM_RULE(thy1, forward, backward)
+  fun raw_forall(v :: FVar, body :: Term) :: Term:
+    mk_eq(mk_abs(v, body), mk_abs(v, raw_true))
+  fun raw_conj(p :: Term, q :: Term) :: values(Term, Thm):
+    let unfolded = unfold_conj(thy1, p, q)
+    let target = rhs_of(unfolded)
+    let target_to_raw = cong_replace(
+                          thy1, tm_true, raw_true,
+                          SYM(thy1, true_eq), target)
+    let raw_to_target = SYM(thy1, target_to_raw)
+    values(rhs_of(target_to_raw),
+           TRANS(raw_to_target, SYM(thy1, unfolded)))
+  fun raw_imp(p :: Term, q :: Term) :: values(Term, Thm):
+    let (raw_and, raw_and_eq) = raw_conj(p, q)
+    let target = rhs_of(unfold_imp(thy1, p, q))
+    let target_and = mk_conj(p, q)
+    let target_to_raw = cong_replace(
+                          thy1, target_and, raw_and,
+                          SYM(thy1, raw_and_eq), target)
+    let raw_to_imp = TRANS(
+                       SYM(thy1, target_to_raw),
+                       SYM(thy1, unfold_imp(thy1, p, q)))
+    values(rhs_of(target_to_raw), raw_to_imp)
+  fun fold_forall_eq(v :: FVar, raw_body :: Term, body :: Term,
+                     body_eq :: Thm) :: Thm:
+    let raw_all = mk_eq(mk_abs(v, raw_body), mk_abs(v, raw_true))
+    let raw_pred = mk_abs(v, raw_body)
+    let body_pred = mk_abs(v, body)
+    let changed_body = cong_replace(
+                         thy1, raw_pred, body_pred,
+                         ABS(thy1, v, body_eq), raw_all)
+    let raw_truth_pred = mk_abs(v, raw_true)
+    let truth_pred = mk_abs(v, tm_true)
+    let changed_true = cong_replace(
+                         thy1, raw_truth_pred, truth_pred,
+                         ABS(thy1, v, true_eq),
+                         mk_eq(body_pred, raw_truth_pred))
+    TRANS(changed_body,
+          TRANS(changed_true,
+                SYM(thy1, unfold_forall(thy1, mk_abs(v, body)))))
+  let zero_not_succ:
+    let eq = mk_eq(zero, mk_comb(succ, n))
+    let raw_body = mk_eq(eq, raw_false)
+    let body = mk_eq(eq, tm_false)
+    let body_eq = cong_replace(
+                    thy1, raw_false, tm_false, false_eq, raw_body)
+    let all_eq = fold_forall_eq(n, raw_body, body, body_eq)
+    EQ_MP(all_eq, raw_zero_not_succ)
+  let succ_imp:
+    let lhs = mk_eq(mk_comb(succ, m), mk_comb(succ, n))
+    let rhs = mk_eq(m :~ Term, n)
+    let body = mk_imp(lhs, rhs)
+    let (raw_body, body_eq) = raw_imp(lhs, rhs)
+    let raw_n = raw_forall(n, raw_body)
+    let n_body = mk_forall(n, body)
+    let n_eq = fold_forall_eq(n, raw_body, body, body_eq)
+    let m_eq = fold_forall_eq(m, raw_n, n_body, n_eq)
+    EQ_MP(m_eq, raw_succ_imp)
+  let induction:
+    let pred_ty = mk_fun(nat_ty, bool_ty)
+    let p = mk_var(#'P, pred_ty)
+    let pn = mk_comb(p, n)
+    let psn = mk_comb(p, mk_comb(succ, n))
+    let step_body = mk_imp(pn, psn)
+    let (raw_step_body, step_body_eq) = raw_imp(pn, psn)
+    let raw_step = raw_forall(n, raw_step_body)
+    let step = mk_forall(n, step_body)
+    let step_eq = fold_forall_eq(
+                    n, raw_step_body, step_body, step_body_eq)
+    let base = mk_comb(p, zero)
+    let (raw_prem, _) = raw_conj(base, raw_step)
+    let (_, raw_prem_step_eq) = raw_conj(base, step)
+    let prem = mk_conj(base, step)
+    let prem_changed = cong_replace(
+                         thy1, raw_step, step, step_eq, raw_prem)
+    let prem_eq = TRANS(prem_changed, raw_prem_step_eq)
+    let raw_concl = raw_forall(n, pn)
+    let concl = mk_forall(n, pn)
+    let concl_eq = fold_forall_eq(n, pn, pn, REFL(thy1, pn))
+    let (raw_outer, _) = raw_imp(raw_prem, raw_concl)
+    let (raw_outer_prem, _) = raw_imp(prem, raw_concl)
+    let (raw_outer_both, raw_outer_both_eq) = raw_imp(prem, concl)
+    let outer_prem = cong_replace(
+                       thy1, raw_prem, prem, prem_eq, raw_outer)
+    let outer_concl = cong_replace(
+                        thy1, raw_concl, concl, concl_eq,
+                        raw_outer_prem)
+    let outer_eq = TRANS(
+                     outer_prem,
+                     TRANS(outer_concl, raw_outer_both_eq))
+    let outer = mk_imp(prem, concl)
+    let all_eq = fold_forall_eq(p, raw_outer, outer, outer_eq)
+    EQ_MP(all_eq, raw_induction)
+  // The kernel extension returns only its three semantic facts. Complete the
+  // conventional datatype interface with derived cases, discriminator, and
+  // selector theorems so every existing pattern/recursion consumer can share
+  // the same DatatypeThms representation.
+  let succ_not_zero:
+    let eq = mk_eq(mk_comb(succ, n), zero)
+    let zero_ne_succ = EQF_ELIM(
+                         thy1, SPEC(thy1, n, zero_not_succ))
+    let contradiction = MP(thy1, NOT_ELIM(thy1, zero_ne_succ),
+                           SYM(thy1, ASSUME(thy1, eq)))
+    GEN(thy1, n, NOT_INTRO(thy1, DISCH(thy1, eq, contradiction)))
+  let succ_injective:
+    let lhs = mk_eq(mk_comb(succ, m), mk_comb(succ, n))
+    let rhs = mk_eq(m :~ Term, n)
+    let forward = SPECL(thy1, [m :~ Term, n :~ Term], succ_imp)
+    let backward = DISCH(
+                     thy1, rhs, AP_TERM(thy1, succ, ASSUME(thy1, rhs)))
+    GENL(thy1, [m, n],
+         IMP_ANTISYM_RULE(thy1, forward, backward))
+  let spec = DatatypeSpec(
+               #'Nat, [],
+               [Ctor(#'zero, []),
+                Ctor(#'succ, [Field(#'pred, nat_ty)])])
+  let (thy2, thms) = build_peano_datatype(
+                        thy1, spec,
+                        PeanoThms(succ_injective, succ_not_zero, induction))
+  fun literal_eq(thy :: Theory, term :: Term) :: maybe(Thm):
+    match dest_eq(term)
+    | [NatLit(m), NatLit(n)]:
+        let raw = NAT_LIT_EQ_CONV(
+                    thy, raw_zero_not_succ, raw_succ_imp, m, n)
+        TRANS(raw, (if m == n | true_eq | false_eq))
+    | ~else: #false
+  values(thy2, thms, literal_eq)
+
+def initial_context:
+  // These derived base rules are immutable and belong to the one memoized
+  // base theory. Derive and index them once; every module can safely share
+  // this context because rule updates construct fresh RuleDB values.
+  let thy = infinity_base_theory()
+  let db = for values(d :~ RuleDB = empty_db) (th in tautologies(thy)):
+             add_thm(thy, d, #'propositional, th)
+  let db = for values(d :~ RuleDB = db) (th in conditionals(thy)):
+             add_thm(thy, d, #'conditional, th)
+  // `Pair` is the language's one product type and `fst`/`snd` are defined
+  // with it, in the algebra base theory every session already extends. Their
+  // equations are derived there (`algebra.rhm`'s `ProdThms`) but were only
+  // used to build datatypes, so `fst(Pair(x, y)) === x` had no rule and
+  // stayed unsimplified in every goal that mentioned a projection.
+  let prod = algebra_base_thms().prod
+  // `PAIR(FST p, SND p) === p` joins them, because a `Pair` pattern is
+  // irrefutable -- compiled straight to the two projections -- so nothing
+  // else in the prover ever puts a pair back together again. So does
+  // injectivity: a hypothesis equating two pairs is otherwise unusable,
+  // since the simplifier will not orient a variable-to-variable equation
+  // into a rewrite.
+  let db = for values(d :~ RuleDB = db) (
+                 th in [prod.fst_pair, prod.snd_pair, prod.eta, prod.pair_eq]):
+             add_thm(thy, d, #'Pair, th)
+  // `bool` is a datatype like any other as far as pattern matching is
+  // concerned -- `#true` and `#false` are its two nullary constructors --
+  // but it is primitive, so its facts are derived from `BOOL_CASES_AX`
+  // rather than from a declaration (`bool_datatype.rhm`). Registering it
+  // here is what makes a Boolean literal pattern compile, and it adds no
+  // axiom: the two discriminator constants are definitions.
+  let (bool_thy, bool_thms) = build_bool_datatype_thms(thy)
+  let db = for values(d :~ RuleDB = db) (
+                 th in datatype_rules(bool_thy, bool_thms)):
+             add_thm(bool_thy, d, #'bool, th)
+  let (nat_thy, nat_thms, literal_eq) = install_native_nat(bool_thy)
+  let db = for values(d :~ RuleDB = db) (
+                 th in datatype_rules(nat_thy, nat_thms)):
+             add_thm(nat_thy, d, #'Nat, th)
+  context_with_numerals(
+    mk_context(nat_thy, ~rules: db,
+               ~datatypes: {#'bool: bool_thms, #'Nat: nat_thms},
+               ~literal_eq: literal_eq),
+    numeral_conv)
+
+fun initial_state() :: HolState:
+  HolState(initial_context, {}, standard_overload_registry(),
+           standard_type_constructor_registry(), wfrec_base_def())
+
+// -- datatype ----------------------------------------------------------------
+
+fun add_datatype(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
+  let spec = type_parser.parse_datatype_decl(form, st.type_constructors)
+  let type_constructors = add_declared_type_constructor(
+                            st.type_constructors, spec.name, spec.params)
+  match st.ctx.dts.get(spec.name, #false)
+  | existing :: DatatypeThms:
+      unless spec == existing.spec
+      | hol_error(#'datatype,
+                  "a kernel-native datatype must use its standard constructors",
+                  at)
+      add_subterm_relation(
+        HolState(st.ctx, st.thms, st.operators, type_constructors,
+                 st.wfrec_def),
+        spec, at)
+  | #false:
+      // Non-recursive specs are encoded as sums of products; recursive specs
+      // are carved from the shared infinity model. Both are derived.
+      let (thy2, thms) = try:
+                           (cond
+                            | is_nonrecursive_spec(spec):
+                                build_nonrecursive_datatype_thms(
+                                  st.ctx.thy, spec)
+                            | ~else:
+                                build_recursive_datatype_thms(
+                                  st.ctx.thy, spec, infinity_base_ind()))
+                           ~catch e :: Exn.Fail: hol_reraise(e, at)
+      require_no_new_axioms(#'datatype, st.ctx.thy, thy2, spec.name, at)
+      let db2 = for values(d :~ RuleDB = st.ctx.db) (
+                      th in datatype_rules(thy2, thms)):
+                  add_thm(thy2, d, spec.name, th)
+      let ctx2 = context_add_datatype(
+                   st.ctx, thy2, db2, spec.name, thms)
+      add_subterm_relation(
+        HolState(ctx2, st.thms, st.operators, type_constructors,
+                 st.wfrec_def),
+        spec, at)
+
+// Every recursive datatype brings its structural subterm relation with it, so
+// that a `~measure` into it has an order to decrease in.  It is *derived*:
+// `T_child` is a non-recursive predicate over the discriminators and
+// selectors, `T_lt` is its transitive closure, and the constructor equations
+// are proved from those two definitions (`subterm.rhm`). This replaces the
+// former clausal postulation. The equations join the rule database under the
+// relation's own name.
+fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
+                         at :: Syntax) :: HolState:
+  match subterm_spec(spec)
+  | #false: st
+  | fs:
+      let fs :~ FunSpec = fs
+      when const_type(st.ctx.thy, fs.name) != #false
+      | hol_error(#'datatype,
+                  "the name of this datatype's subterm relation, "
+                    ++ to_string(fs.name)
+                    ++ ", is already taken",
+                  at)
+      let dt :~ DatatypeThms = st.ctx.dts[spec.name]
+      let (thy2, info0) = try:
+                            derive_subterm_relation(st.ctx.thy, spec, dt)
+                            ~catch e :: Exn.Fail: hol_reraise(e, at)
+      let info :~ FunInfo = info0
+      require_no_new_axioms(#'datatype, st.ctx.thy, thy2, fs.name, at)
+      require_closed_theorems(#'datatype, thy2, fs.name, info.equations, at)
+      let db2 = add_thms(thy2, st.ctx.db, fs.name, info.equations)
+      let ctx2 = context_add_function(st.ctx, thy2, db2, fs.name, info)
+      HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
+
+// -- function ----------------------------------------------------------------
+
+// `function` never adds an axiom.  A definition it cannot derive is refused,
+// naming what about the recursion the deriver could not handle, so that
+// "this module compiled" and "this module assumed nothing new" are the same
+// statement for the ordinary declaration form.
+fun add_function(st0 :: HolState, core :: CoreFunctionSpec,
+                 at :: Syntax) :: HolState:
+  let st = st0
+  let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
+                   m ++ {n: (thms :~ DatatypeThms).spec}
+  let spec :~ FunSpec = try:
+                          elab.elaborate_function_decl(
+                            st.ctx.thy, core, ~operators: st.operators,
+                            ~type_constructors: st.type_constructors,
+                            ~datatypes: dt_specs)
+                          ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let (thy2, info) = define_from_spec(st, spec, dt_specs,
+                                      prepare_measure(st, spec), at)
+  require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
+  let db2 = add_thms(thy2, st.ctx.db, spec.name, info.equations)
+  let ctx2 = context_add_function(st.ctx, thy2, db2, spec.name, info)
+  HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
+
+// Derive one function from an already elaborated specification: directly when
+// it does not call itself, from the well-founded recursion theorem when it
+// does.
+fun define_from_spec(st :: HolState, spec :: FunSpec,
+                     dt_specs :: Map.of(Symbol, DatatypeSpec),
+                     measure :: maybe(Measure),
+                     at :: Syntax) :: values(Theory, FunInfo):
+  let prepared :~ PreparedFunction = try:
+                                       prepare_function(st.ctx.thy, spec,
+                                                        dt_specs,
+                                                        ~measure: measure)
+                                       ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let (thy2, info0) = try:
+                        cond
+                        | prepared.recursion is_a NoRecursion:
+                            define_nonrecursive(
+                              st.ctx.thy, prepared, st.ctx.dts,
+                              st.ctx.literal_eq :~ Function)
+                        | ~else:
+                            let plan = plan_derivation(
+                                         prepared, st.ctx.dts, st.ctx.funs)
+                            install_structural_function(
+                              st.ctx.thy, st.wfrec_def, plan, st.ctx.dts,
+                              algebra_base_thms(),
+                              st.ctx.literal_eq :~ Function)
+                        ~catch e :: Exn.Fail: hol_reraise(e, at)
+  require_no_new_axioms(#'function, st.ctx.thy, thy2, spec.name, at)
+  values(thy2, info0 :~ FunInfo)
+
+
+// A path that claims to derive must not have added an axiom.  Every
+// declaration below that is documented as derived runs through this, so the
+// claim is checked at each one rather than resting on the reader following
+// the construction.  It costs a length comparison.
+//
+// This is the check that prevents `datatype` declarations from quietly gaining a
+// postulating fallback. The compiler enforces the claim instead of leaving it
+// to a comment.
+fun require_no_new_axioms(who :: Symbol, before :: Theory, after :: Theory,
+                          what :: Symbol, at :: Syntax) :: Void:
+  // Three things, because "added no axiom" on its own is not the whole
+  // claim and each of the other two is a different way to break it while
+  // satisfying the count.
+  //
+  // The theory has to be an *extension* of the one we started from: a
+  // declaration that returned a theory off to the side would pass an axiom
+  // count and be unusable with everything already proved.
+  unless descends(before.stamp, after.stamp)
+  | hol_error(who,
+              "a derived declaration did not extend the theory it was given: "
+                ++ to_string(what),
+              at)
+  let n0 = axioms_of(before).length()
+  let n1 = axioms_of(after).length()
+  unless n1 == n0
+  | hol_error(who,
+              "a derived declaration introduced "
+                ++ to_string(n1 - n0)
+                ++ " new axiom(s): " ++ to_string(what),
+              at)
+
+// And the theorems it hands back have to be theorems *of* that theory, with
+// nothing left assumed.  An equation with an undischarged hypothesis costs
+// no axiom and is not the equation it looks like: registered as a rewrite
+// rule, it would rewrite unconditionally on the strength of something never
+// proved.
+fun require_closed_theorems(who :: Symbol, thy :: Theory,
+                            what :: Symbol, equations :: List.of(Thm),
+                            at :: Syntax) :: Void:
+  for (th in equations):
+    let th :~ Thm = th
+    unless hyps_of(th).length() == 0
+    | hol_error(who,
+                "a derived declaration produced an equation with "
+                  ++ to_string(hyps_of(th).length())
+                  ++ " undischarged hypothesis(es): " ++ to_string(what),
+                at)
+    unless descends(stamp_of(th), thy.stamp)
+    | hol_error(who,
+                "a derived declaration produced an equation from another "
+                  ++ "theory: " ++ to_string(what),
+                at)
+
+// A declared datatype whose subterm relation was actually installed, which
+// is every recursive one and no other.
+fun has_subterm_relation(st :: HolState, ty :: HType) :: Boolean:
+  match ty
+  | TyApp(n, _):
+      st.ctx.dts.get(n, #false) != #false
+        && st.ctx.funs.get(subterm_relation_name(n), #false) != #false
+  | ~else: #false
+
+// A measure is checked only when structural descent did not settle the
+// declaration. An unusable landing type therefore becomes a targeted failure
+// only if the measure is actually needed.
+fun prepare_measure(st :: HolState, spec :: FunSpec) :: maybe(Measure):
+  match spec.measure
+  | #false: #false
+  | term:
+      match maybe_measure_result_type(spec)
+      | ty :: HType when !has_subterm_relation(st, ty):
+          Measure(term :~ Term,
+                  fun (_ :: Term):
+                    error(
+                      ~who: #'function,
+                      "a measure must land in a declared datatype that "
+                        ++ "recurses: "
+                        ++ type_to_surface_string(st.type_constructors, ty)
+                        ++ " has no subterm relation for it to decrease in"))
+      | ~else: Measure(term :~ Term, discharger(st))
+
+// `#false` leaves the diagnostic to `check_termination`, which can say that
+// the measure did not abstract every parameter. A structural recursion never
+// asks for that diagnostic.
+fun maybe_measure_result_type(spec :: FunSpec) :: maybe(HType):
+  recur loop (ty :~ HType = type_of(spec.measure :~ Term),
+              remaining = spec.arg_types.length()):
+    cond
+    | remaining == 0: ty
+    | is_fun(ty):
+        let (_, result) = dest_fun(ty)
+        loop(result, remaining - 1)
+    | ~else: #false
+
+// Discharge a termination obligation against the state as it stands -- which
+// is to say, without the function being defined.  That is not a limitation to
+// work around but the point: a measure that needed the definition it justifies
+// would justify nothing.
+fun discharger(st :: HolState) :: Function:
+  fun (obligation :: Term) :: values(maybe(Thm), maybe(String)):
+    let (th, node) = prove(st.ctx, obligation)
+    match th
+    | #false: values(#false, residue_message(#'measure, node))
+    | proved :~ Thm: values(proved, #false)
+
+// -- theorem -----------------------------------------------------------------
+
+// A theorem is retained by name for explicit proof-local `use`, but never
+// enters the shared RuleDB. Adding a theorem therefore cannot change the
+// automation seen by later declarations.
+fun add_theorem(st0 :: HolState, name :: Symbol,
+                stmt :: CoreExpr, tactic :: CoreTactic,
+                at :: Syntax) :: HolState:
+  let st = st0
+  let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
+                   m ++ {n: (thms :~ DatatypeThms).spec}
+  let (statement, names) = try:
+                             elab.elaborate_theorem_statement(
+                               st.ctx.thy, stmt, ~operators: st.operators,
+                               ~type_constructors: st.type_constructors,
+                               ~datatypes: dt_specs)
+                             ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let induct = tactic.induct
+  let using_names = tactic.using_names
+  let skipped_stage_names = tactic.skipped_stage_names
+  let disabled_rule_names = tactic.disabled_rule_names
+  let case_exprs = tactic.cases
+  let witness_exprs = tactic.witnesses
+  let search_steps = tactic.search_steps
+  let extensionality = tactic.extensionality
+  let using:
+    for List (u in (using_names :~ List)):
+      match st.thms.get(u, #false)
+      | #false:
+          hol_error(#'proof, "no such theorem to use: " ++ to_string(u), at)
+      | th:
+          RuleBinding(u :~ Symbol, th :~ Thm)
+  let skipped = for values(acc :~ Set = Set()) (d in (skipped_stage_names :~ List)):
+                  acc ++ {d :~ Symbol}
+  let scope = RuleScope(using, disabled_rule_names :~ List, skipped)
+  let (vars, _) = strip_forall_all(statement, names)
+  let tyvars = elab.core_type_vars(stmt)
+  let env = for values(m :~ Map = {}) (v in vars):
+              m ++ {(v :~ FVar).name: v :~ Term}
+  let cases:
+    for List (c in case_exprs):
+      try:
+        elab.parse_core_prop(
+          st.ctx.thy, tyvars, env, c, ~operators: st.operators,
+          ~type_constructors: st.type_constructors,
+          ~datatypes: dt_specs)
+        ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let witnesses:
+    for List (w in witness_exprs):
+      try:
+        elab.parse_core_prop(
+          st.ctx.thy, tyvars, env, w, ~operators: st.operators,
+          ~type_constructors: st.type_constructors,
+          ~datatypes: dt_specs)
+        ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let limits :~ SearchLimits:
+    match search_steps
+    | #false: SearchLimits()
+    | n: SearchLimits(n :~ NonnegInt)
+  let (proved, node):
+    prove(st.ctx, statement, ~names: names,
+          ~induct: (induct :~ maybe(Symbol)),
+          ~scope: scope, ~cases: cases,
+          ~witnesses: witnesses, ~limits: limits,
+          ~extensionality:
+            (extensionality :~ maybe(Symbol)))
+  match proved
+  | #false: hol_error(#'theorem, residue_message(name, node), at)
+  | th :~ Thm:
+      unless hyps_of(th).length() == 0 && concl_of(th) == statement
+      | hol_error(#'theorem,
+                  "prover returned a result that does not prove this theorem source",
+                  at)
+      HolState(st.ctx, st.thms ++ {name: th}, st.operators,
+               st.type_constructors, st.wfrec_def)
+// -- static overload metadata ----------------------------------------------
+
+
+fun add_overload_method_decl(
+      st :: HolState, function_name :: Symbol,
+      argument_type_stxs :: List.of(Syntax),
+      result_type_stx :: maybe(Syntax),
+      constant :: Symbol, argument_order :: List.of(NonnegInt),
+      at :: Syntax) :: HolState:
+  let arity = argument_type_stxs.length()
+  let registry_with_function:
+    try:
+      ensure_overload_function(st.operators, function_name, arity)
+      ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let argument_types:
+    argument_type_stxs.map(
+      fun (type_stx):
+        try:
+          type_parser.parse_open_type(type_stx, st.type_constructors)
+          ~catch e :: Exn.Fail: hol_reraise(e, at))
+  let result_type:
+    match result_type_stx
+    | #false: #false
+    | result_stx:
+        try:
+          type_parser.parse_open_type(
+            result_stx :~ Syntax, st.type_constructors)
+          ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let constant_type:
+    match const_type(st.ctx.thy, constant)
+    | #false:
+        hol_error(#'overload,
+                  "implementation constant is not declared: "
+                    ++ to_string(constant),
+                  at)
+    | ty: ty :~ HType
+  let method:
+    try:
+      build_overload_method(
+        function_name, argument_types, result_type,
+        constant, constant_type, argument_order)
+      ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let registry:
+    try:
+      add_overload_method(registry_with_function, method)
+      ~catch e :: Exn.Fail: hol_reraise(e, at)
+  HolState(st.ctx, st.thms, registry, st.type_constructors, st.wfrec_def)
+
+fun add_overload_method_encoded(
+      st :: HolState, function_name :: Symbol,
+      signature :: Syntax,
+      constant :: Symbol, argument_order :: List.of(NonnegInt),
+      at :: Syntax) :: HolState:
+  match signature
+  | '(overload_signature [$argument_type, ...] [$result_type])':
+      let result = (if Syntax.unwrap(result_type) == #false
+                    | #false
+                    | result_type)
+      add_overload_method_decl(
+        st, function_name, [argument_type, ...],
+        result, constant, argument_order, at)
+  | ~else:
+      hol_error(#'overload, "internal malformed overload signature", at)
+
+
+// -- adopting an imported theory ----------------------------------------------
+
+// Adopt an imported theory wholesale.
+//
+// The imported state arrives as a live value: the same `Theory`, the same
+// `Thm` objects, the same rule database.  Nothing is re-parsed and nothing is
+// re-asserted, so there is no trust boundary here at all -- a `Thm` cannot be
+// fabricated without the kernel, which is what its being opaque is for.  A
+// description of a theory, by contrast, is data, and anything can write one.
+//
+// The single check is that the imported theory really extends the current one.
+// That is not bureaucracy: `combine_stamps` refuses to mix theorems from two
+// theories neither of which extends the other, so a module that adopted a
+// sibling would be left holding two sets of theorems it could not use
+// together.  Keeping the lineage a chain is what makes this a comparison
+// rather than a theory merge.
+fun adopt(st :: HolState, imported :: HolState, at :: Syntax) :: HolState:
+  unless st.ctx.thy.stamp == imported.ctx.thy.stamp
+           || descends(st.ctx.thy.stamp, imported.ctx.thy.stamp)
+  | hol_error(#'import,
+              "this theory does not extend the one in scope; an `import` of a "
+                ++ "theory must come before the module's own declarations, "
+                ++ "and several of them must be given in dependency order",
+              at)
+  imported

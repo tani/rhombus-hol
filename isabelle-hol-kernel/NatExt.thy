@@ -1387,4 +1387,1253 @@ lemma eval_nat_lit_rhs:
   "eval_term F \<rho> \<nu> env (nat_lit_rhs n) = eval_term F \<rho> \<nu> env (NatLit n)"
   by (cases n) (simp_all add: nat_zero_c_def nat_succ_c_def)
 
+text \<open>Literal equality is native only after the caller presents the two closed
+constructor laws installed by @{const new_nat_type}.  Checking their complete
+statements and lineage prevents unrelated user constants from being treated as
+a Peano representation.  The result contains only the two compact literals, so
+its size is independent of their values.\<close>
+
+definition nat_lit_eq_rhs :: "nat \<Rightarrow> nat \<Rightarrow> hterm" where
+  "nat_lit_eq_rhs m n = (if m = n then true_term else false_term)"
+
+definition nat_lit_eq_conv ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> hthm option" where
+  "nat_lit_eq_conv thy zero_not_succ succ_injective m n =
+    (if wf_thm thy zero_not_succ \<and> hyps zero_not_succ = [] \<and>
+        concl zero_not_succ = zns_concl \<and>
+        wf_thm thy succ_injective \<and> hyps succ_injective = [] \<and>
+        concl succ_injective = si_concl \<and>
+        check_type thy nat_aty \<and> check_type thy nat_sty \<and>
+        const_tab thy nat_zero_name = Some nat_aty \<and>
+        const_tab thy nat_succ_name = Some nat_sty
+     then checked_eq_thm thy []
+       (eq_term nat_aty (NatLit m) (NatLit n))
+       (nat_lit_eq_rhs m n) (thy_stamp thy)
+     else None)"
+
+lemma nat_lit_eq_conv_extract:
+  assumes run: "nat_lit_eq_conv thy zns si m n = Some th"
+  shows "wf_thm thy zns" "hyps zns = []" "concl zns = zns_concl"
+    "wf_thm thy si" "hyps si = []" "concl si = si_concl"
+    "check_type thy nat_aty" "check_type thy nat_sty"
+    "const_tab thy nat_zero_name = Some nat_aty"
+    "const_tab thy nat_succ_name = Some nat_sty"
+    "th = \<lparr>hyps = [],
+      concl = eq_term bool_ty (eq_term nat_aty (NatLit m) (NatLit n))
+        (nat_lit_eq_rhs m n),
+      thm_stamp = thy_stamp thy\<rparr>"
+    "wf_thm thy th"
+  using run
+  by (auto simp: nat_lit_eq_conv_def nat_lit_eq_rhs_def eq_shape_def thm_shape_def
+      true_term_def false_term_def constant_true_function_def eq_bool_ty_def
+      eq_term_def eq_const_def mk_fun_def bool_ty_def split: if_splits)
+
+lemma nat_lit_eq_conv_nat_checks:
+  assumes run: "nat_lit_eq_conv thy zns si m n = Some th"
+  shows "check_type thy nat_aty" "check_type thy nat_sty"
+    "const_tab thy nat_zero_name = Some nat_aty"
+    "const_tab thy nat_succ_name = Some nat_sty"
+  using nat_lit_eq_conv_extract(7,8,9,10)[OF run] by blast+
+
+lemma nat_lit_zero_not_succ_semantic:
+  assumes run: "nat_lit_eq_conv thy zns si m n = Some th"
+    and thy_wf: "wf_theory thy" and model: "models_theory F thy"
+    and zns_valid: "valid_sequent F thy (hyps zns) (concl zns)"
+    and type_ok: "type_valuation_ok \<rho>" and free_ok: "free_valuation_ok F \<rho> \<nu>"
+    and x_in: "Elem x (interp_type F \<rho> nat_aty)"
+  shows "const_sem F \<rho> nat_zero_name nat_aty \<noteq>
+    app (const_sem F \<rho> nat_succ_name nat_sty) x"
+proof -
+  have frame_ok: "frame_wf F" using model by (simp add: models_theory_def)
+  have const_ok: "const_interpretation_ok F thy \<rho>"
+    using model type_ok by (auto simp: models_theory_def)
+  have nat_aty_check: "check_type thy nat_aty"
+    and nat_sty_check: "check_type thy nat_sty"
+    and zero_decl: "const_tab thy nat_zero_name = Some nat_aty"
+    and succ_decl: "const_tab thy nat_succ_name = Some nat_sty"
+    using nat_lit_eq_conv_nat_checks[OF run] by blast+
+  have zero_c_check: "check_term thy nat_zero_c"
+      "type_of nat_zero_c = Some nat_aty"
+    using zero_decl nat_aty_check nat_aty_self_match
+    by (simp_all add: nat_zero_c_def check_term_def)
+  have succ_c_check: "check_term thy nat_succ_c"
+      "type_of nat_succ_c = Some nat_sty"
+    using succ_decl nat_sty_check nat_sty_self_match
+    by (simp_all add: nat_succ_c_def check_term_def)
+  have succ_app_check: "check_term thy (Comb nat_succ_c (FVar nat_n0 nat_aty))"
+    using succ_c_check nat_aty_check
+    by (simp add: check_term_def nat_succ_c_def nat_sty_def mk_fun_def)
+  have succ_app_type: "type_of (Comb nat_succ_c (FVar nat_n0 nat_aty)) = Some nat_aty"
+    using succ_c_check by (simp add: nat_succ_c_def nat_sty_def mk_fun_def)
+  have inner_check: "check_term thy
+      (eq_term nat_aty nat_zero_c (Comb nat_succ_c (FVar nat_n0 nat_aty)))"
+    and inner_type: "type_of
+      (eq_term nat_aty nat_zero_c (Comb nat_succ_c (FVar nat_n0 nat_aty))) = Some bool_ty"
+    using wf_theory_eq_term_check[OF thy_wf nat_aty_check zero_c_check(1) zero_c_check(2)
+        succ_app_check succ_app_type]
+    by simp_all
+  have body_check: "check_term thy (eq_term bool_ty
+      (eq_term nat_aty nat_zero_c (Comb nat_succ_c (FVar nat_n0 nat_aty))) false_term)"
+    and body_type: "type_of (eq_term bool_ty
+      (eq_term nat_aty nat_zero_c (Comb nat_succ_c (FVar nat_n0 nat_aty))) false_term) =
+      Some bool_ty"
+    using wf_theory_eq_term_check[OF thy_wf wf_theory_bool_ty_check[OF thy_wf]
+        inner_check inner_type wf_theory_false_term_check(1)[OF thy_wf]
+        wf_theory_false_term_check(2)[OF thy_wf]]
+    by simp_all
+  have left_check: "check_term thy (target_abs nat_n0 nat_aty (eq_term bool_ty
+      (eq_term nat_aty nat_zero_c (Comb nat_succ_c (FVar nat_n0 nat_aty))) false_term))"
+    and left_type: "type_of (target_abs nat_n0 nat_aty (eq_term bool_ty
+      (eq_term nat_aty nat_zero_c (Comb nat_succ_c (FVar nat_n0 nat_aty))) false_term)) =
+      Some (mk_fun nat_aty bool_ty)"
+    using target_abs_ok[OF nat_aty_check body_check body_type] by simp_all
+  have right_check: "check_term thy (Abs nat_aty true_term)"
+    using wf_theory_true_term_check[OF thy_wf] nat_aty_check
+      check_open_term_weaken[of thy "[]" true_term "[nat_aty]"]
+    by (simp add: check_term_def)
+  have right_type: "type_of (Abs nat_aty true_term) = Some (mk_fun nat_aty bool_ty)"
+    using wf_theory_true_term_check[OF thy_wf] by simp
+  have zns_holds: "holds F \<rho> \<nu> zns_concl"
+    using zns_valid type_ok const_ok free_ok nat_lit_eq_conv_extract(2,3)[OF run]
+    by (auto simp: valid_sequent_def)
+  have outer: "holds F \<rho> \<nu> zns_concl \<longleftrightarrow>
+      (\<forall>z. Elem z (interp_type F \<rho> nat_aty) \<longrightarrow>
+        eval_term F \<rho> (\<nu>((nat_n0, nat_aty) := z)) [] (eq_term bool_ty
+          (eq_term nat_aty nat_zero_c (Comb nat_succ_c (FVar nat_n0 nat_aty))) false_term) =
+        ztrue)"
+    unfolding zns_concl_def
+    using holds_target_forall_iff_general[OF thy_wf frame_ok type_ok const_ok free_ok
+        body_check left_check left_type right_check right_type] .
+  let ?\<nu>x = "\<nu>((nat_n0, nat_aty) := x)"
+  have free_ok_x: "free_valuation_ok F \<rho> ?\<nu>x"
+    using free_valuation_update[OF free_ok] x_in .
+  have body_true: "eval_term F \<rho> ?\<nu>x [] (eq_term bool_ty
+        (eq_term nat_aty nat_zero_c (Comb nat_succ_c (FVar nat_n0 nat_aty))) false_term) =
+      ztrue"
+    using zns_holds outer x_in by blast
+  have inner_eval: "eval_term F \<rho> ?\<nu>x []
+      (eq_term nat_aty nat_zero_c (Comb nat_succ_c (FVar nat_n0 nat_aty))) =
+      (if const_sem F \<rho> nat_zero_name nat_aty =
+          app (const_sem F \<rho> nat_succ_name nat_sty) x then ztrue else zfalse)"
+    using eval_eq_term[OF thy_wf frame_ok type_ok free_ok_x const_ok
+        zero_c_check(1) zero_c_check(2) succ_app_check succ_app_type]
+    by (simp add: nat_zero_c_def nat_succ_c_def)
+  have body_eval: "eval_term F \<rho> ?\<nu>x [] (eq_term bool_ty
+        (eq_term nat_aty nat_zero_c (Comb nat_succ_c (FVar nat_n0 nat_aty))) false_term) =
+      (if eval_term F \<rho> ?\<nu>x []
+          (eq_term nat_aty nat_zero_c (Comb nat_succ_c (FVar nat_n0 nat_aty))) = zfalse
+       then ztrue else zfalse)"
+    using eval_eq_term[OF thy_wf frame_ok type_ok free_ok_x const_ok
+        inner_check inner_type wf_theory_false_term_check(1)[OF thy_wf]
+        wf_theory_false_term_check(2)[OF thy_wf]]
+    by simp
+  show ?thesis using body_true body_eval inner_eval ztrue_neq_zfalse by auto
+qed
+
+lemma nat_lit_succ_injective_semantic:
+  assumes run: "nat_lit_eq_conv thy zns si i j = Some th"
+    and thy_wf: "wf_theory thy" and model: "models_theory F thy"
+    and si_valid: "valid_sequent F thy (hyps si) (concl si)"
+    and type_ok: "type_valuation_ok \<rho>" and free_ok: "free_valuation_ok F \<rho> \<nu>"
+    and x_in: "Elem x (interp_type F \<rho> nat_aty)"
+    and y_in: "Elem y (interp_type F \<rho> nat_aty)"
+    and equal: "app (const_sem F \<rho> nat_succ_name nat_sty) x =
+      app (const_sem F \<rho> nat_succ_name nat_sty) y"
+  shows "x = y"
+proof -
+  have frame_ok: "frame_wf F" using model by (simp add: models_theory_def)
+  have const_ok: "const_interpretation_ok F thy \<rho>"
+    using model type_ok by (auto simp: models_theory_def)
+  have nat_aty_check: "check_type thy nat_aty"
+    and nat_sty_check: "check_type thy nat_sty"
+    and succ_decl: "const_tab thy nat_succ_name = Some nat_sty"
+    using nat_lit_eq_conv_nat_checks[OF run] by blast+
+  have succ_c_check: "check_term thy nat_succ_c"
+      "type_of nat_succ_c = Some nat_sty"
+    using succ_decl nat_sty_check nat_sty_self_match
+    by (simp_all add: nat_succ_c_def check_term_def)
+  have succ_app_check: "check_term thy (Comb nat_succ_c (FVar v nat_aty))" for v
+    using succ_c_check nat_aty_check
+    by (simp add: check_term_def nat_succ_c_def nat_sty_def mk_fun_def)
+  have succ_app_type: "type_of (Comb nat_succ_c (FVar v nat_aty)) = Some nat_aty" for v
+    using succ_c_check by (simp add: nat_succ_c_def nat_sty_def mk_fun_def)
+  have fvar_check: "check_term thy (FVar v nat_aty)" for v
+    using nat_aty_check by (simp add: check_term_def)
+  have fvar_type: "type_of (FVar v nat_aty) = Some nat_aty" for v by simp
+  let ?lhs = "eq_term nat_aty (Comb nat_succ_c (FVar nat_m0 nat_aty))
+    (Comb nat_succ_c (FVar nat_n0 nat_aty))"
+  let ?rhs = "eq_term nat_aty (FVar nat_m0 nat_aty) (FVar nat_n0 nat_aty)"
+  let ?imp = "target_imp ?lhs ?rhs"
+  have lhs_check: "check_term thy ?lhs" and lhs_type: "type_of ?lhs = Some bool_ty"
+    using wf_theory_eq_term_check[OF thy_wf nat_aty_check
+        succ_app_check succ_app_type succ_app_check succ_app_type]
+    by simp_all
+  have rhs_check: "check_term thy ?rhs" and rhs_type: "type_of ?rhs = Some bool_ty"
+    using wf_theory_eq_term_check[OF thy_wf nat_aty_check
+        fvar_check fvar_type fvar_check fvar_type]
+    by simp_all
+  have imp_check: "check_term thy ?imp" and imp_type: "type_of ?imp = Some bool_ty"
+    using wf_theory_target_imp_check[OF thy_wf lhs_check lhs_type rhs_check rhs_type]
+    by simp_all
+  have inner_check: "check_term thy (target_forall nat_n0 nat_aty ?imp)"
+    and inner_type: "type_of (target_forall nat_n0 nat_aty ?imp) = Some bool_ty"
+    using wf_theory_target_forall_check[OF thy_wf nat_aty_check imp_check imp_type]
+    by simp_all
+  have m_left_check: "check_term thy (target_abs nat_m0 nat_aty
+      (target_forall nat_n0 nat_aty ?imp))"
+    and m_left_type: "type_of (target_abs nat_m0 nat_aty
+      (target_forall nat_n0 nat_aty ?imp)) = Some (mk_fun nat_aty bool_ty)"
+    using target_abs_ok[OF nat_aty_check inner_check inner_type] by simp_all
+  have forall_right_check: "check_term thy (Abs nat_aty true_term)"
+    using wf_theory_true_term_check[OF thy_wf] nat_aty_check
+      check_open_term_weaken[of thy "[]" true_term "[nat_aty]"]
+    by (simp add: check_term_def)
+  have forall_right_type: "type_of (Abs nat_aty true_term) = Some (mk_fun nat_aty bool_ty)"
+    using wf_theory_true_term_check[OF thy_wf] by simp
+  have si_holds: "holds F \<rho> \<nu> si_concl"
+    using si_valid type_ok const_ok free_ok nat_lit_eq_conv_extract(5,6)[OF run]
+    by (auto simp: valid_sequent_def)
+  have outer: "holds F \<rho> \<nu> si_concl \<longleftrightarrow>
+      (\<forall>a. Elem a (interp_type F \<rho> nat_aty) \<longrightarrow>
+        eval_term F \<rho> (\<nu>((nat_m0, nat_aty) := a)) []
+          (target_forall nat_n0 nat_aty ?imp) = ztrue)"
+    unfolding si_concl_def
+    using holds_target_forall_iff_general[OF thy_wf frame_ok type_ok const_ok free_ok
+        inner_check m_left_check m_left_type forall_right_check forall_right_type] .
+  let ?\<nu>x = "\<nu>((nat_m0, nat_aty) := x)"
+  have free_ok_x: "free_valuation_ok F \<rho> ?\<nu>x"
+    using free_valuation_update[OF free_ok] x_in .
+  have inner_holds: "holds F \<rho> ?\<nu>x (target_forall nat_n0 nat_aty ?imp)"
+    using si_holds outer x_in by (simp add: holds_def)
+  have n_left_check: "check_term thy (target_abs nat_n0 nat_aty ?imp)"
+    and n_left_type: "type_of (target_abs nat_n0 nat_aty ?imp) = Some (mk_fun nat_aty bool_ty)"
+    using target_abs_ok[OF nat_aty_check imp_check imp_type] by simp_all
+  have inner: "holds F \<rho> ?\<nu>x (target_forall nat_n0 nat_aty ?imp) \<longleftrightarrow>
+      (\<forall>b. Elem b (interp_type F \<rho> nat_aty) \<longrightarrow>
+        eval_term F \<rho> (?\<nu>x((nat_n0, nat_aty) := b)) [] ?imp = ztrue)"
+    using holds_target_forall_iff_general[OF thy_wf frame_ok type_ok const_ok free_ok_x
+        imp_check n_left_check n_left_type forall_right_check forall_right_type]
+    by (simp add: holds_def)
+  let ?\<nu>xy = "?\<nu>x((nat_n0, nat_aty) := y)"
+  have free_ok_xy: "free_valuation_ok F \<rho> ?\<nu>xy"
+    using free_valuation_update[OF free_ok_x] y_in .
+  have imp_holds: "holds F \<rho> ?\<nu>xy ?imp"
+    using inner_holds inner y_in by (simp add: holds_def)
+  have p_fresh: "\<not> vfree_in conj_fn conj_fty ?lhs"
+    by (simp add: eq_term_def eq_const_def nat_succ_c_def)
+  have q_fresh: "\<not> vfree_in conj_fn conj_fty ?rhs"
+    by (simp add: eq_term_def eq_const_def)
+  have imp_iff: "holds F \<rho> ?\<nu>xy ?imp \<longleftrightarrow> (holds F \<rho> ?\<nu>xy ?lhs \<longrightarrow> holds F \<rho> ?\<nu>xy ?rhs)"
+    using wf_theory_target_imp_holds[OF thy_wf frame_ok type_ok const_ok free_ok_xy
+        lhs_check lhs_type rhs_check rhs_type p_fresh q_fresh] .
+  have lhs_eval: "eval_term F \<rho> ?\<nu>xy [] ?lhs = ztrue"
+    using eval_eq_term[OF thy_wf frame_ok type_ok free_ok_xy const_ok
+        succ_app_check succ_app_type succ_app_check succ_app_type] equal
+    by (simp add: nat_succ_c_def)
+  have rhs_holds: "holds F \<rho> ?\<nu>xy ?rhs"
+    using imp_holds imp_iff lhs_eval by (simp add: holds_def)
+  have rhs_eval: "eval_term F \<rho> ?\<nu>xy [] ?rhs = (if x = y then ztrue else zfalse)"
+    using eval_eq_term[OF thy_wf frame_ok type_ok free_ok_xy const_ok
+        fvar_check fvar_type fvar_check fvar_type]
+    by simp
+  show ?thesis using rhs_holds rhs_eval ztrue_neq_zfalse
+    by (cases "x = y"; simp_all add: holds_def)
+qed
+
+lemma nat_lit_denote_eq_iff:
+  assumes run: "nat_lit_eq_conv thy zns si m n = Some th"
+    and thy_wf: "wf_theory thy" and model: "models_theory F thy"
+    and zns_valid: "valid_sequent F thy (hyps zns) (concl zns)"
+    and si_valid: "valid_sequent F thy (hyps si) (concl si)"
+    and type_ok: "type_valuation_ok \<rho>" and free_ok: "free_valuation_ok F \<rho> \<nu>"
+  shows "nat_lit_denote F \<rho> m = nat_lit_denote F \<rho> n \<longleftrightarrow> m = n"
+proof -
+  have frame_ok: "frame_wf F" using model by (simp add: models_theory_def)
+  have const_ok: "const_interpretation_ok F thy \<rho>"
+    using model type_ok by (auto simp: models_theory_def)
+  have literal_check: "check_term thy (NatLit k)" for k
+    using nat_lit_eq_conv_nat_checks[OF run] by (simp add: check_term_def)
+  have empty_ok: "bound_valuation_ok F \<rho> [] []" by (simp add: bound_valuation_ok_def)
+  have literal_in: "Elem (nat_lit_denote F \<rho> k) (interp_type F \<rho> nat_aty)" for k
+  proof -
+    have open_ok: "check_open_term thy [] (NatLit k)"
+      using literal_check[of k] by (simp add: check_term_def)
+    show ?thesis
+      using eval_type_sound[OF thy_wf frame_ok type_ok free_ok const_ok empty_ok
+          open_ok, of nat_aty]
+      by simp
+  qed
+  have zero_not: "const_sem F \<rho> nat_zero_name nat_aty \<noteq>
+      app (const_sem F \<rho> nat_succ_name nat_sty) x"
+    if "Elem x (interp_type F \<rho> nat_aty)" for x
+    using nat_lit_zero_not_succ_semantic[OF run thy_wf model zns_valid type_ok free_ok that] .
+  have succ_inj: "x = y"
+    if "Elem x (interp_type F \<rho> nat_aty)"
+      "Elem y (interp_type F \<rho> nat_aty)"
+      "app (const_sem F \<rho> nat_succ_name nat_sty) x =
+       app (const_sem F \<rho> nat_succ_name nat_sty) y" for x y
+    using nat_lit_succ_injective_semantic[OF run thy_wf model si_valid type_ok free_ok
+        that(1) that(2) that(3)] .
+  show ?thesis
+  proof (induction m arbitrary: n)
+    case 0
+    then show ?case
+      using zero_not literal_in by (cases n) auto
+  next
+    case (Suc m)
+    then show ?case
+    proof (cases n)
+      case 0
+      then show ?thesis using zero_not[OF literal_in, of m] by auto
+    next
+      case (Suc n')
+      have step: "app (const_sem F \<rho> nat_succ_name nat_sty) (nat_lit_denote F \<rho> m) =
+          app (const_sem F \<rho> nat_succ_name nat_sty) (nat_lit_denote F \<rho> n') \<longleftrightarrow>
+          nat_lit_denote F \<rho> m = nat_lit_denote F \<rho> n'"
+      proof
+        assume equal: "app (const_sem F \<rho> nat_succ_name nat_sty) (nat_lit_denote F \<rho> m) =
+          app (const_sem F \<rho> nat_succ_name nat_sty) (nat_lit_denote F \<rho> n')"
+        show "nat_lit_denote F \<rho> m = nat_lit_denote F \<rho> n'"
+          using succ_inj[OF literal_in literal_in equal] .
+      next
+        assume "nat_lit_denote F \<rho> m = nat_lit_denote F \<rho> n'"
+        then show "app (const_sem F \<rho> nat_succ_name nat_sty) (nat_lit_denote F \<rho> m) =
+          app (const_sem F \<rho> nat_succ_name nat_sty) (nat_lit_denote F \<rho> n')" by simp
+      qed
+      show ?thesis using Suc.IH[of n'] step Suc by simp
+    qed
+  qed
+qed
+
+theorem nat_lit_eq_conv_semantically_valid:
+  assumes run: "nat_lit_eq_conv thy zns si m n = Some th"
+    and thy_wf: "wf_theory thy"
+    and zns_valid: "semantically_valid thy zns"
+    and si_valid: "semantically_valid thy si"
+  shows "semantically_valid thy th"
+proof (unfold semantically_valid_def, intro conjI)
+  show "wf_thm thy th" using nat_lit_eq_conv_extract(12)[OF run] .
+  show "\<forall>F. models_theory F thy \<longrightarrow> valid_sequent F thy (hyps th) (concl th)"
+  proof (intro allI impI)
+    fix F assume model: "models_theory F thy"
+    have frame_ok: "frame_wf F" using model by (simp add: models_theory_def)
+    have zns_sequent: "valid_sequent F thy (hyps zns) (concl zns)"
+      using zns_valid model by (simp add: semantically_valid_def)
+    have si_sequent: "valid_sequent F thy (hyps si) (concl si)"
+      using si_valid model by (simp add: semantically_valid_def)
+    have shape: "th = \<lparr>hyps = [],
+        concl = eq_term bool_ty (eq_term nat_aty (NatLit m) (NatLit n))
+          (nat_lit_eq_rhs m n),
+        thm_stamp = thy_stamp thy\<rparr>"
+      using nat_lit_eq_conv_extract(11)[OF run] .
+    have th_hyps: "hyps th = []" and th_concl:
+        "concl th = eq_term bool_ty (eq_term nat_aty (NatLit m) (NatLit n))
+          (nat_lit_eq_rhs m n)"
+      using shape by simp_all
+    show "valid_sequent F thy (hyps th) (concl th)"
+      unfolding th_hyps th_concl valid_sequent_def
+    proof (intro allI impI)
+      fix \<rho> \<nu>
+      assume type_ok: "type_valuation_ok \<rho>"
+        and const_ok: "const_interpretation_ok F thy \<rho>"
+        and free_ok: "free_valuation_ok F \<rho> \<nu>"
+      have literal_check: "check_term thy (NatLit k)" for k
+        using nat_lit_eq_conv_nat_checks[OF run] by (simp add: check_term_def)
+      have inner_check: "check_term thy (eq_term nat_aty (NatLit m) (NatLit n))"
+        and inner_type: "type_of (eq_term nat_aty (NatLit m) (NatLit n)) = Some bool_ty"
+        using wf_theory_eq_term_check[OF thy_wf nat_lit_eq_conv_nat_checks(1)[OF run]
+            literal_check _ literal_check _] by simp_all
+      have rhs_check: "check_term thy (nat_lit_eq_rhs m n)"
+        and rhs_type: "type_of (nat_lit_eq_rhs m n) = Some bool_ty"
+        using wf_theory_true_term_check[OF thy_wf] wf_theory_false_term_check[OF thy_wf]
+        by (simp_all add: nat_lit_eq_rhs_def)
+      have denote_iff: "nat_lit_denote F \<rho> m = nat_lit_denote F \<rho> n \<longleftrightarrow> m = n"
+        using nat_lit_denote_eq_iff[OF run thy_wf model zns_sequent si_sequent
+            type_ok free_ok] .
+      have inner_eval: "eval_term F \<rho> \<nu> [] (eq_term nat_aty (NatLit m) (NatLit n)) =
+          (if m = n then ztrue else zfalse)"
+        using eval_eq_term[OF thy_wf frame_ok type_ok free_ok const_ok
+            literal_check _ literal_check _] denote_iff
+        by simp
+      have rhs_eval: "eval_term F \<rho> \<nu> [] (nat_lit_eq_rhs m n) =
+          (if m = n then ztrue else zfalse)"
+        by (simp add: nat_lit_eq_rhs_def)
+      have result_eval: "eval_term F \<rho> \<nu> []
+          (eq_term bool_ty (eq_term nat_aty (NatLit m) (NatLit n))
+            (nat_lit_eq_rhs m n)) = ztrue"
+        using eval_eq_term[OF thy_wf frame_ok type_ok free_ok const_ok
+            inner_check inner_type rhs_check rhs_type]
+          inner_eval rhs_eval
+        by simp
+      show "holds F \<rho> \<nu> (eq_term bool_ty (eq_term nat_aty (NatLit m) (NatLit n))
+          (nat_lit_eq_rhs m n))"
+        using result_eval by (simp add: holds_def)
+    qed
+  qed
+qed
+
+section \<open>Checked native arithmetic on compact literals\<close>
+
+text \<open>Arithmetic evidence is specialized by the caller with fresh natural
+free variables.  Keeping those variables explicit makes the validator both
+strict and small: it checks the exact Peano clauses, while semantic soundness
+reads each clause at arbitrary values through the ordinary free valuation.\<close>
+
+definition nat_binary_ty :: "htype \<Rightarrow> htype" where
+  "nat_binary_ty rty = mk_fun nat_aty (mk_fun nat_aty rty)"
+
+definition nat_binary_const :: "hname \<Rightarrow> htype \<Rightarrow> hterm" where
+  "nat_binary_const f rty = Const f (nat_binary_ty rty)"
+
+definition nat_binary_app :: "hname \<Rightarrow> htype \<Rightarrow> hterm \<Rightarrow> hterm \<Rightarrow> hterm" where
+  "nat_binary_app f rty x y = Comb (Comb (nat_binary_const f rty) x) y"
+
+fun term_head_const :: "hterm \<Rightarrow> hname option" where
+  "term_head_const (Const f _) = Some f"
+| "term_head_const (Comb f _) = term_head_const f"
+| "term_head_const _ = None"
+
+definition equation_head_const :: "hthm \<Rightarrow> hname option" where
+  "equation_head_const th =
+    (case dest_eq (concl th) of
+       Some (lhs, _) \<Rightarrow> term_head_const lhs
+     | None \<Rightarrow> None)"
+
+definition one_nat_var :: "hthm \<Rightarrow> hname option" where
+  "one_nat_var th =
+    (case free_vars (concl th) of [(n, ty)] \<Rightarrow> if ty = nat_aty then Some n else None
+     | _ \<Rightarrow> None)"
+
+definition two_nat_vars :: "hthm \<Rightarrow> (hname \<times> hname) option" where
+  "two_nat_vars th =
+    (case free_vars (concl th) of
+       [(m, mty), (n, nty)] \<Rightarrow>
+         if mty = nat_aty \<and> nty = nat_aty \<and> m \<noteq> n then Some (m, n) else None
+     | _ \<Rightarrow> None)"
+
+definition equation_rhs_bool_const :: "hthm \<Rightarrow> hname option" where
+  "equation_rhs_bool_const th =
+    (case dest_eq (concl th) of
+       Some (_, Const b ty) \<Rightarrow> if ty = bool_ty then Some b else None
+     | _ \<Rightarrow> None)"
+
+definition arithmetic_evidence_ok :: "htheory \<Rightarrow> hthm \<Rightarrow> hterm \<Rightarrow> bool" where
+  "arithmetic_evidence_ok thy th expected \<longleftrightarrow>
+    wf_thm thy th \<and> hyps th = [] \<and> concl th = expected"
+
+definition nat_arithmetic_context_ok :: "htheory \<Rightarrow> bool" where
+  "nat_arithmetic_context_ok thy \<longleftrightarrow>
+    check_type thy nat_aty \<and> check_type thy nat_sty \<and>
+    const_tab thy nat_zero_name = Some nat_aty \<and>
+    const_tab thy nat_succ_name = Some nat_sty"
+
+definition add_zero_concl :: "hname \<Rightarrow> hname \<Rightarrow> hterm" where
+  "add_zero_concl add n = eq_term nat_aty
+    (nat_binary_app add nat_aty nat_zero_c (FVar n nat_aty)) (FVar n nat_aty)"
+
+definition add_succ_concl :: "hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hterm" where
+  "add_succ_concl add k n = eq_term nat_aty
+    (nat_binary_app add nat_aty (Comb nat_succ_c (FVar k nat_aty)) (FVar n nat_aty))
+    (Comb nat_succ_c (nat_binary_app add nat_aty (FVar k nat_aty) (FVar n nat_aty)))"
+
+definition mul_zero_concl :: "hname \<Rightarrow> hname \<Rightarrow> hterm" where
+  "mul_zero_concl mul n = eq_term nat_aty
+    (nat_binary_app mul nat_aty nat_zero_c (FVar n nat_aty)) nat_zero_c"
+
+definition mul_succ_concl :: "hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hterm" where
+  "mul_succ_concl add mul k n = eq_term nat_aty
+    (nat_binary_app mul nat_aty (Comb nat_succ_c (FVar k nat_aty)) (FVar n nat_aty))
+    (nat_binary_app add nat_aty (FVar n nat_aty)
+      (nat_binary_app mul nat_aty (FVar k nat_aty) (FVar n nat_aty)))"
+
+definition le_zero_concl :: "hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hterm" where
+  "le_zero_concl le truth n = eq_term bool_ty
+    (nat_binary_app le bool_ty nat_zero_c (FVar n nat_aty)) (Const truth bool_ty)"
+
+definition le_succ_zero_concl :: "hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hterm" where
+  "le_succ_zero_concl le falsehood k = eq_term bool_ty
+    (nat_binary_app le bool_ty (Comb nat_succ_c (FVar k nat_aty)) nat_zero_c)
+    (Const falsehood bool_ty)"
+
+definition le_succ_succ_concl :: "hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hterm" where
+  "le_succ_succ_concl le k n = eq_term bool_ty
+    (nat_binary_app le bool_ty (Comb nat_succ_c (FVar k nat_aty))
+      (Comb nat_succ_c (FVar n nat_aty)))
+    (nat_binary_app le bool_ty (FVar k nat_aty) (FVar n nat_aty))"
+
+definition sub_zero_concl :: "hname \<Rightarrow> hname \<Rightarrow> hterm" where
+  "sub_zero_concl sub n = eq_term nat_aty
+    (nat_binary_app sub nat_aty nat_zero_c (FVar n nat_aty)) nat_zero_c"
+
+definition sub_succ_zero_concl :: "hname \<Rightarrow> hname \<Rightarrow> hterm" where
+  "sub_succ_zero_concl sub k = eq_term nat_aty
+    (nat_binary_app sub nat_aty (Comb nat_succ_c (FVar k nat_aty)) nat_zero_c)
+    (Comb nat_succ_c (FVar k nat_aty))"
+
+definition sub_succ_succ_concl :: "hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hterm" where
+  "sub_succ_succ_concl sub k n = eq_term nat_aty
+    (nat_binary_app sub nat_aty (Comb nat_succ_c (FVar k nat_aty))
+      (Comb nat_succ_c (FVar n nat_aty)))
+    (nat_binary_app sub nat_aty (FVar k nat_aty) (FVar n nat_aty))"
+
+definition pow_zero_concl :: "hname \<Rightarrow> hname \<Rightarrow> hterm" where
+  "pow_zero_concl pow base = eq_term nat_aty
+    (nat_binary_app pow nat_aty (FVar base nat_aty) nat_zero_c)
+    (Comb nat_succ_c nat_zero_c)"
+
+definition pow_succ_concl :: "hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hname \<Rightarrow> hterm" where
+  "pow_succ_concl mul pow base k = eq_term nat_aty
+    (nat_binary_app pow nat_aty (FVar base nat_aty)
+      (Comb nat_succ_c (FVar k nat_aty)))
+    (nat_binary_app mul nat_aty (FVar base nat_aty)
+      (nat_binary_app pow nat_aty (FVar base nat_aty) (FVar k nat_aty)))"
+
+definition nat_lit_add_conv ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> hthm option" where
+  "nat_lit_add_conv thy add_zero add_succ m n =
+    (case (equation_head_const add_zero, one_nat_var add_zero,
+           two_nat_vars add_succ) of
+       (Some add, Some zn, Some (sk, sn)) \<Rightarrow>
+         if nat_arithmetic_context_ok thy \<and>
+            arithmetic_evidence_ok thy add_zero (add_zero_concl add zn) \<and>
+            arithmetic_evidence_ok thy add_succ (add_succ_concl add sk sn)
+         then checked_eq_thm thy []
+           (nat_binary_app add nat_aty (NatLit m) (NatLit n)) (NatLit (m + n))
+           (thy_stamp thy)
+         else None
+     | _ \<Rightarrow> None)"
+
+definition nat_lit_mul_conv ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> hthm option" where
+  "nat_lit_mul_conv thy add_zero add_succ mul_zero mul_succ m n =
+    (case (equation_head_const add_zero, one_nat_var add_zero,
+           two_nat_vars add_succ, equation_head_const mul_zero,
+           one_nat_var mul_zero, two_nat_vars mul_succ) of
+       (Some add, Some azn, Some (ask, asn), Some mul, Some mzn,
+          Some (msk, msn)) \<Rightarrow>
+         if nat_arithmetic_context_ok thy \<and>
+            arithmetic_evidence_ok thy add_zero (add_zero_concl add azn) \<and>
+            arithmetic_evidence_ok thy add_succ (add_succ_concl add ask asn) \<and>
+            arithmetic_evidence_ok thy mul_zero (mul_zero_concl mul mzn) \<and>
+            arithmetic_evidence_ok thy mul_succ (mul_succ_concl add mul msk msn)
+         then checked_eq_thm thy []
+           (nat_binary_app mul nat_aty (NatLit m) (NatLit n)) (NatLit (m * n))
+           (thy_stamp thy)
+         else None
+     | _ \<Rightarrow> None)"
+
+definition nat_lit_le_conv ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> hthm option" where
+  "nat_lit_le_conv thy le_zero le_succ_zero le_succ_succ m n =
+    (case (equation_head_const le_zero, equation_rhs_bool_const le_zero,
+           one_nat_var le_zero, equation_rhs_bool_const le_succ_zero,
+           one_nat_var le_succ_zero, two_nat_vars le_succ_succ) of
+       (Some le, Some truth, Some lzn, Some falsehood, Some lsk,
+          Some (lssk, lssn)) \<Rightarrow>
+         if nat_arithmetic_context_ok thy \<and>
+            arithmetic_evidence_ok thy le_zero (le_zero_concl le truth lzn) \<and>
+            arithmetic_evidence_ok thy le_succ_zero
+              (le_succ_zero_concl le falsehood lsk) \<and>
+            arithmetic_evidence_ok thy le_succ_succ
+              (le_succ_succ_concl le lssk lssn)
+         then checked_eq_thm thy []
+           (nat_binary_app le bool_ty (NatLit m) (NatLit n))
+           (Const (if m \<le> n then truth else falsehood) bool_ty) (thy_stamp thy)
+         else None
+     | _ \<Rightarrow> None)"
+
+definition nat_lit_sub_conv ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> hthm option" where
+  "nat_lit_sub_conv thy sub_zero sub_succ_zero sub_succ_succ m n =
+    (case (equation_head_const sub_zero, one_nat_var sub_zero,
+           one_nat_var sub_succ_zero, two_nat_vars sub_succ_succ) of
+       (Some sub, Some szn, Some ssk, Some (sssk, sssn)) \<Rightarrow>
+         if nat_arithmetic_context_ok thy \<and>
+            arithmetic_evidence_ok thy sub_zero (sub_zero_concl sub szn) \<and>
+            arithmetic_evidence_ok thy sub_succ_zero (sub_succ_zero_concl sub ssk) \<and>
+            arithmetic_evidence_ok thy sub_succ_succ
+              (sub_succ_succ_concl sub sssk sssn)
+         then checked_eq_thm thy []
+           (nat_binary_app sub nat_aty (NatLit m) (NatLit n)) (NatLit (m - n))
+           (thy_stamp thy)
+         else None
+     | _ \<Rightarrow> None)"
+
+definition nat_lit_pow_conv ::
+  "htheory \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> hthm option" where
+  "nat_lit_pow_conv thy add_zero add_succ mul_zero mul_succ pow_zero pow_succ base exponent =
+    (case (equation_head_const add_zero, one_nat_var add_zero,
+           two_nat_vars add_succ, equation_head_const mul_zero,
+           one_nat_var mul_zero, two_nat_vars mul_succ,
+           equation_head_const pow_zero, one_nat_var pow_zero,
+           two_nat_vars pow_succ) of
+       (Some add, Some azn, Some (ask, asn), Some mul, Some mzn,
+          Some (msk, msn), Some pow, Some pzb, Some (psb, psk)) \<Rightarrow>
+         if nat_arithmetic_context_ok thy \<and>
+            arithmetic_evidence_ok thy add_zero (add_zero_concl add azn) \<and>
+            arithmetic_evidence_ok thy add_succ (add_succ_concl add ask asn) \<and>
+            arithmetic_evidence_ok thy mul_zero (mul_zero_concl mul mzn) \<and>
+            arithmetic_evidence_ok thy mul_succ (mul_succ_concl add mul msk msn) \<and>
+            arithmetic_evidence_ok thy pow_zero (pow_zero_concl pow pzb) \<and>
+            arithmetic_evidence_ok thy pow_succ (pow_succ_concl mul pow psb psk)
+         then checked_eq_thm thy []
+           (nat_binary_app pow nat_aty (NatLit base) (NatLit exponent))
+           (NatLit (base ^ exponent)) (thy_stamp thy)
+         else None
+     | _ \<Rightarrow> None)"
+
+lemma arithmetic_evidence_eval:
+  assumes thy_wf: "wf_theory thy" and model: "models_theory F thy"
+    and valid: "semantically_valid thy evidence"
+    and no_hyps: "hyps evidence = []"
+    and conclusion: "concl evidence = eq_term ty lhs rhs"
+    and type_ok: "type_valuation_ok \<rho>"
+    and free_ok: "free_valuation_ok F \<rho> \<nu>"
+  shows "eval_term F \<rho> \<nu> [] lhs = eval_term F \<rho> \<nu> [] rhs"
+proof -
+  have evidence_wf: "wf_thm thy evidence"
+    using valid by (simp add: semantically_valid_def)
+  have evidence_valid: "valid_sequent F thy (hyps evidence) (concl evidence)"
+    using valid model by (simp add: semantically_valid_def)
+  have const_ok: "const_interpretation_ok F thy \<rho>"
+    using model type_ok by (auto simp: models_theory_def)
+  have dest: "dest_eq (concl evidence) = Some (lhs, rhs)"
+    by (simp add: conclusion eq_term_def eq_const_def)
+  have hyps_ok: "\<forall>h\<in>set (hyps evidence). holds F \<rho> \<nu> h"
+    by (simp add: no_hyps)
+  show ?thesis
+    using valid_equality_elim[OF thy_wf model evidence_wf evidence_valid dest
+        type_ok const_ok free_ok hyps_ok] .
+qed
+
+lemma nat_arithmetic_literal_in:
+  assumes thy_wf: "wf_theory thy" and model: "models_theory F thy"
+    and nat_context: "nat_arithmetic_context_ok thy"
+    and type_ok: "type_valuation_ok \<rho>"
+    and free_ok: "free_valuation_ok F \<rho> \<nu>"
+  shows "Elem (nat_lit_denote F \<rho> n) (interp_type F \<rho> nat_aty)"
+proof -
+  have frame_ok: "frame_wf F" using model by (simp add: models_theory_def)
+  have const_ok: "const_interpretation_ok F thy \<rho>"
+    using model type_ok by (auto simp: models_theory_def)
+  have checked: "check_open_term thy [] (NatLit n)"
+    using nat_context by (simp add: nat_arithmetic_context_ok_def)
+  have empty_ok: "bound_valuation_ok F \<rho> [] []"
+    by (simp add: bound_valuation_ok_def)
+  show ?thesis
+    using eval_type_sound[OF thy_wf frame_ok type_ok free_ok const_ok empty_ok checked,
+        of nat_aty]
+    by simp
+qed
+
+lemma closed_eq_semantically_valid:
+  assumes thy_wf: "wf_theory thy" and th_wf: "wf_thm thy th"
+    and no_hyps: "hyps th = []" and conclusion: "concl th = eq_term ty lhs rhs"
+    and equal: "\<And>F \<rho> \<nu>. models_theory F thy \<Longrightarrow> type_valuation_ok \<rho> \<Longrightarrow>
+      free_valuation_ok F \<rho> \<nu> \<Longrightarrow> eval_term F \<rho> \<nu> [] lhs = eval_term F \<rho> \<nu> [] rhs"
+  shows "semantically_valid thy th"
+proof (unfold semantically_valid_def, intro conjI)
+  show "wf_thm thy th" using th_wf .
+  show "\<forall>F. models_theory F thy \<longrightarrow> valid_sequent F thy (hyps th) (concl th)"
+  proof (intro allI impI)
+    fix F assume model: "models_theory F thy"
+    show "valid_sequent F thy (hyps th) (concl th)"
+      unfolding valid_sequent_def no_hyps conclusion
+    proof (intro allI impI)
+      fix \<rho> \<nu>
+      assume type_ok: "type_valuation_ok \<rho>"
+        and const_ok: "const_interpretation_ok F thy \<rho>"
+        and free_ok: "free_valuation_ok F \<rho> \<nu>"
+      have dest: "dest_eq (concl th) = Some (lhs, rhs)"
+        by (simp add: conclusion eq_term_def eq_const_def)
+      obtain out_ty where out:
+          "concl th = eq_term out_ty lhs rhs"
+          "check_term thy lhs" "type_of lhs = Some out_ty"
+          "check_term thy rhs" "type_of rhs = Some out_ty"
+        using wf_thm_dest_eq[OF thy_wf th_wf dest] .
+      have frame_ok: "frame_wf F" using model by (simp add: models_theory_def)
+      have holds_out: "holds F \<rho> \<nu> (eq_term out_ty lhs rhs)"
+        using holds_eq_iff[OF thy_wf frame_ok type_ok free_ok const_ok
+            out(2) out(3) out(4) out(5)] equal[OF model type_ok free_ok]
+        by blast
+      show "holds F \<rho> \<nu> (eq_term ty lhs rhs)"
+        using holds_out out(1) conclusion by simp
+    qed
+  qed
+qed
+
+lemma nat_lit_add_conv_extract:
+  assumes run: "nat_lit_add_conv thy add_zero add_succ m n = Some th"
+  obtains add zn sk sn where
+    "nat_arithmetic_context_ok thy"
+    "arithmetic_evidence_ok thy add_zero (add_zero_concl add zn)"
+    "arithmetic_evidence_ok thy add_succ (add_succ_concl add sk sn)"
+    "sk \<noteq> sn"
+    "th = \<lparr>hyps = [], concl = eq_term nat_aty
+      (nat_binary_app add nat_aty (NatLit m) (NatLit n)) (NatLit (m + n)),
+      thm_stamp = thy_stamp thy\<rparr>"
+    "wf_thm thy th"
+  using run that
+  by (auto simp: nat_lit_add_conv_def equation_head_const_def one_nat_var_def
+      two_nat_vars_def arithmetic_evidence_ok_def add_zero_concl_def
+      add_succ_concl_def eq_shape_def thm_shape_def split: option.splits prod.splits
+      list.splits if_splits)
+
+theorem nat_lit_add_conv_semantically_valid:
+  assumes run: "nat_lit_add_conv thy add_zero add_succ m n = Some th"
+    and thy_wf: "wf_theory thy"
+    and zero_valid: "semantically_valid thy add_zero"
+    and succ_valid: "semantically_valid thy add_succ"
+  shows "semantically_valid thy th"
+proof -
+  obtain add zn sk sn where nat_context: "nat_arithmetic_context_ok thy"
+    and zero_ok: "arithmetic_evidence_ok thy add_zero (add_zero_concl add zn)"
+    and succ_ok: "arithmetic_evidence_ok thy add_succ (add_succ_concl add sk sn)"
+    and vars: "sk \<noteq> sn"
+    and shape: "th = \<lparr>hyps = [], concl = eq_term nat_aty
+      (nat_binary_app add nat_aty (NatLit m) (NatLit n)) (NatLit (m + n)),
+      thm_stamp = thy_stamp thy\<rparr>"
+    and th_wf: "wf_thm thy th"
+    using nat_lit_add_conv_extract[OF run] .
+  have zero_hyps: "hyps add_zero = []" and zero_concl:
+      "concl add_zero = add_zero_concl add zn"
+    using zero_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have succ_hyps: "hyps add_succ = []" and succ_concl:
+      "concl add_succ = add_succ_concl add sk sn"
+    using succ_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have zero_concl': "concl add_zero = eq_term nat_aty
+      (nat_binary_app add nat_aty nat_zero_c (FVar zn nat_aty)) (FVar zn nat_aty)"
+    using zero_concl by (simp add: add_zero_concl_def)
+  have succ_concl': "concl add_succ = eq_term nat_aty
+      (nat_binary_app add nat_aty (Comb nat_succ_c (FVar sk nat_aty))
+        (FVar sn nat_aty))
+      (Comb nat_succ_c
+        (nat_binary_app add nat_aty (FVar sk nat_aty) (FVar sn nat_aty)))"
+    using succ_concl by (simp add: add_succ_concl_def)
+  show ?thesis
+  proof (rule closed_eq_semantically_valid[OF thy_wf th_wf])
+    show "hyps th = []" using shape by simp
+    show "concl th = eq_term nat_aty
+        (nat_binary_app add nat_aty (NatLit m) (NatLit n)) (NatLit (m + n))"
+      using shape by simp
+    fix F \<rho> \<nu>
+    assume model: "models_theory F thy" and type_ok: "type_valuation_ok \<rho>"
+      and free_ok: "free_valuation_ok F \<rho> \<nu>"
+    have lit_in: "Elem (nat_lit_denote F \<rho> k) (interp_type F \<rho> nat_aty)" for k
+      using nat_arithmetic_literal_in[OF thy_wf model nat_context type_ok free_ok] .
+    have zero_eq: "eval_term F \<rho> \<nu>0 []
+        (nat_binary_app add nat_aty nat_zero_c (FVar zn nat_aty)) =
+        eval_term F \<rho> \<nu>0 [] (FVar zn nat_aty)"
+      if free0: "free_valuation_ok F \<rho> \<nu>0" for \<nu>0
+      using arithmetic_evidence_eval[OF thy_wf model zero_valid zero_hyps
+          zero_concl' type_ok free0]
+      by (simp add: add_zero_concl_def)
+    have succ_eq: "eval_term F \<rho> \<nu>0 []
+        (nat_binary_app add nat_aty (Comb nat_succ_c (FVar sk nat_aty))
+          (FVar sn nat_aty)) =
+        eval_term F \<rho> \<nu>0 []
+          (Comb nat_succ_c
+            (nat_binary_app add nat_aty (FVar sk nat_aty) (FVar sn nat_aty)))"
+      if free0: "free_valuation_ok F \<rho> \<nu>0" for \<nu>0
+      using arithmetic_evidence_eval[OF thy_wf model succ_valid succ_hyps
+          succ_concl' type_ok free0]
+      by (simp add: add_succ_concl_def)
+    show "eval_term F \<rho> \<nu> []
+        (nat_binary_app add nat_aty (NatLit m) (NatLit n)) =
+        eval_term F \<rho> \<nu> [] (NatLit (m + n))"
+    proof (induction m)
+      case 0
+      let ?\<nu>n = "\<nu>((zn, nat_aty) := nat_lit_denote F \<rho> n)"
+      have free_n: "free_valuation_ok F \<rho> ?\<nu>n"
+        using free_valuation_update[OF free_ok lit_in] .
+      show ?case using zero_eq[OF free_n]
+        by (simp add: nat_binary_app_def nat_binary_const_def nat_zero_c_def)
+    next
+      case (Suc k)
+      let ?\<nu>k = "\<nu>((sk, nat_aty) := nat_lit_denote F \<rho> k)"
+      let ?\<nu>kn = "?\<nu>k((sn, nat_aty) := nat_lit_denote F \<rho> n)"
+      have free_k: "free_valuation_ok F \<rho> ?\<nu>k"
+        using free_valuation_update[OF free_ok lit_in] .
+      have free_kn: "free_valuation_ok F \<rho> ?\<nu>kn"
+        using free_valuation_update[OF free_k lit_in] .
+      show ?case using succ_eq[OF free_kn] Suc.IH vars
+        by (simp add: nat_binary_app_def nat_binary_const_def nat_succ_c_def)
+    qed
+  qed
+qed
+
+lemma nat_add_evidence_denote:
+  assumes thy_wf: "wf_theory thy" and model: "models_theory F thy"
+    and nat_context: "nat_arithmetic_context_ok thy"
+    and zero_valid: "semantically_valid thy add_zero"
+    and succ_valid: "semantically_valid thy add_succ"
+    and zero_hyps: "hyps add_zero = []"
+    and zero_concl: "concl add_zero = add_zero_concl add zn"
+    and succ_hyps: "hyps add_succ = []"
+    and succ_concl: "concl add_succ = add_succ_concl add sk sn"
+    and vars: "sk \<noteq> sn"
+    and type_ok: "type_valuation_ok \<rho>"
+    and free_ok: "free_valuation_ok F \<rho> \<nu>"
+  shows "eval_term F \<rho> \<nu> [] (nat_binary_app add nat_aty (NatLit m) (NatLit n)) =
+    eval_term F \<rho> \<nu> [] (NatLit (m + n))"
+proof -
+  have lit_in: "Elem (nat_lit_denote F \<rho> k) (interp_type F \<rho> nat_aty)" for k
+    using nat_arithmetic_literal_in[OF thy_wf model nat_context type_ok free_ok] .
+  have zero_concl': "concl add_zero = eq_term nat_aty
+      (nat_binary_app add nat_aty nat_zero_c (FVar zn nat_aty)) (FVar zn nat_aty)"
+    using zero_concl by (simp add: add_zero_concl_def)
+  have succ_concl': "concl add_succ = eq_term nat_aty
+      (nat_binary_app add nat_aty (Comb nat_succ_c (FVar sk nat_aty))
+        (FVar sn nat_aty))
+      (Comb nat_succ_c
+        (nat_binary_app add nat_aty (FVar sk nat_aty) (FVar sn nat_aty)))"
+    using succ_concl by (simp add: add_succ_concl_def)
+  show ?thesis
+  proof (induction m)
+    case 0
+    let ?\<nu>n = "\<nu>((zn, nat_aty) := nat_lit_denote F \<rho> n)"
+    have free_n: "free_valuation_ok F \<rho> ?\<nu>n"
+      using free_valuation_update[OF free_ok lit_in] .
+    note step = arithmetic_evidence_eval[OF thy_wf model zero_valid zero_hyps
+        zero_concl' type_ok free_n]
+    show ?case using step
+      by (simp add: nat_binary_app_def nat_binary_const_def nat_zero_c_def)
+  next
+    case (Suc k)
+    let ?\<nu>k = "\<nu>((sk, nat_aty) := nat_lit_denote F \<rho> k)"
+    let ?\<nu>kn = "?\<nu>k((sn, nat_aty) := nat_lit_denote F \<rho> n)"
+    have free_k: "free_valuation_ok F \<rho> ?\<nu>k"
+      using free_valuation_update[OF free_ok lit_in] .
+    have free_kn: "free_valuation_ok F \<rho> ?\<nu>kn"
+      using free_valuation_update[OF free_k lit_in] .
+    note step = arithmetic_evidence_eval[OF thy_wf model succ_valid succ_hyps
+        succ_concl' type_ok free_kn]
+    show ?case using step Suc.IH vars
+      by (simp add: nat_binary_app_def nat_binary_const_def nat_succ_c_def)
+  qed
+qed
+
+lemma nat_lit_mul_conv_extract:
+  assumes run: "nat_lit_mul_conv thy add_zero add_succ mul_zero mul_succ m n = Some th"
+  obtains add azn ask asn mul mzn msk msn where
+    "nat_arithmetic_context_ok thy"
+    "arithmetic_evidence_ok thy add_zero (add_zero_concl add azn)"
+    "arithmetic_evidence_ok thy add_succ (add_succ_concl add ask asn)"
+    "arithmetic_evidence_ok thy mul_zero (mul_zero_concl mul mzn)"
+    "arithmetic_evidence_ok thy mul_succ (mul_succ_concl add mul msk msn)"
+    "ask \<noteq> asn" "msk \<noteq> msn"
+    "th = \<lparr>hyps = [], concl = eq_term nat_aty
+      (nat_binary_app mul nat_aty (NatLit m) (NatLit n)) (NatLit (m * n)),
+      thm_stamp = thy_stamp thy\<rparr>"
+    "wf_thm thy th"
+  using run that
+  by (auto simp: nat_lit_mul_conv_def equation_head_const_def one_nat_var_def
+      two_nat_vars_def arithmetic_evidence_ok_def add_zero_concl_def
+      add_succ_concl_def mul_zero_concl_def mul_succ_concl_def
+      eq_shape_def thm_shape_def split: option.splits prod.splits list.splits if_splits)
+
+theorem nat_lit_mul_conv_semantically_valid:
+  assumes run: "nat_lit_mul_conv thy add_zero add_succ mul_zero mul_succ m n = Some th"
+    and thy_wf: "wf_theory thy"
+    and az_valid: "semantically_valid thy add_zero"
+    and ass_valid: "semantically_valid thy add_succ"
+    and mz_valid: "semantically_valid thy mul_zero"
+    and ms_valid: "semantically_valid thy mul_succ"
+  shows "semantically_valid thy th"
+proof -
+  obtain add azn ask asn mul mzn msk msn where
+    nat_context: "nat_arithmetic_context_ok thy"
+    and az_ok: "arithmetic_evidence_ok thy add_zero (add_zero_concl add azn)"
+    and ass_ok: "arithmetic_evidence_ok thy add_succ (add_succ_concl add ask asn)"
+    and mz_ok: "arithmetic_evidence_ok thy mul_zero (mul_zero_concl mul mzn)"
+    and ms_ok: "arithmetic_evidence_ok thy mul_succ (mul_succ_concl add mul msk msn)"
+    and avars: "ask \<noteq> asn" and mvars: "msk \<noteq> msn"
+    and shape: "th = \<lparr>hyps = [], concl = eq_term nat_aty
+      (nat_binary_app mul nat_aty (NatLit m) (NatLit n)) (NatLit (m * n)),
+      thm_stamp = thy_stamp thy\<rparr>"
+    and th_wf: "wf_thm thy th"
+    using nat_lit_mul_conv_extract[OF run] .
+  have az: "hyps add_zero = []" "concl add_zero = add_zero_concl add azn"
+    using az_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have ass: "hyps add_succ = []" "concl add_succ = add_succ_concl add ask asn"
+    using ass_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have mz: "hyps mul_zero = []" "concl mul_zero = mul_zero_concl mul mzn"
+    using mz_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have ms: "hyps mul_succ = []" "concl mul_succ = mul_succ_concl add mul msk msn"
+    using ms_ok by (simp_all add: arithmetic_evidence_ok_def)
+  show ?thesis
+  proof (rule closed_eq_semantically_valid[OF thy_wf th_wf])
+    show "hyps th = []" using shape by simp
+    show "concl th = eq_term nat_aty
+        (nat_binary_app mul nat_aty (NatLit m) (NatLit n)) (NatLit (m * n))"
+      using shape by simp
+    fix F \<rho> \<nu>
+    assume model: "models_theory F thy" and type_ok: "type_valuation_ok \<rho>"
+      and free_ok: "free_valuation_ok F \<rho> \<nu>"
+    have lit_in: "Elem (nat_lit_denote F \<rho> k) (interp_type F \<rho> nat_aty)" for k
+      using nat_arithmetic_literal_in[OF thy_wf model nat_context type_ok free_ok] .
+    have add_result: "eval_term F \<rho> \<nu> []
+        (nat_binary_app add nat_aty (NatLit a) (NatLit b)) =
+        eval_term F \<rho> \<nu> [] (NatLit (a + b))" for a b
+      using nat_add_evidence_denote[OF thy_wf model nat_context az_valid ass_valid
+          az(1) az(2) ass(1) ass(2) avars type_ok free_ok] .
+    have mz_concl: "concl mul_zero = eq_term nat_aty
+        (nat_binary_app mul nat_aty nat_zero_c (FVar mzn nat_aty)) nat_zero_c"
+      using mz(2) by (simp add: mul_zero_concl_def)
+    have ms_concl: "concl mul_succ = eq_term nat_aty
+        (nat_binary_app mul nat_aty (Comb nat_succ_c (FVar msk nat_aty))
+          (FVar msn nat_aty))
+        (nat_binary_app add nat_aty (FVar msn nat_aty)
+          (nat_binary_app mul nat_aty (FVar msk nat_aty) (FVar msn nat_aty)))"
+      using ms(2) by (simp add: mul_succ_concl_def)
+    show "eval_term F \<rho> \<nu> []
+        (nat_binary_app mul nat_aty (NatLit m) (NatLit n)) =
+        eval_term F \<rho> \<nu> [] (NatLit (m * n))"
+    proof (induction m)
+      case 0
+      let ?\<nu>n = "\<nu>((mzn, nat_aty) := nat_lit_denote F \<rho> n)"
+      have free_n: "free_valuation_ok F \<rho> ?\<nu>n"
+        using free_valuation_update[OF free_ok lit_in] .
+      note step = arithmetic_evidence_eval[OF thy_wf model mz_valid mz(1)
+          mz_concl type_ok free_n]
+      show ?case using step
+        by (simp add: nat_binary_app_def nat_binary_const_def nat_zero_c_def)
+    next
+      case (Suc k)
+      let ?\<nu>k = "\<nu>((msk, nat_aty) := nat_lit_denote F \<rho> k)"
+      let ?\<nu>kn = "?\<nu>k((msn, nat_aty) := nat_lit_denote F \<rho> n)"
+      have free_k: "free_valuation_ok F \<rho> ?\<nu>k"
+        using free_valuation_update[OF free_ok lit_in] .
+      have free_kn: "free_valuation_ok F \<rho> ?\<nu>kn"
+        using free_valuation_update[OF free_k lit_in] .
+      note step = arithmetic_evidence_eval[OF thy_wf model ms_valid ms(1)
+          ms_concl type_ok free_kn]
+      show ?case using step Suc.IH add_result[of n "k * n"] mvars
+        by (simp add: nat_binary_app_def nat_binary_const_def nat_succ_c_def)
+    qed
+  qed
+qed
+
+lemma nat_lit_le_conv_extract:
+  assumes run: "nat_lit_le_conv thy le_zero le_succ_zero le_succ_succ m n = Some th"
+  obtains le truth falsehood lzn lsk lssk lssn where
+    "nat_arithmetic_context_ok thy"
+    "arithmetic_evidence_ok thy le_zero (le_zero_concl le truth lzn)"
+    "arithmetic_evidence_ok thy le_succ_zero (le_succ_zero_concl le falsehood lsk)"
+    "arithmetic_evidence_ok thy le_succ_succ (le_succ_succ_concl le lssk lssn)"
+    "lssk \<noteq> lssn"
+    "th = \<lparr>hyps = [], concl = eq_term bool_ty
+      (nat_binary_app le bool_ty (NatLit m) (NatLit n))
+      (Const (if m \<le> n then truth else falsehood) bool_ty), thm_stamp = thy_stamp thy\<rparr>"
+    "wf_thm thy th"
+  using run that
+  by (auto simp: nat_lit_le_conv_def equation_head_const_def equation_rhs_bool_const_def
+      one_nat_var_def two_nat_vars_def arithmetic_evidence_ok_def le_zero_concl_def
+      le_succ_zero_concl_def le_succ_succ_concl_def eq_shape_def thm_shape_def
+      split: option.splits prod.splits list.splits if_splits)
+
+theorem nat_lit_le_conv_semantically_valid:
+  assumes run: "nat_lit_le_conv thy le_zero le_succ_zero le_succ_succ m n = Some th"
+    and thy_wf: "wf_theory thy"
+    and lz_valid: "semantically_valid thy le_zero"
+    and lsz_valid: "semantically_valid thy le_succ_zero"
+    and lss_valid: "semantically_valid thy le_succ_succ"
+  shows "semantically_valid thy th"
+proof -
+  obtain le truth falsehood lzn lsk lssk lssn where
+    nat_context: "nat_arithmetic_context_ok thy"
+    and lz_ok: "arithmetic_evidence_ok thy le_zero (le_zero_concl le truth lzn)"
+    and lsz_ok: "arithmetic_evidence_ok thy le_succ_zero (le_succ_zero_concl le falsehood lsk)"
+    and lss_ok: "arithmetic_evidence_ok thy le_succ_succ (le_succ_succ_concl le lssk lssn)"
+    and vars: "lssk \<noteq> lssn"
+    and shape: "th = \<lparr>hyps = [], concl = eq_term bool_ty
+      (nat_binary_app le bool_ty (NatLit m) (NatLit n))
+      (Const (if m \<le> n then truth else falsehood) bool_ty), thm_stamp = thy_stamp thy\<rparr>"
+    and th_wf: "wf_thm thy th"
+    using nat_lit_le_conv_extract[OF run] .
+  have lz: "hyps le_zero = []" "concl le_zero = le_zero_concl le truth lzn"
+    using lz_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have lsz: "hyps le_succ_zero = []" "concl le_succ_zero = le_succ_zero_concl le falsehood lsk"
+    using lsz_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have lss: "hyps le_succ_succ = []" "concl le_succ_succ = le_succ_succ_concl le lssk lssn"
+    using lss_ok by (simp_all add: arithmetic_evidence_ok_def)
+  show ?thesis
+  proof (rule closed_eq_semantically_valid[OF thy_wf th_wf])
+    show "hyps th = []" using shape by simp
+    show "concl th = eq_term bool_ty (nat_binary_app le bool_ty (NatLit m) (NatLit n))
+        (Const (if m \<le> n then truth else falsehood) bool_ty)" using shape by simp
+    fix F \<rho> \<nu>
+    assume model: "models_theory F thy" and type_ok: "type_valuation_ok \<rho>"
+      and free_ok: "free_valuation_ok F \<rho> \<nu>"
+    have lit_in: "Elem (nat_lit_denote F \<rho> k) (interp_type F \<rho> nat_aty)" for k
+      using nat_arithmetic_literal_in[OF thy_wf model nat_context type_ok free_ok] .
+    have lz_concl: "concl le_zero = eq_term bool_ty
+        (nat_binary_app le bool_ty nat_zero_c (FVar lzn nat_aty)) (Const truth bool_ty)"
+      using lz(2) by (simp add: le_zero_concl_def)
+    have lsz_concl: "concl le_succ_zero = eq_term bool_ty
+        (nat_binary_app le bool_ty (Comb nat_succ_c (FVar lsk nat_aty)) nat_zero_c)
+        (Const falsehood bool_ty)"
+      using lsz(2) by (simp add: le_succ_zero_concl_def)
+    have lss_concl: "concl le_succ_succ = eq_term bool_ty
+        (nat_binary_app le bool_ty (Comb nat_succ_c (FVar lssk nat_aty))
+          (Comb nat_succ_c (FVar lssn nat_aty)))
+        (nat_binary_app le bool_ty (FVar lssk nat_aty) (FVar lssn nat_aty))"
+      using lss(2) by (simp add: le_succ_succ_concl_def)
+    show "eval_term F \<rho> \<nu> [] (nat_binary_app le bool_ty (NatLit m) (NatLit n)) =
+        eval_term F \<rho> \<nu> [] (Const (if m \<le> n then truth else falsehood) bool_ty)"
+    proof (induction m arbitrary: n)
+      case 0
+      let ?\<nu>n = "\<nu>((lzn, nat_aty) := nat_lit_denote F \<rho> n)"
+      have free_n: "free_valuation_ok F \<rho> ?\<nu>n" using free_valuation_update[OF free_ok lit_in] .
+      note step = arithmetic_evidence_eval[OF thy_wf model lz_valid lz(1) lz_concl type_ok free_n]
+      show ?case using step by (simp add: nat_binary_app_def nat_binary_const_def nat_zero_c_def)
+    next
+      case (Suc k)
+      show ?case
+      proof (cases n)
+        case 0
+        let ?\<nu>k = "\<nu>((lsk, nat_aty) := nat_lit_denote F \<rho> k)"
+        have free_k: "free_valuation_ok F \<rho> ?\<nu>k" using free_valuation_update[OF free_ok lit_in] .
+        note step = arithmetic_evidence_eval[OF thy_wf model lsz_valid lsz(1) lsz_concl type_ok free_k]
+        show ?thesis using step 0
+          by (simp add: nat_binary_app_def nat_binary_const_def nat_zero_c_def nat_succ_c_def)
+      next
+        case (Suc j)
+        let ?\<nu>k = "\<nu>((lssk, nat_aty) := nat_lit_denote F \<rho> k)"
+        let ?\<nu>kj = "?\<nu>k((lssn, nat_aty) := nat_lit_denote F \<rho> j)"
+        have free_k: "free_valuation_ok F \<rho> ?\<nu>k" using free_valuation_update[OF free_ok lit_in] .
+        have free_kj: "free_valuation_ok F \<rho> ?\<nu>kj" using free_valuation_update[OF free_k lit_in] .
+        note step = arithmetic_evidence_eval[OF thy_wf model lss_valid lss(1) lss_concl type_ok free_kj]
+        show ?thesis using step Suc.IH[of j] Suc vars
+          by (simp add: nat_binary_app_def nat_binary_const_def nat_succ_c_def)
+      qed
+    qed
+  qed
+qed
+
+lemma nat_lit_sub_conv_extract:
+  assumes run: "nat_lit_sub_conv thy sub_zero sub_succ_zero sub_succ_succ m n = Some th"
+  obtains sub szn ssk sssk sssn where
+    "nat_arithmetic_context_ok thy"
+    "arithmetic_evidence_ok thy sub_zero (sub_zero_concl sub szn)"
+    "arithmetic_evidence_ok thy sub_succ_zero (sub_succ_zero_concl sub ssk)"
+    "arithmetic_evidence_ok thy sub_succ_succ (sub_succ_succ_concl sub sssk sssn)"
+    "sssk \<noteq> sssn"
+    "th = \<lparr>hyps = [], concl = eq_term nat_aty
+      (nat_binary_app sub nat_aty (NatLit m) (NatLit n)) (NatLit (m - n)),
+      thm_stamp = thy_stamp thy\<rparr>"
+    "wf_thm thy th"
+  using run that
+  by (auto simp: nat_lit_sub_conv_def equation_head_const_def one_nat_var_def
+      two_nat_vars_def arithmetic_evidence_ok_def sub_zero_concl_def
+      sub_succ_zero_concl_def sub_succ_succ_concl_def eq_shape_def thm_shape_def
+      split: option.splits prod.splits list.splits if_splits)
+
+theorem nat_lit_sub_conv_semantically_valid:
+  assumes run: "nat_lit_sub_conv thy sub_zero sub_succ_zero sub_succ_succ m n = Some th"
+    and thy_wf: "wf_theory thy"
+    and sz_valid: "semantically_valid thy sub_zero"
+    and ssz_valid: "semantically_valid thy sub_succ_zero"
+    and sss_valid: "semantically_valid thy sub_succ_succ"
+  shows "semantically_valid thy th"
+proof -
+  obtain sub szn ssk sssk sssn where
+    nat_context: "nat_arithmetic_context_ok thy"
+    and sz_ok: "arithmetic_evidence_ok thy sub_zero (sub_zero_concl sub szn)"
+    and ssz_ok: "arithmetic_evidence_ok thy sub_succ_zero (sub_succ_zero_concl sub ssk)"
+    and sss_ok: "arithmetic_evidence_ok thy sub_succ_succ (sub_succ_succ_concl sub sssk sssn)"
+    and vars: "sssk \<noteq> sssn"
+    and shape: "th = \<lparr>hyps = [], concl = eq_term nat_aty
+      (nat_binary_app sub nat_aty (NatLit m) (NatLit n)) (NatLit (m - n)), thm_stamp = thy_stamp thy\<rparr>"
+    and th_wf: "wf_thm thy th"
+    using nat_lit_sub_conv_extract[OF run] .
+  have sz: "hyps sub_zero = []" "concl sub_zero = sub_zero_concl sub szn"
+    using sz_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have ssz: "hyps sub_succ_zero = []" "concl sub_succ_zero = sub_succ_zero_concl sub ssk"
+    using ssz_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have sss: "hyps sub_succ_succ = []" "concl sub_succ_succ = sub_succ_succ_concl sub sssk sssn"
+    using sss_ok by (simp_all add: arithmetic_evidence_ok_def)
+  show ?thesis
+  proof (rule closed_eq_semantically_valid[OF thy_wf th_wf])
+    show "hyps th = []" using shape by simp
+    show "concl th = eq_term nat_aty (nat_binary_app sub nat_aty (NatLit m) (NatLit n))
+        (NatLit (m - n))" using shape by simp
+    fix F \<rho> \<nu>
+    assume model: "models_theory F thy" and type_ok: "type_valuation_ok \<rho>"
+      and free_ok: "free_valuation_ok F \<rho> \<nu>"
+    have lit_in: "Elem (nat_lit_denote F \<rho> k) (interp_type F \<rho> nat_aty)" for k
+      using nat_arithmetic_literal_in[OF thy_wf model nat_context type_ok free_ok] .
+    have sz_concl: "concl sub_zero = eq_term nat_aty
+        (nat_binary_app sub nat_aty nat_zero_c (FVar szn nat_aty)) nat_zero_c"
+      using sz(2) by (simp add: sub_zero_concl_def)
+    have ssz_concl: "concl sub_succ_zero = eq_term nat_aty
+        (nat_binary_app sub nat_aty (Comb nat_succ_c (FVar ssk nat_aty)) nat_zero_c)
+        (Comb nat_succ_c (FVar ssk nat_aty))"
+      using ssz(2) by (simp add: sub_succ_zero_concl_def)
+    have sss_concl: "concl sub_succ_succ = eq_term nat_aty
+        (nat_binary_app sub nat_aty (Comb nat_succ_c (FVar sssk nat_aty))
+          (Comb nat_succ_c (FVar sssn nat_aty)))
+        (nat_binary_app sub nat_aty (FVar sssk nat_aty) (FVar sssn nat_aty))"
+      using sss(2) by (simp add: sub_succ_succ_concl_def)
+    show "eval_term F \<rho> \<nu> [] (nat_binary_app sub nat_aty (NatLit m) (NatLit n)) =
+        eval_term F \<rho> \<nu> [] (NatLit (m - n))"
+    proof (induction m arbitrary: n)
+      case 0
+      let ?\<nu>n = "\<nu>((szn, nat_aty) := nat_lit_denote F \<rho> n)"
+      have free_n: "free_valuation_ok F \<rho> ?\<nu>n" using free_valuation_update[OF free_ok lit_in] .
+      note step = arithmetic_evidence_eval[OF thy_wf model sz_valid sz(1) sz_concl type_ok free_n]
+      show ?case using step by (simp add: nat_binary_app_def nat_binary_const_def nat_zero_c_def)
+    next
+      case (Suc k)
+      show ?case
+      proof (cases n)
+        case 0
+        let ?\<nu>k = "\<nu>((ssk, nat_aty) := nat_lit_denote F \<rho> k)"
+        have free_k: "free_valuation_ok F \<rho> ?\<nu>k" using free_valuation_update[OF free_ok lit_in] .
+        note step = arithmetic_evidence_eval[OF thy_wf model ssz_valid ssz(1) ssz_concl type_ok free_k]
+        show ?thesis using step 0
+          by (simp add: nat_binary_app_def nat_binary_const_def nat_zero_c_def nat_succ_c_def)
+      next
+        case (Suc j)
+        let ?\<nu>k = "\<nu>((sssk, nat_aty) := nat_lit_denote F \<rho> k)"
+        let ?\<nu>kj = "?\<nu>k((sssn, nat_aty) := nat_lit_denote F \<rho> j)"
+        have free_k: "free_valuation_ok F \<rho> ?\<nu>k" using free_valuation_update[OF free_ok lit_in] .
+        have free_kj: "free_valuation_ok F \<rho> ?\<nu>kj" using free_valuation_update[OF free_k lit_in] .
+        note step = arithmetic_evidence_eval[OF thy_wf model sss_valid sss(1) sss_concl type_ok free_kj]
+        show ?thesis using step Suc.IH[of j] Suc vars
+          by (simp add: nat_binary_app_def nat_binary_const_def nat_succ_c_def)
+      qed
+    qed
+  qed
+qed
+
+lemma nat_lit_pow_conv_extract:
+  assumes run: "nat_lit_pow_conv thy add_zero add_succ mul_zero mul_succ pow_zero pow_succ base exponent = Some th"
+  obtains add azn ask asn mul mzn msk msn pow pzb psb psk where
+    "nat_arithmetic_context_ok thy"
+    "arithmetic_evidence_ok thy add_zero (add_zero_concl add azn)"
+    "arithmetic_evidence_ok thy add_succ (add_succ_concl add ask asn)"
+    "arithmetic_evidence_ok thy mul_zero (mul_zero_concl mul mzn)"
+    "arithmetic_evidence_ok thy mul_succ (mul_succ_concl add mul msk msn)"
+    "arithmetic_evidence_ok thy pow_zero (pow_zero_concl pow pzb)"
+    "arithmetic_evidence_ok thy pow_succ (pow_succ_concl mul pow psb psk)"
+    "ask \<noteq> asn" "msk \<noteq> msn" "psb \<noteq> psk"
+    "th = \<lparr>hyps = [], concl = eq_term nat_aty
+      (nat_binary_app pow nat_aty (NatLit base) (NatLit exponent)) (NatLit (base ^ exponent)),
+      thm_stamp = thy_stamp thy\<rparr>"
+    "wf_thm thy th"
+  using run that
+  by (auto simp: nat_lit_pow_conv_def equation_head_const_def one_nat_var_def
+      two_nat_vars_def arithmetic_evidence_ok_def add_zero_concl_def add_succ_concl_def
+      mul_zero_concl_def mul_succ_concl_def pow_zero_concl_def pow_succ_concl_def
+      eq_shape_def thm_shape_def split: option.splits prod.splits list.splits if_splits)
+
+theorem nat_lit_pow_conv_semantically_valid:
+  assumes run: "nat_lit_pow_conv thy add_zero add_succ mul_zero mul_succ pow_zero pow_succ base exponent = Some th"
+    and thy_wf: "wf_theory thy"
+    and az_valid: "semantically_valid thy add_zero"
+    and ass_valid: "semantically_valid thy add_succ"
+    and mz_valid: "semantically_valid thy mul_zero"
+    and ms_valid: "semantically_valid thy mul_succ"
+    and pz_valid: "semantically_valid thy pow_zero"
+    and ps_valid: "semantically_valid thy pow_succ"
+  shows "semantically_valid thy th"
+proof -
+  obtain add azn ask asn mul mzn msk msn pow pzb psb psk where
+    nat_context: "nat_arithmetic_context_ok thy"
+    and az_ok: "arithmetic_evidence_ok thy add_zero (add_zero_concl add azn)"
+    and ass_ok: "arithmetic_evidence_ok thy add_succ (add_succ_concl add ask asn)"
+    and mz_ok: "arithmetic_evidence_ok thy mul_zero (mul_zero_concl mul mzn)"
+    and ms_ok: "arithmetic_evidence_ok thy mul_succ (mul_succ_concl add mul msk msn)"
+    and pz_ok: "arithmetic_evidence_ok thy pow_zero (pow_zero_concl pow pzb)"
+    and ps_ok: "arithmetic_evidence_ok thy pow_succ (pow_succ_concl mul pow psb psk)"
+    and avars: "ask \<noteq> asn" and mvars: "msk \<noteq> msn" and pvars: "psb \<noteq> psk"
+    and shape: "th = \<lparr>hyps = [], concl = eq_term nat_aty
+      (nat_binary_app pow nat_aty (NatLit base) (NatLit exponent)) (NatLit (base ^ exponent)),
+      thm_stamp = thy_stamp thy\<rparr>"
+    and th_wf: "wf_thm thy th"
+    using nat_lit_pow_conv_extract[OF run] .
+  have az: "hyps add_zero = []" "concl add_zero = add_zero_concl add azn"
+    using az_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have ass: "hyps add_succ = []" "concl add_succ = add_succ_concl add ask asn"
+    using ass_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have mz: "hyps mul_zero = []" "concl mul_zero = mul_zero_concl mul mzn"
+    using mz_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have ms: "hyps mul_succ = []" "concl mul_succ = mul_succ_concl add mul msk msn"
+    using ms_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have pz: "hyps pow_zero = []" "concl pow_zero = pow_zero_concl pow pzb"
+    using pz_ok by (simp_all add: arithmetic_evidence_ok_def)
+  have ps: "hyps pow_succ = []" "concl pow_succ = pow_succ_concl mul pow psb psk"
+    using ps_ok by (simp_all add: arithmetic_evidence_ok_def)
+  show ?thesis
+  proof (rule closed_eq_semantically_valid[OF thy_wf th_wf])
+    show "hyps th = []" using shape by simp
+    show "concl th = eq_term nat_aty
+        (nat_binary_app pow nat_aty (NatLit base) (NatLit exponent)) (NatLit (base ^ exponent))"
+      using shape by simp
+    fix F \<rho> \<nu>
+    assume model: "models_theory F thy" and type_ok: "type_valuation_ok \<rho>"
+      and free_ok: "free_valuation_ok F \<rho> \<nu>"
+    have lit_in: "Elem (nat_lit_denote F \<rho> k) (interp_type F \<rho> nat_aty)" for k
+      using nat_arithmetic_literal_in[OF thy_wf model nat_context type_ok free_ok] .
+    have add_result: "eval_term F \<rho> \<nu> [] (nat_binary_app add nat_aty (NatLit a) (NatLit b)) =
+        eval_term F \<rho> \<nu> [] (NatLit (a + b))" for a b
+      using nat_add_evidence_denote[OF thy_wf model nat_context az_valid ass_valid
+          az(1) az(2) ass(1) ass(2) avars type_ok free_ok] .
+    have mz_concl: "concl mul_zero = eq_term nat_aty
+        (nat_binary_app mul nat_aty nat_zero_c (FVar mzn nat_aty)) nat_zero_c"
+      using mz(2) by (simp add: mul_zero_concl_def)
+    have ms_concl: "concl mul_succ = eq_term nat_aty
+        (nat_binary_app mul nat_aty (Comb nat_succ_c (FVar msk nat_aty)) (FVar msn nat_aty))
+        (nat_binary_app add nat_aty (FVar msn nat_aty)
+          (nat_binary_app mul nat_aty (FVar msk nat_aty) (FVar msn nat_aty)))"
+      using ms(2) by (simp add: mul_succ_concl_def)
+    have mul_result: "eval_term F \<rho> \<nu> [] (nat_binary_app mul nat_aty (NatLit a) (NatLit b)) =
+        eval_term F \<rho> \<nu> [] (NatLit (a * b))" for a b
+    proof (induction a)
+      case 0
+      let ?\<nu>b = "\<nu>((mzn, nat_aty) := nat_lit_denote F \<rho> b)"
+      have free_b: "free_valuation_ok F \<rho> ?\<nu>b" using free_valuation_update[OF free_ok lit_in] .
+      note step = arithmetic_evidence_eval[OF thy_wf model mz_valid mz(1) mz_concl type_ok free_b]
+      show ?case using step by (simp add: nat_binary_app_def nat_binary_const_def nat_zero_c_def)
+    next
+      case (Suc a)
+      let ?\<nu>a = "\<nu>((msk, nat_aty) := nat_lit_denote F \<rho> a)"
+      let ?\<nu>ab = "?\<nu>a((msn, nat_aty) := nat_lit_denote F \<rho> b)"
+      have free_a: "free_valuation_ok F \<rho> ?\<nu>a" using free_valuation_update[OF free_ok lit_in] .
+      have free_ab: "free_valuation_ok F \<rho> ?\<nu>ab" using free_valuation_update[OF free_a lit_in] .
+      note step = arithmetic_evidence_eval[OF thy_wf model ms_valid ms(1) ms_concl type_ok free_ab]
+      show ?case using step Suc.IH add_result[of b "a * b"] mvars
+        by (simp add: nat_binary_app_def nat_binary_const_def nat_succ_c_def)
+    qed
+    have pz_concl: "concl pow_zero = eq_term nat_aty
+        (nat_binary_app pow nat_aty (FVar pzb nat_aty) nat_zero_c) (Comb nat_succ_c nat_zero_c)"
+      using pz(2) by (simp add: pow_zero_concl_def)
+    have ps_concl: "concl pow_succ = eq_term nat_aty
+        (nat_binary_app pow nat_aty (FVar psb nat_aty) (Comb nat_succ_c (FVar psk nat_aty)))
+        (nat_binary_app mul nat_aty (FVar psb nat_aty)
+          (nat_binary_app pow nat_aty (FVar psb nat_aty) (FVar psk nat_aty)))"
+      using ps(2) by (simp add: pow_succ_concl_def)
+    show "eval_term F \<rho> \<nu> [] (nat_binary_app pow nat_aty (NatLit base) (NatLit exponent)) =
+        eval_term F \<rho> \<nu> [] (NatLit (base ^ exponent))"
+    proof (induction exponent)
+      case 0
+      let ?\<nu>b = "\<nu>((pzb, nat_aty) := nat_lit_denote F \<rho> base)"
+      have free_b: "free_valuation_ok F \<rho> ?\<nu>b" using free_valuation_update[OF free_ok lit_in] .
+      note step = arithmetic_evidence_eval[OF thy_wf model pz_valid pz(1) pz_concl type_ok free_b]
+      show ?case using step
+        by (simp add: nat_binary_app_def nat_binary_const_def nat_zero_c_def nat_succ_c_def)
+    next
+      case (Suc k)
+      let ?\<nu>b = "\<nu>((psb, nat_aty) := nat_lit_denote F \<rho> base)"
+      let ?\<nu>bk = "?\<nu>b((psk, nat_aty) := nat_lit_denote F \<rho> k)"
+      have free_b: "free_valuation_ok F \<rho> ?\<nu>b" using free_valuation_update[OF free_ok lit_in] .
+      have free_bk: "free_valuation_ok F \<rho> ?\<nu>bk" using free_valuation_update[OF free_b lit_in] .
+      note step = arithmetic_evidence_eval[OF thy_wf model ps_valid ps(1) ps_concl type_ok free_bk]
+      show ?case using step Suc.IH mul_result[of base "base ^ k"] pvars
+        by (simp add: nat_binary_app_def nat_binary_const_def nat_succ_c_def)
+    qed
+  qed
+qed
+
 end

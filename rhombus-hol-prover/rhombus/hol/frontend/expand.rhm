@@ -1,0 +1,257 @@
+#lang rhombus/static
+
+// Parsing one `#lang rhombus/hol` declaration at a time.
+//
+// This module only *classifies*: it says which group is a declaration, what
+// its pieces are, and how much of a sequence it consumes. Bound declaration
+// macros in `module_block.rhm` call `plan_next`; the sequence macros for
+// theorem and function forms use the returned tail to pair an optional
+// following `proof:` block.
+//
+// Turning a declaration into syntax remains `module_block.rhm`'s job, because
+// a syntax template built here would carry this module's phase-0 bindings and
+// lose them on the way to the user's module -- a literal `'def x = 1'` created
+// at phase 0 and returned from a phase-1 macro reports `def: unbound
+// identifier`.
+
+import:
+  rhombus/hol/frontend/elab as elab
+  rhombus/hol/frontend/type/parse as type_parser
+
+export:
+  Decl
+  plan_next
+
+// `kind` selects the template `module_block.rhm` will use; `parts` carries
+// the pieces it needs, as syntax taken from the user's own source.
+class Decl(kind :: Symbol,
+           form :: Syntax,
+           parts :: List)
+
+// The heads this language claims.  Anything else is passed through untouched,
+// so ordinary Rhombus definitions keep working.
+def declaration_heads :: List.of(Symbol) = [#'datatype, #'function,
+                                            #'theorem, #'overload, #'import]
+
+fun head_of(form :: Syntax) :: maybe(Symbol):
+  match form
+  | '$(id :: Identifier) $_ ...':
+      let n = Syntax.unwrap(id)
+      (if declaration_heads.contains(n) | n | #false)
+  | ~else: #false
+
+// Return exactly one declaration and the still-unexpanded tail. A caller can
+// emit the first declaration and let the Rhombus expander install any bindings
+// before asking for the next one.
+fun plan_next(forms :: List.of(Syntax))
+     :: values(maybe(Decl), List.of(Syntax)):
+  match forms
+  | []: values(#false, [])
+  | List.cons(form, rest):
+      match theorem_parts(form)
+      | #false:
+          match head_of(form)
+          | #'function: plan_function(form, rest)
+          | ~else: values(plan_one(form), rest)
+      | [name, stmt]:
+          match rest
+          | List.cons(nxt, more):
+              match proof_groups(nxt)
+              | #false:
+                  values(Decl(#'theorem, form, [name, stmt, #false]), rest)
+              | groups:
+                  values(Decl(#'theorem, form, [name, stmt, groups]), more)
+          | ~else:
+              values(Decl(#'theorem, form, [name, stmt, #false]), rest)
+
+
+// `theorem name: <prop>`, or `#false` if this is not one.
+fun theorem_parts(form :: Syntax) :: maybe(List):
+  match form
+  | 'theorem $(name :: Identifier): $g; ...': [name, [g, ...]]
+  | ~else: #false
+
+fun proof_groups(form :: Syntax) :: maybe(List.of(Syntax)):
+  match form
+  | 'proof: $g; ...': [g, ...]
+  | ~else: #false
+
+fun plan_function(form :: Syntax, rest :: List.of(Syntax))
+     :: values(Decl, List.of(Syntax)):
+  match rest
+  | List.cons(nxt, more):
+      match proof_groups(nxt)
+      | #false: values(Decl(#'function, form, [#false]), rest)
+      | groups:
+          let measure = elab.function_proof_measure(
+                          groups :~ List.of(Syntax), nxt)
+          values(Decl(#'function, form, [measure]), more)
+  | ~else:
+      values(Decl(#'function, form, [#false]), rest)
+
+fun plan_one(form :: Syntax) :: Decl:
+  match head_of(form)
+  | #'datatype:
+      // Runtime identifiers are captured here; registry-dependent type
+      // elaboration happens in `module_block.rhm` with the current state.
+      let [name, constructors] = type_parser.datatype_decl_shape(form)
+      Decl(#'datatype, form, [name, constructors])
+  | #'overload:
+      overload_decl(form)
+  | #'import:
+      // An ordinary Rhombus import, with one extra reading: if what it names
+      // is a theory, its logic is adopted as well as its values.  The import
+      // itself is passed through untouched -- this only looks at it.
+      Decl(#'import, form, [theory_paths(form)])
+  | ~else:
+      syntax_error_here(#'declaration, "internal non-HOL declaration", form)
+
+fun overload_argument(arg :: Syntax, named :: Boolean,
+                      form :: Syntax) :: List:
+  match arg
+  | '$(name :: Identifier) :: $ty ...':
+      unless named
+      | syntax_error_here(
+          #'overload,
+          "a bare implementation constant takes types without argument names",
+          form)
+      [name, '$ty ...']
+  | ~else:
+      when named
+      | syntax_error_here(
+          #'overload,
+          "a template overload argument needs `name :: Type`",
+          arg)
+      [#false, arg]
+
+fun overload_parts(function_name :: Syntax, args :: List.of(Syntax),
+                   result_type, constant :: Syntax,
+                   template_arguments, named :: Boolean,
+                   form :: Syntax) :: Decl:
+  let parsed = args.map(
+                 fun (arg): overload_argument(arg, named, form))
+  Decl(#'overload_method, form,
+       [function_name,
+        parsed.map(fun (part): (part :~ List)[0]),
+        parsed.map(fun (part): (part :~ List)[1]),
+        result_type,
+        constant,
+        template_arguments])
+
+fun overload_decl(form :: Syntax) :: Decl:
+  match form
+  | 'overload $(function_name :: Identifier)($arg, ...)
+       :: $result_type ... = $(constant :: Identifier)($(template :: Identifier), ...)':
+      overload_parts(
+        function_name, [arg, ...], '$result_type ...', constant,
+        [Syntax.unwrap(template), ...], #true, form)
+  | 'overload $(function_name :: Identifier)($arg, ...)
+       = $(constant :: Identifier)($(template :: Identifier), ...)':
+      overload_parts(
+        function_name, [arg, ...], #false, constant,
+        [Syntax.unwrap(template), ...], #true, form)
+  | 'overload $(function_name :: Identifier)($arg, ...)
+       :: $result_type ... = $(constant :: Identifier)':
+      overload_parts(function_name, [arg, ...], '$result_type ...',
+                     constant, #false, #false, form)
+  | 'overload $(function_name :: Identifier)($arg, ...)
+       = $(constant :: Identifier)':
+      overload_parts(function_name, [arg, ...], #false,
+                     constant, #false, #false, form)
+  | ~else:
+      syntax_error_here(
+        #'overload,
+        "expected `overload function(Type, ...) = implementation` or "
+          ++ "`overload function(arg :: Type, ...) = implementation(arg, ...)`",
+        form)
+
+fun syntax_error_here(who :: Symbol, message :: String, at :: Syntax):
+  error(~who: who, message, error.val(~label: "in", to_string(at)))
+
+// -- imports -----------------------------------------------------------------
+
+// The module paths in an `import` that name `rhombus/hol` theories, each as
+// its list of *terms*.
+//
+// Terms rather than an assembled group, because the group would be built here
+// and this module is a phase-0 helper: a template built here loses its
+// bindings on the way out of the phase-1 macro, and an emitted import whose
+// path had lost them cannot read its own string literal.  The terms are the
+// user's own syntax and carry the user's context; `module_block.rhm`
+// reassembles them.
+//
+// A module is a theory exactly when it has a `hol_theory` submodule, and that
+// is *checked*, not guessed from the shape of the path: an ordinary import has
+// to pass through untouched, and a theory import must not be missed.
+fun theory_paths(form :: Syntax) :: List.of(List.of(Syntax)):
+  for values(acc :~ List = []) (c in import_clauses(form)):
+    let chosen = clause_path(c)
+    check_no_stray_theory(c, chosen)
+    cond
+    | chosen && is_theory(chosen :~ Syntax):
+        acc ++ [clause_terms(chosen :~ Syntax)]
+    | ~else: acc
+
+fun import_clauses(form :: Syntax) :: List.of(Syntax):
+  match form
+  | 'import: $c; ...': [c, ...]
+  | 'import $t ...': ['$t ...']
+  | ~else: []
+
+fun clause_terms(c :: Syntax) :: List.of(Syntax):
+  match c
+  | '$t ...': [t, ...]
+  | ~else: []
+
+// The longest prefix of the clause that reads as a module path.
+//
+// Trying prefixes rather than matching a list of modifier names keeps this
+// from having to track Rhombus's import grammar: whatever the modifiers are,
+// they are whatever is left once the path stops parsing.
+fun clause_path(c :: Syntax) :: maybe(Syntax):
+  let ts = clause_terms(c)
+  recur loop (k = ts.length()):
+    cond
+    | k == 0: #false
+    | ~else:
+        let [t, ...] = (for List (i in List.iota(k)): ts[i])
+        let cand = '$t ...'
+        (if ModulePath.maybe(cand) | cand | loop(k - 1))
+
+// Probing a path that is not a module at all raises rather than answering --
+// a missing *collection* is an error, where a missing submodule is not -- and
+// every term of every import clause gets probed here.  A path that cannot be
+// resolved is simply not a theory; if it was meant to be one, the user's own
+// import reports the real reason.
+fun is_theory(p :: Syntax) :: Boolean:
+  match ModulePath.maybe('$p ! hol_theory')
+  | #false: #false
+  | mp:
+      try:
+        Evaluator.module_is_declared(mp :~ ModulePath, ~load: #true)
+        ~catch _ :: Exn.Fail: #false
+
+// A clause whose path is not what the prefix rule picked -- `import: meta:
+// "a.rhm"` reads its path out of a block, so the rule stops at `meta` -- would
+// otherwise drop a theory without a word.  Rather than grow the rule to cover
+// every such form, refuse the ones it cannot read.
+fun check_no_stray_theory(c :: Syntax, chosen :: maybe(Syntax)) :: Void:
+  let chosen_str = (if chosen | to_string(chosen :~ Syntax) | "")
+  for (cand in path_candidates(c)):
+    when to_string(cand) != chosen_str && is_theory(cand)
+    | syntax_error_here(
+        #'import,
+        "this import names a theory in a form `rhombus/hol` cannot read; "
+          ++ "write it as a plain `import: \"path.rhm\"` clause so that its "
+          ++ "theory can be adopted",
+        c)
+
+// Every group in the clause that might be a module path: each term on its
+// own, and, for a term that is a block, each group inside it.  The block case
+// is what catches `import: meta: "a.rhm"`, whose path the prefix rule never
+// reaches.
+fun path_candidates(c :: Syntax) :: List.of(Syntax):
+  for values(acc :~ List = []) (t in clause_terms(c)):
+    match t
+    | ': $g; ...': acc ++ [g, ...]
+    | ~else: acc ++ ['$t']

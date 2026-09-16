@@ -1,0 +1,122 @@
+#lang rhombus/static
+
+// Full type unification with an occurs check.
+//
+// The kernel never unifies -- every kernel rule either checks a type against
+// a theory (`check_type`) or one-way matches a generic type against a used
+// instance (`type_match`). Full two-way unification is an elaborator
+// convenience: `elab.rhm` uses it to solve for the type variables of a
+// constant or datatype occurrence from context, before the result is checked
+// by the kernel exactly like anything else. Living here rather than in
+// `rhombus-hol-kernel/.../htype.rhm` keeps the kernel's public surface to
+// only what the ten primitive rules need.
+
+import:
+  lib("racket/base.rkt") as rb
+  rhombus/hol/htype open
+  rhombus/hol/effect/core open
+  rhombus/hol/effect/syntax open
+
+
+export:
+  type_unify
+
+// `Symbol.gen` mints uninterned symbols for call-site metavariables
+// (`fresh_type` and friends); ordinary source identifiers, including a
+// function's own declared type variables, are interned. When two still-open
+// metavariables meet during unification, keeping the interned one as the
+// surviving representative is what lets a derived theorem's printed type
+// read back the name the author wrote instead of an internal generated one.
+fun is_generated_tyvar(name :: Symbol) :: Boolean:
+  !rb.#{symbol-interned?}(name)
+
+class.together:
+  class UnifyError():
+    nonfinal
+
+  class OccursCheck(variable :: Symbol, value :: HType):
+    extends UnifyError
+
+  class TypeMismatch(left :: HType, right :: HType):
+    extends UnifyError
+
+class Substitution():
+  state_effect
+
+class UnifyFailure():
+  failure_effect
+
+// Follow substitutions through variables. The lookup is deliberately an
+// effect request: recursive unification never receives an explicit
+// substitution parameter.
+fun resolve(t :: HType) :: Computation:
+  match t
+  | TyVar(n):
+      effect:
+        let substitution :: Map.of(Symbol, HType) <- Substitution.get()
+        match substitution.get(n, #false)
+        | #false: return t
+        | next: resolve(next)
+  | ~else: return t
+
+fun bind_variable(name :: Symbol, value :: HType) :: Computation:
+  effect:
+    let substitution :: Map.of(Symbol, HType) <- Substitution.get()
+    let value = type_subst(substitution, value)
+    cond
+    | value is_a TyVar && (value :~ TyVar).name == name:
+        return #void
+    | type_occurs(name, value):
+        UnifyFailure.fail(OccursCheck(name, value))
+    | ~else:
+        effect:
+          let _ <- Substitution.put(substitution ++ {name: value})
+          return #void
+
+// Unification owns two nominal capabilities: substitution state and semantic
+// failure. `type_unify` installs both handlers and preserves the existing
+// result contract.
+fun unify(a :: HType, b :: HType) :: Computation:
+  fun unify_arguments(left :: List.of(HType), right :: List.of(HType))
+      :: Computation:
+    match left
+    | []:
+        match right
+        | []: return #void
+        | ~else: UnifyFailure.fail(TypeMismatch(a, b))
+    | List.cons(first, rest):
+        match right
+        | List.cons(other, others):
+            effect:
+              let _ <- unify(first, other)
+              unify_arguments(rest, others)
+        | ~else: UnifyFailure.fail(TypeMismatch(a, b))
+  fun after_left(left :: HType) :: Computation:
+    fun after_right(right :: HType) :: Computation:
+      match left
+      | TyVar(lname):
+          match right
+          | TyVar(rname) when is_generated_tyvar(lname) && !is_generated_tyvar(rname):
+              bind_variable(lname, right)
+          | TyVar(rname) when is_generated_tyvar(rname):
+              bind_variable(rname, left)
+          | ~else: bind_variable(lname, right)
+      | TyApp(left_name, left_args):
+          match right
+          | TyVar(name): bind_variable(name, left)
+          | TyApp(right_name, right_args) when left_name == right_name:
+              unify_arguments(left_args, right_args)
+          | ~else: UnifyFailure.fail(TypeMismatch(left, right))
+    effect:
+      let right :: HType <- resolve(b)
+      after_right(right)
+  effect:
+    let left :: HType <- resolve(a)
+    after_left(left)
+
+fun type_unify(a :: HType, b :: HType, initial :: Map.of(Symbol, HType))
+     :: maybe(Map.of(Symbol, HType)):
+  match UnifyFailure.handle(Substitution.handle(initial, unify(a, b)))
+  | Pure(Substitution.Result(_, substitution)): substitution
+  | UnifyFailure.Failed(_): #false
+  | ~else: error(~who: #'type_unify, "internal error: unhandled effect")

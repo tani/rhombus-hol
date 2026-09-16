@@ -1,0 +1,200 @@
+#lang rhombus/static
+
+// `unit` and `prod`, derived via `new_basic_type_definition` rather than
+// postulated (`algebra.rhm`). This scaffolds non-recursive type formers built
+// once and reused by every datatype. `sum` is not implemented yet, so this
+// covers `unit`/`prod` only.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/logic/drule open
+  rhombus/hol/datatype/algebra open
+
+def thy = base_theory()
+def A = mk_tyvar(#'a)
+def B = mk_tyvar(#'b)
+
+
+// -- unit --------------------------------------------------------------
+
+def (thy1, unit_unique) = build_unit(thy)
+
+check hyps_of(unit_unique) ~is []
+def uty = mk_tyapp(ty_unit, [])
+def one = mk_const(c_one, uty)
+check:
+  let u = mk_var(#'u, uty)
+  concl_of(unit_unique) == mk_forall(u, mk_eq(u, one))
+  ~is #true
+
+// Specialising at `one` itself gives a trivial reflexivity, not a
+// tautological non-fact: the single point really is `one`.
+check:
+  concl_of(SPEC(thy1, one, unit_unique))
+  ~is mk_eq(one, one)
+
+// -- prod ----------------------------------------------------------------
+
+def (thy2, pt) = build_prod(thy1)
+
+check hyps_of(pt.pair_eq) ~is []
+check hyps_of(pt.surjective) ~is []
+check hyps_of(pt.fst_pair) ~is []
+check hyps_of(pt.snd_pair) ~is []
+
+check:
+  let x = mk_var(#'x, A)
+  let y = mk_var(#'y, B)
+  let z = mk_var(#'z, A)
+  let u = mk_var(#'u, B)
+  let lhs = mk_eq(mk_pair_term(x, y), mk_pair_term(z, u))
+  let rhs = mk_conj(mk_eq(x, z), mk_eq(y, u))
+  concl_of(pt.pair_eq) == mk_forall_list([x, y, z, u], mk_eq(lhs, rhs))
+  ~is #true
+
+check:
+  let p = mk_var(#'p, prod_ty(A, B))
+  let x = mk_var(#'x, A)
+  let y = mk_var(#'y, B)
+  concl_of(pt.surjective)
+    == mk_forall(p, mk_exists(x, mk_exists(y, mk_eq(p, mk_pair_term(x, y)))))
+  ~is #true
+
+check:
+  let x = mk_var(#'x, A)
+  let y = mk_var(#'y, B)
+  concl_of(pt.fst_pair)
+    == mk_forall_list([x, y], mk_eq(mk_fst(mk_pair_term(x, y)), x))
+  ~is #true
+
+check:
+  let x = mk_var(#'x, A)
+  let y = mk_var(#'y, B)
+  concl_of(pt.snd_pair)
+    == mk_forall_list([x, y], mk_eq(mk_snd(mk_pair_term(x, y)), y))
+  ~is #true
+
+// Instantiating `pair_eq` at two concrete, distinct types exercises the
+// bijection's polymorphism, not just its schematic statement.
+def tyN :: HType = mk_tyvar(#'n)
+def n1 = mk_var(#'n1, tyN)
+def n2 = mk_var(#'n2, tyN)
+
+check:
+  let inst = INST_TYPE(thy2, {#'a: tyN, #'b: bool}, pt.pair_eq)
+  let lhs = mk_eq(mk_pair_term(n1, tm_true), mk_pair_term(n2, tm_false))
+  let rhs = mk_conj(mk_eq(n1, n2), mk_eq(tm_true, tm_false))
+  concl_of(SPECL(thy2, [n1, tm_true, n2, tm_false], inst)) == mk_eq(lhs, rhs)
+  ~is #true
+
+check:
+  let inst = INST_TYPE(thy2, {#'a: tyN, #'b: bool}, pt.fst_pair)
+  concl_of(SPECL(thy2, [n1, tm_true], inst))
+    == mk_eq(mk_fst(mk_pair_term(n1, tm_true)), n1)
+  ~is #true
+
+check:
+  let inst = INST_TYPE(thy2, {#'a: tyN, #'b: bool}, pt.snd_pair)
+  concl_of(SPECL(thy2, [n1, tm_true], inst))
+    == mk_eq(mk_snd(mk_pair_term(n1, tm_true)), tm_true)
+  ~is #true
+
+// -- sum -------------------------------------------------------------------
+
+def (thy3, st) = build_sum(thy2)
+
+check hyps_of(st.inl_inj) ~is []
+check hyps_of(st.inr_inj) ~is []
+check hyps_of(st.distinct) ~is []
+check hyps_of(st.cases) ~is []
+
+check:
+  let x = mk_var(#'x, A)
+  let y = mk_var(#'y, A)
+  let lhs = mk_eq(mk_inl_term(x, B), mk_inl_term(y, B))
+  concl_of(st.inl_inj) == mk_forall_list([x, y], mk_eq(lhs, mk_eq(x, y)))
+  ~is #true
+
+check:
+  let x = mk_var(#'x, B)
+  let y = mk_var(#'y, B)
+  let lhs = mk_eq(mk_inr_term(A, x), mk_inr_term(A, y))
+  concl_of(st.inr_inj) == mk_forall_list([x, y], mk_eq(lhs, mk_eq(x, y)))
+  ~is #true
+
+check:
+  let x = mk_var(#'x, A)
+  let y = mk_var(#'y, B)
+  concl_of(st.distinct)
+    == mk_forall_list([x, y],
+                      mk_neg(mk_eq(mk_inl_term(x, B), mk_inr_term(A, y))))
+  ~is #true
+
+check:
+  let s = mk_var(#'s, sum_ty(A, B))
+  let x = mk_var(#'x, A)
+  let y = mk_var(#'y, B)
+  let left = mk_exists(x, mk_eq(s, mk_inl_term(x, B)))
+  let right = mk_exists(y, mk_eq(s, mk_inr_term(A, y)))
+  concl_of(st.cases) == mk_forall(s, mk_disj(left, right))
+  ~is #true
+
+// Instantiating at two concrete, distinct types, and at the constructed
+// value `INL(n1)` for `cases`, exercises the bijection beyond its schematic
+// statement.
+check:
+  let inst = INST_TYPE(thy3, {#'a: tyN, #'b: bool}, st.inl_inj)
+  let lhs = mk_eq(mk_inl_term(n1, bool), mk_inl_term(n2, bool))
+  concl_of(SPECL(thy3, [n1, n2], inst)) == mk_eq(lhs, mk_eq(n1, n2))
+  ~is #true
+
+check:
+  let inst = INST_TYPE(thy3, {#'a: tyN, #'b: bool}, st.distinct)
+  concl_of(SPECL(thy3, [n1, tm_true], inst))
+    == mk_neg(mk_eq(mk_inl_term(n1, bool), mk_inr_term(tyN, tm_true)))
+  ~is #true
+
+check:
+  let inst_cases = INST_TYPE(thy3, {#'a: tyN, #'b: bool}, st.cases)
+  let s0 = mk_inl_term(n1, bool)
+  let x = mk_var(#'x, tyN)
+  let y = mk_var(#'y, bool)
+  let expected = mk_disj(mk_exists(x, mk_eq(s0, mk_inl_term(x, bool))),
+                         mk_exists(y, mk_eq(s0, mk_inr_term(tyN, y))))
+  concl_of(SPEC(thy3, s0, inst_cases)) == expected
+  ~is #true
+
+// -- N-ary tupling -----------------------------------------------------
+//
+// Multi-argument `WFREC` wiring: `WFREC` takes a single
+// `A`, so a multi-argument function's parameters need tupling into one.
+
+def tyP :: HType = mk_tyapp(#'P, [])
+def tyQ :: HType = mk_tyapp(#'Q, [])
+def tyR :: HType = mk_tyapp(#'R, [])
+def thy4 = new_type(new_type(new_type(thy3, #'P, 0), #'Q, 0), #'R, 0)
+def p = mk_var(#'p, tyP)
+def q = mk_var(#'q, tyQ)
+def r = mk_var(#'r, tyR)
+def tys3 = [tyP, tyQ, tyR]
+def args3 = [p, q, r]
+
+check tuple_ty(tys3) ~is prod_ty(tyP, prod_ty(tyQ, tyR))
+check mk_tuple(args3) ~is mk_pair_term(p, mk_pair_term(q, r))
+
+check:
+  let actual = for List (i in [0, 1, 2]):
+                 concl_of(prove_tuple_proj(thy4, pt, tys3, i, args3))
+  let expected = for List (i in [0, 1, 2]):
+                   mk_eq(tuple_proj(tys3, i, mk_tuple(args3)), args3[i])
+  actual == expected
+  ~is #true
+
+// Every projection theorem carries zero hypotheses: these unfold known
+// facts about the arguments handed in, nothing conditional.
+check:
+  for List (i in [0, 1, 2]): hyps_of(prove_tuple_proj(thy4, pt, tys3, i, args3)).length()
+  ~is [0, 0, 0]

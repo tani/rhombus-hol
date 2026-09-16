@@ -289,6 +289,12 @@ code_identifier
 | constant code_inst \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.inst"
 | constant code_inst_type \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.inst_type"
 | constant code_nat_lit_conv \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.nat_lit_conv"
+| constant code_nat_lit_eq_conv \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.nat_lit_eq_conv"
+| constant code_nat_lit_add_conv \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.nat_lit_add_conv"
+| constant code_nat_lit_mul_conv \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.nat_lit_mul_conv"
+| constant code_nat_lit_le_conv \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.nat_lit_le_conv"
+| constant code_nat_lit_sub_conv \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.nat_lit_sub_conv"
+| constant code_nat_lit_pow_conv \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.nat_lit_pow_conv"
 | constant code_new_type \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_type"
 | constant code_new_nat_type \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_nat_type"
 | constant code_new_constant \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.new_constant"
@@ -313,7 +319,8 @@ export_code CodeUndeclaredType CodeTypeArity CodeInvalidType CodeUnboundIndex
   code_check_type code_check_term
   code_refl code_trans code_mk_comb code_abs code_beta code_assume code_eq_mp
   code_deduct_antisym code_inst code_inst_type
-  code_nat_lit_conv code_new_nat_type code_new_type code_new_constant code_new_axiom
+  code_nat_lit_conv code_nat_lit_eq_conv code_nat_lit_add_conv code_nat_lit_mul_conv
+  code_nat_lit_le_conv code_nat_lit_sub_conv code_nat_lit_pow_conv code_new_nat_type code_new_type code_new_constant code_new_axiom
   code_new_basic_definition code_new_basic_type_definition
   initial_theory check_type check_open_term check_term is_bool mk_eq dest_eq
   sid gen ancestors hyps concl thm_stamp tyops const_tab axiom_list def_tab thy_stamp
@@ -333,7 +340,8 @@ export_code CodeUndeclaredType CodeTypeArity CodeInvalidType CodeUnboundIndex
   CodeSuccess CodeFailure Pair None Some
   code_check_type code_check_term
   code_refl code_trans code_mk_comb code_abs code_beta code_assume code_eq_mp
-  code_nat_lit_conv code_new_nat_type code_new_type code_new_constant code_new_axiom
+  code_nat_lit_conv code_nat_lit_eq_conv code_nat_lit_add_conv code_nat_lit_mul_conv
+  code_nat_lit_le_conv code_nat_lit_sub_conv code_nat_lit_pow_conv code_new_nat_type code_new_type code_new_constant code_new_axiom
   code_new_basic_definition code_new_basic_type_definition
   initial_theory check_type check_open_term check_term is_bool mk_eq dest_eq
   sid gen ancestors hyps concl thm_stamp tyops const_tab axiom_list def_tab thy_stamp

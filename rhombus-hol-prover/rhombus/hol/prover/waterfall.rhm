@@ -1,0 +1,486 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+// ACL2's waterfall architecture is a design reference; see THIRD_PARTY_NOTICES.
+
+
+// The waterfall: the driver that pushes a goal through the stages.
+//
+//   simplification -> destructor elimination -> fertilization ->
+//   generalization -> elimination of irrelevance -> induction
+//
+// A stage that makes progress restarts its subgoals at the top of the
+// pipeline; a goal that falls off the bottom is left open, and its scoped
+// trace becomes the stuck-residue message.
+//
+// The order follows ACL2's own waterfall.  Fertilization sits right after
+// destructor elimination because its usual source is an induction
+// hypothesis of the shape `x === f(y)`, freshly exposed by the previous
+// induction step; elimination of irrelevance sits right before induction
+// because its whole purpose is to keep an unrelated hypothesis from
+// confusing the induction heuristics that come after it.
+//
+// Nothing here can produce a theorem on its own.  Each stage hands back a
+// `Step` carrying its own justification, and `run` composes them; the only
+// theorems that exist are the ones the kernel made.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/printer open
+  rhombus/hol/logic/bool open
+  rhombus/hol/prover/search/limits open
+  rhombus/hol/logic/conv open
+  rhombus/hol/logic/drule open
+  rhombus/hol/prover/goal open
+  rhombus/hol/logic/taut open
+  rhombus/hol/prover/context open
+  rhombus/hol/prover/stage open
+  rhombus/hol/prover/proof/executor open
+  rhombus/hol/prover/trace open
+  rhombus/hol/effect/core open
+  rhombus/hol/effect/syntax open
+
+export:
+  Context
+  RuleBinding
+  RuleScope
+  mk_context
+  context_with_rules
+  context_with_theory
+  context_with_numerals
+  context_add_datatype
+  context_add_function
+  prove_goal
+  prove
+  residue_message
+  strip_forall_all
+  SearchLimits
+
+
+// How long a chain of nested inductions the driver will follow.
+//
+// This is the termination argument, not a tunable budget.  Each induction
+// replaces a variable by constructor patterns that introduce *new* variables
+// of the same type, so `candidate_vars` will suggest one again on every
+// subgoal, forever.  Duplicate detection cannot save this on its own -- the
+// subgoals are genuinely different terms each time, not repeats -- so a
+// limit on the length of an induction branch is what makes the driver a
+// function rather than a search.  ACL2 bounds its own search the same way,
+// with subgoal path limits; it does *not* use a fixed depth of two, and an
+// earlier comment here saying so was wrong about its architecture.
+//
+// The value is set by measurement, not by principle.  On
+// `tests/decl_theorem.rhm`, which is where the stuck fixtures live:
+//
+//     limit    2     3     4     5     6      20      100
+//     time   3.19  3.07  3.06  3.05  3.08    5.75   does not finish
+//
+// Six is three times what the specification's examples need and still free;
+// past that each further level multiplies the work on goals that are going
+// to get stuck anyway by the number of constructors.  The duplicate check
+// prunes real repeats but is not what bounds the search -- the `100` column
+// is what that claim rests on.
+def max_induction_path = 6
+
+
+// The recognised `skip` names -- see `elab.rhm`'s `parse_tactic`.
+def stage_names :: Set = {#'simplify, #'eliminate, #'fertilize, #'generalize,
+                          #'irrelevance, #'specialize, #'induct}
+
+fun check_skipped_stages(skipped :: Set.of(Symbol)) :: Void:
+  for (n in skipped):
+    unless stage_names.contains(n)
+    | error(~who: #'proof, "no such waterfall stage to skip",
+            error.val(~label: "name", n),
+            error.val(~label: "understood", to_string(stage_names)))
+
+
+// `hint` forces the first induction variable; deeper inductions always choose
+// for themselves. This public boundary installs each capability once; all
+// recursive proof work remains one computation beneath those handlers.
+fun prove_goal(ctx :: Context, g :: Goal,
+               ~induct: hint :: maybe(FVar) = #false,
+               ~skipped_stages: skipped :: Set.of(Symbol) = Set(),
+               ~limits: limits :: SearchLimits = SearchLimits()) :: ProofNode:
+  SearchBudget.run(
+    limits,
+    run_proof_scope(
+      ctx, RuleScope([], [], skipped),
+      Trace.handle(prove_goal_impl(g, ~induct: hint))))
+
+fun prove_goal_impl(g :: Goal,
+                    ~induct: hint :: maybe(FVar) = #false) :: Computation:
+  fun open_goal(g :: Goal) :: Computation:
+    effect:
+      let trace :: List.of(TraceEvent) <- Trace.current()
+      return Open(Residue(g, trace))
+
+  fun go(g :: Goal, inducted :: List, hint :: maybe(FVar)) :: Computation:
+    // One step per waterfall visit, on the same budget the simplifier spends
+    // from. Each individual simplification can terminate while the stages
+    // cycle between themselves; the shared total is what stops that.
+    effect:
+      let _ <- SearchBudget.spend(#'waterfall)
+      let step <- first_success(standard_stages(), g)
+      match step
+      | #false:
+          let key = [g.asms, g.concl]
+          effect:
+            let policy :: SearchPolicy <- SearchPolicy.ask()
+            cond
+            | inducted.length() >= max_induction_path: open_goal(g)
+            | inducted.contains(key): open_goal(g)
+            | policy.skipped_stages.contains(#'induct): open_goal(g)
+            | ~else:
+                effect:
+                  let induction <- run_stage(induction_stage(hint), g)
+                  match induction
+                  | #false: open_goal(g)
+                  | induction :~ Step:
+                      descend(induction, inducted ++ [key], #false)
+      | step :~ Step: descend(step, inducted, hint)
+
+  // `hint` is the user's `~induct` variable, and it survives a step that is
+  // not an induction: a goal that simplifies once before the induction stage
+  // is reached would otherwise lose it and fall back to the heuristic, which
+  // is not what the option says. An induction consumes it; deeper ones choose
+  // for themselves.
+  fun descend(step :: Step, inducted :: List,
+              hint :: maybe(FVar)) :: Computation:
+    unless step.subgoals.length() == step.events.length()
+    | error(~who: #'proof, "proof step has unpaired trace events")
+    recur loop (remaining_goals :~ List = step.subgoals,
+                remaining_events :~ List = step.events,
+                children_rev :~ List = []):
+      match [remaining_goals, remaining_events]
+      | [[], []]: return Derived(step, children_rev.reverse())
+      | [List.cons(subgoal, rest), List.cons(event, event_rest)]:
+          let subgoal :~ Goal = subgoal
+          // Only where the variable is still there to induct on.
+          let carried = (cond
+                         | !hint: #false
+                         | free_vars(subgoal.concl).contains(hint :~ Term):
+                             hint
+                         | ~else: #false)
+          effect:
+            let child <- Trace.note(
+                           event :~ TraceEvent,
+                           go(subgoal, inducted, carried))
+            loop(rest, event_rest, List.cons(child, children_rev))
+
+  effect:
+    let policy :: SearchPolicy <- SearchPolicy.ask()
+    check_skipped_stages(policy.skipped_stages)
+    go(g, [], hint)
+
+// Prove a closed proposition.  Leading universal quantifiers are stripped
+// first -- the prover works on the matrix and puts the quantifiers back --
+// and the result is checked against what was asked for before it is returned.
+//
+// `names` supplies the names to give those quantified variables.  Terms are
+// locally nameless, so a binder's name is not part of the statement: it lives
+// in the source the statement was written from.  Anything that refers to a
+// bound variable by name -- a `~induct: xs` option, and the variable names
+// a residue message shows the user -- therefore has to be told
+// what the source called them.  Without `names` the prover invents its own,
+// which is fine for a machine-generated goal and unhelpful for a human one.
+// The public entry point installs the proof environment, search policy,
+// executor, trace, and shared resource budget. `prove_impl` and everything
+// beneath it only request capabilities; nested work cannot reset the allowance
+// or silently choose an execution strategy.
+class ProofResult(proved :: maybe(Thm), node :: ProofNode)
+
+fun prove(ctx :: Context, statement :: Term,
+          ~names: names :: List.of(Symbol) = [],
+          ~induct: hint :: maybe(Symbol) = #false,
+          ~scope: scope :: RuleScope = RuleScope(),
+          ~cases: cases :: List.of(Term) = [],
+          ~witnesses: witnesses :: List.of(Term) = [],
+          ~limits: limits :: SearchLimits = SearchLimits(),
+          ~extensionality: extensionality :: maybe(Symbol) = #false,
+          ~executor: executor :: ProofExecutor = sequential_executor())
+     :: values(maybe(Thm), ProofNode):
+  let result :~ ProofResult:
+    SearchBudget.run(
+      limits,
+      run_proof_scope(
+        ctx, scope,
+        ProofExecutor.handle(
+          executor.run,
+          Trace.handle(
+            prove_impl(statement, ~names: names, ~induct: hint,
+                       ~cases: cases, ~witnesses: witnesses,
+                       ~extensionality: extensionality)))))
+  values(result.proved, result.node)
+
+fun prove_impl(statement :: Term,
+               ~names: names :: List.of(Symbol) = [],
+               ~induct: hint :: maybe(Symbol) = #false,
+               ~cases: cases :: List.of(Term) = [],
+               ~witnesses: witnesses :: List.of(Term) = [],
+               ~extensionality: extensionality :: maybe(Symbol) = #false)
+     :: Computation:
+  effect:
+    let env :: ProofEnv <- ProofEnv.ask()
+    let thy = env.base.thy
+    let (vars, matrix) = strip_forall_all(statement, names)
+    let hint_var = (cond
+                    | hint:
+                        recur loop (vs :~ List = vars):
+                          match vs
+                          | []:
+                              error(~who: #'prove,
+                                    "no such variable to induct on",
+                                    error.val(~label: "variable", hint),
+                                    error.val(~label: "quantified variables",
+                                              to_string(vars.map(
+                                                fun (u :: FVar): u.name))),
+                                    error.val(~label: "hint",
+                                              "pass the source names with "
+                                                ++ "`~names:`; a locally "
+                                                ++ "nameless term does not "
+                                                ++ "carry them"))
+                          | List.cons(v, rest):
+                              (if (v :~ FVar).name == hint | v | loop(rest))
+                    | ~else: #false)
+    // Beta-normalize the goal before the waterfall sees it. The surface
+    // desugarings -- an anonymous or local `function`, a `let` in expression
+    // position, `exists1`/`select`/`Set`-comprehension -- all elaborate to a
+    // lambda applied to its argument, and nothing downstream reduces one: a
+    // redex has no head constant, so no rewrite rule can be indexed for it.
+    // Doing it here rather than inside the simplifier keeps it away from the
+    // derived equations of a recursive definition, whose folded recursive
+    // calls are themselves redexes that must stay unreduced.
+    let beta = TOP_DEPTH_CONV(BETA_CONV)(thy, matrix)
+    let reduced = (if beta | rhs_of(beta :~ Thm) | matrix)
+    let node <- apply_explicit_extensionality(
+                  extensionality, witnesses, cases,
+                  mk_goal([], reduced), hint_var)
+    let executed <- ProofExecutor.execute(node)
+    match executed
+    | #false: return ProofResult(#false, node)
+    | th :~ Thm:
+        let restored = (if beta
+                        | EQ_MP(SYM(thy, beta :~ Thm), th)
+                        | th)
+        let closed = GENL(thy, vars, restored)
+        // The prover is not trusted to have proved what was asked: check it.
+        cond
+        | hyps_of(closed).length() != 0:
+            error(~who: #'prove, "proof left hypotheses behind",
+                  error.val(~label: "hypotheses", show_hyps(hyps_of(closed))))
+        | concl_of(closed) != statement:
+            error(~who: #'prove, "proof does not match the statement",
+                  error.val(~label: "asked", show(statement)),
+                  error.val(~label: "got", show(concl_of(closed))))
+        | ~else: return ProofResult(closed, node)
+
+// An explicit extensionality request is one derived `EXT` step before the
+// ordinary proof controls. It is accepted only for equality at function type;
+// set equality is the same case because sets are predicates.
+fun apply_explicit_extensionality(
+      requested :: maybe(Symbol),
+      witnesses :: List.of(Term), cases :: List.of(Term),
+      g :: Goal, hint :: maybe(FVar)) :: Computation:
+  match requested
+  | #false: apply_witnesses(witnesses, cases, g, hint)
+  | name:
+      match dest_imp(g.concl)
+      | [antecedent, consequent]:
+          let subgoal = Goal(g.asms ++ [antecedent], consequent)
+          let event = Assumed(antecedent)
+          effect:
+            let env :: ProofEnv <- ProofEnv.ask()
+            fun discharge(ths :: List.of(Thm)) :: Thm:
+              DISCH(env.base.thy, antecedent, ths[0])
+            let step = Step([subgoal], discharge, [event])
+            let child <- Trace.note(
+                           event,
+                           apply_explicit_extensionality(
+                             requested, witnesses, cases, subgoal, hint))
+            return Derived(step, [child])
+      | #false:
+          match dest_eq(g.concl)
+          | [left, right]:
+              let function_type = type_of(left)
+              unless is_fun(function_type)
+              | error(
+                  ~who: #'proof,
+                  "`~extensionality` requires an equality between functions",
+                  error.val(~label: "goal", show(g.concl)))
+              let (domain, _) = dest_fun(function_type)
+              let variable = variant(
+                               g.asms ++ [g.concl],
+                               mk_var(name :~ Symbol, domain))
+              let pointwise = mk_eq(
+                                mk_comb(left, variable),
+                                mk_comb(right, variable))
+              let subgoal = Goal(g.asms, pointwise)
+              let event = FunctionExtensionalized()
+              effect:
+                let env :: ProofEnv <- ProofEnv.ask()
+                fun justify(ths :: List.of(Thm)) :: Thm:
+                  EXT(env.base.thy, variable, ths[0])
+                let step = Step([subgoal], justify, [event])
+                let child <- Trace.note(
+                               event,
+                               apply_witnesses(
+                                 witnesses, cases, subgoal, hint))
+                return Derived(step, [child])
+          | #false:
+              error(
+                ~who: #'proof,
+                "`~extensionality` requires an equality between functions",
+                error.val(~label: "goal", show(g.concl)))
+
+// Apply explicit existential witnesses before Boolean case splits. Each step
+// is justified by the derived EXISTS rule, and mismatched hints fail loudly
+// rather than being ignored.
+fun apply_witnesses(witnesses :: List.of(Term), cases :: List.of(Term),
+                    g :: Goal, hint :: maybe(FVar)) :: Computation:
+  match witnesses
+  | []: apply_cases(cases, g, hint)
+  | List.cons(witness, rest):
+      match dest_imp(g.concl)
+      | [antecedent, consequent]:
+          let sub = Goal(g.asms ++ [antecedent], consequent)
+          let event = Assumed(antecedent)
+          effect:
+            let env :: ProofEnv <- ProofEnv.ask()
+            fun discharge_antecedent(ths :: List.of(Thm)) :: Thm:
+              DISCH(env.base.thy, antecedent, ths[0])
+            let step = Step([sub], discharge_antecedent, [event])
+            let child <- Trace.note(
+                           event,
+                           apply_witnesses(witnesses, cases, sub, hint))
+            return Derived(step, [child])
+      | ~else:
+          match dest_exists(g.concl)
+          | #false:
+              error(~who: #'proof,
+                    "an explicit witness was supplied for a non-existential goal",
+                    error.val(~label: "goal", show(g.concl)))
+          | [v, body]:
+              unless type_of(witness) == (v :~ FVar).ty
+              | error(~who: #'proof, "existential witness has the wrong type",
+                      error.val(~label: "witness", show_typed(witness)),
+                      error.val(~label: "binder",
+                                type_to_string((v :~ FVar).ty)))
+              let instantiated = inst_fvar([[witness, v :~ FVar]], body)
+              let sub = Goal(g.asms, instantiated)
+              let event = Witnessed(witness)
+              effect:
+                let env :: ProofEnv <- ProofEnv.ask()
+                fun introduce_witness(ths :: List.of(Thm)) :: Thm:
+                  EXISTS(env.base.thy, g.concl, witness, ths[0])
+                let step = Step([sub], introduce_witness, [event])
+                let child <- Trace.note(
+                               event,
+                               apply_witnesses(rest :~ List, cases, sub, hint))
+                return Derived(step, [child])
+
+// `~split: p`, applied before the waterfall runs: split the goal on each term
+// in turn, true branch and false branch, so `n` terms give `2^n` subgoals.
+// Justified by `taut.rhm`'s `excluded_middle`, not postulated -- a term that
+// turns out irrelevant to the goal just produces two subgoals that both need
+// the same proof the unsplit goal would have, so a bad choice of case terms
+// costs search effort, never soundness. Every subgoal, however deep the
+// nesting, restarts at the top of the ordinary waterfall, so case splitting
+// composes with induction and stage skipping rather than replacing them.
+fun apply_cases(cases :: List.of(Term), g :: Goal,
+                hint :: maybe(FVar)) :: Computation:
+  match cases
+  | []: prove_goal_impl(g, ~induct: hint)
+  | List.cons(c, rest):
+      let rest :~ List = rest
+      let sub_true = Goal(g.asms ++ [c], g.concl)
+      let sub_false = Goal(g.asms ++ [mk_neg(c)], g.concl)
+      let true_event = CaseSplit(c, #true)
+      let false_event = CaseSplit(c, #false)
+      effect:
+        let env :: ProofEnv <- ProofEnv.ask()
+        fun discharge_cases(ths :: List.of(Thm)) :: Thm:
+          let em = excluded_middle(env.base.thy, c)
+          DISJ_CASES(env.base.thy, em, ths[0], ths[1])
+        let step = Step([sub_true, sub_false], discharge_cases,
+                        [true_event, false_event])
+        let true_child <- Trace.note(
+                            true_event,
+                            apply_cases(rest, sub_true, hint))
+        let false_child <- Trace.note(
+                             false_event,
+                             apply_cases(rest, sub_false, hint))
+        return Derived(step, [true_child, false_child])
+
+fun strip_forall_all(t :: Term, names :: List.of(Symbol))
+     :: values(List.of(FVar), Term):
+  recur loop (t = t, i = 0, acc :~ List = []):
+    match dest_forall(t)
+    | #false: values(acc, t)
+    | [v0, body0]:
+        let v0 :~ FVar = v0
+        cond
+        | i >= names.length(): loop(body0, i + 1, acc ++ [v0])
+        | ~else:
+            // Use the caller's name, unless something free in the body already
+            // claims it.
+            let wanted = mk_var(names[i], v0.ty)
+            let (_, absterm) = dest_comb(t)
+            // Avoid names genuinely free under the binder, but do not treat
+            // this binder's temporary opening name as a collision with itself.
+            let v = variant([absterm], wanted)
+            loop(open_abs(v, absterm), i + 1, acc ++ [v])
+
+// Formatting stays at the user-facing residue boundary. Trace producers retain
+// typed terms and symbols, so alternate handlers can inspect them losslessly.
+fun trace_event_message(event :: TraceEvent) :~ String:
+  match event
+  | Simplified(): "simplification"
+  | FunctionExtensionalized(): "function extensionality"
+  | DestructorEliminated(variable, constructor):
+      "destructor elimination (" ++ to_string(variable)
+        ++ " -> " ++ to_string(constructor) ++ ")"
+  | Fertilized(equation): "fertilize using " ++ show(equation)
+  | Generalized(term, variable):
+      "generalization (" ++ show(term) ++ " -> " ++ to_string(variable) ++ ")"
+  | Inducted(variable, constructor):
+      "induction on " ++ to_string(variable)
+        ++ " (case " ++ to_string(constructor) ++ ")"
+  | DroppedIrrelevant(count):
+      "drop " ++ to_string(count)
+        ++ " hypothesis(es) irrelevant to the conclusion"
+  | Assumed(term): "assuming " ++ show(term)
+  | Witnessed(term): "existential witness " ++ show(term)
+  | Specialized(variable):
+      "specializing the goal's quantifier at " ++ to_string(variable)
+  | CaseSplit(term, positive):
+      (if positive
+       | "case split: " ++ show(term)
+       | "case split: not (" ++ show(term) ++ ")")
+
+fun show_residue(residue :: Residue) :~ String:
+  let steps = residue.trace.map(
+                fun (event :: TraceEvent):
+                  "    " ++ trace_event_message(event))
+  let head:
+    cond
+    | steps.length() == 0: ""
+    | ~else: "  after\n" ++ String.join(steps, "\n") ++ "\n"
+  let goal = residue.goal
+  let asm_lines = goal.asms.map(fun (a): "    assuming " ++ show(a))
+  let asms:
+    cond
+    | asm_lines.length() == 0: ""
+    | ~else: String.join(asm_lines, "\n") ++ "\n"
+  head ++ asms ++ "    " ++ show(goal.concl)
+
+// The stuck-residue message: what is left, and how it got there.
+fun residue_message(name :: Symbol, node :: ProofNode) :~ String:
+  let open_goals = residues(node)
+  let body = String.join(open_goals.map(show_residue), "\n\n")
+  to_string(name) ++ ": could not prove.\n"
+    ++ (if open_goals.length() == 1
+        | "Remaining goal,\n"
+        | to_string(open_goals.length()) ++ " remaining goals,\n")
+    ++ body

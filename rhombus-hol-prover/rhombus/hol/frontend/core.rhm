@@ -1,0 +1,48 @@
+#lang rhombus/static
+
+// The evaluation-ordered reading of a function body.
+//
+// Surface syntax now has its own `CoreExpr` hierarchy in `surface_core.rhm`.
+// This module's deliberately smaller IR starts after surface elaboration: it
+// records only evaluations that disappear from the resulting HOL term.
+//
+// A `function`'s body has two readings. The logical reading is the right-hand
+// side of its defining equation. The operational reading also evaluates every
+// `let` initializer, including an unused one. `EvalCoreLet` retains that
+// difference so termination checking sees recursive calls in initializers.
+
+import:
+  rhombus/hol/term open
+
+export:
+  EvalCoreExpr
+  EvalCoreLeaf
+  EvalCoreLet
+  eval_core_term
+  eval_core_obligations
+
+class EvalCoreExpr():
+  nonfinal
+
+class EvalCoreLeaf(term :: Term):
+  extends EvalCoreExpr
+
+class EvalCoreLet(init :: EvalCoreExpr,
+                  body :: EvalCoreExpr):
+  extends EvalCoreExpr
+
+fun eval_core_term(c :: EvalCoreExpr) :: Term:
+  match c
+  | EvalCoreLeaf(t): t
+  | EvalCoreLet(_, body): eval_core_term(body :~ EvalCoreExpr)
+  | ~else: error(~who: #'eval_core_term, "unknown evaluation core expression")
+
+fun eval_core_obligations(c :: EvalCoreExpr) :: List.of(Term):
+  match c
+  | EvalCoreLeaf(t): [t]
+  | EvalCoreLet(init, body):
+      eval_core_obligations(init :~ EvalCoreExpr)
+        ++ eval_core_obligations(body :~ EvalCoreExpr)
+  | ~else:
+      error(~who: #'eval_core_obligations,
+            "unknown evaluation core expression")

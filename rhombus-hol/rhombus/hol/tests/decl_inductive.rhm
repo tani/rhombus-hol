@@ -1,0 +1,105 @@
+#lang rhombus/static
+
+// The `inductive` declaration: a predicate given by rules, installed as the
+// least predicate closed under them.
+//
+// What the declaration owes its user is three families of *theorems*, so the
+// checks below are about the statements that reach the theorem database, not
+// about the encoding they were derived from. `inductive.rhm` covers the
+// derivations themselves.
+
+import:
+  "fixture_load.rhm" open
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/frontend/driver open
+  "fixtures/inductive_ok.rhm"!hol_theory as m
+
+def st :~ HolState = m.theory
+
+def tree = mk_tyapp(#'Tree, [])
+def leaf = mk_const(#'leaf, tree)
+def node = mk_const(#'node, mk_fun(tree, mk_fun(tree, tree)))
+def spine = mk_const(#'spine, mk_fun(tree, bool))
+fun spine_at(t :: Term) :: Term: mk_comb(spine, t)
+fun node_of(l :: Term, r :: Term) :: Term: list_mk_comb(node, [l, r])
+
+def r = mk_var(#'r, tree)
+def t0 = mk_var(#'t, tree)
+
+// -- one theorem per rule ----------------------------------------------------
+
+check concl_of(st.thms[#'spine_leaf]) ~is spine_at(leaf)
+check:
+  concl_of(st.thms[#'spine_node])
+  ~is mk_forall(r, mk_imp(spine_at(r), spine_at(node_of(leaf, r))))
+
+// -- induction: the predicate is the *least* one closed under the rules ------
+
+def pv = mk_var(#'spine, mk_fun(tree, bool))
+check:
+  concl_of(st.thms[#'spine_induct])
+  ~is mk_forall(
+        pv,
+        mk_imp(mk_comb(pv, leaf),
+               mk_imp(mk_forall(r, mk_imp(mk_comb(pv, r),
+                                          mk_comb(pv, node_of(leaf, r)))),
+                      mk_forall(t0, mk_imp(spine_at(t0),
+                                           mk_comb(pv, t0))))))
+
+// -- cases: membership came from one of the rules ----------------------------
+
+def x0 = mk_var(#'x0, tree)
+check:
+  concl_of(st.thms[#'spine_cases])
+  ~is mk_forall(
+        x0,
+        mk_imp(spine_at(x0),
+               mk_disj(mk_eq(x0, leaf),
+                       mk_exists(r, mk_conj(spine_at(r),
+                                            mk_eq(x0, node_of(leaf, r)))))))
+
+// -- derived, not postulated -------------------------------------------------
+//
+// The declaration is one basic definition; every theorem above was derived
+// from it, so none may carry a hypothesis and none may have added an axiom.
+
+check:
+  for any (name in [#'spine_leaf, #'spine_node, #'spine_induct, #'spine_cases]):
+    hyps_of(st.thms[name :~ Symbol]).length() != 0
+  ~is #false
+check:
+  axioms_of(st.ctx.thy).length()
+  ~is axioms_of(initial_state().ctx.thy).length()
+
+// -- and they are usable in a proof ------------------------------------------
+//
+// The fixture's `spine_one` is proved by the waterfall from the introduction
+// theorems alone, so instantiating the fixture exercises the whole path.
+
+check st.thms.has_key(#'spine_one) ~is #true
+
+// -- rules that describe no least fixed point are refused --------------------
+
+fun bad_message(mp :: ModulePath) :: String:
+  try:
+    block:
+      instantiate_hol_fixture(mp)
+      "fixture compiled"
+    ~catch e :: Exn.Fail: e.message
+
+def negative_message:
+  bad_message(
+    ModulePath'lib("rhombus/hol/tests/fixtures/inductive_negative_bad.rhm")')
+def unapplied_message:
+  bad_message(
+    ModulePath'lib("rhombus/hol/tests/fixtures/inductive_unapplied_bad.rhm")')
+def conclusion_message:
+  bad_message(
+    ModulePath'lib("rhombus/hol/tests/fixtures/inductive_conclusion_bad.rhm")')
+
+check negative_message.contains("negative position") ~is #true
+check unapplied_message.contains("applied to arguments") ~is #true
+check conclusion_message.contains("must conclude with") ~is #true

@@ -246,7 +246,76 @@ Thus `definition` has no termination check: it cannot introduce recursion. It
 is the appropriate form for specification-level or choice-based HOL constants.
 Use `function` when an executable meaning is required.
 
-### 4.4 `theorem` and `proof`
+### 4.4 `inductive`
+
+```rhombus
+inductive name(Type, ...)
+| rule_name: proposition
+| ...
+```
+
+`inductive` introduces the least predicate closed under the given rules. The
+head lists the predicate's argument types; each rule is a closed proposition
+about the predicate being declared, so it quantifies over its own variables.
+
+```rhombus
+inductive spine(Tree)
+| spine_leaf: spine(leaf())
+| spine_node: forall (r :: Tree): spine(r) ==> spine(node(leaf(), r))
+```
+
+A rule has the form
+
+```text
+forall y1 ... ym. Q1 ==> ... ==> Qj ==> name(a1, ..., an)
+```
+
+and the declaration introduces the constant `name : T1 -> ... -> Tn -> Boolean`
+with the single definition
+
+```text
+|- name = \x1. ... \xn. !P. R1[P] ==> ... ==> Rk[P] ==> P x1 ... xn
+```
+
+where `Ri[P]` is rule `i` with `name` replaced by the quantified `P`: the
+predicate is the intersection of every predicate the rules are closed under.
+This is one `new_basic_definition` call, so `inductive` adds no axiom and no
+new definition principle.
+
+From that definition the declaration derives, by kernel rules only:
+
+- one introduction theorem per rule, named by the rule, stating `Ri[name]`;
+- `name_induct`, stating
+  `!P. R1[P] ==> ... ==> Rk[P] ==> !x. name x ==> P x`; and
+- `name_cases`, stating that membership came from some rule:
+  `!x. name x ==> (D1 or ... or Dk)`, where `Di` is
+  `?y1 ... ym. Q1 and ... and Qj and x1 = a1 and ... and xn = an` for rule
+  `i`.
+
+The derived theorems are retained by name, exactly as a `theorem` is, and are
+requested in a later proof with `~use:`. Neither the definition nor the derived
+theorems enter the rewriter, so the automation never unfolds the fixed point on
+its own.
+
+The rules must describe a monotone operator, which is what makes the least
+predicate closed under them and the introduction theorems derivable. The
+following are static errors:
+
+- a rule that does not conclude with the declared predicate applied to `n`
+  arguments;
+- an occurrence of the predicate in a negative position of a premise, that is
+  under `not` or to the left of a nested `==>`;
+- an occurrence of the predicate that is not applied to arguments, including
+  one passed to another function or compared with `===`;
+- an occurrence of the predicate inside its own conclusion's or premise's
+  arguments; and
+- a rule name, `name_induct` or `name_cases` that is already a theorem in the
+  current theory.
+
+`inductive` has no executable reading: like `definition`, it emits no Rhombus
+binding.
+
+### 4.5 `theorem` and `proof`
 
 ```rhombus
 theorem name:
@@ -284,7 +353,7 @@ admit a false proposition.
   (including predicate-encoded sets) to its pointwise equality. It is a
   compile-time error for any other goal shape.
 
-### 4.5 `notation`
+### 4.6 `notation`
 
 ```rhombus
 notation left operator right:
@@ -327,7 +396,7 @@ The usual Rhombus precedence and associativity options (`~order`,
 `~stronger_than`, `~weaker_than`, `~same_as`, `~same_on_left_as`,
 `~same_on_right_as`, and `~associativity`) apply.
 
-### 4.6 `overload`
+### 4.7 `overload`
 
 ```rhombus
 overload public_name(ArgumentType, ...) = implementation
@@ -353,7 +422,7 @@ The language-reserved notation-facing names are `add`, `subtract`, `negate`,
 `append`, `member`, `union`, and `intersection`. Their implementations are
 library or module declarations, not language primitives.
 
-### 4.7 `quickcheck`
+### 4.8 `quickcheck`
 
 ```rhombus
 quickcheck name:
@@ -515,7 +584,7 @@ and `or` are strict logically; totality makes this difference unobservable in
 valid function bodies.
 
 `+`, `-`, unary `-`, `*`, `**`, comparisons, `++`, `in`, `union`, and
-`intersect` lower to the named overloadable calls from section 4.6. `**`, `++`,
+`intersect` lower to the named overloadable calls from section 4.7. `**`, `++`,
 and `==>` are right-associative. Multiplication, addition, set intersection,
 set union, conjunction, and disjunction are left-associative. Relations and
 equality are non-associative: `a < b < c` and `a === b === c` are errors.

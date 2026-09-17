@@ -197,6 +197,48 @@ parameter list, with each case's own patterns supplying the parameters ---
 the same form available for a top-level @rhombus(function, ~datum)'s
 declaration-level clauses.
 
+@section{@rhombus(inductive, ~datum)}
+
+@verbatim{
+inductive Id(Type, ...)
+| Id: proposition
+| ...
+}
+
+Declares the least predicate closed under the given rules. The head lists the
+predicate's argument types; each rule is a closed proposition about the
+predicate being declared, so it quantifies over its own variables.
+
+@rhombusblock(
+  inductive spine(Tree)
+  | spine_leaf: spine(leaf())
+  | spine_node: forall (r :: Tree): spine(r) ==> spine(node(leaf(), r))
+)
+
+The declaration makes one basic definition --- the predicate is the
+intersection of every predicate the rules are closed under, which ordinary
+higher-order quantification already expresses --- and then @emph{derives}
+three families of theorems from it: one introduction theorem per rule, under
+the rule's own name; @tt{Id_induct}, saying that any predicate closed under
+the rules contains this one; and @tt{Id_cases}, the inversion theorem, saying
+that membership came from some rule. Nothing is postulated.
+
+Those theorems are retained by name like a @rhombus(theorem, ~datum) and are
+requested with @tt{~use:}; they do not enter the rewriter, so the automation
+never unfolds the fixed point by itself.
+
+A rule is rejected unless it concludes with the declared predicate applied to
+its arguments, and unless every recursive occurrence in a premise is an
+application of the predicate in a position the rules are monotone in. An
+occurrence under @rhombus(not, ~datum), one to the left of a nested
+@tt{==>}, one passed to another function, and one inside the predicate's own
+arguments are each refused: without monotonicity there need be no least
+predicate closed under the rules, and the introduction theorems would not be
+derivable.
+
+Like @rhombus(definition, ~datum), an inductive predicate is logical only and
+emits no Rhombus binding.
+
 @section(~tag: "notation"){HOL notation}
 
 @verbatim{

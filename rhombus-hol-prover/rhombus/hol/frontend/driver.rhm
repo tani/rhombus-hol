@@ -39,6 +39,7 @@ import:
   rhombus/hol/logic/taut open
   rhombus/hol/prover/waterfall open
   rhombus/hol/recursion/wfrec open
+  rhombus/hol/inductive/define open
   rhombus/hol/recursion/terminate open
   rhombus/hol/recursion/stepfn open
   rhombus/hol/number/conv open
@@ -55,6 +56,7 @@ export:
   initial_state
   add_datatype
   add_definition
+  add_inductive
   add_function
   add_theorem
   add_overload_method_encoded
@@ -455,6 +457,73 @@ fun add_definition(st :: HolState, name :: Symbol, type_stx :: Syntax,
   let db2 = add_thm(thy2, st.ctx.db, name, equation)
   let ctx2 = context_with_rules(context_with_theory(st.ctx, thy2), db2)
   HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
+
+// An `inductive` predicate: one kernel basic definition (the intersection of
+// every predicate closed under the rules) plus the introduction, induction
+// and inversion theorems derived from it in `inductive/define.rhm`.
+//
+// The rules are elaborated with the predicate's own name bound to a variable
+// of its type: that is what the definition quantifies over, so the surface
+// rule and the logical rule operator are the same term, read once.
+//
+// Nothing enters the rule database. The generated theorems are retained by
+// name, like a `theorem`, so a later proof asks for them with `~use` instead
+// of the automation silently unfolding the fixed point.
+fun add_inductive(st :: HolState, name :: Symbol,
+                  parameter_types :: List.of(Syntax),
+                  rule_names :: List.of(Symbol),
+                  rule_exprs :: List.of(CoreExpr), at :: Syntax) :: HolState:
+  let tyvars:
+    for values(acc :~ List.of(Symbol) = []) (stx in parameter_types):
+      for values(inner :~ List.of(Symbol) = acc) (
+            n in type_parser.collect_type_vars(stx)):
+        (if inner.contains(n) | inner | inner ++ [n])
+  let arg_tys:
+    for List (stx in parameter_types):
+      try:
+        type_parser.parse_type(stx, tyvars, st.type_constructors)
+        ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let pred_ty:
+    for values(acc :~ HType = bool) (ty in arg_tys.reverse()):
+      mk_fun(ty :~ HType, acc)
+  let pred = mk_var(name, pred_ty)
+  let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
+                   m ++ {n: (thms :~ DatatypeThms).spec}
+  let rules:
+    for List (expr in rule_exprs):
+      try:
+        elab.parse_core_prop(
+          st.ctx.thy, tyvars, {name: pred :~ Term}, expr,
+          ~operators: st.operators,
+          ~type_constructors: st.type_constructors,
+          ~datatypes: dt_specs)
+        ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let (thy2, derived0) = try:
+                           define_inductive(st.ctx.thy, name, pred, rules)
+                           ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let derived :~ InductiveThms = derived0
+  require_no_new_axioms(#'inductive, st.ctx.thy, thy2, name, at)
+  let generated:
+    for values(acc :~ List.of(List) = []) (
+          rule_name in rule_names, th in derived.introductions):
+      acc ++ [[rule_name, th]]
+  let named = generated ++ [[suffixed(name, "_induct"), derived.induction],
+                            [suffixed(name, "_cases"), derived.cases]]
+  require_closed_theorems(#'inductive, thy2, name,
+                          named.map(fun (entry :: List): entry[1] :~ Thm), at)
+  let thms:
+    for values(acc :~ Map = st.thms) (entry in named):
+      let [thm_name, th] = entry :~ List
+      when acc.has_key(thm_name)
+      | hol_error(#'inductive,
+                  "a theorem of this name already exists: "
+                    ++ to_string(thm_name), at)
+      acc ++ {thm_name :~ Symbol: th :~ Thm}
+  HolState(context_with_theory(st.ctx, thy2), thms, st.operators,
+           st.type_constructors, st.wfrec_def)
+
+fun suffixed(name :: Symbol, suffix :: String) :: Symbol:
+  Symbol.from_string(to_string(name) ++ suffix)
 
 // Derive one function from an already elaborated specification: directly when
 // it does not call itself, from the well-founded recursion theorem when it

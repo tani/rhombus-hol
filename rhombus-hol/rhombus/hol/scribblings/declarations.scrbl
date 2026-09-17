@@ -200,14 +200,14 @@ declaration-level clauses.
 @section{@rhombus(inductive, ~datum)}
 
 @verbatim{
-inductive Id(Type, ...)
+inductive Id(Type, ...) and Id(Type, ...) and ...
 | Id: proposition
 | ...
 }
 
-Declares the least predicate closed under the given rules. The head lists the
-predicate's argument types; each rule is a closed proposition about the
-predicate being declared, so it quantifies over its own variables.
+Declares the least predicates closed under the given rules. Each head lists
+one predicate's argument types; each rule is a closed proposition about the
+predicates being declared, so it quantifies over its own variables.
 
 @rhombusblock(
   inductive spine(Tree)
@@ -215,25 +215,37 @@ predicate being declared, so it quantifies over its own variables.
   | spine_node: forall (r :: Tree): spine(r) ==> spine(node(leaf(), r))
 )
 
-The declaration makes one basic definition --- the predicate is the
-intersection of every predicate the rules are closed under, which ordinary
-higher-order quantification already expresses --- and then @emph{derives}
-three families of theorems from it: one introduction theorem per rule, under
-the rule's own name; @tt{Id_induct}, saying that any predicate closed under
-the rules contains this one; and @tt{Id_cases}, the inversion theorem, saying
-that membership came from some rule. Nothing is postulated.
+The declaration makes one basic definition per predicate --- each is a
+component of the intersection of every predicate family the rules are closed
+under, which ordinary higher-order quantification already expresses --- and
+then @emph{derives} three families of theorems from them: one introduction
+theorem per rule, under the rule's own name; @tt{Id_induct} per predicate,
+saying that any family closed under the rules contains it; and @tt{Id_cases}
+per predicate, the inversion theorem, saying that membership came from some
+rule concluding with that predicate. Nothing is postulated.
+
+Predicates joined by @rhombus(and, ~datum) are mutually recursive: they share
+every rule, so a rule may conclude with any of them and reach the others
+through its premises.
+
+@rhombusblock(
+  inductive even_depth(Tree) and odd_depth(Tree)
+  | even_leaf: even_depth(leaf())
+  | even_step: forall (t :: Tree): odd_depth(t) ==> even_depth(node(t, t))
+  | odd_step: forall (t :: Tree): even_depth(t) ==> odd_depth(node(t, t))
+)
 
 Those theorems are retained by name like a @rhombus(theorem, ~datum) and are
 requested with @tt{~use:}; they do not enter the rewriter, so the automation
 never unfolds the fixed point by itself.
 
-A rule is rejected unless it concludes with the declared predicate applied to
-its arguments, and unless every recursive occurrence in a premise is an
-application of the predicate in a position the rules are monotone in. An
-occurrence under @rhombus(not, ~datum), one to the left of a nested
-@tt{==>}, one passed to another function, and one inside the predicate's own
+A rule is rejected unless it concludes with one of the declared predicates
+applied to its arguments, and unless every recursive occurrence in a premise
+is an application of a declared predicate in a position the rules are monotone
+in. An occurrence under @rhombus(not, ~datum), one to the left of a nested
+@tt{==>}, one passed to another function, and one inside a rule's own
 arguments are each refused: without monotonicity there need be no least
-predicate closed under the rules, and the introduction theorems would not be
+predicates closed under the rules, and the introduction theorems would not be
 derivable.
 
 Like @rhombus(definition, ~datum), an inductive predicate is logical only and

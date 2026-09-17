@@ -125,30 +125,55 @@ fun definition_parts(form :: Syntax) :: List:
         "expected `definition name :: Type: expression`",
         form)
 
-// An inductive predicate: the types of its arguments, and one named rule per
-// alternative. Each rule is an ordinary closed proposition about the
-// predicate being declared, carried as source and elaborated once with that
-// name bound to a variable of the predicate's type.
+// An inductive declaration: the predicates it introduces, each with its
+// argument types, and one named rule per alternative. Several predicates
+// joined by `and` are defined by mutual recursion: the rules are shared, so
+// each may conclude with any of them.
 //
-// The head lists types, not parameters: a rule quantifies over its own
-// variables, so a name here would be a binder that nothing is inside of.
+// Each rule is an ordinary closed proposition about the predicates being
+// declared, carried as source and elaborated once with those names bound to
+// variables of the predicates' types.
+//
+// A head lists types, not parameters: a rule quantifies over its own
+// variables, so a name there would be a binder that nothing is inside of.
 fun inductive_parts(form :: Syntax) :: List:
   match form
-  | 'inductive $(name :: Identifier)($parameter, ...)
+  | 'inductive $head ...
      | $rule
      | ...':
-      let parameters = [parameter, ...]
-      when parameters.length() == 0
-      | syntax_error_here(
-          #'inductive,
-          "an inductive predicate needs at least one argument type", form)
-      [name, parameters, [rule, ...].map(inductive_rule)]
+      let heads = inductive_heads('$head ...', form)
+      [heads.map(fun (h :: List): h[0]),
+       heads.map(fun (h :: List): h[1]),
+       [rule, ...].map(inductive_rule)]
   | ~else:
       syntax_error_here(
         #'inductive,
-        "expected `inductive name(Type, ...)` followed by "
-          ++ "`| rule_name: proposition` alternatives",
+        "expected `inductive name(Type, ...)`, optionally `and` more "
+          ++ "predicates, followed by `| rule_name: proposition` "
+          ++ "alternatives",
         form)
+
+// `name(Type, ...) and name(Type, ...) and ...`, as `[name, [type, ...]]`
+// pairs.
+fun inductive_heads(stx :: Syntax, form :: Syntax) :: List:
+  match stx
+  | '$(name :: Identifier)($parameter, ...) and $rest ...':
+      [inductive_head(name, [parameter, ...], form)]
+        ++ inductive_heads('$rest ...', form)
+  | '$(name :: Identifier)($parameter, ...)':
+      [inductive_head(name, [parameter, ...], form)]
+  | ~else:
+      syntax_error_here(
+        #'inductive,
+        "an inductive predicate is written `name(Type, ...)`", stx)
+
+fun inductive_head(name :: Syntax, parameters :: List.of(Syntax),
+                   form :: Syntax) :: List:
+  when parameters.length() == 0
+  | syntax_error_here(
+      #'inductive,
+      "an inductive predicate needs at least one argument type", form)
+  [name, parameters]
 
 fun inductive_rule(stx :: Syntax) :: List:
   match stx

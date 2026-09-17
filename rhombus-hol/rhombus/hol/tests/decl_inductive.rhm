@@ -15,6 +15,7 @@ import:
   rhombus/hol/kernel open
   rhombus/hol/logic/bool open
   rhombus/hol/frontend/driver open
+  "fixtures/inductive_mutual_ok.rhm"!hol_theory as mutual
   "fixtures/inductive_ok.rhm"!hol_theory as m
 
 def st :~ HolState = m.theory
@@ -80,6 +81,85 @@ check:
 // theorems alone, so instantiating the fixture exercises the whole path.
 
 check st.thms.has_key(#'spine_one) ~is #true
+
+// -- predicates declared together are one least family -----------------------
+//
+// The rules are shared, so each predicate's induction principle quantifies
+// over a predicate for *both* positions, and each inversion theorem covers
+// exactly the rules that conclude with that predicate.
+
+def mst :~ HolState = mutual.theory
+
+def even_depth = mk_const(#'even_depth, mk_fun(tree, bool))
+def odd_depth = mk_const(#'odd_depth, mk_fun(tree, bool))
+def ev = mk_var(#'even_depth, mk_fun(tree, bool))
+def od = mk_var(#'odd_depth, mk_fun(tree, bool))
+def t1 = mk_var(#'t, tree)
+
+fun doubled(t :: Term) :: Term: node_of(t, t)
+
+check concl_of(mst.thms[#'even_leaf]) ~is mk_comb(even_depth, leaf)
+check:
+  concl_of(mst.thms[#'odd_step])
+  ~is mk_forall(t1, mk_imp(mk_comb(even_depth, t1),
+                           mk_comb(odd_depth, doubled(t1))))
+
+// Both quantified predicates are in scope in each induction principle, and
+// every rule is a premise of both.
+fun closure(first :: Term, second :: Term, conclusion :: Term) :: Term:
+  mk_forall(
+    ev,
+    mk_forall(
+      od,
+      mk_imp(mk_comb(ev, leaf),
+             mk_imp(mk_forall(t1, mk_imp(mk_comb(od, t1),
+                                         mk_comb(ev, doubled(t1)))),
+                    mk_imp(mk_forall(t1, mk_imp(mk_comb(ev, t1),
+                                                mk_comb(od, doubled(t1)))),
+                           conclusion)))))
+
+check:
+  concl_of(mst.thms[#'even_depth_induct])
+  ~is closure(ev, od,
+              mk_forall(x0, mk_imp(mk_comb(even_depth, x0),
+                                   mk_comb(ev, x0))))
+check:
+  concl_of(mst.thms[#'odd_depth_induct])
+  ~is closure(ev, od,
+              mk_forall(x0, mk_imp(mk_comb(odd_depth, x0),
+                                   mk_comb(od, x0))))
+
+// `odd_depth` has one rule, so its inversion theorem has one disjunct, and it
+// mentions the *other* predicate: the two were inverted as one family.
+check:
+  concl_of(mst.thms[#'odd_depth_cases])
+  ~is mk_forall(
+        x0,
+        mk_imp(mk_comb(odd_depth, x0),
+               mk_exists(t1, mk_conj(mk_comb(even_depth, t1),
+                                     mk_eq(x0, doubled(t1))))))
+check:
+  concl_of(mst.thms[#'even_depth_cases])
+  ~is mk_forall(
+        x0,
+        mk_imp(mk_comb(even_depth, x0),
+               mk_disj(mk_eq(x0, leaf),
+                       mk_exists(t1, mk_conj(mk_comb(odd_depth, t1),
+                                             mk_eq(x0, doubled(t1)))))))
+
+check:
+  for any (name in [#'even_leaf, #'even_step, #'odd_step,
+                    #'even_depth_induct, #'odd_depth_induct,
+                    #'even_depth_cases, #'odd_depth_cases]):
+    hyps_of(mst.thms[name :~ Symbol]).length() != 0
+  ~is #false
+check:
+  axioms_of(mst.ctx.thy).length()
+  ~is axioms_of(initial_state().ctx.thy).length()
+
+// A rule concluding with one predicate from a premise about the other is
+// usable in a proof, which is what mutual closure means.
+check mst.thms.has_key(#'odd_one) ~is #true
 
 // -- rules that describe no least fixed point are refused --------------------
 

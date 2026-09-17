@@ -1,35 +1,41 @@
 #lang rhombus/static
 // SPDX-License-Identifier: 0BSD
 
-// Inductive predicates: the least predicate closed under a set of rules.
+// Inductive predicates: the least predicates closed under a set of rules.
 //
 // HOL needs no new definition principle for this. A rule set whose recursive
 // occurrences are all positive describes a monotone operator, and the least
-// predicate closed under it can be written down directly with higher-order
-// quantification -- the intersection of every predicate the rules are closed
-// under:
+// predicates closed under it can be written down directly with higher-order
+// quantification -- the intersection of every predicate family the rules are
+// closed under:
 //
-//   p := \x. !P. R_1[P] ==> ... ==> R_k[P] ==> P x
+//   p_j := \x. !P_1 ... P_m. R_1[P] ==> ... ==> R_k[P] ==> P_j x
 //
-// where `R_i[P]` is rule `i` with the predicate being defined replaced by the
-// quantified `P`. This is one `new_basic_definition`, so the trust model is
-// unchanged; `recursion/wfrec.rhm` writes the same encoding down for the one
-// relation well-founded recursion needs.
+// where `R_i[P]` is rule `i` with the predicates being defined replaced by the
+// quantified `P_1, ..., P_m`. Each `p_j` is one `new_basic_definition`, so the
+// trust model is unchanged; `recursion/wfrec.rhm` writes the same encoding
+// down for the one relation well-founded recursion needs.
 //
-// From that definition three families of theorems are derived here, each by
+// Mutual recursion needs nothing beyond that shape: all of the rules are
+// premises of every definition, and the family is quantified over as a whole,
+// so the `m = 1` case is the general one with a one-element family.
+//
+// From those definitions three families of theorems are derived here, each by
 // ordinary kernel rules:
 //
-//   introduction  `R_i[p]` -- `p` is closed under every rule
-//   induction     `!P. R_1[P] ==> ... ==> R_k[P] ==> !x. p x ==> P x`
-//                 -- which is immediate: it *is* the definition
-//   cases         `!x. p x ==> (D_1 or ... or D_k)`, where `D_i` says some
-//                 instance of rule `i` concluded with `x`
+//   introduction  `R_i[p]` -- the predicates are closed under every rule
+//   induction     `!P. R_1[P] ==> ... ==> R_k[P] ==> !x. p_j x ==> P_j x`,
+//                 one per predicate -- which is immediate: it *is* the
+//                 definition
+//   cases         `!x. p_j x ==> (D_1 or ... or D_r)`, one per predicate,
+//                 where `D_i` says some instance of a rule concluding with
+//                 `p_j` concluded with `x`
 //
 // Induction is the easy direction and introduction is the interesting one:
-// closure of `p` needs the rule's own premises transported from `p` to `P`,
-// which is where positivity is paid for. `monotone_instance` performs that
-// transport, structurally, and it is also what makes the inversion theorem
-// derivable rather than postulated.
+// closure of `p` needs each rule's premises transported from the `p`s to the
+// `P`s, which is where positivity is paid for. `monotone_instance` performs
+// that transport, structurally, and it is also what makes the inversion
+// theorems derivable rather than postulated.
 
 import:
   rhombus/hol/htype open
@@ -45,113 +51,162 @@ export:
   check_inductive_rules
   define_inductive
 
-// The rules of one inductive predicate, with `pred` standing for the
-// predicate itself: `rules` are the `R_i[pred]` above.
-class InductiveThms(definition :: Thm,
+// `introductions` has one theorem per rule, in rule order; `inductions` and
+// `cases` have one per predicate, in declaration order.
+class InductiveThms(definitions :: List.of(Thm),
                     introductions :: List.of(Thm),
-                    induction :: Thm,
-                    cases :: Thm)
+                    inductions :: List.of(Thm),
+                    cases :: List.of(Thm))
 
 fun fail(message :: String, what :: Term):
   error(~who: #'inductive, message, error.val(~label: "in", show(what)))
 
+// -- the predicate family -----------------------------------------------------
+
+// The variables the rules were elaborated with, and the constants they turn
+// into. One position per declared predicate, in declaration order.
+class Family(vars :: List.of(FVar),
+             constants :: List.of(Term),
+             arities :: List.of(NonnegInt))
+
+fun mk_family(names :: List.of(Symbol),
+              vars :: List.of(FVar)) :: Family:
+  Family(vars,
+         for List (name in names, v in vars):
+           mk_const(name, (v :~ FVar).ty),
+         vars.map(fun (v :: FVar): argument_types(v).length()))
+
+fun argument_types(pred :: FVar) :: List.of(HType):
+  recur loop (ty :: HType = pred.ty, acc :~ List.of(HType) = []):
+    cond
+    | is_fun(ty):
+        let (domain, result) = dest_fun(ty)
+        loop(result, acc ++ [domain])
+    | ~else: acc
+
+fun family_terms(family :: Family) :: List.of(Term):
+  family.vars.map(fun (v :: FVar): v :~ Term)
+
+// The position of `head` in the family, or `#false`.
+fun family_index(family :: Family, head :: Term) :: maybe(NonnegInt):
+  recur loop (i = 0):
+    cond
+    | i >= family.vars.length(): #false
+    | (family.vars[i] :~ FVar) :~ Term == head: i
+    | ~else: loop(i + 1)
+
+fun mentions_family(family :: Family, t :: Term) :: Boolean:
+  for any (v in family.vars): vfree_in(v :~ Term, t)
+
+// Every predicate variable replaced by its constant.
+fun instantiate(family :: Family, t :: Term) :: Term:
+  inst_fvar(
+    for List (v in family.vars, c in family.constants): [c :~ Term, v :~ Term],
+    t)
+
 // -- positivity ---------------------------------------------------------------
 
-// Every recursive occurrence must be an application of the predicate to
-// arguments that do not mention it, and must sit in a position the operator is
-// monotone in. `not p x`, `p x ==> q`, and `f p` each break monotonicity, so
-// the least fixed point the definition denotes would not be closed under the
-// rules; the encoding would still be a definition, and the introduction
-// theorems would simply not be derivable. Refusing here is what keeps a
-// declaration from being accepted without its rules.
-fun check_inductive_rules(pred :: FVar, arity :: NonnegInt,
+// Every recursive occurrence must be an application of one of the predicates
+// to arguments that do not mention any of them, and must sit in a position the
+// rule operator is monotone in. `not p x`, `p x ==> q`, and `f p` each break
+// monotonicity, so the fixed point the definitions denote need not be closed
+// under the rules at all; the encoding would still be a definition, and the
+// introduction theorems would simply not be derivable. Refusing here is what
+// keeps a declaration from being accepted without its rules.
+fun check_inductive_rules(family :: Family,
                           rules :: List.of(Term)) :: Void:
   for (rule in rules):
-    let (_, premises, args) = rule_parts(pred, arity, rule, [])
+    let (_, _, premises, args) = rule_parts(family, rule, [])
     for (premise in premises):
-      check_monotone(pred, arity, premise, #true)
+      check_monotone(family, premise, #true)
     for (argument in args):
-      check_absent(pred, argument, rule)
+      check_absent(family, argument, rule)
 
-fun check_absent(pred :: FVar, t :: Term, rule :: Term) :: Void:
-  when vfree_in(pred :~ Term, t)
-  | fail("an inductive rule cannot mention the predicate in its own "
+fun check_absent(family :: Family, t :: Term, rule :: Term) :: Void:
+  when mentions_family(family, t)
+  | fail("an inductive rule cannot mention a declared predicate in its own "
            ++ "arguments", rule)
 
 // `positive` is monotonicity, not truth polarity: it says the operator grows
-// with the predicate at this position.
-fun check_monotone(pred :: FVar, arity :: NonnegInt, t :: Term,
+// with the predicates at this position.
+fun check_monotone(family :: Family, t :: Term,
                    positive :: Boolean) :: Void:
   cond
-  | !vfree_in(pred :~ Term, t): #void
+  | !mentions_family(family, t): #void
   | ~else:
       match dest_conj(t)
       | [a, b]:
-          check_monotone(pred, arity, a, positive)
-          check_monotone(pred, arity, b, positive)
+          check_monotone(family, a, positive)
+          check_monotone(family, b, positive)
       | ~else:
           match dest_disj(t)
           | [a, b]:
-              check_monotone(pred, arity, a, positive)
-              check_monotone(pred, arity, b, positive)
+              check_monotone(family, a, positive)
+              check_monotone(family, b, positive)
           | ~else:
               match dest_imp(t)
               | [a, b]:
-                  check_monotone(pred, arity, a, !positive)
-                  check_monotone(pred, arity, b, positive)
+                  check_monotone(family, a, !positive)
+                  check_monotone(family, b, positive)
               | ~else:
                   match dest_neg(t)
-                  | #false: check_monotone_binder(pred, arity, t, positive)
-                  | a: check_monotone(pred, arity, a :~ Term, !positive)
+                  | #false: check_monotone_binder(family, t, positive)
+                  | a: check_monotone(family, a :~ Term, !positive)
 
-fun check_monotone_binder(pred :: FVar, arity :: NonnegInt, t :: Term,
+fun check_monotone_binder(family :: Family, t :: Term,
                           positive :: Boolean) :: Void:
-  match binder_body(pred, t)
-  | #false: check_monotone_atom(pred, arity, t, positive)
-  | opened: check_monotone(pred, arity, opened :~ Term, positive)
+  match binder_body(family, t)
+  | #false: check_monotone_atom(family, t, positive)
+  | opened: check_monotone(family, opened :~ Term, positive)
 
-// A quantifier's body, opened at a variable fresh for the predicate.
-fun binder_body(pred :: FVar, t :: Term) :: maybe(Term):
+// A quantifier's body, opened at a variable fresh for the family.
+fun binder_body(family :: Family, t :: Term) :: maybe(Term):
+  let avoid = family_terms(family) ++ [t]
   match dest_forall(t)
-  | [v, body]: subst_bvar(variant([pred :~ Term, t], v :~ FVar), body :~ Term)
+  | [v, body]: subst_bvar(variant(avoid, v :~ FVar), body :~ Term)
   | ~else:
       match dest_exists(t)
-      | [v, body]:
-          subst_bvar(variant([pred :~ Term, t], v :~ FVar), body :~ Term)
+      | [v, body]: subst_bvar(variant(avoid, v :~ FVar), body :~ Term)
       | ~else: #false
 
-fun check_monotone_atom(pred :: FVar, arity :: NonnegInt, t :: Term,
+fun check_monotone_atom(family :: Family, t :: Term,
                         positive :: Boolean) :: Void:
   let (head, args) = strip_comb(t)
-  cond
-  | head != (pred :~ Term):
-      fail("an inductive rule can only use the predicate applied to "
+  match family_index(family, head)
+  | #false:
+      fail("an inductive rule can only use a declared predicate applied to "
              ++ "arguments", t)
-  | !positive:
-      fail("an inductive rule cannot use the predicate in a negative "
-             ++ "position", t)
-  | args.length() != arity:
-      fail("an inductive rule applies the predicate to the wrong number of "
-             ++ "arguments", t)
-  | ~else:
-      for (argument in args):
-        check_absent(pred, argument :~ Term, t)
+  | index:
+      cond
+      | !positive:
+          fail("an inductive rule cannot use a declared predicate in a "
+                 ++ "negative position", t)
+      | args.length() != family.arities[index :~ NonnegInt]:
+          fail("an inductive rule applies a declared predicate to the wrong "
+                 ++ "number of arguments", t)
+      | ~else:
+          for (argument in args):
+            check_absent(family, argument, t)
 
 // -- rule structure -----------------------------------------------------------
 
-// The binders, premises and conclusion arguments of
-// `!y. Q_1 ==> ... ==> p a`, with the binders opened at variables fresh for
-// `avoid`.
-fun rule_parts(pred :: FVar, arity :: NonnegInt, rule :: Term,
-               avoid :: List.of(Term))
-    :: values(List.of(FVar), List.of(Term), List.of(Term)):
-  let (binders, matrix) = open_foralls(rule, avoid ++ [pred :~ Term])
+// The predicate a rule concludes with, its opened binders, its premises, and
+// its conclusion's arguments, for `!y. Q_1 ==> ... ==> p_j a`. The binders are
+// opened at variables fresh for `avoid`.
+fun rule_parts(family :: Family, rule :: Term, avoid :: List.of(Term))
+    :: values(NonnegInt, List.of(FVar), List.of(Term), List.of(Term)):
+  let (binders, matrix) = open_foralls(rule, avoid ++ family_terms(family))
   let (premises, conclusion) = split_imps(matrix)
   let (head, args) = strip_comb(conclusion)
-  unless head == (pred :~ Term) && args.length() == arity
-  | fail("an inductive rule must conclude with the predicate applied to "
-           ++ "its arguments", conclusion)
-  values(binders, premises, args)
+  match family_index(family, head)
+  | #false:
+      fail("an inductive rule must conclude with a declared predicate "
+             ++ "applied to its arguments", conclusion)
+  | index:
+      unless args.length() == family.arities[index :~ NonnegInt]
+      | fail("an inductive rule concludes with the wrong number of "
+               ++ "arguments", conclusion)
+      values(index, binders, premises, args)
 
 fun open_foralls(t :: Term, avoid :: List.of(Term))
     :: values(List.of(FVar), Term):
@@ -172,40 +227,43 @@ fun split_imps(t :: Term) :: values(List.of(Term), Term):
 
 fun mk_conj_list(ts :: List.of(Term)) :: Term:
   match ts
+  | []: tm_true
   | [t]: t
   | List.cons(t, rest): mk_conj(t :~ Term, mk_conj_list(rest))
-  | ~else: error(~who: #'inductive, "internal empty conjunction")
 
+// A predicate with no rules holds of nothing, so the disjunction of the ways
+// something could have got into it is empty -- that is `false`, and the
+// inversion theorem then says exactly that.
 fun mk_disj_list(ts :: List.of(Term)) :: Term:
   match ts
+  | []: tm_false
   | [t]: t
   | List.cons(t, rest): mk_disj(t :~ Term, mk_disj_list(rest))
-  | ~else: error(~who: #'inductive, "internal empty disjunction")
 
 // -- monotonicity -------------------------------------------------------------
 
-// `|- body[pred := f] ==> body[pred := g]`, given `atom(args)` proving
-// `|- f args ==> g args` for each recursive occurrence.
+// `|- body[p := f] ==> body[p := g]`, given `atom(j, args)` proving
+// `|- f_j args ==> g_j args` for each recursive occurrence.
 //
 // The two sides are not built and then justified: each case composes the
 // theorems its subterms returned, so the statement that comes out is whatever
 // those pieces actually prove. That is what lets the caller substitute a
-// lambda for the predicate -- the instantiated premises it has to discharge
-// are beta-reduced, and so are the ones this returns.
-fun monotone_instance(thy :: Theory, pred :: FVar, body :: Term,
+// lambda for a predicate -- the instantiated premises it has to discharge are
+// beta-reduced, and so are the ones this returns.
+fun monotone_instance(thy :: Theory, family :: Family, body :: Term,
                       atom :: Function) :: Thm:
   cond
-  | !vfree_in(pred :~ Term, body): DISCH(thy, body, ASSUME(thy, body))
+  | !mentions_family(family, body): DISCH(thy, body, ASSUME(thy, body))
   | ~else:
       match dest_conj(body)
-      | [a, b]: monotone_conj(thy, pred, a :~ Term, b :~ Term, atom)
+      | [a, b]: monotone_conj(thy, family, a :~ Term, b :~ Term, atom)
       | ~else:
           match dest_disj(body)
-          | [a, b]: monotone_disj(thy, pred, a :~ Term, b :~ Term, atom)
+          | [a, b]: monotone_disj(thy, family, a :~ Term, b :~ Term, atom)
           | ~else:
               match dest_imp(body)
-              | [a, b]: monotone_imp(thy, pred, a :~ Term, b :~ Term, atom)
-              | ~else: monotone_binder(thy, pred, body, atom)
+              | [a, b]: monotone_imp(thy, family, a :~ Term, b :~ Term, atom)
+              | ~else: monotone_binder(thy, family, body, atom)
 
 fun antecedent_of(th :: Thm) :: Term:
   match dest_imp(concl_of(th))
@@ -217,10 +275,10 @@ fun consequent_of(th :: Thm) :: Term:
   | [_, b]: b
   | ~else: error(~who: #'inductive, "internal non-implication")
 
-fun monotone_conj(thy :: Theory, pred :: FVar, a :: Term, b :: Term,
+fun monotone_conj(thy :: Theory, family :: Family, a :: Term, b :: Term,
                   atom :: Function) :: Thm:
-  let left = monotone_instance(thy, pred, a, atom)
-  let right = monotone_instance(thy, pred, b, atom)
+  let left = monotone_instance(thy, family, a, atom)
+  let right = monotone_instance(thy, family, b, atom)
   let source = mk_conj(antecedent_of(left), antecedent_of(right))
   let h = ASSUME(thy, source)
   DISCH(thy, source,
@@ -228,12 +286,11 @@ fun monotone_conj(thy :: Theory, pred :: FVar, a :: Term, b :: Term,
              MP(thy, left, CONJUNCT1(thy, h)),
              MP(thy, right, CONJUNCT2(thy, h))))
 
-fun monotone_disj(thy :: Theory, pred :: FVar, a :: Term, b :: Term,
+fun monotone_disj(thy :: Theory, family :: Family, a :: Term, b :: Term,
                   atom :: Function) :: Thm:
-  let left = monotone_instance(thy, pred, a, atom)
-  let right = monotone_instance(thy, pred, b, atom)
+  let left = monotone_instance(thy, family, a, atom)
+  let right = monotone_instance(thy, family, b, atom)
   let source = mk_disj(antecedent_of(left), antecedent_of(right))
-  let target = mk_disj(consequent_of(left), consequent_of(right))
   let from_left = DISJ1(thy, MP(thy, left, ASSUME(thy, antecedent_of(left))),
                         consequent_of(right))
   let from_right = DISJ2(thy, consequent_of(left),
@@ -241,42 +298,43 @@ fun monotone_disj(thy :: Theory, pred :: FVar, a :: Term, b :: Term,
   DISCH(thy, source,
         DISJ_CASES(thy, ASSUME(thy, source), from_left, from_right))
 
-// The predicate cannot occur in the antecedent -- `check_monotone` refused
-// that -- so only the consequent moves.
-fun monotone_imp(thy :: Theory, pred :: FVar, a :: Term, b :: Term,
+// No predicate can occur in the antecedent -- `check_monotone` refused that --
+// so only the consequent moves.
+fun monotone_imp(thy :: Theory, family :: Family, a :: Term, b :: Term,
                  atom :: Function) :: Thm:
-  when vfree_in(pred :~ Term, a)
-  | fail("an inductive rule cannot use the predicate in a negative "
+  when mentions_family(family, a)
+  | fail("an inductive rule cannot use a declared predicate in a negative "
            ++ "position", a)
-  let inner = monotone_instance(thy, pred, b, atom)
+  let inner = monotone_instance(thy, family, b, atom)
   let source = mk_imp(a, antecedent_of(inner))
   DISCH(thy, source,
         DISCH(thy, a,
               MP(thy, inner, MP(thy, ASSUME(thy, source), ASSUME(thy, a)))))
 
-fun monotone_binder(thy :: Theory, pred :: FVar, body :: Term,
+fun monotone_binder(thy :: Theory, family :: Family, body :: Term,
                     atom :: Function) :: Thm:
   match dest_forall(body)
-  | [v, inner]: monotone_forall(thy, pred, v :~ FVar, inner :~ Term, body, atom)
+  | [v, inner]:
+      monotone_forall(thy, family, v :~ FVar, inner :~ Term, body, atom)
   | ~else:
       match dest_exists(body)
       | [v, inner]:
-          monotone_exists(thy, pred, v :~ FVar, inner :~ Term, body, atom)
-      | ~else: monotone_atom(thy, pred, body, atom)
+          monotone_exists(thy, family, v :~ FVar, inner :~ Term, body, atom)
+      | ~else: monotone_atom(thy, family, body, atom)
 
-fun monotone_forall(thy :: Theory, pred :: FVar, v :: FVar, inner :: Term,
+fun monotone_forall(thy :: Theory, family :: Family, v :: FVar, inner :: Term,
                     body :: Term, atom :: Function) :: Thm:
-  let fresh = variant([pred :~ Term, body], v)
-  let step = monotone_instance(thy, pred, subst_bvar(fresh :~ Term, inner),
+  let fresh = variant(family_terms(family) ++ [body], v)
+  let step = monotone_instance(thy, family, subst_bvar(fresh :~ Term, inner),
                                atom)
   let source = mk_forall(fresh, antecedent_of(step))
   DISCH(thy, source,
         GEN(thy, fresh, MP(thy, step, SPEC(thy, fresh, ASSUME(thy, source)))))
 
-fun monotone_exists(thy :: Theory, pred :: FVar, v :: FVar, inner :: Term,
+fun monotone_exists(thy :: Theory, family :: Family, v :: FVar, inner :: Term,
                     body :: Term, atom :: Function) :: Thm:
-  let fresh = variant([pred :~ Term, body], v)
-  let step = monotone_instance(thy, pred, subst_bvar(fresh :~ Term, inner),
+  let fresh = variant(family_terms(family) ++ [body], v)
+  let step = monotone_instance(thy, family, subst_bvar(fresh :~ Term, inner),
                                atom)
   let source = mk_exists(fresh, antecedent_of(step))
   let target = mk_exists(fresh, consequent_of(step))
@@ -284,50 +342,64 @@ fun monotone_exists(thy :: Theory, pred :: FVar, v :: FVar, inner :: Term,
                          MP(thy, step, ASSUME(thy, antecedent_of(step))))
   DISCH(thy, source, CHOOSE(thy, fresh, ASSUME(thy, source), witnessed))
 
-fun monotone_atom(thy :: Theory, pred :: FVar, body :: Term,
+fun monotone_atom(thy :: Theory, family :: Family, body :: Term,
                   atom :: Function) :: Thm:
   let (head, args) = strip_comb(body)
-  unless head == (pred :~ Term)
-  | fail("an inductive rule can only use the predicate applied to arguments",
-         body)
-  atom(args)
+  match family_index(family, head)
+  | #false:
+      fail("an inductive rule can only use a declared predicate applied to "
+             ++ "arguments", body)
+  | index: atom(index, args)
 
-// -- the definition -----------------------------------------------------------
+// -- the definitions ----------------------------------------------------------
 
-// `pred` is the variable the rules were elaborated with: its type fixes the
-// predicate's arity, and `rules` are the rule statements about it.
-fun define_inductive(thy :: Theory, name :: Symbol, pred :: FVar,
+// `vars` are the variables the rules were elaborated with, one per declared
+// predicate: their types fix the predicates' arities, and `rules` are the rule
+// statements about them.
+fun define_inductive(thy :: Theory, names :: List.of(Symbol),
+                     vars :: List.of(FVar),
                      rules :: List.of(Term)) :: values(Theory, InductiveThms):
-  when rules.length() == 0
-  | error(~who: #'inductive, "an inductive predicate needs at least one rule")
-  let arg_tys = argument_types(pred)
-  check_inductive_rules(pred, arg_tys.length(), rules)
-  let xs = argument_vars(arg_tys, [pred :~ Term] ++ rules)
-  let args = xs.map(fun (v :: FVar): v :~ Term)
-  let body = list_mk_abs(
-               xs,
-               mk_forall(pred,
-                         implication_chain(
-                           rules, list_mk_comb(pred :~ Term, args))))
-  let (thy2, definition):
-    new_basic_definition(thy, mk_eq(mk_var(name, pred.ty), body))
-  let constant = mk_const(name, pred.ty)
-  let induction = derive_induction(thy2, definition, pred, constant, rules, xs)
+  when names.length() == 0
+  | error(~who: #'inductive, "an inductive declaration needs a predicate")
+  let family = mk_family(names, vars)
+  check_inductive_rules(family, rules)
+  let arguments:
+    for List (v in vars):
+      argument_vars(argument_types(v :~ FVar),
+                    family_terms(family) ++ rules)
+  let (thy2, definitions):
+    for values(current :~ Theory = thy, acc :~ List.of(Thm) = []) (
+          name in names, v in vars, xs in arguments):
+      let body = definition_body(family, rules, v :~ FVar, xs :~ List)
+      let (next, definition):
+        new_basic_definition(current,
+                             mk_eq(mk_var(name :~ Symbol, (v :~ FVar).ty),
+                                   body))
+      values(next, acc ++ [definition])
+  let inductions:
+    for List (definition in definitions, xs in arguments,
+              index in List.iota(names.length())):
+      derive_induction(thy2, definition :~ Thm, family, rules, xs :~ List,
+                       index)
   let introductions:
     for List (rule in rules):
-      derive_introduction(thy2, definition, pred, constant, rules, induction,
+      derive_introduction(thy2, definitions, family, rules, inductions,
                           rule :~ Term)
-  let cases = derive_cases(thy2, pred, constant, rules, induction,
-                           introductions, xs)
-  values(thy2, InductiveThms(definition, introductions, induction, cases))
+  let cases:
+    for List (index in List.iota(names.length())):
+      derive_cases(thy2, family, rules, inductions, introductions, arguments,
+                   index)
+  values(thy2,
+         InductiveThms(definitions, introductions, inductions, cases))
 
-fun argument_types(pred :: FVar) :: List.of(HType):
-  recur loop (ty :: HType = pred.ty, acc :~ List.of(HType) = []):
-    cond
-    | is_fun(ty):
-        let (domain, result) = dest_fun(ty)
-        loop(result, acc ++ [domain])
-    | ~else: acc
+// `\x. !P. R_1[P] ==> ... ==> R_k[P] ==> P_j x`
+fun definition_body(family :: Family, rules :: List.of(Term), v :: FVar,
+                    xs :: List.of(FVar)) :: Term:
+  let args = xs.map(fun (x :: FVar): x :~ Term)
+  list_mk_abs(
+    xs,
+    mk_forall_list(family.vars,
+                   implication_chain(rules, list_mk_comb(v :~ Term, args))))
 
 fun argument_vars(arg_tys :: List.of(HType),
                   avoid :: List.of(Term)) :: List.of(FVar):
@@ -351,9 +423,6 @@ fun discharge_all(thy :: Theory, antecedents :: List.of(Term),
   for values(acc :~ Thm = th) (a in antecedents.reverse()):
     DISCH(thy, a :~ Term, acc)
 
-fun subst_pred(pred :: FVar, replacement :: Term, t :: Term) :: Term:
-  inst_fvar([[replacement, pred :~ Term]], t)
-
 fun require_statement(th :: Thm, expected :: Term, what :: String) :: Thm:
   unless concl_of(th) == expected
   | error(~who: #'inductive,
@@ -365,137 +434,173 @@ fun require_statement(th :: Thm, expected :: Term, what :: String) :: Thm:
 
 // -- induction ----------------------------------------------------------------
 
-// `|- !P. R_1[P] ==> ... ==> R_k[P] ==> !x. p x ==> P x`
+// `|- !P. R_1[P] ==> ... ==> R_k[P] ==> !x. p_j x ==> P_j x`
 //
-// The definition read back: `p x` *is* the statement that every rule-closed
-// predicate holds of `x`.
-fun derive_induction(thy :: Theory, definition :: Thm, pred :: FVar,
-                     constant :: Term, rules :: List.of(Term),
-                     xs :: List.of(FVar)) :: Thm:
-  let args = xs.map(fun (v :: FVar): v :~ Term)
-  let membership = list_mk_comb(constant, args)
+// The definition read back: `p_j x` *is* the statement that every rule-closed
+// family holds of `x` at position `j`.
+fun derive_induction(thy :: Theory, definition :: Thm, family :: Family,
+                     rules :: List.of(Term), xs :: List.of(FVar),
+                     index :: NonnegInt) :: Thm:
+  let args = xs.map(fun (x :: FVar): x :~ Term)
+  let membership = list_mk_comb(family.constants[index], args)
   let unfolded = EQ_MP(unfold_def(thy, definition, args),
                        ASSUME(thy, membership))
   let applied:
-    for values(acc :~ Thm = SPEC(thy, pred :~ Term, unfolded)) (rule in rules):
+    for values(acc :~ Thm = SPECL(thy, family_terms(family), unfolded)) (
+          rule in rules):
       MP(thy, acc, ASSUME(thy, rule :~ Term))
-  GEN(thy, pred,
-      discharge_all(thy, rules,
-                    GENL(thy, xs, DISCH(thy, membership, applied))))
+  GENL(thy, family.vars,
+       discharge_all(thy, rules,
+                     GENL(thy, xs, DISCH(thy, membership, applied))))
 
 // -- introduction -------------------------------------------------------------
 
-// `|- R_i[p]`: the predicate is closed under rule `i`.
+// `|- R_i[p]`: the predicates are closed under rule `i`.
 //
-// Unfolded, the goal says that every rule-closed `P` holds of the rule's
+// Unfolded, the goal says that every rule-closed family holds of the rule's
 // conclusion. Rule `i` itself supplies that, once its premises have been
-// transported from `p` to that `P` -- and induction, at this very `P`, is the
-// pointwise implication the transport runs on.
-fun derive_introduction(thy :: Theory, definition :: Thm, pred :: FVar,
-                        constant :: Term, rules :: List.of(Term),
-                        induction :: Thm, rule :: Term) :: Thm:
-  let arity = argument_types(pred).length()
-  let (ys, premises, args) = rule_parts(pred, arity, rule, [constant])
-  let instantiated = premises.map(
-                       fun (p :: Term): subst_pred(pred, constant, p))
-  let conclusion_args = args.map(
-                          fun (a :: Term): subst_pred(pred, constant, a))
+// transported from the `p`s to that family -- and induction, at this very
+// family, is the pointwise implication the transport runs on.
+fun derive_introduction(thy :: Theory, definitions :: List.of(Thm),
+                        family :: Family, rules :: List.of(Term),
+                        inductions :: List.of(Thm), rule :: Term) :: Thm:
+  let (index, ys, premises, args) = rule_parts(family, rule,
+                                               family.constants)
+  let instantiated = premises.map(fun (p :: Term): instantiate(family, p))
+  let conclusion_args = args.map(fun (a :: Term): instantiate(family, a))
   let pointwise:
-    for values(acc :~ Thm = SPEC(thy, pred :~ Term, induction)) (
-          r in rules):
-      MP(thy, acc, ASSUME(thy, r :~ Term))
-  fun atom(arguments :: List.of(Term)) :: Thm:
-    SPECL(thy, arguments, pointwise)
+    for List (induction in inductions):
+      for values(acc :~ Thm = SPECL(thy, family_terms(family),
+                                    induction :~ Thm)) (
+            r in rules):
+        MP(thy, acc, ASSUME(thy, r :~ Term))
+  fun atom(position :: NonnegInt, arguments :: List.of(Term)) :: Thm:
+    SPECL(thy, arguments, pointwise[position] :~ Thm)
   let transported:
     for List (source in premises, given in instantiated):
-      MP(thy, monotone_instance(thy, pred, source :~ Term, atom),
+      MP(thy, monotone_instance(thy, family, source :~ Term, atom),
          ASSUME(thy, given :~ Term))
   let derived:
-    for values(acc :~ Thm = SPECL(thy, ys.map(fun (v :: FVar): v :~ Term),
+    for values(acc :~ Thm = SPECL(thy, ys.map(fun (y :: FVar): y :~ Term),
                                   ASSUME(thy, rule))) (
           given in transported):
       MP(thy, acc, given :~ Thm)
-  let quantified = GEN(thy, pred, discharge_all(thy, rules, derived))
-  let folded = EQ_MP(SYM(thy, unfold_def(thy, definition, conclusion_args)),
+  let quantified = GENL(thy, family.vars, discharge_all(thy, rules, derived))
+  let folded = EQ_MP(SYM(thy, unfold_def(thy, definitions[index],
+                                         conclusion_args)),
                      quantified)
   require_statement(
     GENL(thy, ys, discharge_all(thy, instantiated, folded)),
-    subst_pred(pred, constant, rule), "introduction")
+    instantiate(family, rule), "introduction")
 
 // -- cases --------------------------------------------------------------------
 
-// `|- !x. p x ==> (D_1 or ... or D_k)`
+// `|- !x. p_j x ==> (D_1 or ... or D_r)`, over the rules that conclude with
+// `p_j`.
 //
-// The converse of closure, by induction at `\x. p x and (D_1 or ... or D_k)`.
-// The extra conjunct is what makes each closure case's premises available as
-// facts about `p` again, which is how the introduction theorems re-establish
-// the first conjunct; without it the disjunction would have nothing to say
-// about a rule's recursive premises.
-fun derive_cases(thy :: Theory, pred :: FVar, constant :: Term,
-                 rules :: List.of(Term), induction :: Thm,
+// The converse of closure, by induction at the strengthened family
+// `\x. p_l x and (D_1 or ... or D_r)`. The extra conjunct is what makes each
+// closure case's premises available as facts about the `p`s again, which is
+// how the introduction theorems re-establish the first conjunct; without it
+// the disjunction would have nothing to say about a rule's recursive premises.
+fun derive_cases(thy :: Theory, family :: Family, rules :: List.of(Term),
+                 inductions :: List.of(Thm),
                  introductions :: List.of(Thm),
-                 xs :: List.of(FVar)) :: Thm:
-  let args = xs.map(fun (v :: FVar): v :~ Term)
+                 arguments :: List.of(List.of(FVar)),
+                 index :: NonnegInt) :: Thm:
+  let positions = rules.map(fun (r :: Term): rule_target(family, r))
   let disjuncts:
-    for List (rule in rules):
-      inversion_term(pred, constant, rule :~ Term, xs)
-  let disjunction = mk_disj_list(disjuncts)
-  let strong = list_mk_abs(xs, mk_conj(list_mk_comb(constant, args),
-                                       disjunction))
-  let instance = BETA_RULE(thy, SPEC(thy, strong, induction))
+    for List (position in List.iota(family.vars.length())):
+      for values(acc :~ List.of(Term) = []) (rule in rules, at in positions):
+        cond
+        | at == position:
+            acc ++ [inversion_term(family, rule :~ Term,
+                                   arguments[position] :~ List)]
+        | ~else: acc
+  let disjunctions = disjuncts.map(
+                       fun (ds :: List.of(Term)): mk_disj_list(ds))
+  let strong:
+    for List (xs in arguments, disjunction in disjunctions,
+              position in List.iota(family.vars.length())):
+      list_mk_abs(
+        xs :~ List,
+        mk_conj(list_mk_comb(family.constants[position],
+                             (xs :~ List).map(fun (x :: FVar): x :~ Term)),
+                disjunction :~ Term))
+  let instance = BETA_RULE(thy, SPECL(thy, strong, inductions[index]))
   let (goals, _) = split_imps(concl_of(instance))
+  let projections:
+    for List (xs in arguments, disjunction in disjunctions,
+              position in List.iota(family.vars.length())):
+      conjunct_projection(thy, family.constants[position],
+                          disjunction :~ Term, xs :~ List)
   let closed:
     for values(acc :~ Thm = instance) (
           rule in rules, introduction in introductions, goal in goals,
-          index in List.iota(rules.length())):
+          at in positions):
       MP(thy, acc,
-         derive_closure_case(thy, pred, constant, rule :~ Term,
-                             introduction :~ Thm, disjuncts, disjunction, xs,
-                             index, goal :~ Term))
-  let membership = list_mk_comb(constant, args)
+         derive_closure_case(
+           thy, family, rule :~ Term, introduction :~ Thm, projections,
+           disjuncts[at :~ NonnegInt] :~ List, arguments[at :~ NonnegInt] :~ List,
+           disjunct_index(rules, positions, rule :~ Term, at :~ NonnegInt),
+           goal :~ Term))
+  let xs = arguments[index] :~ List
+  let args = xs.map(fun (x :: FVar): x :~ Term)
+  let membership = list_mk_comb(family.constants[index], args)
   let at_args = MP(thy, SPECL(thy, args, closed), ASSUME(thy, membership))
   GENL(thy, xs, DISCH(thy, membership, CONJUNCT2(thy, at_args)))
 
-// `D_i`: some instance of rule `i` has premises holding of `p` and concluded
-// with `x`.
-fun inversion_term(pred :: FVar, constant :: Term, rule :: Term,
+fun rule_target(family :: Family, rule :: Term) :: NonnegInt:
+  let (index, _, _, _) = rule_parts(family, rule, [])
+  index
+
+// A rule's position among the rules that conclude with the same predicate,
+// which is the disjunct it justifies.
+fun disjunct_index(rules :: List.of(Term), positions :: List.of(NonnegInt),
+                   rule :: Term, target :: NonnegInt) :: NonnegInt:
+  recur loop (remaining :~ List.of(Term) = rules,
+              at :~ List.of(NonnegInt) = positions, seen = 0):
+    match remaining
+    | []: error(~who: #'inductive, "internal missing rule")
+    | List.cons(first, rest):
+        cond
+        | first == rule && at[0] == target: seen
+        | at[0] == target: loop(rest, at.drop(1), seen + 1)
+        | ~else: loop(rest, at.drop(1), seen)
+
+// `D_i`: some instance of rule `i` has premises holding of the `p`s and
+// concluded with `x`.
+fun inversion_term(family :: Family, rule :: Term,
                    xs :: List.of(FVar)) :: Term:
-  let avoid = [constant] ++ xs.map(fun (v :: FVar): v :~ Term)
-  let arity = argument_types(pred).length()
-  let (ys, premises, args) = rule_parts(pred, arity, rule, avoid)
+  let avoid = family.constants ++ xs.map(fun (x :: FVar): x :~ Term)
+  let (_, ys, premises, args) = rule_parts(family, rule, avoid)
   let equations:
     for List (x in xs, argument in args):
-      mk_eq(x :~ Term, subst_pred(pred, constant, argument))
-  let instantiated = premises.map(
-                       fun (p :: Term): subst_pred(pred, constant, p))
+      mk_eq(x :~ Term, instantiate(family, argument))
+  let instantiated = premises.map(fun (p :: Term): instantiate(family, p))
   for values(acc :~ Term = mk_conj_list(instantiated ++ equations)) (
         y in ys.reverse()):
     mk_exists(y :~ FVar, acc)
 
-// One closure case: assuming rule `i`'s premises about the strengthened
-// predicate, both of its conjuncts hold of the rule's conclusion.
-fun derive_closure_case(thy :: Theory, pred :: FVar, constant :: Term,
-                        rule :: Term, introduction :: Thm,
-                        disjuncts :: List.of(Term), disjunction :: Term,
-                        xs :: List.of(FVar), index :: NonnegInt,
-                        goal :: Term) :: Thm:
-  let arity = argument_types(pred).length()
-  let (ys, premises, args) = rule_parts(pred, arity, rule,
-                                        [constant, disjunction])
-  let conclusion_args = args.map(
-                          fun (a :: Term): subst_pred(pred, constant, a))
-  let projection = conjunct_projection(thy, constant, disjunction, xs)
-  fun atom(arguments :: List.of(Term)) :: Thm:
-    SPECL(thy, arguments, projection)
+// One closure case: assuming a rule's premises about the strengthened family,
+// both conjuncts hold of the rule's conclusion.
+fun derive_closure_case(thy :: Theory, family :: Family, rule :: Term,
+                        introduction :: Thm, projections :: List.of(Thm),
+                        disjuncts :: List.of(Term), xs :: List.of(FVar),
+                        index :: NonnegInt, goal :: Term) :: Thm:
+  let (_, ys, premises, args) = rule_parts(family, rule, family.constants)
+  let conclusion_args = args.map(fun (a :: Term): instantiate(family, a))
+  fun atom(position :: NonnegInt, arguments :: List.of(Term)) :: Thm:
+    SPECL(thy, arguments, projections[position] :~ Thm)
   let steps:
     for List (source in premises):
-      monotone_instance(thy, pred, source :~ Term, atom)
+      monotone_instance(thy, family, source :~ Term, atom)
   let assumptions = steps.map(antecedent_of)
   let recovered:
     for List (step in steps, given in assumptions):
       MP(thy, step :~ Thm, ASSUME(thy, given :~ Term))
   let membership:
-    for values(acc :~ Thm = SPECL(thy, ys.map(fun (v :: FVar): v :~ Term),
+    for values(acc :~ Thm = SPECL(thy, ys.map(fun (y :: FVar): y :~ Term),
                                   introduction)) (
           given in recovered):
       MP(thy, acc, given :~ Thm)
@@ -506,19 +611,20 @@ fun derive_closure_case(thy :: Theory, pred :: FVar, constant :: Term,
                     fun (d :: Term): inst_fvar(substitution, d))
   let injected = inject_disjunct(
                    thy, instances, index,
-                   witness_inversion(thy, instances[index], ys,
-                                     recovered, xs.length()))
+                   witness_inversion(thy, instances[index], ys, recovered,
+                                     xs.length()))
   require_statement(
     GENL(thy, ys,
          discharge_all(thy, assumptions, CONJ(thy, membership, injected))),
     goal, "inversion closure")
 
-// `|- !x. (p x and D) ==> p x`: dropping the strengthened predicate's second
-// conjunct is what turns a premise about it back into a premise about `p`.
+// `|- !x. (p_l x and D) ==> p_l x`: dropping the strengthened predicate's
+// second conjunct is what turns a premise about it back into a premise about
+// `p_l`.
 fun conjunct_projection(thy :: Theory, constant :: Term, disjunction :: Term,
                         xs :: List.of(FVar)) :: Thm:
   let source = mk_conj(list_mk_comb(constant,
-                                    xs.map(fun (v :: FVar): v :~ Term)),
+                                    xs.map(fun (x :: FVar): x :~ Term)),
                        disjunction)
   GENL(thy, xs, DISCH(thy, source, CONJUNCT1(thy, ASSUME(thy, source))))
 
@@ -573,8 +679,8 @@ fun conj_all(thy :: Theory, ths :: List.of(Thm)) :: Thm:
   | List.cons(th, rest): CONJ(thy, th :~ Thm, conj_all(thy, rest))
   | ~else: error(~who: #'inductive, "internal empty conjunction")
 
-// Inject a proof of the `index`-th disjunct into the right-nested
-// disjunction of all of them.
+// Inject a proof of the `index`-th disjunct into the right-nested disjunction
+// of all of them.
 fun inject_disjunct(thy :: Theory, terms :: List.of(Term),
                     index :: NonnegInt, th :: Thm) :: Thm:
   cond

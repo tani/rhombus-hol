@@ -249,14 +249,14 @@ Use `function` when an executable meaning is required.
 ### 4.4 `inductive`
 
 ```rhombus
-inductive name(Type, ...)
+inductive name(Type, ...) and name(Type, ...) and ...
 | rule_name: proposition
 | ...
 ```
 
-`inductive` introduces the least predicate closed under the given rules. The
-head lists the predicate's argument types; each rule is a closed proposition
-about the predicate being declared, so it quantifies over its own variables.
+`inductive` introduces the least predicates closed under the given rules. Each
+head lists one predicate's argument types; each rule is a closed proposition
+about the predicates being declared, so it quantifies over its own variables.
 
 ```rhombus
 inductive spine(Tree)
@@ -270,27 +270,33 @@ A rule has the form
 forall y1 ... ym. Q1 ==> ... ==> Qj ==> name(a1, ..., an)
 ```
 
-and the declaration introduces the constant `name : T1 -> ... -> Tn -> Boolean`
-with the single definition
+and the declaration introduces one constant
+`name : T1 -> ... -> Tn -> Boolean` per head, each with a single definition
 
 ```text
-|- name = \x1. ... \xn. !P. R1[P] ==> ... ==> Rk[P] ==> P x1 ... xn
+|- name_j = \x1. ... \xn. !P1 ... Pm. R1[P] ==> ... ==> Rk[P] ==> Pj x1 ... xn
 ```
 
-where `Ri[P]` is rule `i` with `name` replaced by the quantified `P`: the
-predicate is the intersection of every predicate the rules are closed under.
-This is one `new_basic_definition` call, so `inductive` adds no axiom and no
-new definition principle.
+where `Ri[P]` is rule `i` with each declared name replaced by the
+corresponding quantified `Pj`: predicate `j` is the `j`-th component of the
+intersection of every predicate family the rules are closed under. Each is one
+`new_basic_definition` call, so `inductive` adds no axiom and no new
+definition principle.
 
-From that definition the declaration derives, by kernel rules only:
+Predicates declared together with `and` are mutually recursive: all of the
+rules are premises of every definition, and a rule may conclude with any of
+the declared predicates. A single predicate is this same construction with a
+one-element family.
+
+From those definitions the declaration derives, by kernel rules only:
 
 - one introduction theorem per rule, named by the rule, stating `Ri[name]`;
-- `name_induct`, stating
-  `!P. R1[P] ==> ... ==> Rk[P] ==> !x. name x ==> P x`; and
-- `name_cases`, stating that membership came from some rule:
-  `!x. name x ==> (D1 or ... or Dk)`, where `Di` is
-  `?y1 ... ym. Q1 and ... and Qj and x1 = a1 and ... and xn = an` for rule
-  `i`.
+- `name_induct` per predicate, stating
+  `!P1 ... Pm. R1[P] ==> ... ==> Rk[P] ==> !x. name_j x ==> Pj x`; and
+- `name_cases` per predicate, stating that membership came from some rule
+  concluding with that predicate: `!x. name_j x ==> (D1 or ... or Dr)`, where
+  `Di` is `?y1 ... ym. Q1 and ... and Qj and x1 = a1 and ... and xn = an` for
+  such a rule `i`. A predicate with no rules gets `!x. name_j x ==> false`.
 
 The derived theorems are retained by name, exactly as a `theorem` is, and are
 requested in a later proof with `~use:`. Neither the definition nor the derived
@@ -301,14 +307,14 @@ The rules must describe a monotone operator, which is what makes the least
 predicate closed under them and the introduction theorems derivable. The
 following are static errors:
 
-- a rule that does not conclude with the declared predicate applied to `n`
+- a rule that does not conclude with a declared predicate applied to its
   arguments;
-- an occurrence of the predicate in a negative position of a premise, that is
-  under `not` or to the left of a nested `==>`;
-- an occurrence of the predicate that is not applied to arguments, including
-  one passed to another function or compared with `===`;
-- an occurrence of the predicate inside its own conclusion's or premise's
-  arguments; and
+- an occurrence of a declared predicate in a negative position of a premise,
+  that is under `not` or to the left of a nested `==>`;
+- an occurrence of a declared predicate that is not applied to arguments,
+  including one passed to another function or compared with `===`;
+- an occurrence of a declared predicate inside a rule's own arguments;
+- the same predicate name declared twice in one head list; and
 - a rule name, `name_induct` or `name_cases` that is already a theorem in the
   current theory.
 

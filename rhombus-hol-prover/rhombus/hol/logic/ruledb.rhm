@@ -44,37 +44,31 @@ export:
   simp_conv_effect
 
 class RewriteRule(name :: Symbol,
-                  // the specialised theorem `|- cond1 ==> ... ==> lhs === rhs`
-                  // (an empty `conds` when there are none); instantiating it
-                  // and discharging each instantiated `cond` is how the rule
-                  // fires
+                  // the specialised theorem `|- cond1 ==> ... ==> lhs === rhs`;
+                  // its leading implications are the rule's conditions
                   src :: Thm,
                   vars :: List.of(FVar),
-                  conds :: List.of(Term),
                   lhs :: Term,
                   rhs :: Term,
                   head :: Symbol,
                   // lhs and rhs are variants of one another, so the rule can
                   // only be allowed to fire downhill
-                  permutative :: Boolean)
+                  permutative :: Boolean):
+  property conds :: List.of(Term):
+    let (conditions, _) = strip_imp(concl_of(src))
+    conditions
 
-// `type_by_head` is a second, independent classification of the same
-// theorems `add_thm` sees: ACL2's rule classes are not mutually exclusive,
-// and a fact of the shape `|- forall xs. P(f(xs))` is registered *both* as
-// an ordinary rewrite rule for `P` (unchanged from before -- ordinary
-// rewriting is not touched by this) *and*, separately, as a type fact about
-// what `f`'s result always satisfies, keyed by `f` rather than by `P`.
+// Ordinary rewrite rules share one newest-first list. `rules_of` filters it
+// by head, retaining the same newest-first order within each head.
 //
-// Each entry is `[registered_name, fact]`.  The name is not the key -- a
-// fact about `f` is found by asking about `f` -- but it is what `disable`
-// matches on, so that switching off a name reaches its type fact as well as
-// its rewrite rule.  Every existing `rules_of` query returns exactly what
-// it always did.
-class RuleDB(by_head :: Map.of(Symbol, List.of(RewriteRule)),
+// `type_by_head` is a separate classification of Boolean facts: a theorem can
+// be both a rewrite rule and a fact about a function result. Its stored name
+// lets `disable` suppress both classifications together.
+class RuleDB(rules :: List.of(RewriteRule),
              disabled :: Set.of(Symbol),
              type_by_head :: Map.of(Symbol, List))
 
-def empty_db :: RuleDB = RuleDB({}, Set(), {})
+def empty_db :: RuleDB = RuleDB([], Set(), {})
 
 // -- building a rule from a theorem ----------------------------------------
 
@@ -185,7 +179,7 @@ fun mk_rule_from_spec(thy :: Theory, name :: Symbol,
               cond
               | !(for all (v in rtv): ltv.contains(v)): #false
               | ~else:
-                  RewriteRule(name, spec, vars, conds, lhs, rhs, h,
+                  RewriteRule(name, spec, vars, lhs, rhs, h,
                               is_variant(vars, lhs, rhs))
 fun type_vars_of(t :: Term) :: List.of(Symbol):
   fun add(ty :: HType, acc :~ List) :~ List:
@@ -211,9 +205,8 @@ fun is_variant(vars :: List.of(FVar), lhs :: Term, rhs :: Term) :: Boolean:
 // -- the database ----------------------------------------------------------
 
 fun add_rule(db :: RuleDB, r :: RewriteRule) :: RuleDB:
-  let cur = db.by_head.get(r.head, [])
   // Newest first, as ACL2 does: a later rule shadows an earlier one.
-  RuleDB(db.by_head ++ {r.head: List.cons(r, cur :~ List)}, db.disabled, db.type_by_head)
+  RuleDB(List.cons(r, db.rules), db.disabled, db.type_by_head)
 
 // The function a type-prescription fact is about, or `#false`.
 //
@@ -250,7 +243,7 @@ fun add_thm(thy :: Theory, db :: RuleDB, name :: Symbol, th :: Thm) :: RuleDB:
   | #false: db2
   | fname:
       let cur = db2.type_by_head.get(fname, [])
-      RuleDB(db2.by_head, db2.disabled,
+      RuleDB(db2.rules, db2.disabled,
              db2.type_by_head ++ {fname: List.cons([name, th], cur :~ List)})
 
 // Add only a rewrite rule. Local assumptions are never queried as
@@ -267,23 +260,23 @@ fun add_thms(thy :: Theory, db :: RuleDB, name :: Symbol,
              ths :: List.of(Thm)) :: RuleDB:
   for values(d :~ RuleDB = db) (th in ths): add_thm(thy, d, name, th)
 
-// `disable` and `enable` swap only the suppressed set, so a scoped rule
-// change shares the whole index with its parent.
+// `disable` and `enable` change only suppression state, sharing the rules and
+// type facts with their parent.
 fun disable(db :: RuleDB, names :: List.of(Symbol)) :: RuleDB:
   let disabled2 = for values(s :~ Set = db.disabled) (n in names): s ++ {n}
-  RuleDB(db.by_head, disabled2, db.type_by_head)
+  RuleDB(db.rules, disabled2, db.type_by_head)
 
 fun enable(db :: RuleDB, names :: List.of(Symbol)) :: RuleDB:
   let disabled2 = for values(s :~ Set = db.disabled) (n in names): s.remove(n)
-  RuleDB(db.by_head, disabled2, db.type_by_head)
+  RuleDB(db.rules, disabled2, db.type_by_head)
 
 fun rules_of(db :: RuleDB, head :: Symbol) :: List.of(RewriteRule):
-  (db.by_head.get(head, []) :~ List).filter(
-    ~skip: fun (r :: RewriteRule): r.name in db.disabled)
+  db.rules.filter(
+    ~keep: fun (r :: RewriteRule):
+             r.head == head && !(r.name in db.disabled))
 
 fun rule_names(db :: RuleDB) :: List.of(Symbol):
-  for values(acc :~ List = []) ((_, rs) in db.by_head):
-    acc ++ (rs :~ List).map(fun (r :: RewriteRule): r.name)
+  db.rules.map(fun (r :: RewriteRule): r.name)
 
 // Every *enabled* type-prescription fact registered about `head`'s results,
 // newest first.
@@ -328,9 +321,9 @@ fun apply_rule(r :: RewriteRule, thy :: Theory, db :: RuleDB, t :: Term,
       // never be discharged: `!x:?a. P x ==> f x = g x` simply never fired
       // at a concrete type, even with `P(c)` in the database.
       //
-      // Reading them back from the instantiated theorem removes the second
-      // copy entirely, so there is no order left to get wrong.  `r.conds`
-      // stays as an index for display and admission checks.
+      // Reading them back from the instantiated theorem leaves that theorem as
+      // the single condition representation, so there is no order left to get
+      // wrong.
       let inst_th = INST(thy, m.theta, INST_TYPE(thy, m.tyin, r.src))
       let (inst_conds, _) = strip_imp(concl_of(inst_th))
       effect:

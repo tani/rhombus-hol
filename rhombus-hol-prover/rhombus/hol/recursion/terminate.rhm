@@ -131,13 +131,14 @@ fun check_termination(who :: Symbol,
   // Deduplicated on the whole site, patterns and guards included, never on
   // the call alone. The two are genuinely different sites when the guards
   // differ.
-  let all_sites = for values(acc :~ List = []) ([clause, pats, terms] in clauses):
-                    for values(a :~ List = acc) (t in terms :~ List):
-                      let calls = call_sites_in(who, name, fn, arity,
-                                                t :~ Term)
-                      for values(b :~ List = a) ([guards, args] in calls):
-                        let site = [clause, pats, guards, args]
-                        if b.contains(site) | b | b ++ [site]
+  let all_sites_rev:
+    for values(acc :~ List = []) ([clause, pats, terms] in clauses):
+      for values(a :~ List = acc) (t in terms :~ List):
+        let calls = call_sites_in(who, name, fn, arity, t :~ Term)
+        for values(b :~ List = a) ([guards, args] in calls):
+          let site = [clause, pats, guards, args]
+          if b.contains(site) | b | List.cons(site, b)
+  let all_sites = all_sites_rev.reverse()
   cond
   | all_sites.length() == 0:
       NoRecursion()
@@ -348,6 +349,8 @@ fun mentions(fn :: Term, t :: Term) :: Boolean:
 // decreases even down the branch that is never taken.
 fun call_sites_in(who :: Symbol, name :: Symbol, fn :: Term, arity :: Int,
                   t :: Term) :: List:
+  // `walk` keeps the discovered sites reversed, avoiding a growing list copy
+  // per call; the public traversal order is restored at the boundary.
   fun walk(t :: Term, conds :~ List, under_binder :: Boolean,
            acc :~ List) :~ List:
     let acc2:
@@ -359,7 +362,7 @@ fun call_sites_in(who :: Symbol, name :: Symbol, fn :: Term, arity :: Int,
                   error.val(~label: "name", name),
                   error.val(~label: "recursive call",
                             show(list_mk_comb(fn, args))))
-          acc ++ [[conds, args]]
+          List.cons([conds, args], acc)
       | ~else: acc
     match dest_cond(t)
     | [c, a, b]:
@@ -372,4 +375,4 @@ fun call_sites_in(who :: Symbol, name :: Symbol, fn :: Term, arity :: Int,
             walk(x, conds, under_binder, walk(f, conds, under_binder, acc2))
         | Abs(_, b): walk(b, conds, #true, acc2)
         | ~else: acc2
-  walk(t, [], #false, [])
+  (walk(t, [], #false, [])).reverse()

@@ -52,105 +52,60 @@ fun replace_subterm(old :: Term, new :: Term, t :: Term) :: Term:
           (if f2 === f && x2 === x | t | mk_comb(f2, x2))
       | ~else: t
 
-// Structural equality for a `Term` recursively hashes the whole tree. Using
-// terms themselves as keys therefore makes a chain of nested applications
-// quadratic before the candidate analysis even begins. Assign a canonical
-// integer to each distinct term shape once; every count and dependency lookup
-// below is then over small integers.
+// Candidate selection needs only structural term equality. Keep the direct
+// traversal in one representation instead of assigning term identities and
+// maintaining parallel count, representative, and dominance indexes.
 fun generalization_candidates(ctors :: Set.of(Symbol),
                               g :: Goal) :: List.of(Term):
-  let by_identity = WeakMutableMap.by(===)()
-  let canonical = MutableMap()
-  let next_id = Box(0)
-
-  fun term_id(t :: Term) :: Int:
-    match by_identity.get(t, #false)
-    | id :: Int: id
-    | #false:
-        let key:
-          match t
-          | FVar(n, ty): [#'fvar, n, ty]
-          | BVar(i, ty): [#'bvar, i, ty]
-          | Const(n, ty): [#'const, n, ty]
-          | NatLit(value): [#'natlit, value]
-          | Comb(f, x): [#'comb, term_id(f), term_id(x)]
-          | Abs(ty, b): [#'abs, ty, term_id(b)]
-        let id :~ Int:
-          match canonical.get(key, #false)
-          | found :: Int: found
-          | #false:
-              let fresh = next_id.value :~ Int
-              next_id.value := fresh + 1
-              canonical.set(key, fresh)
-              fresh
-        by_identity.set(t, id)
-        id
-
-  let parts = g.asms ++ [g.concl]
-  let counts = MutableMap()
-  fun count_occurrences(t :: Term) :: Void:
-    let id = term_id(t)
-    let old :~ Int = counts.get(id, 0)
-    counts.set(id, old + 1)
+  fun occurrences(t :: Term, wanted :: Term) :: Int:
+    let here = (if t == wanted | 1 | 0)
     match t
     | Comb(f, x):
-        count_occurrences(f)
-        count_occurrences(x)
-    | ~else: #void
-  for (part in parts): count_occurrences(part :~ Term)
+        here + occurrences(f, wanted) + occurrences(x, wanted)
+    | ~else: here
 
-  // Candidate collection follows application arguments, not partial function
-  // spines, preserving the old first-occurrence ordering.
-  let concl_id = term_id(g.concl)
-  let seen = MutableMap()
-  let representatives = MutableMap()
-  let ordered_rev = Box([])
-  fun collect(t :: Term) :: Void:
-    let id = term_id(t)
+  let parts = g.asms ++ [g.concl]
+  fun candidates_in(t :: Term) :: List.of(Term):
     let (head, args) = strip_comb(t)
+    let nested:
+      for values(acc :: List.of(Term) = []) (arg in args):
+        acc ++ candidates_in(arg :~ Term)
     let eligible:
       cond
       | !(t is_a Comb): #false
-      | id == concl_id: #false
+      | t == g.concl: #false
       | is_fun(type_of(t)): #false
       | ~else:
           match head
           | Const(n, _): !(n in ctors) && n != c_eq
           | ~else: #false
-    when eligible && !seen.get(id, #false)
-    | seen.set(id, #true)
-      representatives.set(id, t)
-      ordered_rev.value := List.cons(id, ordered_rev.value :~ List)
-    for (arg in args): collect(arg :~ Term)
-  for (part in parts): collect(part :~ Term)
-  let ordered = (ordered_rev.value :~ List).reverse()
-  fun repeated(id) :: Boolean:
-    let n :~ Int = counts.get(id, 0)
-    n >= 2
+    (if eligible | [t] ++ nested | nested)
+
+  let candidates:
+    for values(acc :: List.of(Term) = []) (part in parts):
+      acc ++ candidates_in(part :~ Term)
+  let ordered:
+    for values(acc :: List.of(Term) = []) (candidate in candidates):
+      (if acc.contains(candidate) | acc | acc ++ [candidate :~ Term])
+  fun repeated(candidate :: Term) :: Boolean:
+    let count = for values(n = 0) (part in parts):
+                  n + occurrences(part :~ Term, candidate)
+    count >= 2
   let counted = ordered.filter(~keep: repeated)
 
-  // Mark a counted candidate when it occurs below another counted candidate.
-  // A raw walk is required: a candidate can occur in a function position even
-  // though partial application spines are not themselves collected.
-  let counted_set = MutableMap()
-  for (id in counted): counted_set.set(id, #true)
-  let dominated = MutableMap()
-  fun mark_dominated(t :: Term, inside :: Boolean) :: Void:
-    let id = term_id(t)
-    let candidate :~ Boolean = counted_set.get(id, #false)
-    when inside && candidate
-    | dominated.set(id, #true)
-    let inside2 = inside || candidate
+  // A candidate under another counted candidate is less general; prefer the
+  // outer term. This deliberately walks raw combinations, including function
+  // positions, while collection above visits application arguments only.
+  fun occurs_below(t :: Term, wanted :: Term) :: Boolean:
     match t
     | Comb(f, x):
-        mark_dominated(f, inside2)
-        mark_dominated(x, inside2)
-    | ~else: #void
-  for (part in parts): mark_dominated(part :~ Term, #false)
-
-  fun maximal(id) :: Boolean: !dominated.get(id, #false)
-  fun representative(id) :: Term: representatives.get(id) :~ Term
-  counted.filter(~keep: maximal).map(representative)
+        f == wanted || x == wanted
+          || occurs_below(f, wanted) || occurs_below(x, wanted)
+    | ~else: #false
+  fun maximal(candidate :: Term) :: Boolean:
+    !(for any (other in counted):
+        other != candidate && occurs_below(other :~ Term, candidate))
+  counted.filter(~keep: maximal)
 
 // The first type-prescription fact about `t`'s head function that
 // instantiates cleanly at `t`'s actual arguments, as a theorem `|- Q(t)` --

@@ -58,6 +58,7 @@ export:
   is_forall
   is_exists
   strip_forall
+  open_foralls
   strip_conj
   strip_imp
 
@@ -162,11 +163,29 @@ fun strip_forall(t :: Term) :: values(List.of(FVar), Term):
     | [v, b]: loop(b, List.cons(v, acc))
     | ~else: values(acc.reverse(), t)
 
+// Peel leading universal quantifiers, choosing each opening variable fresh
+// for `avoid` and for the remaining quantified term.
+fun open_foralls(t :: Term, avoid :: List.of(Term))
+    :: values(List.of(FVar), Term):
+  recur loop (current :: Term = t, avoid :~ List.of(Term) = avoid,
+              vars :~ List.of(FVar) = []):
+    match dest_forall(current)
+    | [v0, _]:
+        let fresh = variant(avoid ++ [current], v0 :~ FVar)
+        let (_, binder) = dest_comb(current)
+        loop(open_abs(fresh, binder), List.cons(fresh :~ Term, avoid),
+             List.cons(fresh, vars))
+    | ~else: values(vars.reverse(), current)
+
 // `a and b and c` flattened; a non-conjunction is a one-element list.
 fun strip_conj(t :: Term) :: List.of(Term):
-  match dest_conj(t)
-  | [a, b]: strip_conj(a) ++ strip_conj(b)
-  | ~else: [t]
+  recur loop (pending :~ List = [t], acc :~ List = []):
+    match pending
+    | []: acc.reverse()
+    | List.cons(current, rest):
+        match dest_conj(current :~ Term)
+        | [a, b]: loop(List.cons(a, List.cons(b, rest)), acc)
+        | ~else: loop(rest, List.cons(current, acc))
 
 // `a ==> b ==> c` as `([a, b], c)`.
 fun strip_imp(t :: Term) :: values(List.of(Term), Term):

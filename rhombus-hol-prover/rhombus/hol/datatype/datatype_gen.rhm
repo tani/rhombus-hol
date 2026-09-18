@@ -190,15 +190,6 @@ fun choose_through_and_rewrap(thy :: Theory, ex_th :: Thm, m :: Int, transform) 
       let inner = choose_through_and_rewrap(thy, asm, m - 1, fun (rest_vars, flat_th): transform([gv] ++ rest_vars, flat_th))
       CHOOSE(thy, gv, ex_th, inner)
 
-fun index_of_ctor(spec :: DatatypeSpec, ci :: Term) :: Int:
-  let (head, _) = strip_comb(ci)
-  match head
-  | Const(n, _):
-      recur loop (cs :~ List = spec.ctors, i = 0):
-        match cs
-        | List.cons(c, rest):
-            (if (c :~ Ctor).name == n | i | loop(rest, i + 1))
-
 fun mk_field_vars(fields :: List.of(Field), prefix :: String) :: List.of(FVar):
   for List (f in fields, i in List.iota(fields.length())):
     mk_var(Symbol.from_string(prefix ++ to_string(i)), (f :~ Field).ty)
@@ -392,10 +383,11 @@ fun build_nonrecursive_datatype_thms(thy :: Theory, spec :: DatatypeSpec,
     let xs_t = xs.map(fun (v :: FVar): v :~ Term)
     let ys_t = ys.map(fun (v :: FVar): v :~ Term)
     GENL(thy, xs ++ ys, ctor_distinct_raw(i, j, xs_t, ys_t))
-  let pairs = for values(acc :~ List = []) (ci in spec.ctors, i in List.iota(n)):
-                for values(acc2 :~ List = acc) (cj in spec.ctors, j in List.iota(n)):
-                  (if i < j | acc2 ++ [[i, j]] | acc2)
-  let distinctness = for List ([i, j] in pairs): ctor_distinct(i, j)
+  let distinctness_rev:
+    for values(acc :~ List.of(Thm) = []) (i in List.iota(n)):
+      for values(acc2 :~ List.of(Thm) = acc) (j in List.iota(n)):
+        (if i < j | List.cons(ctor_distinct(i, j), acc2) | acc2)
+  let distinctness = distinctness_rev.reverse()
 
   // -- cases: `forall x. x=C0 or (?...x=C1(...)) or ...`, left-associated,
   // matching `datatype.rhm`'s own fold direction.
@@ -501,9 +493,11 @@ fun build_nonrecursive_datatype_thms(thy :: Theory, spec :: DatatypeSpec,
       cond
       | !is_exists(stmt):
           let [_, ci] = (match dest_eq(stmt) | l: l)
-          let i = index_of_ctor(spec, ci)
-          let specialized = SPECL(thy, chosen, per_ctor_th[i])
-          EQ_MP(AP_TERM(thy, bigP, SYM(thy, th)), specialized)
+          let (head, _) = strip_comb(ci)
+          match head
+          | Const(name, _):
+              let specialized = SPECL(thy, chosen, per_ctor_th[ctor_index(spec, name)])
+              EQ_MP(AP_TERM(thy, bigP, SYM(thy, th)), specialized)
       | ~else:
           let [ov, obody] = (match dest_exists(stmt) | l: l)
           let ov :~ FVar = ov

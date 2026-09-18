@@ -87,7 +87,6 @@ fun unfold_def(thy :: Theory, def_th :: Thm, args :: List.of(Term)) :: Thm:
     | #false: t1
     | b :~ Thm: TRANS(t1, b)
 
-fun eq_term(a :: Term, b :: Term) :: Boolean: a == b
 
 fun unfold_conj(thy :: Theory, p :: Term, q :: Term) :: Thm:
   unfold_def(thy, base_defs(c_conj), [p, q])
@@ -216,7 +215,7 @@ fun MP(thy :: Theory, ith :: Thm, th :: Thm) :: Thm:
       error(~who: #'MP, "theorem is not an implication",
             error.val(~label: "theorem", show(concl_of(ith))))
   | [p, q]:
-      unless eq_term(p, concl_of(th))
+      unless p == concl_of(th)
       | error(~who: #'MP, "antecedent does not match",
               error.val(~label: "expected", show(p)),
               error.val(~label: "given", show(concl_of(th))))
@@ -282,9 +281,10 @@ fun GENL(thy :: Theory, vs :: List.of(FVar), th :: Thm) :: Thm:
 // Generalize over every variable free in the conclusion but not in the
 // hypotheses.
 fun GEN_ALL(thy :: Theory, th :: Thm) :: Thm:
-  let hyp_vars = for values(acc :~ List = []) (h in hyps_of(th)):
-                   acc ++ free_vars(h)
-  let vs = free_vars(concl_of(th)).filter(~skip: fun (v): hyp_vars.contains(v))
+  let hyp_vars = for values(acc :~ Set.of(FVar) = Set()) (h in hyps_of(th)):
+                   for values(inner :~ Set.of(FVar) = acc) (v in free_vars(h)):
+                     inner ++ {v :~ FVar}
+  let vs = free_vars(concl_of(th)).filter(~skip: fun (v): v in hyp_vars)
   GENL(thy, vs, th)
 
 // A |- forall x. p   ==>   A |- p[t/x]
@@ -353,7 +353,7 @@ fun DISJ_CASES(thy :: Theory, dth :: Thm, ath :: Thm, bth :: Thm) :: Thm:
       error(~who: #'DISJ_CASES, "theorem is not a disjunction",
             error.val(~label: "theorem", show(concl_of(dth))))
   | [p, q]:
-      unless eq_term(concl_of(ath), concl_of(bth))
+      unless concl_of(ath) == concl_of(bth)
       | error(~who: #'DISJ_CASES, "the two cases prove different things",
               error.val(~label: "left", show(concl_of(ath))),
               error.val(~label: "right", show(concl_of(bth))))
@@ -379,13 +379,13 @@ fun NOT_INTRO(thy :: Theory, th :: Thm) :: Thm:
   match dest_imp(concl_of(th))
   | #false: error(~who: #'NOT_INTRO, "theorem is not an implication")
   | [p, f]:
-      unless eq_term(f, tm_false)
+      unless f == tm_false
       | error(~who: #'NOT_INTRO, "consequent is not `false`")
       EQ_MP(SYM(thy, unfold_neg(thy, p)), th)
 
 // A |- false   ==>   A |- t
 fun CONTR(thy :: Theory, t :: Term, th :: Thm) :: Thm:
-  unless eq_term(concl_of(th), tm_false)
+  unless concl_of(th) == tm_false
   | error(~who: #'CONTR, "theorem is not `false`")
   SPEC(thy, t, EQ_MP(unfold_false(thy), th))
 
@@ -403,13 +403,13 @@ fun EQF_ELIM(thy :: Theory, th :: Thm) :: Thm:
   let [p, f] = (match dest_eq(concl_of(th))
                 | #false: error(~who: #'EQF_ELIM, "theorem is not an equation")
                 | pair: pair)
-  unless eq_term(f, tm_false)
+  unless f == tm_false
   | error(~who: #'EQF_ELIM, "right-hand side is not `false`")
   NOT_INTRO(thy, DISCH(thy, p, EQ_MP(th, ASSUME(thy, p))))
 
 // A, not t |- false   ==>   A |- t.  This is where BOOL_CASES earns its keep.
 fun CCONTR(thy :: Theory, t :: Term, th :: Thm) :: Thm:
-  unless eq_term(concl_of(th), tm_false)
+  unless concl_of(th) == tm_false
   | error(~who: #'CCONTR, "theorem is not `false`")
   let cases = SPEC(thy, t, base_axiom(#'BOOL_CASES_AX))
   let case_t = EQT_ELIM(thy, ASSUME(thy, mk_eq(t, tm_true)))
@@ -420,7 +420,7 @@ fun CCONTR(thy :: Theory, t :: Term, th :: Thm) :: Thm:
 // A |- p   B, p |- q   ==>   A u (B - p) |- q
 fun PROVE_HYP(thy :: Theory, ath :: Thm, bth :: Thm) :: Thm:
   cond
-  | (for any (h in hyps_of(bth)): eq_term(h, concl_of(ath))):
+  | (for any (h in hyps_of(bth)): h == concl_of(ath)):
       EQ_MP(DEDUCT_ANTISYM_RULE(ath, bth), ath)
   | ~else: bth
 
@@ -441,7 +441,7 @@ fun EXISTS(thy :: Theory, target :: Term, witness :: Term, th :: Thm) :: Thm:
   | [v, body]:
       let v :~ FVar = v
       let expect = inst_fvar([[witness, v]], body)
-      unless eq_term(expect, concl_of(th))
+      unless expect == concl_of(th)
       | error(~who: #'EXISTS, "theorem does not match the instantiated body",
               error.val(~label: "expected", show(expect)),
               error.val(~label: "given", show(concl_of(th))))

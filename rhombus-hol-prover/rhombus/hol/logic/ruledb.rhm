@@ -59,16 +59,16 @@ class RewriteRule(name :: Symbol,
     conditions
 
 // Ordinary rewrite rules share one newest-first list. `rules_of` filters it
-// by head, retaining the same newest-first order within each head.
-//
-// `type_by_head` is a separate classification of Boolean facts: a theorem can
-// be both a rewrite rule and a fact about a function result. Its stored name
-// lets `disable` suppress both classifications together.
+// by head, retaining the same newest-first order within each head. Type
+// facts — Boolean facts about a function's results — share the same shape:
+// one newest-first list, filtered by head at the query. A theorem can be
+// both a rewrite rule and a type fact; the stored name lets `disable`
+// suppress both classifications together.
 class RuleDB(rules :: List.of(RewriteRule),
              disabled :: Set.of(Symbol),
-             type_by_head :: Map.of(Symbol, List))
+             type_facts :: List)
 
-def empty_db :: RuleDB = RuleDB([], Set(), {})
+def empty_db :: RuleDB = RuleDB([], Set(), [])
 
 // -- building a rule from a theorem ----------------------------------------
 
@@ -206,7 +206,7 @@ fun is_variant(vars :: List.of(FVar), lhs :: Term, rhs :: Term) :: Boolean:
 
 fun add_rule(db :: RuleDB, r :: RewriteRule) :: RuleDB:
   // Newest first, as ACL2 does: a later rule shadows an earlier one.
-  RuleDB(List.cons(r, db.rules), db.disabled, db.type_by_head)
+  RuleDB(List.cons(r, db.rules), db.disabled, db.type_facts)
 
 // The function a type-prescription fact is about, or `#false`.
 //
@@ -242,9 +242,8 @@ fun add_thm(thy :: Theory, db :: RuleDB, name :: Symbol, th :: Thm) :: RuleDB:
   match type_prescription_head(spec)
   | #false: db2
   | fname:
-      let cur = db2.type_by_head.get(fname, [])
       RuleDB(db2.rules, db2.disabled,
-             db2.type_by_head ++ {fname: List.cons([name, th], cur :~ List)})
+             List.cons([fname, name, th], db2.type_facts))
 
 // Add only a rewrite rule. Local assumptions are never queried as
 // type-prescription facts, so classifying them there is avoidable work.
@@ -264,11 +263,11 @@ fun add_thms(thy :: Theory, db :: RuleDB, name :: Symbol,
 // type facts with their parent.
 fun disable(db :: RuleDB, names :: List.of(Symbol)) :: RuleDB:
   let disabled2 = for values(s :~ Set = db.disabled) (n in names): s ++ {n}
-  RuleDB(db.rules, disabled2, db.type_by_head)
+  RuleDB(db.rules, disabled2, db.type_facts)
 
 fun enable(db :: RuleDB, names :: List.of(Symbol)) :: RuleDB:
   let disabled2 = for values(s :~ Set = db.disabled) (n in names): s.remove(n)
-  RuleDB(db.rules, disabled2, db.type_by_head)
+  RuleDB(db.rules, disabled2, db.type_facts)
 
 fun rules_of(db :: RuleDB, head :: Symbol) :: List.of(RewriteRule):
   db.rules.filter(
@@ -288,9 +287,11 @@ fun rule_names(db :: RuleDB) :: List.of(Symbol):
 // consuming a fact the proof had just been told to do without, which is the
 // opposite of a disabled rule's purpose.
 fun type_facts_of(db :: RuleDB, head :: Symbol) :: List.of(Thm):
-  for values(acc :~ List = []) (e in (db.type_by_head.get(head, []) :~ List)):
-    let [n, th] = e :~ List
-    (if (n :~ Symbol) in db.disabled | acc | acc ++ [th :~ Thm])
+  for values(acc :~ List = []) (e in db.type_facts):
+    let [h, n, th] = e :~ List
+    (if h :~ Symbol == head && !(n :~ Symbol in db.disabled)
+     | acc ++ [th :~ Thm]
+     | acc)
 
 // -- rewriting -------------------------------------------------------------
 

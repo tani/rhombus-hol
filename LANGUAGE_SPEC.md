@@ -157,6 +157,43 @@ shared interface for matching, structural equality, readable printing, fields,
 and constructor calls. It does not introduce a distinct runtime representation
 unrelated to the logical declaration.
 
+#### Mutually recursive datatypes
+
+```rhombus
+datatype.together:
+  datatype Expr
+  | lit(value :: Nat)
+  | app(args :: Args)
+  datatype Args
+  | anil()
+  | acons(head :: Expr, tail :: Args)
+```
+
+A `datatype.together:` block declares a family of datatypes simultaneously:
+a constructor field may be at any member of the family. Every member must
+declare the same type parameters, every constructor name in the family must
+be distinct, and each member must be inhabited by values the family's own
+constructors build. A single `datatype` declaration is the one-member case of
+this form, and the two spellings share one implementation.
+
+A family is read as one ordinary self-recursive datatype -- the union of every
+member's constructors, with a field at a member replaced by the union type --
+with each member carved out of it as the set of values its own constructors
+build. Those membership predicates are the least ones closed under the
+constructors, which is `inductive`'s construction, so a family needs no
+representation, no definition principle and no trusted operation that a single
+datatype does not.
+
+Each member derives everything a single declaration derives, stated about its
+own constructors: injectivity, distinctness, cases, discriminators, selectors,
+destructor elimination, structural induction whose hypotheses are about its own
+recursive fields, and its subterm relation when it has one. The family's joint
+induction, whose hypotheses may be about any member, is retained by name as
+`<Member1>_..._union_induct` and requested in a proof with `~use:`.
+
+The family's union type also gives the whole family one well-founded order,
+which is what a `function.together:` recursion over it descends in.
+
 ### 4.2 `function`
 
 ```rhombus
@@ -191,6 +228,53 @@ same normalized Core decision tree used by the logical reading.
 
 A recursive definition is never assumed. It is either derived from an accepted
 well-founded order or rejected.
+
+#### Mutually recursive functions
+
+```rhombus
+function.together:
+  function a_size(a :: Args) :: Nat
+  | (anil()): zero()
+  | (acons(e, r)): plus(e_size(e), a_size(r))
+  function e_size(e :: Expr) :: Nat
+  | (lit(n)): succ(zero())
+  | (app(a)): succ(a_size(a))
+```
+
+A `function.together:` block declares a family of functions simultaneously:
+a member's body may call any member of the family. Every member declares each
+parameter type and its result type, since the members are elaborated against
+each other rather than inferred from their bodies, and all members use the
+same type variables. A member of a family is called with all of its arguments.
+A single `function` declaration is the one-member case of this form.
+
+A family is read as one ordinary function over a tagged argument: a domain
+datatype with one constructor per member carrying that member's parameters,
+and, when the members' result types differ, a result datatype tagging them the
+same way. That combined function is derived by the well-founded machinery an
+ordinary recursive `function` already uses, and each member is then the
+non-recursive definition that tags its arguments and reads the result back.
+Each member's clausal equations are derived from the combined function's and
+registered as rewrite rules, so a proof sees the members, never the encoding.
+
+A recursive call in a family leaves the member that made it, so the descent
+order has to span the family. Either every member supplies a
+`proof: ~measure: expression` into one common declared datatype, or none does
+and the family descends structurally: one argument column per member, at a
+common recursive datatype -- or at the union type of a datatype family, which
+is what relates values of different members of it -- such that every call
+between members reaches a strict subterm. A family that does neither is
+rejected, exactly as a single function that terminates for no visible reason
+is.
+
+A member's `proof:` block is the ordinary one: it sits adjacent to that
+member inside the block and carries exactly one `~measure:`. The members'
+measures are read as one measure over the tag, so they must land in the same
+type, and a measure may not call a member of its own family: it justifies the
+family's definition and so cannot use it.
+
+The executable reading is one Rhombus `fun` per member, calling each other
+directly; the tagging is logical only.
 
 ### 4.3 `definition`
 
@@ -246,12 +330,34 @@ Thus `definition` has no termination check: it cannot introduce recursion. It
 is the appropriate form for specification-level or choice-based HOL constants.
 Use `function` when an executable meaning is required.
 
+#### Simultaneous definitions
+
+```rhombus
+definition.together:
+  definition zero_set :: Nat -> Boolean: function (n :: Nat): n == zero()
+  definition all_set :: Nat -> Boolean: function (n :: Nat): true
+```
+
+A `definition.together:` block declares several constants simultaneously.
+Every body is elaborated in the theory the block started in, so no member can
+mention another: a `definition` cannot be recursive, and neither can a family
+of them. The form exists so that every declaration that groups also groups the
+same way; a single `definition` is its one-member case.
+
 ### 4.4 `inductive`
 
 ```rhombus
-inductive name(Type, ...) and name(Type, ...) and ...
+inductive name(Type, ...)
 | rule_name: proposition
 | ...
+
+inductive.together:
+  inductive name(Type, ...)
+  | rule_name: proposition
+  | ...
+  inductive name(Type, ...)
+  | rule_name: proposition
+  | ...
 ```
 
 `inductive` introduces the least predicates closed under the given rules. Each
@@ -283,10 +389,10 @@ intersection of every predicate family the rules are closed under. Each is one
 `new_basic_definition` call, so `inductive` adds no axiom and no new
 definition principle.
 
-Predicates declared together with `and` are mutually recursive: all of the
-rules are premises of every definition, and a rule may conclude with any of
-the declared predicates. A single predicate is this same construction with a
-one-element family.
+Predicates declared in one `inductive.together:` block are mutually
+recursive: the block's rules are shared, so all of them are premises of every
+definition and a rule may conclude with any of the declared predicates. A
+single `inductive` is this same construction with a one-element family.
 
 From those definitions the declaration derives, by kernel rules only:
 
@@ -314,7 +420,7 @@ following are static errors:
 - an occurrence of a declared predicate that is not applied to arguments,
   including one passed to another function or compared with `===`;
 - an occurrence of a declared predicate inside a rule's own arguments;
-- the same predicate name declared twice in one head list; and
+- the same predicate name declared twice in one family; and
 - a rule name, `name_induct` or `name_cases` that is already a theorem in the
   current theory.
 
@@ -756,7 +862,10 @@ The checker tries two methods in order.
 2. **Measure descent.** If structural descent fails, an adjacent
    `proof: ~measure: expression` supplies a measure. Each recursive call creates
    a guarded obligation that the recursive-call measure is below the enclosing
-   pattern measure. The ordinary theorem prover must close every obligation.
+   pattern measure. The ordinary theorem prover must close every obligation. A
+   branch condition that calls the function being defined is not among an
+   obligation's assumptions: the function has no equations yet, so the call has
+   to descend whichever way that branch went.
 
 Every recursive datatype derives `T_lt`, its well-founded proper-subterm
 relation. A measure must produce such a declared datatype; a Boolean or another
@@ -764,8 +873,15 @@ type without a derived subterm relation is rejected. `T_lt` is derived as the
 transitive closure of a non-recursive direct-child predicate and proved
 well-founded using the datatype's induction principle.
 
-Nested recursion, mutual recursion, and recursive calls through a nested lambda
-are not supported. They are rejected, not treated as unchecked definitions.
+A `function.together:` family is checked the same way, on the combined
+function its members are read as (section 4.2): one order spans the family,
+either from every member's `~measure:` or from an argument column per member
+at a common recursive datatype. A datatype family's union type is such a
+datatype, which is what lets a recursion cross between mutually recursive
+datatypes.
+
+Nested recursion and recursive calls through a nested lambda are not
+supported. They are rejected, not treated as unchecked definitions.
 
 ## 9. The automatic prover
 

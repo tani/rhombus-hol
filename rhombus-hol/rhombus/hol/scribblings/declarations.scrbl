@@ -73,6 +73,46 @@ appear to the left of an arrow in a field. An ill-founded declaration has no
 set of labelled trees to be carved out of, so it now fails to be constructed
 rather than being assumed into existence.
 
+@subsection{Mutually recursive datatypes}
+
+@verbatim{
+datatype.together:
+  datatype Id
+  | ctor
+  | ...
+  datatype Id
+  | ctor
+  | ...
+}
+
+A @tt{datatype.together:} block declares a family of datatypes at once, so a
+constructor field may be at any member of the family. Every member declares
+the same type parameters, constructor names are distinct across the family,
+and every member must be inhabited by values the family's own constructors
+build.
+
+@rhombusblock(
+  datatype.together:
+    datatype Expr
+    | lit(value :: Nat)
+    | app(args :: Args)
+    datatype Args
+    | anil()
+    | acons(head :: Expr, tail :: Args)
+)
+
+The family is read as one ordinary recursive datatype --- the union of every
+member's constructors --- with each member carved out of it as the least set
+its own constructors build, which is @rhombus(inductive, ~datum)'s
+construction. So a family adds no representation and no new principle, and
+each member derives exactly what a lone declaration derives, stated about its
+own constructors. The family's joint induction, whose hypotheses may be about
+any member, is kept by name as @tt{Member1_..._union_induct} for a proof's
+@tt{~use:}.
+
+A single @rhombus(datatype, ~datum) declaration is the one-member case of the
+same form.
+
 @section{@rhombus(function, ~datum)}
 
 @verbatim{
@@ -114,6 +154,55 @@ argument through @tt{~measure: expression} for a definition that does not
 descend structurally. It is checked only when no structural descent can be
 found, so a measure on a definition that already descends is not examined.
 
+@subsection{Mutually recursive functions}
+
+@verbatim{
+function.together:
+  function Id(arg :: Type, ...) :: Type
+  | (pattern, ...): body
+  | ...
+  function Id(arg :: Type, ...) :: Type
+  | (pattern, ...): body
+  | ...
+}
+
+A @tt{function.together:} block declares a family of functions at once, so a
+member's body may call any member of the family. Each member declares every
+parameter type and its result type --- the members are elaborated against each
+other, not inferred from their bodies --- and all members use the same type
+variables. A member is always called with all of its arguments. A member may
+still carry its own adjacent @rhombus(proof, ~datum) block.
+
+@rhombusblock(
+  function.together:
+    function a_size(a :: Args) :: Nat
+    | (anil()): zero()
+    | (acons(e, r)): plus(e_size(e), a_size(r))
+    function e_size(e :: Expr) :: Nat
+    | (lit(n)): succ(zero())
+    | (app(a)): succ(a_size(a))
+)
+
+The family is read as one ordinary function over a tagged argument: a domain
+datatype with one constructor per member, and a result datatype when the
+members' result types differ. That function is derived by the same
+well-founded machinery a lone recursive @rhombus(function, ~datum) uses, and
+each member is then the plain definition that tags its arguments and reads the
+result back. Each member's own clausal equations are derived from it and enter
+the rewriter, so proofs see the members and never the encoding. Executably the
+members are ordinary Rhombus functions calling each other.
+
+Because a call leaves the member that made it, the descent order spans the
+family: either every member supplies @tt{~measure:} into one datatype, or the
+family descends structurally on one argument column per member, read through a
+datatype family's union type when the recursion crosses between mutually
+recursive datatypes (@secref("termination")).
+
+A member's @rhombus(proof, ~datum) block is the ordinary one: it sits next to
+that member inside the block and carries exactly one @tt{~measure:}. Since
+the members' measures are read as one measure over the tag, they land in the
+same type, and a measure may not call a member of its own family --- it
+justifies the family's definition, so it cannot use it.
 
 @section{@rhombus(definition, ~datum)}
 
@@ -137,6 +226,22 @@ noncomputable HOL terms such as @rhombus(select, ~datum). Use
 @rhombus(function, ~datum) for a definition that must run: it has an
 executable reading, supports pattern clauses and recursion, and therefore
 accepts only the executable expression subset.
+
+@subsection{Simultaneous definitions}
+
+@verbatim{
+definition.together:
+  definition Id :: Type:
+    expr
+  definition Id :: Type:
+    expr
+}
+
+A @tt{definition.together:} block declares several constants at once. Every
+body is checked in the theory the block started in, so a member cannot mention
+another: a @rhombus(definition, ~datum) cannot be recursive, and neither can a
+family of them. The form exists so that every declaration that can be grouped
+is grouped the same way.
 
 @subsection(~tag: "local-function"){Local and anonymous @rhombus(function, ~datum)}
 
@@ -200,9 +305,17 @@ declaration-level clauses.
 @section{@rhombus(inductive, ~datum)}
 
 @verbatim{
-inductive Id(Type, ...) and Id(Type, ...) and ...
+inductive Id(Type, ...)
 | Id: proposition
 | ...
+
+inductive.together:
+  inductive Id(Type, ...)
+  | Id: proposition
+  | ...
+  inductive Id(Type, ...)
+  | Id: proposition
+  | ...
 }
 
 Declares the least predicates closed under the given rules. Each head lists
@@ -224,15 +337,17 @@ saying that any family closed under the rules contains it; and @tt{Id_cases}
 per predicate, the inversion theorem, saying that membership came from some
 rule concluding with that predicate. Nothing is postulated.
 
-Predicates joined by @rhombus(and, ~datum) are mutually recursive: they share
-every rule, so a rule may conclude with any of them and reach the others
-through its premises.
+Predicates declared in one @tt{inductive.together:} block are mutually
+recursive: they share every rule, so a rule may conclude with any of them and
+reach the others through its premises.
 
 @rhombusblock(
-  inductive even_depth(Tree) and odd_depth(Tree)
-  | even_leaf: even_depth(leaf())
-  | even_step: forall (t :: Tree): odd_depth(t) ==> even_depth(node(t, t))
-  | odd_step: forall (t :: Tree): even_depth(t) ==> odd_depth(node(t, t))
+  inductive.together:
+    inductive even_depth(Tree)
+    | even_leaf: even_depth(leaf())
+    | even_step: forall (t :: Tree): odd_depth(t) ==> even_depth(node(t, t))
+    inductive odd_depth(Tree)
+    | odd_step: forall (t :: Tree): even_depth(t) ==> odd_depth(node(t, t))
 )
 
 Those theorems are retained by name like a @rhombus(theorem, ~datum) and are

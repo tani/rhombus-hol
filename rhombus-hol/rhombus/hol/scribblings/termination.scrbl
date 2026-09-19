@@ -141,6 +141,21 @@ The relation's equations are in the rewriter under its own name, so a proof can
 suppress them with @rhombus(~disable: [Nat_lt]) without touching the
 datatype's other rules.
 
+@section{A family of functions}
+
+A @tt{function.together:} family is checked as the one tagged function its
+members are read as, so it uses this same machinery: one order spans the
+family, because a recursive call leaves the member that made it. Either every
+member supplies a @tt{~measure:} landing in one declared datatype, or the
+family descends structurally --- one argument column per member, at a common
+recursive datatype. A @tt{datatype.together:} family's union type is such a
+datatype, and it is what relates values of different members, so a recursion
+that crosses between mutually recursive datatypes descends in it.
+
+A branch condition that calls the function being defined is not among an
+obligation's assumptions: the function has no equations yet, so the call has
+to descend whichever way that branch went.
+
 @section{What is not supported}
 
 @itemlist(
@@ -148,9 +163,6 @@ datatype's other rules.
  @item{@bold{Nested recursion.} A recursive call among the arguments of
   another recursive call has no obligation this version can state, because the
   obligation would mention the function being defined.}
-
- @item{@bold{Mutual recursion.} Two functions that call each other cannot be
-  declared; neither is complete when the other is checked.}
 
  @item{@bold{Recursion under a binder.} A local or anonymous
   @rhombus(function) inside a recursive definition's body is an ordinary

@@ -15,6 +15,7 @@ export:
   parse_open_type
   collect_type_vars
   parse_datatype_decl
+  parse_datatype_decls
   datatype_decl_shape
 
 fun syntax_error(message :: String, at :: Syntax):
@@ -146,18 +147,11 @@ fun parse_field(stx :: Syntax, params :: List.of(Symbol),
   | ~else:
       syntax_error("a constructor field needs a name and a type", stx)
 
-fun finish_datatype_decl(name :: Syntax, params :: List.of(Symbol),
-                         constructors :: List.of(Syntax),
-                         registry :: TypeConstructorRegistry) :: DatatypeSpec:
-  let kernel_name = Syntax.unwrap(name)
-  let local = add_declared_type_constructor(registry, kernel_name, params)
-  DatatypeSpec(kernel_name, params,
-               constructors.map(
-                 fun (constructor):
-                   parse_ctor(constructor, params, local)))
-
-fun parse_datatype_decl(stx :: Syntax,
-                        registry :: TypeConstructorRegistry) :: DatatypeSpec:
+// The head of a datatype declaration: its name, its type parameters, and its
+// constructor groups, without resolving any field type.  A family declared
+// together needs every member's head before any member's fields can be
+// parsed, since a field may mention a sibling.
+fun datatype_decl_head(stx :: Syntax) :: List:
   match stx
   | 'datatype $(name :: Identifier).of($param, ...)
      | $constructor
@@ -165,7 +159,7 @@ fun parse_datatype_decl(stx :: Syntax,
       let params = [parse_param(param), ...]
       when params.length() == 0
       | syntax_error("a nullary datatype declaration omits `.of`", stx)
-      finish_datatype_decl(name, params, [constructor, ...], registry)
+      [name, params, [constructor, ...]]
   | 'datatype $(name :: Identifier)($param, ...)
      | $_
      | ...':
@@ -176,8 +170,32 @@ fun parse_datatype_decl(stx :: Syntax,
   | 'datatype $(name :: Identifier)
      | $constructor
      | ...':
-      finish_datatype_decl(name, [], [constructor, ...], registry)
+      [name, [], [constructor, ...]]
   | ~else: syntax_error("malformed datatype declaration", stx)
+
+// Every member of a datatype family, parsed against a registry that already
+// knows all of their names: that is what lets one member's constructor field
+// mention another member, which is what makes the family mutually recursive.
+fun parse_datatype_decls(stxs :: List.of(Syntax),
+                         registry :: TypeConstructorRegistry)
+     :: List.of(DatatypeSpec):
+  let heads = stxs.map(datatype_decl_head)
+  let family:
+    for values(out :~ TypeConstructorRegistry = registry) (head in heads):
+      let head :~ List = head
+      add_declared_type_constructor(
+        out, Syntax.unwrap(head[0] :~ Syntax), head[1] :~ List.of(Symbol))
+  for List (head in heads):
+    let head :~ List = head
+    let params = head[1] :~ List.of(Symbol)
+    DatatypeSpec(Syntax.unwrap(head[0] :~ Syntax), params,
+                 (head[2] :~ List.of(Syntax)).map(
+                   fun (constructor :: Syntax):
+                     parse_ctor(constructor, params, family)))
+
+fun parse_datatype_decl(stx :: Syntax,
+                        registry :: TypeConstructorRegistry) :: DatatypeSpec:
+  parse_datatype_decls([stx], registry)[0]
 
 fun datatype_decl_shape(stx :: Syntax) :: List:
   fun constructor_shape(constructor :: Syntax) :: List:

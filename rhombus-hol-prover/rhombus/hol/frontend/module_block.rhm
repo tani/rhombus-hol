@@ -1637,15 +1637,15 @@ meta:
         ['import: $path!hol_theory as $alias']
     | '(~adopt $cur $nxt $alias [$at])':
         ['def $nxt = _hol_driver.adopt($cur, $(alias).theory, '$at')']
-    | '(~datatype $cur $nxt [$form] [$at])':
-        ['def $nxt = _hol_driver.add_datatype($cur, '$form', '$at')']
-    | '(~function $cur $nxt [$core] [$at])':
+    | '(~datatype $cur $nxt [$form, ...] [$at])':
+        ['def $nxt = _hol_driver.add_datatypes($cur, ['$form', ...], '$at')']
+    | '(~function $cur $nxt [$core, ...] [$at])':
         ['def $nxt:
-           let spec = try:
-                        _hol_surface.decode_function('$core')
-                        ~catch e :: Exn.Fail:
-                          _hol_driver.hol_reraise(e, '$at')
-           _hol_driver.add_function($cur, spec, '$at')']
+           let specs = try:
+                         [_hol_surface.decode_function('$core'), ...]
+                         ~catch e :: Exn.Fail:
+                           _hol_driver.hol_reraise(e, '$at')
+           _hol_driver.add_functions($cur, specs, '$at')']
     | '(~theorem $cur $nxt [$name] [$core] [$tactic] [$at])':
         ['def $nxt:
            let statement = try:
@@ -1658,14 +1658,15 @@ meta:
                            _hol_driver.hol_reraise(e, '$at')
            _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
                                    statement, proof, '$at')']
-    | '(~definition $cur $nxt [$name] [$type] [$core] [$at])':
+    | '(~definition $cur $nxt [$name, ...] [$type, ...] [$core, ...] [$at])':
         ['def $nxt:
-           let expression = try:
-                            _hol_surface.decode_expr('$core', #'definition)
-                            ~catch e :: Exn.Fail:
-                              _hol_driver.hol_reraise(e, '$at')
-           _hol_driver.add_definition(
-             $cur, Syntax.unwrap('$name'), '$type', expression, '$at')']
+           let expressions = try:
+                               [_hol_surface.decode_expr('$core', #'definition), ...]
+                               ~catch e :: Exn.Fail:
+                                 _hol_driver.hol_reraise(e, '$at')
+           _hol_driver.add_definitions(
+             $cur, [Syntax.unwrap('$name'), ...], ['$type', ...],
+             expressions, '$at')']
     | '(~inductive $cur $nxt [$name, ...] [$signature, ...] [$rule_name, ...] [$rule_core, ...] [$at])':
         ['def $nxt:
            let rules = try:
@@ -1708,6 +1709,135 @@ meta:
     | '$_ $term ...': 'import $term ...'
     | ~else: syntax_meta.error("internal malformed import declaration", form)
 
+  // -- a declaration family --------------------------------------------------
+  //
+  // `datatype`, `definition`, `function` and `inductive` are declared either
+  // singly or as a `<kind>.together:` family whose members are elaborated
+  // simultaneously.  One path serves both, because a lone declaration is the
+  // one-member family: there is no separate single-declaration encoding to
+  // keep in step, and the ordinary declarations exercise the family path.
+  //
+  // The whole family travels to the driver as one chain step.  It has to: a
+  // member of a mutually recursive family is not a declaration on its own,
+  // and the logical construction reads all of them at once.
+  fun declared_function_type(state :: SurfaceContext,
+                             spec :: CoreFunctionSpec) :: HType:
+    let registry = state.surface.type_constructors
+    let result = surface_optional_type(spec.result_type, registry, "_result")
+    for values(ty :~ HType = result) (binder in spec.params.reverse()):
+      mk_fun(surface_optional_type((binder :~ CoreBinder).type_stx,
+                                   registry, "_parameter"),
+             ty)
+
+  fun emit_group(kind :: Symbol, decls :: List.of(expand.Decl),
+                 n :: Int, runtime_state :: SurfaceContext)
+       :: values(List.of(Syntax), List.of(Syntax), Int, SurfaceContext):
+    let cur = st(n)
+    let nxt = st(n + 1)
+    let at = head_term((decls[0] :~ expand.Decl).form)
+    match kind
+    | #'datatype:
+        let [form, ...] = decls.map(fun (d :: expand.Decl): d.form)
+        let ready = force_surface_context(runtime_state)
+        let specs = type_parser.parse_datatype_decls(
+                      [form, ...], ready.surface.type_constructors)
+        let selves:
+          for List (spec in specs):
+            mk_tyapp((spec :~ DatatypeSpec).name,
+                     (spec :~ DatatypeSpec).params.map(
+                       fun (parameter :: Symbol): mk_tyvar(parameter)))
+        let runtime:
+          for values(acc :~ List.of(Syntax) = []) (d in decls, spec in specs):
+            let [name, ctors] = (d :~ expand.Decl).parts
+            let cs :~ List = ctors
+            // A field at any member of the family counts as recursive for
+            // generation: a base case has to avoid every member, or sampling
+            // a mutually recursive family would not terminate.
+            let gen:
+              for List (ctor in cs, semantic in (spec :~ DatatypeSpec).ctors):
+                let types = (semantic :~ Ctor).fields.map(
+                              fun (field :: Field): field.ty)
+                [(ctor :~ List)[0], types,
+                 for any (type in types): selves.contains(type)]
+            acc ++ [emit_type(name :~ Syntax, cs),
+                    emit_generator(name :~ Syntax,
+                                   (spec :~ DatatypeSpec).params, gen),
+                    emit_shrinker(name :~ Syntax, gen)]
+        let next_runtime:
+          for values(state :~ SurfaceContext = ready) (spec in specs):
+            surface_add_datatype(state, spec :~ DatatypeSpec)
+        values(runtime,
+               ['(~datatype $cur $nxt [$form, ...] [$at])'],
+               n + 1, next_runtime)
+    | #'function:
+        let encoded:
+          for List (d in decls):
+            let d = d :~ expand.Decl
+            let [measure] = d.parts
+            let (core, name) = function_encoding(
+                                 d.form, measure :~ maybe(Syntax))
+            [core, name, decode_function(core)]
+        // Every member's signature is registered before any member's body is
+        // rendered, so that a call to a sibling resolves while the family is
+        // still being emitted.  Rhombus module-level definitions are mutually
+        // visible, so the emitted `fun`s need no other arrangement.
+        let declared:
+          for values(state :~ SurfaceContext = force_surface_context(runtime_state)) (
+                entry in encoded):
+            let spec :~ CoreFunctionSpec = (entry :~ List)[2]
+            surface_add_function(state, spec,
+                                 declared_function_type(state, spec))
+        let (runtime, next_runtime):
+          for values(acc :~ List.of(Syntax) = [],
+                     state :~ SurfaceContext = declared) (entry in encoded):
+            let entry :~ List = entry
+            let spec :~ CoreFunctionSpec = entry[2]
+            let emitted = emit_function(spec, state, entry[1] :~ Syntax)
+            values(acc ++ [emitted.stx],
+                   surface_add_function(state, spec, emitted.ty))
+        let [core, ...] = encoded.map(fun (entry :: List): entry[0] :~ Syntax)
+        values(runtime,
+               ['(~function $cur $nxt [$core, ...] [$at])'],
+               n + 1, next_runtime)
+    | #'definition:
+        let [name, ...] = decls.map(
+                            fun (d :: expand.Decl): (d.parts :~ List)[0])
+        let [type_stx, ...] = decls.map(
+                                fun (d :: expand.Decl): (d.parts :~ List)[1])
+        let [core, ...]:
+          for List (d in decls):
+            let [g, ...] = ((d :~ expand.Decl).parts :~ List)[2] :~ List
+            parse_hol_encoding('$g; ...')
+        values([],
+               ['(~definition $cur $nxt [$name, ...] [$type_stx, ...] [$core, ...] [$at])'],
+               n + 1, runtime_state)
+    | #'inductive:
+        let [name, ...] = decls.map(
+                            fun (d :: expand.Decl): (d.parts :~ List)[0])
+        // One parenthesized group of argument types per predicate, so the
+        // family's heads stay separable after encoding.
+        let [signature, ...]:
+          for List (d in decls):
+            let [parameter_type, ...] = ((d :~ expand.Decl).parts :~ List)[1] :~ List
+            '($parameter_type, ...)'
+        // The family shares every rule: that is what makes the predicates
+        // mutually recursive, and it is why the rules are concatenated here
+        // rather than kept per member.
+        let rules:
+          for values(acc :~ List = []) (d in decls):
+            acc ++ (((d :~ expand.Decl).parts :~ List)[2] :~ List)
+        let [rule_name, ...] = rules.map(fun (r :: List): r[0] :~ Syntax)
+        let [rule_core, ...]:
+          for List (r in rules):
+            let [g, ...] = (r :~ List)[1] :~ List
+            parse_hol_encoding('$g; ...')
+        values([],
+               ['(~inductive $cur $nxt [$name, ...] [$signature, ...] [$rule_name, ...] [$rule_core, ...] [$at])'],
+               n + 1, runtime_state)
+    | ~else:
+        syntax_meta.error("internal unknown declaration family",
+                          (decls[0] :~ expand.Decl).form)
+
   // -- one declaration -------------------------------------------------------
 
   // Two outputs, because they go to two places: the runtime forms stay in the
@@ -1733,73 +1863,6 @@ meta:
           for values(state :~ SurfaceContext = runtime_state) (terms in (paths :~ List)):
             defer_surface_import(state, terms :~ List.of(Syntax))
         values([emit_plain_import(d.form)], chain, n2, next_runtime)
-    | #'datatype:
-        let [name, ctors] = d.parts
-        let at = head_term(d.form)
-        let form = d.form
-        let ready = force_surface_context(runtime_state)
-        let spec = type_parser.parse_datatype_decl(
-                     form, ready.surface.type_constructors)
-        let self = mk_tyapp(
-                     spec.name,
-                     spec.params.map(fun (parameter :: Symbol):
-                                       mk_tyvar(parameter)))
-        let cs :~ List = ctors
-        let gen = for List (ctor in cs, semantic_ctor in spec.ctors):
-                    let types = (semantic_ctor :~ Ctor).fields.map(
-                                  fun (field :: Field): field.ty)
-                    [(ctor :~ List)[0], types,
-                     for any (type in types): type == self]
-        values([emit_type(name, ctors :~ List),
-                emit_generator(name, spec.params, gen),
-                emit_shrinker(name, gen)],
-               ['(~datatype $cur $nxt [$form] [$at])'],
-               n + 1,
-               surface_add_datatype(ready, spec))
-    | #'function:
-        let [measure] = d.parts
-        let at = head_term(d.form)
-        let form = d.form
-        let (core, name) = function_encoding(
-                             form, measure :~ maybe(Syntax))
-        let spec = decode_function(core)
-        let ready_runtime = force_surface_context(runtime_state)
-        let emitted = emit_function(spec, ready_runtime, name)
-        let next_runtime = surface_add_function(
-                             ready_runtime, spec, emitted.ty)
-        values([emitted.stx],
-               ['(~function $cur $nxt [$core] [$at])'],
-               n + 1, next_runtime)
-    | #'definition:
-        let [name, type_stx, stmt] = d.parts
-        let at = head_term(d.form)
-        let gs :~ List = stmt
-        let [g, ...] = gs
-        let core = parse_hol_encoding('$g; ...')
-        values([],
-               ['(~definition $cur $nxt [$name] [$type_stx] [$core] [$at])'],
-               n + 1, runtime_state)
-    | #'inductive:
-        let [names, parameter_types, rules] = d.parts
-        let at = head_term(d.form)
-        let [name, ...] = names :~ List
-        // One parenthesized group of argument types per predicate, so a
-        // mutual declaration's heads stay separable after encoding.
-        let [signature, ...]:
-          (parameter_types :~ List).map(
-            fun (types :: List):
-              let [parameter_type, ...] = types
-              '($parameter_type, ...)')
-        let [rule_name, ...] = (rules :~ List).map(
-                                 fun (r :: List): r[0] :~ Syntax)
-        let [rule_core, ...]:
-          (rules :~ List).map(
-            fun (r :: List):
-              let [g, ...] = r[1] :~ List
-              parse_hol_encoding('$g; ...'))
-        values([],
-               ['(~inductive $cur $nxt [$name, ...] [$signature, ...] [$rule_name, ...] [$rule_core, ...] [$at])'],
-               n + 1, runtime_state)
     | #'theorem:
         let [name, stmt, tactic] = d.parts
         let at = head_term(d.form)
@@ -1854,12 +1917,22 @@ meta:
     unless rb.#{syntax-local-context}() == #'module
     | syntax_meta.error("allowed only in a module body", at)
 
-  fun emit_planned_declaration(d :: expand.Decl) :: Syntax:
+  // The kinds that are declared either singly or as a `.together:` family.
+  // A lone declaration of one of these is emitted as the one-member family,
+  // so there is exactly one encoding, one driver entry point, and one set of
+  // checks for both spellings.
+  def family_kinds :: List.of(Symbol) = [#'datatype, #'definition,
+                                         #'function, #'inductive]
+
+  fun emit_planned(kind :: Symbol, decls :: List.of(expand.Decl)) :: Syntax:
     let box = current_expansion_box()
     let state = box.value :~ ExpansionState
-    let (runtime, chain, next_index, surface) = emit_one(
-                                                   d, state.next_index,
-                                                   state.surface)
+    let (runtime, chain, next_index, surface):
+      cond
+      | family_kinds.contains(kind):
+          emit_group(kind, decls, state.next_index, state.surface)
+      | ~else:
+          emit_one(decls[0] :~ expand.Decl, state.next_index, state.surface)
     let steps_rev:
       for values(acc :~ List.of(Syntax) = state.steps_rev) (step in chain):
         List.cons(step :~ Syntax, acc)
@@ -1871,6 +1944,9 @@ meta:
        ...
      »'
 
+  fun emit_planned_declaration(d :: expand.Decl) :: Syntax:
+    emit_planned(d.kind, [d])
+
   fun declaration_expansion(forms :: List.of(Syntax)) :: Syntax:
     let (planned, rest) = expand.plan_next(forms)
     match planned
@@ -1881,6 +1957,17 @@ meta:
         | syntax_meta.error("internal unconsumed HOL declaration tail",
                             rest[0])
         emit_planned_declaration(d :~ expand.Decl)
+
+  // A `<kind>.together:` block: its members are planned as ordinary
+  // declarations and then emitted as one family.
+  fun group_expansion(kind :: Symbol, forms :: List.of(Syntax)) :: Syntax:
+    when forms.length() == 0
+    | syntax_meta.error(
+        "a `" ++ to_string(kind)
+          ++ ".together:` block needs at least one declaration",
+        Syntax.make_id(to_string(kind), id_ctx))
+    ensure_module_declaration(forms[0])
+    emit_planned(kind, expand.plan_group(forms, kind))
 
   fun quickcheck_expansion(name :: Syntax, opts :: List.of(Syntax),
                            core :: Syntax, at :: Syntax) :: Syntax:
@@ -1931,20 +2018,43 @@ meta:
 decl.macro 'hol_finalize':
   finish_expansion()
 
+// Each declaration kind that can be mutually recursive has the same two
+// spellings: one declaration on its own, or a `.together:` block whose
+// members are declared simultaneously.
 decl.macro 'datatype $term ...':
   ~all_stx use
   let head = macro_use_head(use)
   declaration_expansion(['$head $term ...'])
+
+namespace datatype:
+  export together
+  decl.macro 'together: $form; ...':
+    group_expansion(#'datatype, [form, ...])
 
 decl.macro 'inductive $term ...':
   ~all_stx use
   let head = macro_use_head(use)
   declaration_expansion(['$head $term ...'])
 
+namespace inductive:
+  export together
+  decl.macro 'together: $form; ...':
+    group_expansion(#'inductive, [form, ...])
+
 decl.macro 'definition $term ...':
   ~all_stx use
   let head = macro_use_head(use)
   declaration_expansion(['$head $term ...'])
+
+namespace definition:
+  export together
+  decl.macro 'together: $form; ...':
+    group_expansion(#'definition, [form, ...])
+
+namespace function:
+  export together
+  decl.macro 'together: $form; ...':
+    group_expansion(#'function, [form, ...])
 
 decl.macro 'overload $term ...':
   ~all_stx use

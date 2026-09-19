@@ -28,9 +28,11 @@ import:
   rhombus/hol/datatype/datatype_common open
   rhombus/hol/datatype/datatype_gen open
   rhombus/hol/datatype/datatype_rec open
+  rhombus/hol/datatype/family open
   rhombus/hol/datatype/infinity open
   rhombus/hol/datatype/algebra open
   rhombus/hol/recursion/recdef open
+  rhombus/hol/recursion/family open
   rhombus/hol/recursion/funcases open
   rhombus/hol/recursion/subterm open
   rhombus/hol/logic/ruledb open
@@ -54,11 +56,11 @@ export:
   hol_reraise
   HolState
   initial_state
-  add_datatype
-  add_definition
+  add_datatypes
+  add_definitions
   inductive_signature
   add_inductive
-  add_function
+  add_functions
   add_theorem
   add_overload_method_encoded
   adopt
@@ -320,6 +322,483 @@ fun initial_state() :: HolState:
 
 // -- datatype ----------------------------------------------------------------
 
+// A `datatype.together:` family, and every ordinary `datatype` declaration
+// as its one-member case.
+//
+// Members that do not mention each other are ordinary independent
+// declarations and are built one at a time. Members that do are mutually
+// recursive, and no member is a datatype on its own: the family is carved
+// out of one union type in `datatype/family.rhm`.
+fun add_datatypes(st :: HolState, forms :: List.of(Syntax),
+                  at :: Syntax) :: HolState:
+  let specs = try:
+                type_parser.parse_datatype_decls(forms, st.type_constructors)
+                ~catch e :: Exn.Fail: hol_reraise(e, at)
+  cond
+  | mutually_recursive_specs(specs):
+      add_datatype_family(st, specs, at)
+  | ~else:
+      for values(state :~ HolState = st) (form in forms):
+        add_datatype(state, form, at)
+
+// Does any member's constructor field mention another member?  That, and
+// nothing about how the declarations were spelled, is what makes a family
+// mutually recursive.
+fun mutually_recursive_specs(specs :: List.of(DatatypeSpec)) :: Boolean:
+  let names = specs.map(fun (spec :: DatatypeSpec): spec.name)
+  for any (spec in specs):
+    for any (ctor in (spec :~ DatatypeSpec).ctors):
+      for any (field in (ctor :~ Ctor).fields):
+        for any (name in names):
+          name != (spec :~ DatatypeSpec).name
+            && occurs_in_type(name :~ Symbol, (field :~ Field).ty)
+
+// The family is built as one union datatype with the members carved out of
+// it (`datatype/family.rhm`). The union is installed like any other
+// declaration -- it is one, and it is what gives the family a single
+// well-founded subterm order -- and each member then looks exactly like an
+// ordinary datatype to everything downstream. The family's joint induction
+// theorem is retained by name, as an `inductive` declaration's is, since no
+// single member's induction can state it.
+fun add_datatype_family(st :: HolState, specs :: List.of(DatatypeSpec),
+                        at :: Syntax) :: HolState:
+  let type_constructors:
+    for values(registry :~ TypeConstructorRegistry = st.type_constructors) (
+          spec in specs):
+      add_declared_type_constructor(registry, (spec :~ DatatypeSpec).name,
+                                    (spec :~ DatatypeSpec).params)
+  let (thy2, family0) = try:
+                          build_datatype_family(st.ctx.thy, specs,
+                                                infinity_base_ind())
+                          ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let family :~ DatatypeFamily = family0
+  for (spec in specs):
+    require_no_new_axioms(#'datatype, st.ctx.thy, thy2,
+                          (spec :~ DatatypeSpec).name, at)
+  let installed:
+    for values(state :~ HolState = st) (
+          spec in [family.union_spec] ++ specs,
+          thms in [family.union_thms] ++ family.members):
+      let spec :~ DatatypeSpec = spec
+      let thms :~ DatatypeThms = thms
+      let db2 = for values(d :~ RuleDB = state.ctx.db) (
+                      th in datatype_rules(thy2, thms)):
+                  add_thm(thy2, d, spec.name, th)
+      HolState(context_add_datatype(state.ctx, thy2, db2, spec.name, thms),
+               state.thms, state.operators, type_constructors,
+               state.wfrec_def)
+  // The equations that read a member's constructor through to the union are
+  // rewrite rules: a recursion over the family descends in the union's
+  // subterm order, and these are what connect the two.
+  let with_reps:
+    HolState(
+      context_with_rules(
+        installed.ctx,
+        add_thms(thy2, installed.ctx.db, family.union_spec.name,
+                 family.rep_equations)),
+      installed.thms, installed.operators, installed.type_constructors,
+      installed.wfrec_def)
+  let with_subterms:
+    for values(state :~ HolState = with_reps) (
+          spec in [family.union_spec] ++ specs):
+      add_subterm_relation(state, spec :~ DatatypeSpec, at)
+  let induct_name = suffixed(family.union_spec.name, "_induct")
+  when with_subterms.thms.has_key(induct_name)
+  | hol_error(#'datatype,
+              "a theorem of this name already exists: "
+                ++ to_string(induct_name), at)
+  require_closed_theorems(#'datatype, with_subterms.ctx.thy,
+                          family.union_spec.name, [family.induction], at)
+  HolState(with_subterms.ctx,
+           with_subterms.thms ++ {induct_name: family.induction},
+           with_subterms.operators, with_subterms.type_constructors,
+           with_subterms.wfrec_def)
+
+// A `function.together:` family: one combined function over a tagged
+// argument, and each member defined at its own tag (`recursion/family.rhm`).
+//
+// The tag datatypes are ordinary declarations, so the combined function is
+// an ordinary recursive `function` and is derived by the same well-founded
+// machinery -- there is no second recursion principle, and no member is
+// assumed. What the family adds is a descent order that spans it, since a
+// recursive call leaves the member that made it.
+fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
+                        at :: Syntax) :: HolState:
+  let names = cores.map(fun (core :: CoreFunctionSpec): core.name)
+  let signatures = cores.map(
+                     fun (core :: CoreFunctionSpec):
+                       family_member_signature(st, core, at))
+  let params = (signatures[0] :~ List)[0] :~ List.of(Symbol)
+  for (signature in signatures):
+    unless ((signature :~ List)[0] :~ List) == params
+    | hol_error(#'function,
+                "every member of a function family must use the same type "
+                  ++ "variables", at)
+  // Elaboration needs the siblings to be *names*: they are constants in a
+  // scratch theory, never in the user's. Nothing derived from it survives --
+  // the combined function's clauses mention the combined function, not the
+  // members, and the members are defined in the real theory below.
+  let scratch:
+    for values(t :~ Theory = st.ctx.thy) (name in names,
+                                          signature in signatures):
+      new_constant(t, name :~ Symbol, signature_type(signature :~ List))
+  let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
+                   m ++ {n: (thms :~ DatatypeThms).spec}
+  let specs:
+    for List (core in cores):
+      let spec :~ FunSpec = try:
+                              elab.elaborate_function_decl(
+                                scratch, core :~ CoreFunctionSpec,
+                                ~operators: st.operators,
+                                ~type_constructors: st.type_constructors,
+                                ~datatypes: dt_specs)
+                              ~catch e :: Exn.Fail: hol_reraise(e, at)
+      spec
+  for (spec in specs, name in names):
+    when const_type(st.ctx.thy, name :~ Symbol) != #false
+    | hol_error(#'function,
+                "constant is already declared: " ++ to_string(name), at)
+  // A measure justifies the definition it is attached to, so it cannot use
+  // it -- nor, in a family, any sibling: none of them is defined yet, and
+  // the obligation would mention a constant that does not exist.
+  for (spec in specs):
+    match (spec :~ FunSpec).measure
+    | #false: #void
+    | term:
+        for (other in specs, name in names):
+          when mentions(mk_const(name :~ Symbol,
+                                 fun_type(other :~ FunSpec)), term :~ Term)
+          | hol_error(#'function,
+                      "a measure cannot call a member of its own family: "
+                        ++ to_string(name), at)
+  // -- the tag datatypes ----------------------------------------------------
+  let dom = family_domain_spec(specs, params)
+  let cod = family_codomain_spec(specs, params)
+  let tag_specs = [dom] ++ (if cod | [cod :~ DatatypeSpec] | [])
+  let tagged:
+    for values(state :~ HolState = st) (spec in tag_specs):
+      let spec :~ DatatypeSpec = spec
+      let (thy2, thms) = try:
+                           build_nonrecursive_datatype_thms(state.ctx.thy,
+                                                            spec)
+                           ~catch e :: Exn.Fail: hol_reraise(e, at)
+      require_no_new_axioms(#'function, state.ctx.thy, thy2, spec.name, at)
+      let db2 = for values(d :~ RuleDB = state.ctx.db) (
+                      th in datatype_rules(thy2, thms)):
+                  add_thm(thy2, d, spec.name, th)
+      HolState(context_add_datatype(state.ctx, thy2, db2, spec.name, thms),
+               state.thms, state.operators, state.type_constructors,
+               state.wfrec_def)
+  // -- the combined function ------------------------------------------------
+  let members = family_members(specs, dom, cod)
+  let impl_name = family_impl_name(names)
+  let measure = family_measure(tagged, specs, members, dom, at)
+  let combined = combined_function_spec(impl_name, specs, members, dom, cod,
+                                        measure)
+  let tagged_dt_specs:
+    for values(m :~ Map = {}) ((n, thms) in tagged.ctx.dts):
+      m ++ {n: (thms :~ DatatypeThms).spec}
+  let (thy3, impl_info0) = define_from_spec(
+                             tagged, combined, tagged_dt_specs,
+                             prepare_measure(tagged, combined), at)
+  let impl_info :~ FunInfo = impl_info0
+  let impl = mk_const(impl_name, fun_type(combined))
+  let with_impl:
+    HolState(context_add_function(tagged.ctx, thy3, tagged.ctx.db, impl_name,
+                                  impl_info),
+             tagged.thms, tagged.operators, tagged.type_constructors,
+             tagged.wfrec_def)
+  // -- the members ----------------------------------------------------------
+  let (thy4, definitions):
+    for values(t :~ Theory = thy3, acc :~ List.of(Thm) = []) (
+          spec in specs, m in members):
+      let (t2, def_th) = try:
+                           new_basic_definition(
+                             t,
+                             mk_eq(mk_var((spec :~ FunSpec).name,
+                                          fun_type(spec :~ FunSpec)),
+                                   member_definition_term(
+                                     impl, m :~ FamilyMemberFn)))
+                           ~catch e :: Exn.Fail: hol_reraise(e, at)
+      values(t2, acc ++ [def_th])
+  require_no_new_axioms(#'function, thy3, thy4, impl_name, at)
+  let selector_theorems:
+    match cod
+    | #false: []
+    | cod_spec:
+        let thms :~ DatatypeThms = with_impl.ctx.dts[(cod_spec :~ DatatypeSpec).name]
+        thms.selectors
+  let equations :~ List.of(List.of(Thm)):
+    try:
+      derive_member_equations(
+        thy4, specs, members, definitions, impl,
+        selector_theorems, impl_info.equations)
+      ~catch e :: Exn.Fail: hol_reraise(e, at)
+  for values(state :~ HolState = with_impl) (
+        spec in specs, m in members, member_equations in equations):
+    let spec :~ FunSpec = spec
+    let eqs = member_equations :~ List.of(Thm)
+    require_closed_theorems(#'function, thy4, spec.name, eqs, at)
+    let db2 = add_thms(thy4, state.ctx.db, spec.name, eqs)
+    let info = FunInfo(spec, (m :~ FamilyMemberFn).fn, eqs,
+                       member_recursion(combined, spec))
+    HolState(context_add_function(state.ctx, thy4, db2, spec.name, info),
+             state.thms, state.operators, state.type_constructors,
+             state.wfrec_def)
+
+// A member's parameter and result types, as declared. A family's members are
+// elaborated against each other, so their types cannot be inferred from
+// their bodies the way a lone declaration's can.
+fun family_member_signature(st :: HolState, core :: CoreFunctionSpec,
+                            at :: Syntax) :: List:
+  let result_stx:
+    match core.result_type
+    | #false:
+        hol_error(#'function,
+                  "a member of a function family needs a declared result "
+                    ++ "type: " ++ to_string(core.name), at)
+    | stx: stx :~ Syntax
+  let parameter_stxs:
+    for List (binder in core.params):
+      match (binder :~ CoreBinder).type_stx
+      | #false:
+          hol_error(#'function,
+                    "a member of a function family needs a declared type "
+                      ++ "for every parameter: " ++ to_string(core.name), at)
+      | stx: stx :~ Syntax
+  let tyvars:
+    for values(acc :~ List.of(Symbol) = []) (
+          stx in parameter_stxs ++ [result_stx]):
+      for values(out :~ List.of(Symbol) = acc) (
+            name in type_parser.collect_type_vars(stx :~ Syntax)):
+        (if out.contains(name) | out | out ++ [name])
+  fun parse(stx :: Syntax) :: HType:
+    try:
+      type_parser.parse_type(stx, tyvars, st.type_constructors)
+      ~catch e :: Exn.Fail: hol_reraise(e, at)
+  [tyvars, parameter_stxs.map(parse), parse(result_stx)]
+
+fun signature_type(signature :: List) :: HType:
+  for values(ty :~ HType = signature[2] :~ HType) (
+        argument in (signature[1] :~ List).reverse()):
+    mk_fun(argument :~ HType, ty)
+
+// The members' own recursion record. Only the induction heuristic reads it,
+// to prefer a variable the definition actually descends on; the family's
+// descent itself is the combined function's, and is checked there.
+fun member_recursion(combined :: FunSpec, spec :: FunSpec) :: RecursionPlan:
+  match combined.measure
+  | #false: NoRecursion()
+  | _: MeasuredRecursion(measure_result_type(#'function, spec.name, 1,
+                                             combined.measure :~ Term),
+                         List.iota(spec.arg_types.length()), [], [])
+// The order the whole family descends in, as a measure over the tagged
+// argument.
+//
+// A recursive call in a family leaves the member that made it, so no single
+// member's argument column is an order for the family: the order has to be
+// stated once, over the tag. Either every member supplies a `~measure:` and
+// they are read as one function by cases, or the family descends
+// structurally and the column each member descends in is found the way the
+// single-function checker finds one -- through a datatype family's union
+// type when the members recurse over mutually recursive datatypes, which is
+// the order that relates their values.
+fun family_measure(st :: HolState, specs :: List.of(FunSpec),
+                   members :: List.of(FamilyMemberFn),
+                   dom :: DatatypeSpec, at :: Syntax) :: maybe(Term):
+  let supplied = for values(n = 0) (spec in specs):
+                   (if (spec :~ FunSpec).measure | n + 1 | n)
+  let d = domain_variable(dom)
+  cond
+  | supplied == specs.length():
+      measure_by_cases(
+        dom, d,
+        for List (spec in specs, i in List.iota(specs.length())):
+          measure_at((spec :~ FunSpec).measure :~ Term,
+                     domain_selectors(dom, i, d :~ Term)))
+  | supplied > 0:
+      hol_error(#'function,
+                "either every member of a function family supplies a "
+                  ++ "`proof: ~measure:` or none does", at)
+  | ~else: automatic_family_measure(st, specs, members, dom, d, at)
+
+fun domain_type(dom :: DatatypeSpec) :: HType:
+  mk_tyapp(dom.name, dom.params.map(fun (p :: Symbol): mk_tyvar(p)))
+
+fun domain_variable(dom :: DatatypeSpec) :: FVar:
+  mk_var(#'_family_argument, domain_type(dom))
+
+// Member `i`'s arguments, read back out of a tagged value.
+fun domain_selectors(dom :: DatatypeSpec, i :: Int,
+                     d :: Term) :: List.of(Term):
+  let c :~ Ctor = dom.ctors[i]
+  for List (f in c.fields):
+    mk_comb(mk_const(selector_name(c, f :~ Field),
+                     mk_fun(domain_type(dom), (f :~ Field).ty)),
+            d)
+
+// `\d. if is_tag_1(d) then m_1(d) else ... else m_n(d)`
+fun measure_by_cases(dom :: DatatypeSpec, d :: FVar,
+                     components :: List.of(Term)) :: Term:
+  let dty = domain_type(dom)
+  let body:
+    recur loop (i = components.length() - 2,
+                acc :~ Term = components[components.length() - 1]):
+      cond
+      | i < 0: acc
+      | ~else:
+          let c :~ Ctor = dom.ctors[i]
+          loop(i - 1,
+               mk_cond(mk_comb(mk_const(discriminator_name(c),
+                                        mk_fun(dty, bool)),
+                               d :~ Term),
+                       components[i], acc))
+  mk_abs(d, body)
+
+// The union type a member of a datatype family is represented in, when that
+// union is a recursive datatype with a subterm relation: the order a
+// recursion over the family descends in.
+fun family_union_type(st :: HolState, ty :: HType) :: maybe(HType):
+  match ty
+  | TyApp(n, _):
+      match const_type(st.ctx.thy,
+                       Symbol.from_string("rep_" ++ to_string(n)))
+      | #false: #false
+      | rty when is_fun(rty :~ HType):
+          let (domain, result) = dest_fun(rty :~ HType)
+          (if domain == ty && has_subterm_relation(st, result)
+           | result
+           | #false)
+      | ~else: #false
+  | ~else: #false
+
+// Every type whose values the order at `ty` relates: the type itself, and
+// every member of the datatype family represented in it.
+fun ordered_types(st :: HolState, ty :: HType) :: List.of(HType):
+  for values(acc :~ List.of(HType) = [ty]) ((n, thms) in st.ctx.dts):
+    let spec :~ DatatypeSpec = (thms :~ DatatypeThms).spec
+    let self = mk_tyapp(spec.name,
+                        spec.params.map(fun (p :: Symbol): mk_tyvar(p)))
+    (if family_union_type(st, self) == ty | acc ++ [self] | acc)
+
+// Every order a column could carry, as `[order type, measure term]`: the
+// column's own type when it has a subterm relation, and the union type when
+// the column is at a member of a datatype family. A column at a family
+// member has both, and which one the family descends in is not decided
+// here -- a recursion that stays inside one member type descends in that
+// type, and one that crosses the family descends in the union.
+fun column_options(st :: HolState, ty :: HType, t :: Term) :: List.of(List):
+  let own :~ List.of(List) = (if has_subterm_relation(st, ty)
+                              | [[ty, t]]
+                              | [])
+  match family_union_type(st, ty)
+  | #false: own
+  | union:
+      match ty
+      | TyApp(n, _):
+          own ++ [[union :~ HType,
+                   mk_comb(mk_const(
+                             Symbol.from_string("rep_" ++ to_string(n)),
+                             mk_fun(ty, union :~ HType)),
+                           t)]]
+      | ~else: own
+
+fun column_measure(st :: HolState, ty :: HType, t :: Term,
+                   order :: HType) :: maybe(Term):
+  recur loop (options :~ List.of(List) = column_options(st, ty, t)):
+    match options
+    | []: #false
+    | List.cons(option, rest):
+        (if ((option :~ List)[0] :~ HType) == order
+         | (option :~ List)[1] :~ Term
+         | loop(rest))
+
+fun automatic_family_measure(st :: HolState, specs :: List.of(FunSpec),
+                             members :: List.of(FamilyMemberFn),
+                             dom :: DatatypeSpec, d :: FVar,
+                             at :: Syntax) :: Term:
+  let sites = family_call_sites(members, specs)
+  // For each member, the columns that could carry the order, with the type
+  // the order lives in.
+  let candidates:
+    for List (spec in specs, i in List.iota(specs.length())):
+      for values(acc :~ List = []) (
+            ty in (spec :~ FunSpec).arg_types,
+            k in List.iota((spec :~ FunSpec).arg_types.length())):
+        for values(out :~ List = acc) (
+              option in column_options(st, ty :~ HType,
+                                       mk_var(#'_column, ty :~ HType))):
+          out ++ [[k, (option :~ List)[0] :~ HType]]
+  let order_types:
+    for values(acc :~ List.of(HType) = []) (entry in (candidates[0] :~ List)):
+      let ty = (entry :~ List)[1] :~ HType
+      (if acc.contains(ty) | acc | acc ++ [ty])
+  let chosen:
+    recur try_type (remaining :~ List.of(HType) = order_types):
+      match remaining
+      | []: #false
+      | List.cons(ty, rest):
+          match choose_columns(st, specs, sites, candidates, ty :~ HType):
+          | #false: try_type(rest)
+          | columns: [ty :~ HType, columns]
+  match chosen
+  | #false:
+      hol_error(#'function,
+                "cannot see that this family terminates: no argument column "
+                  ++ "of each member is a strict subterm of the "
+                  ++ "corresponding pattern at every call between them; add "
+                  ++ "an adjacent `proof:` block with `~measure: expression` "
+                  ++ "to every member if it terminates for another reason",
+                at)
+  | found:
+      let ty = (found :~ List)[0] :~ HType
+      let columns = (found :~ List)[1] :~ List
+      measure_by_cases(
+        dom, d,
+        for List (i in List.iota(specs.length())):
+          let k = columns[i] :~ Int
+          let argument = domain_selectors(dom, i, d :~ Term)[k]
+          (column_measure(st, ((specs[i] :~ FunSpec).arg_types[k]) :~ HType,
+                          argument :~ Term, ty) :~ Term))
+
+// One column per member, all at the order's own type, such that every call
+// between members descends. Backtracking, over as many columns as the
+// members have arguments: the members' arities are small, and a wrong first
+// choice would otherwise reject a family that does terminate.
+fun choose_columns(st :: HolState, specs :: List.of(FunSpec),
+                   sites :: List.of(List), candidates :: List,
+                   ty :: HType) :: maybe(List):
+  let types = ordered_types(st, ty)
+  recur extend (i = 0, picked :~ List = []):
+    cond
+    | i == specs.length():
+        (if for all (site in sites): site_descends(specs, types, picked,
+                                                   site :~ List)
+         | picked
+         | #false)
+    | ~else:
+        recur pick (options :~ List = (candidates[i] :~ List)):
+          match options
+          | []: #false
+          | List.cons(option, rest):
+              let option :~ List = option
+              cond
+              | (option[1] :~ HType) != ty: pick(rest)
+              | ~else:
+                  match extend(i + 1, picked ++ [option[0] :~ Int])
+                  | #false: pick(rest)
+                  | complete: complete
+
+fun site_descends(specs :: List.of(FunSpec), types :: List.of(HType),
+                  columns :: List, site :: List) :: Boolean:
+  let [caller, clause, callee, args] = site
+  let pats = ((specs[caller :~ Int] :~ FunSpec).clauses[clause :~ Int]
+                :~ DefClause).pats
+  family_descends_at(types, pats[columns[caller :~ Int] :~ Int] :~ Term,
+                     (args :~ List)[columns[callee :~ Int] :~ Int] :~ Term)
+
+
+
 fun add_datatype(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   let spec = type_parser.parse_datatype_decl(form, st.type_constructors)
   let type_constructors = add_declared_type_constructor(
@@ -389,6 +868,26 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
 
 // -- function ----------------------------------------------------------------
 
+// A `function.together:` family, and every ordinary `function` declaration
+// as its one-member case. Members that call each other are mutually
+// recursive and are derived as one tagged function in
+// `recursion/family.rhm`; members that do not are ordinary declarations.
+fun add_functions(st :: HolState, cores :: List.of(CoreFunctionSpec),
+                  at :: Syntax) :: HolState:
+  cond
+  | mutually_recursive_functions(cores):
+      add_function_family(st, cores, at)
+  | ~else:
+      for values(state :~ HolState = st) (core in cores):
+        add_function(state, core :~ CoreFunctionSpec, at)
+
+fun mutually_recursive_functions(cores :: List.of(CoreFunctionSpec))
+     :: Boolean:
+  let names = cores.map(fun (core :: CoreFunctionSpec): core.name)
+  for any (core in cores):
+    for any (called in core_called_names(core :~ CoreFunctionSpec)):
+      names.contains(called) && called != (core :~ CoreFunctionSpec).name
+
 // `function` never adds an axiom.  A definition it cannot derive is refused,
 // naming what about the recursion the deriver could not handle, so that
 // "this module compiled" and "this module assumed nothing new" are the same
@@ -434,21 +933,50 @@ fun definition_type_vars(type_stx :: Syntax, expr :: CoreExpr)
         name in elab.core_type_vars(expr)):
     (if out.contains(name) | out | out ++ [name])
 
-fun add_definition(st :: HolState, name :: Symbol, type_stx :: Syntax,
-                   expr :: CoreExpr, at :: Syntax) :: HolState:
-  let tyvars = definition_type_vars(type_stx, expr)
-  let ty = try:
-             type_parser.parse_type(type_stx, tyvars, st.type_constructors)
-             ~catch e :: Exn.Fail: hol_reraise(e, at)
+// Several `definition`s declared together are *simultaneous*: every body is
+// elaborated against the theory the family started in, so no member can
+// mention another. A `definition` cannot be recursive, and a family of them
+// cannot be either; the ordinary one-member case is this same path.
+fun add_definitions(st :: HolState, names :: List.of(Symbol),
+                    type_stxs :: List.of(Syntax),
+                    exprs :: List.of(CoreExpr), at :: Syntax) :: HolState:
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
-  let rhs = try:
-              elab.run_checked_elaboration(
-                elab.ElabEnv(st.ctx.thy, tyvars, {}, #'definition, #false,
-                             #false, st.operators, st.type_constructors,
-                             dt_specs),
-                expr, ty)
-              ~catch e :: Exn.Fail: hol_reraise(e, at)
+  // The family's own names are off limits in every member's body. They are
+  // not constants yet, so the elaborator would otherwise report an unknown
+  // one; what the author wrote is a recursion, and a `definition` has none.
+  let restricted:
+    for values(acc :~ Map = {}) (name in names):
+      acc ++ {name :~ Symbol:
+                elab.RefRestriction(
+                  (if names.length() == 1
+                   | "a `definition` cannot refer to the constant it "
+                       ++ "introduces"
+                   | "a `definition.together:` family is simultaneous: its "
+                       ++ "members cannot refer to each other"),
+                  #false)}
+  let elaborated:
+    for List (name in names, type_stx in type_stxs, expr in exprs):
+      let tyvars = definition_type_vars(type_stx :~ Syntax,
+                                        expr :~ CoreExpr)
+      let ty = try:
+                 type_parser.parse_type(type_stx :~ Syntax, tyvars,
+                                        st.type_constructors)
+                 ~catch e :: Exn.Fail: hol_reraise(e, at)
+      let rhs = try:
+                  elab.run_checked_elaboration(
+                    elab.ElabEnv(st.ctx.thy, tyvars, {}, #'definition, #false,
+                                 #false, st.operators, st.type_constructors,
+                                 dt_specs, restricted),
+                    expr :~ CoreExpr, ty)
+                  ~catch e :: Exn.Fail: hol_reraise(e, at)
+      [name, ty, rhs]
+  for values(state :~ HolState = st) (entry in elaborated):
+    let [name, ty, rhs] = entry :~ List
+    install_definition(state, name :~ Symbol, ty :~ HType, rhs :~ Term, at)
+
+fun install_definition(st :: HolState, name :: Symbol, ty :: HType,
+                       rhs :: Term, at :: Syntax) :: HolState:
   let (thy2, def_th) = try:
                          new_basic_definition(
                            st.ctx.thy, mk_eq(mk_var(name, ty), rhs))

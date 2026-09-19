@@ -23,6 +23,7 @@
     "inductive_unapplied_bad.rhm"
     "mutual_datatype_empty_bad.rhm"
     "mutual_function_nonterminating_bad.rhm"
+    "mutual_measure_types_bad.rhm"
     "definition_together_bad.rhm"
     "select_in_function_bad.rhm"
     "extensionality_non_function_bad.rhm"

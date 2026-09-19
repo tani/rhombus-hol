@@ -592,6 +592,7 @@ fun member_recursion(combined :: FunSpec, spec :: FunSpec) :: RecursionPlan:
   | _: MeasuredRecursion(measure_result_type(#'function, spec.name, 1,
                                              combined.measure :~ Term),
                          List.iota(spec.arg_types.length()), [], [])
+
 // The order the whole family descends in, as a measure over the tagged
 // argument.
 //
@@ -611,11 +612,29 @@ fun family_measure(st :: HolState, specs :: List.of(FunSpec),
   let d = domain_variable(dom)
   cond
   | supplied == specs.length():
-      measure_by_cases(
-        dom, d,
+      let components:
         for List (spec in specs, i in List.iota(specs.length())):
           measure_at((spec :~ FunSpec).measure :~ Term,
-                     domain_selectors(dom, i, d :~ Term)))
+                     domain_selectors(dom, i, d :~ Term))
+      // The members' measures are read as one measure over the tag, so they
+      // have to compare in one order: a family whose members measure into
+      // different types has no order at all, and saying so here is what
+      // keeps the failure from surfacing as a term-construction mismatch.
+      let landing = type_of(components[0] :~ Term)
+      for (spec in specs, component in components):
+        unless type_of(component :~ Term) == landing
+        | hol_error(#'function,
+                    "every member of a function family must measure into "
+                      ++ "the same type: "
+                      ++ to_string((spec :~ FunSpec).name) ++ " measures into "
+                      ++ type_to_surface_string(
+                           st.type_constructors,
+                           type_of(component :~ Term))
+                      ++ ", not "
+                      ++ type_to_surface_string(st.type_constructors,
+                                                landing),
+                    at)
+      measure_by_cases(dom, d, components)
   | supplied > 0:
       hol_error(#'function,
                 "either every member of a function family supplies a "

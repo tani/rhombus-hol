@@ -17,9 +17,10 @@ export:
   parse_datatype_decl
   parse_datatype_decls
   datatype_decl_shape
+  syntax_error
 
-fun syntax_error(message :: String, at :: Syntax):
-  error(~who: #'datatype, message, error.val(~label: "in", to_string(at)))
+fun syntax_error(who :: Symbol, message :: String, at :: Syntax):
+  error(~who: who, message, error.val(~label: "in", to_string(at)))
 
 fun split_arrow(stx :: Syntax) :: maybe(List.of(Syntax)):
   recur loop (before :~ List.of(Syntax) = [],
@@ -30,7 +31,7 @@ fun split_arrow(stx :: Syntax) :: maybe(List.of(Syntax)):
         match term
         | '->':
             when before.length() == 0 || rest.length() == 0
-            | syntax_error("a function arrow needs a type on both sides", stx)
+            | syntax_error(#'datatype, "a function arrow needs a type on both sides", stx)
             [Syntax.make_group(before), Syntax.make_group(rest)]
         | ~else: loop(before ++ [term], rest)
 
@@ -46,13 +47,14 @@ fun resolve_bare_type(registry :: TypeConstructorRegistry,
       match lookup_type_constructor_namespace(registry, name)
       | constructor :: TypeConstructor:
           syntax_error(
+            #'datatype,
             "`" ++ to_string(name) ++ "` is a type constructor of arity "
               ++ to_string(constructor.arity)
               ++ "; use `" ++ to_string(constructor.surface_name)
               ++ "(...)` to construct a HOL type",
             at)
       | #false:
-          syntax_error("unknown type constructor `" ++ to_string(name) ++ "`",
+          syntax_error(#'datatype, "unknown type constructor `" ++ to_string(name) ++ "`",
                        at)
 
 fun parse_atomic_type(stx :: Syntax, params :: List.of(Symbol),
@@ -61,7 +63,7 @@ fun parse_atomic_type(stx :: Syntax, params :: List.of(Symbol),
   | '? $(id :: Identifier)':
       let name = Syntax.unwrap(id)
       unless params.contains(name)
-      | syntax_error("unbound type variable", stx)
+      | syntax_error(#'datatype, "unbound type variable", stx)
       mk_tyvar(name)
   | '($inner ...)':
       parse_type('$inner ...', params, registry)
@@ -69,7 +71,7 @@ fun parse_atomic_type(stx :: Syntax, params :: List.of(Symbol),
       let surface_name = qualified_name(Syntax.unwrap(base))
       match lookup_type_constructor(registry, surface_name)
       | #false:
-          syntax_error("unknown type constructor `"
+          syntax_error(#'datatype, "unknown type constructor `"
                          ++ to_string(surface_name) ++ "`",
                        stx)
       | constructor:
@@ -78,10 +80,12 @@ fun parse_atomic_type(stx :: Syntax, params :: List.of(Symbol),
             [parse_type(arg, params, registry), ...], stx)
   | 'Function($domain, $range)':
       syntax_error(
+        #'datatype,
         "function types use `->`; write `A -> B` instead of `Function(A, B)`",
         stx)
   | '$(name :: Identifier)($arg, ...)':
       syntax_error(
+        #'datatype,
         "parameterized HOL types use `.of`; write `"
           ++ to_string(Syntax.unwrap(name)) ++ ".of(...)` instead of `"
           ++ to_string(Syntax.unwrap(name)) ++ "(...)`",
@@ -89,7 +93,7 @@ fun parse_atomic_type(stx :: Syntax, params :: List.of(Symbol),
   | '$(name :: Identifier)':
       resolve_bare_type(registry, Syntax.unwrap(name), stx)
   | ~else:
-      syntax_error("not a type", stx)
+      syntax_error(#'datatype, "not a type", stx)
 
 fun parse_type(stx :: Syntax, params :: List.of(Symbol),
                registry :: TypeConstructorRegistry) :: HType:
@@ -128,7 +132,7 @@ fun parse_param(stx :: Syntax) :: Symbol:
   match stx
   | '? $(id :: Identifier)': Syntax.unwrap(id)
   | ~else:
-      syntax_error("a type parameter is written `?a`, not a plain name", stx)
+      syntax_error(#'datatype, "a type parameter is written `?a`, not a plain name", stx)
 
 fun parse_ctor(stx :: Syntax, params :: List.of(Symbol),
                registry :: TypeConstructorRegistry) :: Ctor:
@@ -137,7 +141,7 @@ fun parse_ctor(stx :: Syntax, params :: List.of(Symbol),
       Ctor(Syntax.unwrap(name),
            [parse_field(field, params, registry), ...])
   | '$(name :: Identifier)': Ctor(Syntax.unwrap(name), [])
-  | ~else: syntax_error("malformed constructor", stx)
+  | ~else: syntax_error(#'datatype, "malformed constructor", stx)
 
 fun parse_field(stx :: Syntax, params :: List.of(Symbol),
                 registry :: TypeConstructorRegistry) :: Field:
@@ -145,7 +149,7 @@ fun parse_field(stx :: Syntax, params :: List.of(Symbol),
   | '$(name :: Identifier) :: $type ...':
       Field(Syntax.unwrap(name), parse_type('$type ...', params, registry))
   | ~else:
-      syntax_error("a constructor field needs a name and a type", stx)
+      syntax_error(#'datatype, "a constructor field needs a name and a type", stx)
 
 // The head of a datatype declaration: its name, its type parameters, and its
 // constructor groups, without resolving any field type.  A family declared
@@ -158,12 +162,13 @@ fun datatype_decl_head(stx :: Syntax) :: List:
      | ...':
       let params = [parse_param(param), ...]
       when params.length() == 0
-      | syntax_error("a nullary datatype declaration omits `.of`", stx)
+      | syntax_error(#'datatype, "a nullary datatype declaration omits `.of`", stx)
       [name, params, [constructor, ...]]
   | 'datatype $(name :: Identifier)($param, ...)
      | $_
      | ...':
       syntax_error(
+        #'datatype,
         "parameterized datatype declarations use `.of`; write `datatype "
           ++ to_string(Syntax.unwrap(name)) ++ ".of(...)`",
         stx)
@@ -171,7 +176,7 @@ fun datatype_decl_head(stx :: Syntax) :: List:
      | $constructor
      | ...':
       [name, [], [constructor, ...]]
-  | ~else: syntax_error("malformed datatype declaration", stx)
+  | ~else: syntax_error(#'datatype, "malformed datatype declaration", stx)
 
 // Every member of a datatype family, parsed against a registry that already
 // knows all of their names: that is what lets one member's constructor field
@@ -203,11 +208,11 @@ fun datatype_decl_shape(stx :: Syntax) :: List:
     | '$(name :: Identifier)($field, ...)':
         [name, [field_name(field), ...]]
     | '$(name :: Identifier)': [name, []]
-    | ~else: syntax_error("malformed constructor", constructor)
+    | ~else: syntax_error(#'datatype, "malformed constructor", constructor)
   fun field_name(field :: Syntax) :: Syntax:
     match field
     | '$(name :: Identifier) :: $_ ...': name
-    | ~else: syntax_error("malformed constructor field", field)
+    | ~else: syntax_error(#'datatype, "malformed constructor field", field)
   match stx
   | 'datatype $(name :: Identifier).of($_, ...)
      | $constructor
@@ -217,6 +222,7 @@ fun datatype_decl_shape(stx :: Syntax) :: List:
      | $_
      | ...':
       syntax_error(
+        #'datatype,
         "parameterized datatype declarations use `.of`; write `datatype "
           ++ to_string(Syntax.unwrap(name)) ++ ".of(...)`",
         stx)
@@ -224,4 +230,4 @@ fun datatype_decl_shape(stx :: Syntax) :: List:
      | $constructor
      | ...':
       [name, [constructor_shape(constructor), ...]]
-  | ~else: syntax_error("malformed datatype declaration", stx)
+  | ~else: syntax_error(#'datatype, "malformed datatype declaration", stx)

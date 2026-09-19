@@ -19,6 +19,9 @@
 // The tree is built first and run second. A failed proof pays no kernel cost
 // for successful branches; execution diagnostics are attached to `Residue`
 // values instead of becoming logical inputs to proof algorithms.
+//
+// `execute` is the sequential interpreter of the tree; `proof/executor` is
+// how a different execution strategy gets substituted for it.
 
 import:
   rhombus/hol/term open
@@ -34,6 +37,9 @@ export:
   Derived
   Open
   mk_goal
+  execute
+  closed
+  collect_residues
 class Goal(asms :: List.of(Term),
            concl :: Term)
 
@@ -60,3 +66,35 @@ class.together:
     extends ProofNode
   class Open(residue :: Residue):
     extends ProofNode
+
+// `#false` when any leaf remains open. Children are visited left-to-right and
+// `Step.justify` receives proofs in the corresponding subgoal order.
+fun execute(node :: ProofNode) :: maybe(Thm):
+  match node
+  | Proved(theorem): theorem
+  | Open(_): #false
+  | Derived(step, children):
+      recur loop (remaining :~ List = children, proofs_rev :~ List = []):
+        match remaining
+        | []: step.justify(proofs_rev.reverse())
+        | List.cons(child, rest):
+            match execute(child :~ ProofNode)
+            | #false: #false
+            | theorem: loop(rest, List.cons(theorem, proofs_rev))
+
+fun closed(node :: ProofNode) :: Boolean:
+  match node
+  | Proved(_): #true
+  | Open(_): #false
+  | Derived(_, children): for all (child in children): closed(child)
+
+fun collect_residues(node :: ProofNode) :: List.of(Residue):
+  fun collect(current :: ProofNode, acc :: List.of(Residue))
+      :: List.of(Residue):
+    match current
+    | Proved(_): acc
+    | Open(residue): List.cons(residue, acc)
+    | Derived(_, children):
+        for values(result :~ List.of(Residue) = acc) (child in children.reverse()):
+          collect(child :~ ProofNode, result)
+  collect(node, [])

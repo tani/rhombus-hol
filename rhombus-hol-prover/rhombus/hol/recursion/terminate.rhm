@@ -86,15 +86,18 @@ class.together:
 class Measure(term :: Term,
               discharge :: Function.of_arity(1))
 
-// `arg` is a subterm of `pat` reached through zero or more of `pat`'s own
-// *recursive* fields -- fields whose type is exactly `pat`'s own type, the
-// chain `T_lt`'s defining equations actually connect (`subterm.rhm`):
-// `T_lt(v, C(...)) <=> v === xi or T_lt(v, xi) or ...` over the recursive
-// fields `xi` only.  One step (`arg` is literally one of `pat`'s own
-// recursive fields) is the base case; a nested pattern's variable, several
-// destructurings deep, is still connected by the same chain one field at a
-// time, so the check recurses into each recursive field in turn.
-fun descends_at(pat :: Term, arg :: Term) :: Boolean:
+// `arg` is a subterm of `pat` reached through zero or more fields whose type
+// the descent covers.  For a single datatype the covered type is exactly
+// `pat`'s own type -- the chain `T_lt`'s defining equations actually
+// connect (`subterm.rhm`): `T_lt(v, C(...)) <=> v === xi or T_lt(v, xi) or
+// ...` over the recursive fields `xi` only; for a datatype family a step
+// may instead land in a sibling type of the family.  One step (`arg` is
+// literally one of those fields) is the base case; a nested pattern's
+// variable, several destructurings deep, is still connected by the same
+// chain one field at a time, so the check recurses into each covered field
+// in turn.
+fun descends_at(types :: List.of(HType), pat :: Term, arg :: Term)
+     :: Boolean:
   match pat
   | FVar(_, _): #false
   | ~else:
@@ -102,7 +105,8 @@ fun descends_at(pat :: Term, arg :: Term) :: Boolean:
       match head
       | Const(_, _):
           for any (f in fields):
-            type_of(f) == type_of(pat) && (f == arg || descends_at(f, arg))
+            types.contains(type_of(f :~ Term))
+              && ((f :~ Term) == arg || descends_at(types, f :~ Term, arg))
       | ~else: #false
 
 // Collect recursive calls from the prepared clause triples. This module does
@@ -202,7 +206,9 @@ fun termination_order(arity :: Int, all_sites :: List) :: maybe(List.of(Int)):
             let col :~ Int = col
             let rest = pending.filter(
               ~keep: fun ([_, pats, _, args]):
-                       !descends_at((pats :~ List)[col], (args :~ List)[col]))
+                       let p = (pats :~ List)[col] :~ Term
+                       let a = (args :~ List)[col] :~ Term
+                       !descends_at([type_of(p)], p, a))
             loop(rest, used ++ [col], order ++ [col])
 
 fun next_column(arity :: Int, pending :: List, used :: List.of(Int)) :: maybe(Int):
@@ -212,11 +218,13 @@ fun next_column(arity :: Int, pending :: List, used :: List.of(Int)) :: maybe(In
     | used.contains(i): loop(i + 1)
     | ~else:
         let ok = for all ([_, pats, _, args] in pending):
-                   let p = (pats :~ List)[i]
-                   let a = (args :~ List)[i]
-                   descends_at(p, a) || a == p
+                   let p = (pats :~ List)[i] :~ Term
+                   let a = (args :~ List)[i] :~ Term
+                   descends_at([type_of(p)], p, a) || a == p
         let any_shrinks = for any ([_, pats, _, args] in pending):
-                            descends_at((pats :~ List)[i], (args :~ List)[i])
+                            let p = (pats :~ List)[i] :~ Term
+                            let a = (args :~ List)[i] :~ Term
+                            descends_at([type_of(p)], p, a)
         (if ok && any_shrinks | i | loop(i + 1))
 
 // Columns that shrink at every site are useful induction hints even when the
@@ -229,7 +237,9 @@ fun induction_positions(arity :: Int, all_sites :: List,
     | order.contains(i): acc
     | ~else:
         let all_descend = for all ([_, pats, _, args] in all_sites):
-                            descends_at((pats :~ List)[i], (args :~ List)[i])
+                            let p = (pats :~ List)[i] :~ Term
+                            let a = (args :~ List)[i] :~ Term
+                            descends_at([type_of(p)], p, a)
         (if all_descend | acc ++ [i] | acc)
 
 // -- the measure -------------------------------------------------------------

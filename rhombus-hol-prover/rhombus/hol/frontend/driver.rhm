@@ -57,7 +57,7 @@ export:
   HolState
   initial_state
   add_datatypes
-  add_definitions
+  add_definition
   inductive_signature
   add_inductive
   add_functions
@@ -952,47 +952,32 @@ fun definition_type_vars(type_stx :: Syntax, expr :: CoreExpr)
         name in elab.core_type_vars(expr)):
     (if out.contains(name) | out | out ++ [name])
 
-// Several `definition`s declared together are *simultaneous*: every body is
-// elaborated against the theory the family started in, so no member can
-// mention another. A `definition` cannot be recursive, and a family of them
-// cannot be either; the ordinary one-member case is this same path.
-fun add_definitions(st :: HolState, names :: List.of(Symbol),
-                    type_stxs :: List.of(Syntax),
-                    exprs :: List.of(CoreExpr), at :: Syntax) :: HolState:
+// A `definition` is never recursive, so its own name is refused in its
+// body. The name is not a constant yet, so without the restriction the
+// elaborator would report an unknown one; what the author wrote is a
+// recursion, and a `definition` has none.
+fun add_definition(st :: HolState, name :: Symbol, type_stx :: Syntax,
+                   expr :: CoreExpr, at :: Syntax) :: HolState:
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
-  // The family's own names are off limits in every member's body. They are
-  // not constants yet, so the elaborator would otherwise report an unknown
-  // one; what the author wrote is a recursion, and a `definition` has none.
   let restricted:
-    for values(acc :~ Map = {}) (name in names):
-      acc ++ {name :~ Symbol:
-                elab.RefRestriction(
-                  (if names.length() == 1
-                   | "a `definition` cannot refer to the constant it "
-                       ++ "introduces"
-                   | "a `definition.together:` family is simultaneous: its "
-                       ++ "members cannot refer to each other"),
-                  #false)}
-  let elaborated:
-    for List (name in names, type_stx in type_stxs, expr in exprs):
-      let tyvars = definition_type_vars(type_stx :~ Syntax,
-                                        expr :~ CoreExpr)
-      let ty = try:
-                 type_parser.parse_type(type_stx :~ Syntax, tyvars,
-                                        st.type_constructors)
-                 ~catch e :: Exn.Fail: hol_reraise(e, at)
-      let rhs = try:
-                  elab.run_checked_elaboration(
-                    elab.ElabEnv(st.ctx.thy, tyvars, {}, #'definition, #false,
-                                 #false, st.operators, st.type_constructors,
-                                 dt_specs, restricted),
-                    expr :~ CoreExpr, ty)
-                  ~catch e :: Exn.Fail: hol_reraise(e, at)
-      [name, ty, rhs]
-  for values(state :~ HolState = st) (entry in elaborated):
-    let [name, ty, rhs] = entry :~ List
-    install_definition(state, name :~ Symbol, ty :~ HType, rhs :~ Term, at)
+    {name :~ Symbol:
+       elab.RefRestriction(
+         "a `definition` cannot refer to the constant it introduces",
+         #false)}
+  let tyvars = definition_type_vars(type_stx, expr)
+  let ty = try:
+             type_parser.parse_type(type_stx, tyvars,
+                                    st.type_constructors)
+             ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let rhs = try:
+              elab.run_checked_elaboration(
+                elab.ElabEnv(st.ctx.thy, tyvars, {}, #'definition, #false,
+                             #false, st.operators, st.type_constructors,
+                             dt_specs, restricted),
+                expr, ty)
+              ~catch e :: Exn.Fail: hol_reraise(e, at)
+  install_definition(st, name, ty, rhs, at)
 
 fun install_definition(st :: HolState, name :: Symbol, ty :: HType,
                        rhs :: Term, at :: Syntax) :: HolState:

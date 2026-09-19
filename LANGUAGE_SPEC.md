@@ -330,20 +330,6 @@ Thus `definition` has no termination check: it cannot introduce recursion. It
 is the appropriate form for specification-level or choice-based HOL constants.
 Use `function` when an executable meaning is required.
 
-#### Simultaneous definitions
-
-```rhombus
-definition.together:
-  definition zero_set :: Nat -> Boolean: function (n :: Nat): n == zero()
-  definition all_set :: Nat -> Boolean: function (n :: Nat): true
-```
-
-A `definition.together:` block declares several constants simultaneously.
-Every body is elaborated in the theory the block started in, so no member can
-mention another: a `definition` cannot be recursive, and neither can a family
-of them. The form exists so that every declaration that groups also groups the
-same way; a single `definition` is its one-member case.
-
 ### 4.4 `inductive`
 
 ```rhombus

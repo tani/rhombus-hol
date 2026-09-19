@@ -1646,15 +1646,14 @@ meta:
                            _hol_driver.hol_reraise(e, '$at')
            _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
                                    statement, proof, '$at')']
-    | '(~definition $cur $nxt [$name, ...] [$type, ...] [$core, ...] [$at])':
+    | '(~definition $cur $nxt [$name] [$type] [$core] [$at])':
         ['def $nxt:
-           let expressions = try:
-                               [_hol_surface.decode_expr('$core', #'definition), ...]
-                               ~catch e :: Exn.Fail:
-                                 _hol_driver.hol_reraise(e, '$at')
-           _hol_driver.add_definitions(
-             $cur, [Syntax.unwrap('$name'), ...], ['$type', ...],
-             expressions, '$at')']
+           let expression = try:
+                            _hol_surface.decode_expr('$core', #'definition)
+                            ~catch e :: Exn.Fail:
+                              _hol_driver.hol_reraise(e, '$at')
+           _hol_driver.add_definition($cur, Syntax.unwrap('$name'),
+                                      '$type', expression, '$at')']
     | '(~inductive $cur $nxt [$name, ...] [$signature, ...] [$rule_name, ...] [$rule_core, ...] [$at])':
         ['def $nxt:
            let rules = try:
@@ -1699,11 +1698,11 @@ meta:
 
   // -- a declaration family --------------------------------------------------
   //
-  // `datatype`, `definition`, `function` and `inductive` are declared either
-  // singly or as a `<kind>.together:` family whose members are elaborated
-  // simultaneously.  One path serves both, because a lone declaration is the
-  // one-member family: there is no separate single-declaration encoding to
-  // keep in step, and the ordinary declarations exercise the family path.
+  // `datatype`, `function` and `inductive` are declared either singly or as
+  // a `<kind>.together:` family whose members are elaborated simultaneously.
+  // One path serves both, because a lone declaration is the one-member
+  // family: there is no separate single-declaration encoding to keep in
+  // step, and the ordinary declarations exercise the family path.
   //
   // The whole family travels to the driver as one chain step.  It has to: a
   // member of a mutually recursive family is not a declaration on its own,
@@ -1787,18 +1786,6 @@ meta:
         values(runtime,
                ['(~function $cur $nxt [$core, ...] [$at])'],
                n + 1, next_runtime)
-    | #'definition:
-        let [name, ...] = decls.map(
-                            fun (d :: expand.Decl): (d.parts :~ List)[0])
-        let [type_stx, ...] = decls.map(
-                                fun (d :: expand.Decl): (d.parts :~ List)[1])
-        let [core, ...]:
-          for List (d in decls):
-            let [g, ...] = ((d :~ expand.Decl).parts :~ List)[2] :~ List
-            parse_hol_encoding('$g; ...')
-        values([],
-               ['(~definition $cur $nxt [$name, ...] [$type_stx, ...] [$core, ...] [$at])'],
-               n + 1, runtime_state)
     | #'inductive:
         let [name, ...] = decls.map(
                             fun (d :: expand.Decl): (d.parts :~ List)[0])
@@ -1861,6 +1848,14 @@ meta:
         values([],
                ['(~theorem $cur $nxt [$name] [$core] [$tactic_core] [$at])'],
                n + 1, runtime_state)
+    | #'definition:
+        let [name, type_stx, body_groups] = d.parts
+        let at = head_term(d.form)
+        let [g, ...] = (body_groups :~ List)
+        let core = parse_hol_encoding('$g; ...')
+        values([],
+               ['(~definition $cur $nxt [$name] [$type_stx] [$core] [$at])'],
+               n + 1, runtime_state)
     | #'overload_method:
         let [function_name, argument_names, argument_types,
              result_type, constant, template_arguments] = d.parts
@@ -1909,8 +1904,8 @@ meta:
   // A lone declaration of one of these is emitted as the one-member family,
   // so there is exactly one encoding, one driver entry point, and one set of
   // checks for both spellings.
-  def family_kinds :: List.of(Symbol) = [#'datatype, #'definition,
-                                         #'function, #'inductive]
+  def family_kinds :: List.of(Symbol) = [#'datatype, #'function,
+                                         #'inductive]
 
   fun emit_planned(kind :: Symbol, decls :: List.of(expand.Decl)) :: Syntax:
     let box = current_expansion_box()
@@ -2033,11 +2028,6 @@ decl.macro 'definition $term ...':
   ~all_stx use
   let head = macro_use_head(use)
   declaration_expansion(['$head $term ...'])
-
-namespace definition:
-  export together
-  decl.macro 'together: $form; ...':
-    group_expansion(#'definition, [form, ...])
 
 namespace function:
   export together

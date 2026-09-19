@@ -227,22 +227,6 @@ noncomputable HOL terms such as @rhombus(select, ~datum). Use
 executable reading, supports pattern clauses and recursion, and therefore
 accepts only the executable expression subset.
 
-@subsection{Simultaneous definitions}
-
-@verbatim{
-definition.together:
-  definition Id :: Type:
-    expr
-  definition Id :: Type:
-    expr
-}
-
-A @tt{definition.together:} block declares several constants at once. Every
-body is checked in the theory the block started in, so a member cannot mention
-another: a @rhombus(definition, ~datum) cannot be recursive, and neither can a
-family of them. The form exists so that every declaration that can be grouped
-is grouped the same way.
-
 @subsection(~tag: "local-function"){Local and anonymous @rhombus(function, ~datum)}
 
 @verbatim{

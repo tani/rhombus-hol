@@ -24,7 +24,7 @@
     "mutual_datatype_empty_bad.rhm"
     "mutual_function_nonterminating_bad.rhm"
     "mutual_measure_types_bad.rhm"
-    "definition_together_bad.rhm"
+    "definition_self_bad.rhm"
     "select_in_function_bad.rhm"
     "extensionality_non_function_bad.rhm"
     "deep_recursive_call_bad.rhm"

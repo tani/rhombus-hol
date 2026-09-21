@@ -54,14 +54,21 @@
 //
 // `fallback` is not the seam for every rejection, though: when
 // `check_expr` already knows definitively that an expression is
-// invalid -- a numeral with no admissible type, a `Pair`/list/set
-// expression whose expected type has the wrong shape entirely, a set
-// literal with a function-typed element -- reporting that through
-// `fallback` would mean `fallback` needing the *exact* original
-// implementation of a shape `check_expr` otherwise fully owns, not
-// just the shapes it hasn't migrated yet. Those cases call the
-// separate `~error` capability directly instead, with the exact
-// original diagnostic message.
+// invalid with a simple, fixed-string diagnostic -- a numeral with no
+// expected type at all, or a still-open expected type with no
+// ambient numeric context; a `Pair`/list/set expression whose
+// expected type has the wrong shape entirely; a set literal with a
+// function-typed element -- reporting that through `fallback` would
+// mean `fallback` needing the *exact* original implementation of a
+// shape `check_expr` otherwise fully owns, not just the shapes it
+// hasn't migrated yet. Those cases call the separate `~error`
+// capability directly instead, with the exact original diagnostic
+// message. A numeral's *third* invalid case -- a concrete but
+// inadmissible expected type, such as `Boolean` -- is the one
+// exception: its diagnostic names the offending type, which needs
+// `type_to_surface_string`/the type constructor registry to format, a
+// capability this Theory-free pass does not have; that one case
+// stays on `fallback`.
 
 import:
   rhombus/hol/htype open
@@ -290,25 +297,33 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
               CheckedConstant(name, resolve(fresh), at)
   | CoreNumeral(value, at):
       // Mirrors `runtime_numeral`'s admissibility cond exactly: a
-      // numeral has a representation only at these three types.
-      // Anything else -- including a still-open metavariable, which
-      // needs an ambient numeric context this call cannot supply --
-      // reports the exact original diagnostic directly rather than
-      // deferring to `fallback`: check_expr already knows definitively
-      // that this is wrong, not merely a shape it cannot itself
-      // classify, so there is nothing for a fuller pipeline to add.
+      // numeral has a representation only at these three types. No
+      // expected type at all, and a still-open metavariable (which
+      // needs an ambient numeric context this call cannot supply),
+      // both report their exact original fixed-string diagnostic
+      // directly -- check_expr already knows definitively that both
+      // are wrong, not merely a shape it cannot itself classify. A
+      // concrete but inadmissible type (anything else -- `Boolean`,
+      // say) defers to `fallback` instead: `runtime_numeral`'s own
+      // diagnostic for that case names the offending type, which
+      // needs `type_to_surface_string`/the type constructor registry
+      // to format -- a capability this Theory-free pass does not have
+      // and should not gain just for one message's sake.
       match expected
       | #false:
           error("a numeral needs an expected numeric type", at)
       | wanted:
           let resolved = resolve(wanted :~ HType)
-          (if resolved == mk_tyapp(#'Nat, [])
-                || resolved == mk_tyapp(#'Integer, [])
-                || resolved == mk_tyapp(#'Rational, [])
-           | CheckedNumeral(value, resolved, at)
-           | error(
-               "a numeral needs a type ascription or an unambiguous numeric context",
-               at))
+          cond
+          | resolved == mk_tyapp(#'Nat, [])
+              || resolved == mk_tyapp(#'Integer, [])
+              || resolved == mk_tyapp(#'Rational, []):
+              CheckedNumeral(value, resolved, at)
+          | resolved is_a TyVar:
+              error(
+                "a numeral needs a type ascription or an unambiguous numeric context",
+                at)
+          | ~else: fallback(expr, expected)
   | CoreTypedExpr(inner, type_stx, at):
       // The annotation is purely a type hint with no runtime
       // representation of its own: `inner`'s own checked node, unified

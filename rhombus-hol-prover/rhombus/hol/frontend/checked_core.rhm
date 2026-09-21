@@ -61,6 +61,7 @@ export:
   CheckedConstant
   CheckedNumeral
   CheckedPair
+  CheckedList
   CheckedIf
   CheckedOpaque
   check_expr
@@ -88,6 +89,12 @@ class CheckedPair(first :: CheckedExpr, second :: CheckedExpr,
                   ty :: HType, at :: Syntax):
   extends CheckedExpr
 
+// `tail` is `#false` for a literal list (implicit `nil`), or a checked
+// tail expression for `[a, ...b]`-style spread syntax.
+class CheckedList(elements :: List.of(CheckedExpr), tail :: maybe(CheckedExpr),
+                  ty :: HType, at :: Syntax):
+  extends CheckedExpr
+
 class CheckedIf(cond :: CheckedExpr, then_branch :: CheckedExpr,
                 else_branch :: CheckedExpr, ty :: HType, at :: Syntax):
   extends CheckedExpr
@@ -103,6 +110,7 @@ fun checked_ty(c :: CheckedExpr) :: HType:
   | CheckedConstant(_, ty, _): ty
   | CheckedNumeral(_, ty, _): ty
   | CheckedPair(_, _, ty, _): ty
+  | CheckedList(_, _, ty, _): ty
   | CheckedIf(_, _, _, ty, _): ty
   | CheckedOpaque(_, ty, _): ty
   | ~else: error(~who: #'checked_ty, "unknown CheckedExpr variant")
@@ -128,8 +136,8 @@ fun core_location(expr :: CoreExpr) :: Syntax:
   | ~else: error(~who: #'core_location, "unknown CoreExpr variant")
 
 // A Theory-free type-checking pass over exactly `CoreRef`, `CoreNumeral`,
-// `CoreTypedExpr`, `CorePairExpr`, and `CoreIf` -- the vertical slice
-// proven end to end first. Any other `CoreExpr` shape, and a `CoreRef`
+// `CoreTypedExpr`, `CorePairExpr`, `CoreListExpr`, and `CoreIf` -- the
+// vertical slice proven end to end first. Any other `CoreExpr` shape, and
 // naming neither a local variable nor an entry `lookup` knows, is handed
 // to `fallback` unchanged: this is the seam a later migration step
 // widens, not a boundary `check_expr` itself needs to know the shape of.
@@ -246,6 +254,54 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
                 resolve(
                   prod_ty(checked_ty(checked_first), checked_ty(checked_second))),
                 at)
+  | CoreListExpr(elements, tail, at):
+      // Mirrors `runtime_list_expr` exactly: with no expected type, the
+      // element type is discovered by checking the first element (or the
+      // tail, destructured) against `#false` first, then every element
+      // and the tail is (re)checked against that discovered type --
+      // matching the un-migrated path's own peek-then-render shape
+      // rather than trying to check each element only once.
+      // `list_element_type` mirrors `runtime_list_element_type`: a still-
+      // open metavariable gets a fresh element type, unified back so a
+      // sibling later resolving this list's type also resolves the
+      // element type; any other wrong shape defers to `fallback`.
+      fun list_ty(et :: HType) :: HType: mk_tyapp(#'List, [et])
+      fun list_element_type(wanted :: HType) :: maybe(HType):
+        match wanted
+        | TyApp(#'List, [et]): et :~ HType
+        | TyVar(_,):
+            let et = mk_tyvar(Symbol.gen("_list_element"))
+            unify(wanted, list_ty(et), at)
+            et
+        | ~else: #false
+      fun build(element_type :: HType) :: CheckedExpr:
+        let checked_elements:
+          elements.map(fun (e :: CoreExpr): check_sub(e, element_type))
+        let checked_tail:
+          match tail
+          | #false: #false
+          | tail_expr:
+              check_sub(tail_expr :~ CoreExpr, list_ty(element_type))
+        CheckedList(
+          checked_elements, checked_tail, resolve(list_ty(element_type)), at)
+      match expected
+      | #false:
+          match elements
+          | List.cons(first, _):
+              let peek = check_sub(first :~ CoreExpr, #false)
+              build(checked_ty(peek))
+          | []:
+              match tail
+              | #false: build(mk_tyvar(Symbol.gen("_list_element")))
+              | tail_expr:
+                  let tail_peek = check_sub(tail_expr :~ CoreExpr, #false)
+                  match list_element_type(resolve(checked_ty(tail_peek)))
+                  | #false: fallback(expr, expected)
+                  | et: build(et)
+      | wanted:
+          match list_element_type(resolve(wanted :~ HType))
+          | #false: fallback(expr, expected)
+          | et: build(et)
   | CoreIf(cond, then_expr, else_expr, at):
       let bool_ty = mk_tyapp(#'bool, [])
       let checked_cond = check_sub(cond, bool_ty)

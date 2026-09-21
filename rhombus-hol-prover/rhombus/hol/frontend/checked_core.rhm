@@ -45,10 +45,23 @@
 // is untouched by this module.
 //
 // `CheckedOpaque` is the migration seam: a subexpression kind
-// `check_expr` does not yet handle is deferred to a caller-supplied
-// fallback, which renders it however the un-migrated path already does and
-// hands back its already-known type. A `CheckedOpaque` carries no further
-// structure `check_expr` needs to see again.
+// `check_expr` does not yet handle -- an overloaded `CoreCall`, an
+// undeclared `CoreRef`, or a `CoreExpr` shape it does not cover at all
+// -- is deferred to a caller-supplied `fallback`, which renders it
+// however the un-migrated path already does and hands back its
+// already-known type. A `CheckedOpaque` carries no further structure
+// `check_expr` needs to see again.
+//
+// `fallback` is not the seam for every rejection, though: when
+// `check_expr` already knows definitively that an expression is
+// invalid -- a numeral with no admissible type, a `Pair`/list/set
+// expression whose expected type has the wrong shape entirely, a set
+// literal with a function-typed element -- reporting that through
+// `fallback` would mean `fallback` needing the *exact* original
+// implementation of a shape `check_expr` otherwise fully owns, not
+// just the shapes it hasn't migrated yet. Those cases call the
+// separate `~error` capability directly instead, with the exact
+// original diagnostic message.
 
 import:
   rhombus/hol/htype open
@@ -248,6 +261,7 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
                ~fallback: fallback :: Function.of_arity(2),
                ~needs_expected: needs_expected :: Function.of_arity(1),
                ~is_overloaded_name: is_overloaded_name :: Function.of_arity(1),
+               ~error: error :: Function.of_arity(2),
                expr :: CoreExpr,
                expected :: maybe(HType))
      :: CheckedExpr:
@@ -256,7 +270,7 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
       ~unify: unify, ~resolve: resolve, ~lookup: lookup,
       ~parse_type: parse_type, ~vars: vars, ~fallback: fallback,
       ~needs_expected: needs_expected,
-      ~is_overloaded_name: is_overloaded_name, e, exp)
+      ~is_overloaded_name: is_overloaded_name, ~error: error, e, exp)
   fun unify_with(ty :: HType, at :: Syntax):
     match expected
     | #false: #void
@@ -275,21 +289,26 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
               unify_with(fresh, at)
               CheckedConstant(name, resolve(fresh), at)
   | CoreNumeral(value, at):
+      // Mirrors `runtime_numeral`'s admissibility cond exactly: a
+      // numeral has a representation only at these three types.
+      // Anything else -- including a still-open metavariable, which
+      // needs an ambient numeric context this call cannot supply --
+      // reports the exact original diagnostic directly rather than
+      // deferring to `fallback`: check_expr already knows definitively
+      // that this is wrong, not merely a shape it cannot itself
+      // classify, so there is nothing for a fuller pipeline to add.
       match expected
-      | #false: fallback(expr, expected)
+      | #false:
+          error("a numeral needs an expected numeric type", at)
       | wanted:
           let resolved = resolve(wanted :~ HType)
-          // Mirrors `runtime_numeral`'s admissibility cond exactly: a
-          // numeral has a representation only at these three types.
-          // Anything else -- including a still-open metavariable, which
-          // needs an ambient numeric context this call cannot supply --
-          // defers to `fallback` rather than accepting an arbitrary
-          // concrete `HType`.
           (if resolved == mk_tyapp(#'Nat, [])
                 || resolved == mk_tyapp(#'Integer, [])
                 || resolved == mk_tyapp(#'Rational, [])
            | CheckedNumeral(value, resolved, at)
-           | fallback(expr, expected))
+           | error(
+               "a numeral needs a type ascription or an unambiguous numeric context",
+               at))
   | CoreTypedExpr(inner, type_stx, at):
       // The annotation is purely a type hint with no runtime
       // representation of its own: `inner`'s own checked node, unified
@@ -308,8 +327,8 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
       // types; a still-open metavariable gets two fresh ones, unified
       // back against it (so a sibling that later resolves this pair's
       // type also resolves the two components); anything else -- wrong
-      // shape entirely -- defers to `fallback` rather than duplicating
-      // its error message.
+      // shape entirely -- reports the exact original diagnostic
+      // directly.
       fun pair_component_types(wanted :: HType) :: maybe(List):
         match wanted
         | TyApp(name, [a, b]) when name == ty_prod: [a :~ HType, b :~ HType]
@@ -329,7 +348,7 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
             at)
       | wanted:
           match pair_component_types(resolve(wanted :~ HType))
-          | #false: fallback(expr, expected)
+          | #false: error("a Pair expression needs a `Pair.of(...)` type", at)
           | [first_type, second_type]:
               let checked_first = check_sub(first, first_type)
               let checked_second = check_sub(second, second_type)
@@ -348,7 +367,8 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
       // `list_element_type` mirrors `runtime_list_element_type`: a still-
       // open metavariable gets a fresh element type, unified back so a
       // sibling later resolving this list's type also resolves the
-      // element type; any other wrong shape defers to `fallback`.
+      // element type; any other wrong shape reports the exact original
+      // diagnostic directly.
       fun list_ty(et :: HType) :: HType: mk_tyapp(#'List, [et])
       fun list_element_type(wanted :: HType) :: maybe(HType):
         match wanted
@@ -380,11 +400,11 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
               | tail_expr:
                   let tail_peek = check_sub(tail_expr :~ CoreExpr, #false)
                   match list_element_type(resolve(checked_ty(tail_peek)))
-                  | #false: fallback(expr, expected)
+                  | #false: error("a list expression needs a `List.of(...)` type", at)
                   | et: build(et)
       | wanted:
           match list_element_type(resolve(wanted :~ HType))
-          | #false: fallback(expr, expected)
+          | #false: error("a list expression needs a `List.of(...)` type", at)
           | et: build(et)
   | CoreStringExpr(value, at):
       // Mirrors `runtime_string_expr`/`elaborate_string_effect` exactly:
@@ -400,8 +420,8 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
       // an expected function-to-Boolean type destructures into its
       // domain (the element type); a still-open metavariable gets a
       // fresh element type, unified back against a function-to-Boolean
-      // shape; any other wrong shape defers to `fallback` rather than
-      // duplicating its error message. Unlike `CoreListExpr`, an empty
+      // shape; any other wrong shape reports the exact original
+      // diagnostic directly. Unlike `CoreListExpr`, an empty
       // set with no expected type needs no peek -- there is no tail to
       // fall back on, just a fresh element type directly.
       fun set_element_type(wanted :: HType) :: maybe(HType):
@@ -419,16 +439,18 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
       // against `element_type` first (checking may itself refine a
       // still-open element type further), then the *post-check*
       // resolved type is what decides soundness -- a function-typed
-      // element has no sound executable equality, so this defers to
-      // `fallback` (not a direct error: `check_expr` never raises its
-      // own diagnostics) which reaches `runtime_set_expr`'s own
-      // identical `is_fun` rejection and its exact message.
+      // element has no sound executable equality, reported directly
+      // (check_expr already knows definitively that this is wrong, the
+      // same `is_fun` rejection `runtime_set_expr` makes, not merely a
+      // shape it cannot itself classify).
       fun build(element_type :: HType) :: CheckedExpr:
         let checked_elements:
           elements.map(fun (e :: CoreExpr): check_sub(e, element_type))
         let resolved_et = resolve(element_type)
         if is_fun(resolved_et)
-        | fallback(expr, expected)
+        | error(
+            "a set literal has no sound executable equality for function values",
+            at)
         | CheckedSet(
             checked_elements, mk_fun(resolved_et, mk_tyapp(#'bool, [])), at)
       match expected
@@ -440,7 +462,7 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
           | []: build(mk_tyvar(Symbol.gen("_set_element")))
       | wanted:
           match set_element_type(resolve(wanted :~ HType))
-          | #false: fallback(expr, expected)
+          | #false: error("a set expression needs a function-to-Boolean type", at)
           | et: build(et)
   // Mirrors `runtime_expr`'s own special-cased rendering for `conj`/
   // `disj`/`imp`/`neg` exactly: each operand is `Boolean`, and so is the

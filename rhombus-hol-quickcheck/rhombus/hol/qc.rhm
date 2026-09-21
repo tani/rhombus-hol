@@ -11,10 +11,15 @@
 // time would mean a second interpreter for the same definitions -- exactly the
 // drift the one-parser rule exists to prevent.
 //
-// Generators and shrinkers are emitted per datatype by `module_block.rhm`, from
-// the same declaration the logic was built from. They reach `quickcheck`
-// through the registry below: `type` registers both under its own name when
-// its module runs, and `quickcheck` looks them up under that name.
+// Generators and shrinkers are derived here from a plain-data descriptor that
+// `module_block.rhm` builds per datatype, from the same declaration the
+// descriptor was built from. `module_block.rhm` only assembles one
+// descriptor entry per constructor -- that much needs macro-expansion
+// capability, to name constructors and fields -- while `derive_generator`
+// and `derive_shrinker` below do the actual enumeration generically, from
+// plain runtime data. They reach `quickcheck` through the registry below:
+// `type` registers both under its own name when its module runs, and
+// `quickcheck` looks them up under that name.
 
 import:
   lib("racket/base.rkt") as rb
@@ -22,6 +27,10 @@ import:
 export:
   QCPassed
   QCFailed
+  CtorSpec
+  derive_generator
+  ShrinkClause
+  derive_shrinker
   pick
   run
   report
@@ -44,6 +53,16 @@ export:
 // `Nat`'s takes only a size.  A shrinker takes a value of the type and returns
 // smaller candidates; it does not need composing with sub-shrinkers, since
 // shrinking recurses on the value's own structure.
+//
+// Two maps, not one `name -> QCType(gen, shrink)` map: `datatype` happens to
+// register both together today, but nothing in the domain requires that --
+// a generator without a shrinker is a coherent thing to register -- and
+// `lookup_gen`/`lookup_shrink` are called independently, from unrelated call
+// sites, at unrelated times (building a field's generator reference vs.
+// building a `quickcheck` input's shrinker), each wanting its own distinct
+// not-found message. Folding them into one record's two fields would still
+// need both lookups and both messages; it would not remove a concept, only
+// rename it.
 def _gens :: MutableMap = MutableMap()
 def _shrinks :: MutableMap = MutableMap()
 
@@ -92,6 +111,42 @@ fun pick(size :: Int, base :: List, all_of :: List):
   let choices :~ List = (if size <= 0 || all_of.length() == 0 | base | all_of)
   let f = choices[rand(choices.length())]
   (f :~ Function)()
+
+// A constructor descriptor for generation: `build` constructs a value from
+// its already-generated fields -- ordinarily the constructor itself, which
+// Rhombus binds as an ordinary first-class function of its fields; `arg_gens`
+// is one size-to-value generator per field, in field order; `base` marks a
+// constructor as available even at size zero, which the positivity check
+// guarantees at least one is, so generation terminates.
+class CtorSpec(build :: Function, arg_gens :: List.of(Function), base :: Boolean)
+
+// The generic reading of a `CtorSpec` list: build every constructor's thunk
+// at the requested size, its fields generated one size smaller, and let
+// `pick` choose among them.
+fun derive_generator(specs :: List.of(CtorSpec)) :: Function:
+  fun (size):
+    fun thunk(spec :: CtorSpec):
+      fun (): spec.build(& spec.arg_gens.map(fun (g :: Function): g(size - 1)))
+    let base = specs.filter(~keep: fun (spec :: CtorSpec): spec.base).map(thunk)
+    let all_of = specs.map(thunk)
+    pick(size, base, all_of)
+
+// A constructor descriptor for shrinking: `extract` reports the recursive
+// fields to shrink when `v` was built by this constructor, or `#false`
+// otherwise. Descriptors are built from an exhaustive `match` over a type's
+// constructors, so exactly one clause matches any value of that type.
+class ShrinkClause(extract :: Function)
+
+// The generic reading of a `ShrinkClause` list: find the one clause whose
+// constructor built `v`, and shrink its recursive fields.
+fun derive_shrinker(clauses :: List.of(ShrinkClause)) :: Function:
+  fun (v):
+    recur try_clause(remaining :~ List = clauses):
+      match remaining
+      | [clause, & rest]:
+          match (clause :~ ShrinkClause).extract(v)
+          | #false: try_clause(rest)
+          | fields: fields :~ List
 
 // `gens` build one input each from a size; `prop` is the property; `shrinks`
 // produce smaller candidates for one input.

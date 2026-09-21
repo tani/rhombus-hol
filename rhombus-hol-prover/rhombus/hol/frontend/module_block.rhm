@@ -400,8 +400,13 @@ meta:
   // -- generators and shrinkers ----------------------------------------------
   //
   // Emitted alongside a datatype, from the same declaration, so that
-  // `quickcheck` has values to sample. They are ordinary Rhombus functions
-  // over the emitted classes; checking runs the real executable code.
+  // `quickcheck` has values to sample. What is built here is a plain-data
+  // descriptor per constructor (`_hol_qc.CtorSpec`/`_hol_qc.ShrinkClause`) --
+  // that much needs this module's macro-expansion capability, to name
+  // constructors and fields as `Syntax`. The enumeration over those
+  // descriptors (`_hol_qc.derive_generator`/`_hol_qc.derive_shrinker`) is
+  // ordinary runtime code, generic over any datatype, and lives in
+  // `qc.rhm`; checking runs the real executable code.
   //
   // They reach `quickcheck` through `qc.rhm`'s registry rather than through a
   // guessed identifier. `datatype` registers its generator and shrinker under the
@@ -439,28 +444,23 @@ meta:
   fun emit_generator(name :: Syntax, params :: List, ctors :: List) :: Syntax:
     let nm = type_name_str(Syntax.unwrap(name))
     let [pg, ...] = params.map(fun (p :: Symbol): param_gen_id(p))
-    let base = ctors.filter(~keep: fun (c :: List): !(c[2] :~ Boolean))
-    let [b, ...] = base.map(ctor_builder)
-    let [a, ...] = ctors.map(ctor_builder)
+    let [spec, ...] = ctors.map(ctor_spec)
     let build = 'fun (_hol_sz, $pg, ...):
-                   _hol_qc.pick(_hol_sz, [$b, ...], [$a, ...])'
+                   _hol_qc.derive_generator([$spec, ...])(_hol_sz)'
     '_hol_qc.register_gen($nm, $build)'
 
   // `[ctor_id, [field_type, ...], recursive?]`
-  fun ctor_builder(c :: List) :: Syntax:
+  fun ctor_spec(c :: List) :: Syntax:
     let cname = c[0] :~ Syntax
     let ftys :~ List = c[1]
-    let [arg, ...] = ftys.map(fun (t): '$(gen_expr(t))(_hol_sz - 1)')
-    'fun (): $cname($arg, ...)'
+    let base = Syntax.make(!(c[2] :~ Boolean), id_ctx)
+    let [g, ...] = ftys.map(gen_expr)
+    '_hol_qc.CtorSpec($cname, [$g, ...], $base)'
 
   fun emit_shrinker(name :: Syntax, ctors :: List) :: Syntax:
     let nm = type_name_str(Syntax.unwrap(name))
     let [clause, ...] = ctors.map(fun (c :: List): shrink_clause(name, c))
-    let build = 'fun (_hol_v):
-                   match _hol_v
-                   | $clause
-                   | ...'
-    '_hol_qc.register_shrink($nm, $build)'
+    '_hol_qc.register_shrink($nm, _hol_qc.derive_shrinker([$clause, ...]))'
 
   // The classic shrink for an algebraic value: its recursive subterms.
   fun shrink_clause(tname :: Syntax, c :: List) :: Syntax:
@@ -473,7 +473,11 @@ meta:
     let keep = for values(acc :~ List = []) (t in ftys, vv in vs):
                  (if same_type_name(t, tname) | acc ++ [vv] | acc)
     let [k, ...] = keep
-    '$cname($v, ...): [$k, ...]'
+    '_hol_qc.ShrinkClause(
+       fun (_hol_v):
+         match _hol_v
+         | $cname($v, ...): [$k, ...]
+         | ~else: #false)'
 
   fun same_type_name(ty, tname :: Syntax) :: Boolean:
     match ty

@@ -14,16 +14,19 @@
 // subgoals to a proof of the parent.  **That is the whole anti-bypass
 // argument.** The only way a `Thm` comes out of the prover is by composing
 // `justify` functions, each written in terms of derived rules, each of which
-// bottoms out in the kernel's ten primitives.  There is no other exit.
+// bottoms out in the kernel's ten primitives.  There is no other exit, and
+// `solve_step` below is the only place composition happens.
 //
-// The tree is built first and run second. A failed proof pays no kernel cost
-// for successful branches; execution diagnostics are attached to `Residue`
-// values instead of becoming logical inputs to proof algorithms.
-//
-// `execute` is the sequential interpreter of the tree: it walks `Derived`
-// nodes bottom-up, calling each `Step.justify` once every one of its
-// subgoals has a real `Thm`, and yields `#false` the moment it meets an
-// `Open` leaf.
+// Search builds the `Thm` directly, one `Step` at a time, as it goes: there
+// is no proof tree built first and executed second. `solve_step` takes a
+// `Step` and a way to search each of its subgoals; it calls `search` on
+// every subgoal -- a stuck step can be stuck in more than one subgoal at
+// once, so every one of them has to be searched to report all of them, not
+// just the first -- and calls `step.justify` the moment every subgoal
+// search came back with a real `Thm`. If any subgoal search failed instead,
+// `justify` is never called; the `Residue` of every subgoal that never
+// resolved is returned instead, in subgoal order, so a caller several levels
+// up can report a genuinely multi-goal failure in one message.
 
 import:
   rhombus/hol/term open
@@ -34,21 +37,15 @@ export:
   Goal
   Step
   Residue
-  ProofNode
-  Proved
-  Derived
-  Open
   mk_goal
-  execute
-  closed
-  collect_residues
+  solve_step
 class Goal(asms :: List.of(Term),
            concl :: Term)
 
 fun mk_goal(asms :: List.of(Term), concl :: Term) :: Goal:
   Goal(asms, concl)
 
-// Diagnostic history belongs to an open execution result, not to the logical
+// Diagnostic history belongs to an open search result, not to the logical
 // proposition that proof algorithms transform.
 class Residue(goal :: Goal,
               trace :: List.of(TraceEvent))
@@ -59,44 +56,28 @@ class Step(subgoals :: List.of(Goal),
            justify :: (List.of(Thm) -> Thm),
            events :: List.of(TraceEvent))
 
-class.together:
-  class ProofNode():
-    nonfinal
-  class Proved(thm :: Thm):
-    extends ProofNode
-  class Derived(step :: Step, kids :: List.of(ProofNode)):
-    extends ProofNode
-  class Open(residue :: Residue):
-    extends ProofNode
-
-// `#false` when any leaf remains open. Children are visited left-to-right and
-// `Step.justify` receives proofs in the corresponding subgoal order.
-fun execute(node :: ProofNode) :: maybe(Thm):
-  match node
-  | Proved(theorem): theorem
-  | Open(_): #false
-  | Derived(step, children):
-      recur loop (remaining :~ List = children, proofs_rev :~ List = []):
-        match remaining
-        | []: step.justify(proofs_rev.reverse())
-        | List.cons(child, rest):
-            match execute(child :~ ProofNode)
-            | #false: #false
-            | theorem: loop(rest, List.cons(theorem, proofs_rev))
-
-fun closed(node :: ProofNode) :: Boolean:
-  match node
-  | Proved(_): #true
-  | Open(_): #false
-  | Derived(_, children): for all (child in children): closed(child)
-
-fun collect_residues(node :: ProofNode) :: List.of(Residue):
-  fun collect(current :: ProofNode, acc :: List.of(Residue))
-      :: List.of(Residue):
-    match current
-    | Proved(_): acc
-    | Open(residue): List.cons(residue, acc)
-    | Derived(_, children):
-        for values(result :~ List.of(Residue) = acc) (child in children.reverse()):
-          collect(child :~ ProofNode, result)
-  collect(node, [])
+// Search every subgoal of `step` with `search`, which receives each subgoal
+// together with `path` extended by that subgoal's own event, and itself
+// returns a `Thm` on success or the residues of whatever it left stuck.
+// Composes `step.justify` from the subgoals' proofs, in their original
+// order, once every one of them is a real `Thm`; otherwise every stuck
+// subgoal's residues, concatenated left to right, and `justify` is never
+// called.
+fun solve_step(step :: Step, path :: List.of(TraceEvent),
+               search :: Function.of_arity(2))
+     :: values(maybe(Thm), List.of(Residue)):
+  unless step.subgoals.length() == step.events.length()
+  | error(~who: #'proof, "proof step has unpaired trace events")
+  recur loop (remaining_goals :~ List = step.subgoals,
+              remaining_events :~ List = step.events,
+              thms_rev :~ List = [],
+              residues :~ List = []):
+    match [remaining_goals, remaining_events]
+    | [[], []]:
+        (if residues.length() == 0
+         | values(step.justify(thms_rev.reverse()), [])
+         | values(#false, residues))
+    | [List.cons(subgoal, rest), List.cons(event, event_rest)]:
+        let (thm, sub_residues):
+          search(subgoal :~ Goal, List.cons(event :~ TraceEvent, path))
+        loop(rest, event_rest, List.cons(thm, thms_rev), residues ++ sub_residues)

@@ -1,12 +1,18 @@
 #lang rhombus/static
 // SPDX-License-Identifier: 0BSD
 
-// Surface type names are frontend metadata, not kernel Theory entries.
+// Surface identity, lookup, and printing for HOL type constructors. Surface
+// type names are frontend metadata, not kernel Theory entries: this whole
+// module exists to resolve surface type syntax and print HType values back
+// out, never to duplicate a datatype's real (kernel-checked) metadata.
 
 import:
-  rhombus/hol/frontend/type/constructor open
+  rhombus/hol/htype open
 
 export:
+  TypeConstructor
+  make_type_constructor
+  apply_type_constructor
   TypeConstructorRegistry
   empty_type_constructor_registry
   standard_type_constructor_registry
@@ -16,6 +22,39 @@ export:
   lookup_type_constructor_namespace
   type_constructor_for_kernel
   merge_type_constructor_registries
+  type_to_surface_string
+
+// -- constructor identity ---------------------------------------------------
+//
+// The surface binding may differ from the kernel name (`List.of` elaborates
+// to `TyApp(#'List, ...)`).
+
+class TypeConstructor(surface_name :: Symbol,
+                      kernel_name :: Symbol,
+                      arity :: NonnegInt)
+
+fun make_type_constructor(kernel_name :: Symbol,
+                          arity :: NonnegInt)
+     :: TypeConstructor:
+  let surface_name = (if arity == 0
+                      | kernel_name
+                      | Symbol.from_string(to_string(kernel_name) ++ ".of"))
+  TypeConstructor(surface_name, kernel_name, arity)
+
+fun apply_type_constructor(constructor :: TypeConstructor,
+                           arguments :: List.of(HType),
+                           at :: Syntax) :: HType:
+  let arity = constructor.arity
+  unless arguments.length() == arity
+  | error(~who: #'type,
+          "type constructor `" ++ to_string(constructor.surface_name)
+            ++ "` expects " ++ to_string(arity)
+            ++ (if arity == 1 | " argument" | " arguments")
+            ++ ", but received " ++ to_string(arguments.length()),
+          error.val(~label: "in", to_string(at)))
+  mk_tyapp(constructor.kernel_name, arguments)
+
+// -- registry -----------------------------------------------------------
 
 class TypeConstructorRegistry(bindings :: Map.of(Symbol, TypeConstructor),
                               kernel_names :: Map.of(Symbol, TypeConstructor))
@@ -99,3 +138,30 @@ def standard_type_constructor_registry_value:
 
 fun standard_type_constructor_registry() :: TypeConstructorRegistry:
   standard_type_constructor_registry_value
+
+// -- printing -----------------------------------------------------------
+//
+// Surface rendering for kernel HType values. Function types are right
+// associative; declared parameterized constructors use their `.of` binding.
+
+fun type_to_surface_string(registry :: TypeConstructorRegistry,
+                           type :: HType) :: String:
+  fun render(type :: HType) :: String:
+    match type
+    | TyVar(name): "?" ++ to_string(name)
+    | TyApp(#'fun, [domain, range]):
+        let domain_text = render(domain)
+        (if is_fun(domain) | "(" ++ domain_text ++ ")" | domain_text)
+          ++ " -> " ++ render(range)
+    | TyApp(kernel_name, arguments):
+        match type_constructor_for_kernel(registry, kernel_name)
+        | constructor :: TypeConstructor when constructor.arity == arguments.length():
+            cond
+            | constructor.arity == 0: to_string(constructor.surface_name)
+            | ~else:
+                to_string(constructor.surface_name)
+                  ++ "("
+                  ++ String.join(arguments.map(render), ", ")
+                  ++ ")"
+        | ~else: type_to_string(type)
+  render(type)

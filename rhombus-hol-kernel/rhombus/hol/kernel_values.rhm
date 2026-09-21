@@ -23,16 +23,21 @@ export:
   hyps_of
   concl_of
   stamp_of
+  stamp_depth
   type_arity
   const_type
   axioms_of
   definition_of
   in_theory
 
-class Stamp(id :: Symbol,
-            gen :: Int,
-            ancestors :: Set.of(Symbol),
-            private raw):
+// A parent-pointer chain rather than a materialized ancestor set: `descends`
+// walks it, trading an O(1) set lookup for an O(depth) walk in exchange for
+// one fewer piece of state to keep in sync. This is a Rhombus-side-only
+// lineage mirror -- the generated kernel tracks its own stamp internally
+// (`Rhombus_HOL_Syntax.thy`'s `stamp`/`descends`) for its own proofs; this
+// one is never read from or synchronized with that value, so its shape is
+// free to differ.
+class Stamp(id :: Symbol, parent :: maybe(Stamp)):
   constructor ~none
   reconstructor ~none
   internal _Stamp
@@ -71,13 +76,11 @@ fun raw_thm(th :: Thm): _Thm.raw(th)
 fun raw_thm_theory(th :: Thm): _Thm.raw_theory(th)
 fun raw_theory(thy :: Theory): _Theory.raw(thy)
 
-fun fresh_stamp(raw) :: Stamp:
-  let id = Symbol.uninterned_from_string("thy")
-  _Stamp(id, 0, {id}, raw)
+fun fresh_stamp() :: Stamp:
+  _Stamp(Symbol.uninterned_from_string("thy"), #false)
 
-fun next_stamp(prev :: Stamp, raw) :: Stamp:
-  let id = Symbol.uninterned_from_string("thy")
-  _Stamp(id, prev.gen + 1, prev.ancestors ++ {id}, raw)
+fun next_stamp(prev :: Stamp) :: Stamp:
+  _Stamp(Symbol.uninterned_from_string("thy"), prev)
 
 def stamp_serial :: Box = Box(0)
 
@@ -87,7 +90,19 @@ fun fresh_generation() :: NonnegInt:
   n
 
 fun descends(a :: Stamp, b :: Stamp) :: Boolean:
-  a.id in b.ancestors
+  recur loop (cur :: maybe(Stamp) = b):
+    match cur
+    | #false: #false
+    | s :: Stamp: s.id == a.id || loop(s.parent)
+
+// The number of extensions between `s` and the theory it descends from --
+// derived by walking the chain rather than stored, since nothing but
+// diagnostics and tests ever reads it.
+fun stamp_depth(s :: Stamp) :: NonnegInt:
+  recur loop (cur :: Stamp = s, n :: NonnegInt = 0):
+    match cur.parent
+    | #false: n
+    | p :: Stamp: loop(p, n + 1)
 
 fun combine_stamps(who :: Symbol, a :: Stamp, b :: Stamp) :: Stamp:
   cond
@@ -132,14 +147,14 @@ fun definition_of(thy :: Theory, n :: Symbol) :: maybe(Thm):
 
 fun make_initial_theory() :: Theory:
   let raw = generated.initial_theory(fresh_generation())
-  _Theory(fresh_stamp(generated.thy_stamp(raw)), raw)
+  _Theory(fresh_stamp(), raw)
 
 // Every `new_*` kernel primitive hands back a fresh raw theory value; this
 // wraps it with a `Stamp` descending from `thy`'s. Callers that also get a
 // theorem back wrap it separately with `wrap_raw_thm`, using the same new
 // stamp and this same new raw theory as its provenance.
 fun wrap_new_theory(thy :: Theory, raw) :: Theory:
-  _Theory(next_stamp(thy.stamp, generated.thy_stamp(raw)), raw)
+  _Theory(next_stamp(thy.stamp), raw)
 
 fun in_theory(who :: Symbol, thy :: Theory, th :: Thm) :: Void:
   unless descends(th.stamp, thy.stamp)

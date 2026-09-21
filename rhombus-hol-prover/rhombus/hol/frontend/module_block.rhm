@@ -1260,11 +1260,14 @@ meta:
           type_parser.parse_open_type(type_stx, state.surface.type_constructors)
         fun needs_expected_cb(e :: CoreExpr) :: Boolean:
           runtime_needs_expected(state, e)
+        fun is_overloaded_name_cb(name :: Symbol) :: Boolean:
+          overload_arity(state.surface.operators, name) != #false
         let checked = check_expr(
           ~unify: unify_cb, ~resolve: runtime_resolve_type,
           ~lookup: lookup_cb, ~parse_type: parse_type_cb,
           ~vars: env, ~fallback: fallback,
           ~needs_expected: needs_expected_cb,
+          ~is_overloaded_name: is_overloaded_name_cb,
           expr, expected)
         ensure(checked_to_runtime(state, checked))
     | ~else:
@@ -1348,6 +1351,27 @@ meta:
         RuntimeExpr(
           '($(left_stx :~ Syntax)) == ($(right_stx :~ Syntax))',
           mk_tyapp(#'bool, []))
+    | CheckedApply(head, args, ty, at):
+        // `head` renders via `runtime_named_apply` (curry-adapting,
+        // taking the constant's own name) exactly when `check_expr`'s
+        // own `CoreRef` case would have produced a `CheckedConstant`
+        // for it -- the same "not a local, has a lookup entry" shape
+        // the un-migrated path's own `CoreRef(name,_) when ...` guard
+        // checks, reached here for free by matching the already-
+        // checked node's own shape rather than re-deriving it.
+        // Anything else (a local variable, a more complex expression)
+        // renders `head` itself and applies it directly.
+        let args_stx:
+          args.map(fun (a :: CheckedExpr): checked_to_runtime(state, a).stx)
+        let rendered_call:
+          match head
+          | CheckedConstant(name, _, _):
+              runtime_named_apply(state, name, args_stx, at)
+          | ~else:
+              let head_stx = checked_to_runtime(state, head).stx
+              let [arg, ...] = args_stx
+              '$(head_stx :~ Syntax)($arg, ...)'
+        RuntimeExpr(rendered_call, ty)
     | ~else:
         error(~who: #'checked_to_runtime, "unknown CheckedExpr variant")
 

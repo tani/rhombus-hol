@@ -66,6 +66,7 @@ export:
   CheckedSet
   CheckedBoolOp
   CheckedEq
+  CheckedApply
   CheckedIf
   CheckedOpaque
   check_expr
@@ -138,6 +139,19 @@ class CheckedBoolOp(op :: Symbol, args :: List.of(CheckedExpr), at :: Syntax):
 class CheckedEq(left :: CheckedExpr, right :: CheckedExpr, at :: Syntax):
   extends CheckedExpr
 
+// The general (non-overloaded, non-special-cased) application case:
+// `head`'s own checked node together with its fully-checked argument
+// list, in original argument order. By the time a `CheckedApply` is
+// constructed every element of `args` is a genuine `CheckedExpr` --
+// `check_expr`'s own two-pass scan/fill (see its `CoreCall` case)
+// only ever hands this constructor its `out` list once every deferred
+// position has been filled, and the field's own `List.of(CheckedExpr)`
+// contract independently rejects a call that got this wrong rather
+// than silently accepting a leftover placeholder.
+class CheckedApply(head :: CheckedExpr, args :: List.of(CheckedExpr),
+                   ty :: HType, at :: Syntax):
+  extends CheckedExpr
+
 // `opaque` is `fallback`'s own already-rendered runtime `Syntax`;
 // `check_expr` never inspects it, only `ty` for further type propagation.
 class CheckedOpaque(opaque :: Syntax, ty :: HType, at :: Syntax):
@@ -154,6 +168,7 @@ fun checked_ty(c :: CheckedExpr) :: HType:
   | CheckedSet(_, ty, _): ty
   | CheckedBoolOp(_, _, _): mk_tyapp(#'bool, [])
   | CheckedEq(_, _, _): mk_tyapp(#'bool, [])
+  | CheckedApply(_, _, ty, _): ty
   | CheckedIf(_, _, _, ty, _): ty
   | CheckedOpaque(_, ty, _): ty
   | ~else: error(~who: #'checked_ty, "unknown CheckedExpr variant")
@@ -180,20 +195,32 @@ fun core_location(expr :: CoreExpr) :: Syntax:
 
 // A Theory-free type-checking pass over exactly `CoreRef`, `CoreNumeral`,
 // `CoreTypedExpr`, `CorePairExpr`, `CoreListExpr`, `CoreStringExpr`,
-// `CoreSetExpr`, `CoreIf`, and a `CoreCall` to `conj`/`disj`/`imp`/`neg`/
-// `eq` at their special-cased arity -- the vertical slice proven end to
-// end first. Any other `CoreExpr` shape, and a `CoreRef` naming neither
-// a local variable nor an entry `lookup` knows, is handed
+// `CoreSetExpr`, `CoreIf`, a `CoreCall` to `conj`/`disj`/`imp`/`neg`/`eq`
+// at their special-cased arity, and the general (non-overloaded)
+// `CoreCall` application case -- the vertical slice proven end to end
+// first. Any other `CoreExpr` shape (chiefly an overloaded call), and a
+// `CoreRef` naming neither a local variable nor an entry `lookup`
+// knows, is handed
 // to `fallback` unchanged: this is the seam a later migration step
 // widens, not a boundary `check_expr` itself needs to know the shape of.
 //
 // `needs_expected(expr)` mirrors `runtime_needs_expected` exactly: a
 // pure (non-unifying) predicate deciding whether `expr` can only
-// elaborate given an expected type handed in, used by `eq`'s
-// bidirectional ordering below to decide which operand to check first
-// -- unification is stateful and side-effecting, so this decision has
-// to be made by inspection before committing to check either operand,
-// not by speculatively trying one and rolling back on failure.
+// elaborate given an expected type handed in. `eq`'s bidirectional
+// ordering and the general apply case's own deferred-argument scan
+// both use it for the same reason -- unification is stateful and
+// side-effecting, so this decision has to be made by inspection
+// before committing to check an operand, not by speculatively trying
+// one and rolling back on failure.
+//
+// `is_overloaded_name(name)` mirrors `overload_arity(...) != #false`
+// exactly: the general apply case defers a `CoreRef`-headed call to
+// `fallback` when its name is a genuine overload placeholder (not
+// shadowed by a local, not already a registered constant), since
+// overload resolution -- picking which underlying implementation an
+// argument's own type selects -- is not something the general apply
+// algorithm's "check the head's type, then its arguments" shape can
+// do; it is still un-migrated, deliberately.
 //
 // `unify`/`resolve` are the caller's own unification state -- not a second,
 // competing substitution: `fallback` ultimately runs whatever un-migrated
@@ -220,6 +247,7 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
                ~vars: vars :: Map.of(Symbol, HType),
                ~fallback: fallback :: Function.of_arity(2),
                ~needs_expected: needs_expected :: Function.of_arity(1),
+               ~is_overloaded_name: is_overloaded_name :: Function.of_arity(1),
                expr :: CoreExpr,
                expected :: maybe(HType))
      :: CheckedExpr:
@@ -227,7 +255,8 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
     check_expr(
       ~unify: unify, ~resolve: resolve, ~lookup: lookup,
       ~parse_type: parse_type, ~vars: vars, ~fallback: fallback,
-      ~needs_expected: needs_expected, e, exp)
+      ~needs_expected: needs_expected,
+      ~is_overloaded_name: is_overloaded_name, e, exp)
   fun unify_with(ty :: HType, at :: Syntax):
     match expected
     | #false: #void
@@ -462,6 +491,83 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
         args.map(fun (a :: CoreExpr): check_sub(a, bool_ty))
       unify_with(bool_ty, at)
       CheckedBoolOp(name, checked_args, at)
+  | CoreCall(CoreRef(name, _), args, at) when !vars.get(name, #false)
+                                                && lookup(name) == #false
+                                                && is_overloaded_name(name):
+      fallback(expr, expected)
+  | CoreCall(func, args, at):
+      // Mirrors `runtime_expr`'s own general-apply `~else` branch /
+      // `elab.rhm`'s `apply_arguments` exactly: an argument whose own
+      // elaboration needs an expected type (a numeral, ...) and a
+      // parameter whose domain is still an open metavariable are
+      // useless to each other, so checking it is deferred until a
+      // later argument's own unification has pinned the domain down.
+      // "the applied expression is not a function" is reported via an
+      // unconditional unify against a fresh function shape below, not
+      // a direct error or a `fallback` retry -- see that step's own
+      // comment for why.
+      let checked_head = check_sub(func, #false)
+      fun replace(xs :: List, index :: Int, value) :: List:
+        for List (x in xs, k in List.iota(xs.length())):
+          (if k == index | value | x)
+      recur scan (rest :~ List = args,
+                  index = 0,
+                  current :~ HType = checked_ty(checked_head),
+                  checked_args :~ List.of(maybe(CheckedExpr)) = [],
+                  domains :~ List = [],
+                  deferred :~ List = []):
+        match rest
+        | []:
+            recur fill (pending :~ List = deferred,
+                        out :~ List.of(maybe(CheckedExpr)) = checked_args):
+              match pending
+              | []:
+                  // Every deferred index was visited exactly once by
+                  // this recursion (it walks `deferred` to `[]`), so no
+                  // `#false` placeholder survives to here -- made
+                  // explicit (not left to `CheckedApply`'s own field
+                  // check alone) by unwrapping every slot to a genuine
+                  // `CheckedExpr` before it is ever passed on.
+                  let final_args :~ List.of(CheckedExpr):
+                    out.map(fun (v): v :~ CheckedExpr)
+                  let result_ty = resolve(current)
+                  unify_with(result_ty, at)
+                  CheckedApply(checked_head, final_args, result_ty, at)
+              | List.cons(i, more):
+                  let idx :: Int = i :~ Int
+                  let arg = args[idx] :~ CoreExpr
+                  let domain = resolve(domains[idx] :~ HType)
+                  let value = check_sub(arg, domain)
+                  unify(domain, checked_ty(value), at)
+                  fill(more, replace(out, idx, value))
+        | List.cons(arg, more):
+            let instantiated = resolve(current)
+            // Unconditionally unify against a fresh function shape --
+            // not gated behind "is `instantiated` already an open
+            // metavariable", the way the runtime's own version reads --
+            // so every case (already a concrete function type, an open
+            // metavariable, or a genuinely wrong concrete type) goes
+            // through the SAME mechanism. `unify`'s own failure reports
+            // the generic diagnostic directly, without retrying
+            // anything: no partial work from `checked_head` or an
+            // earlier argument's own check ever needs to be redone via
+            // `fallback`, and a still-polymorphic head is never
+            // re-freshened a second time with a different instantiation
+            // the way calling `fallback` here would risk.
+            let domain = mk_tyvar(Symbol.gen("_domain"))
+            let range = mk_tyvar(Symbol.gen("_range"))
+            unify(instantiated, mk_fun(domain, range), at)
+            let domain = resolve(domain)
+            let range = resolve(range)
+            cond
+            | needs_expected(arg :~ CoreExpr) && domain is_a TyVar:
+                scan(more, index + 1, range, checked_args ++ [#false],
+                     domains ++ [domain], deferred ++ [index])
+            | ~else:
+                let value = check_sub(arg :~ CoreExpr, domain)
+                unify(domain, checked_ty(value), at)
+                scan(more, index + 1, range, checked_args ++ [value],
+                     domains ++ [domain], deferred)
   | CoreIf(cond, then_expr, else_expr, at):
       let bool_ty = mk_tyapp(#'bool, [])
       let checked_cond = check_sub(cond, bool_ty)

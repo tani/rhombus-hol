@@ -65,6 +65,7 @@ export:
   CheckedString
   CheckedSet
   CheckedBoolOp
+  CheckedEq
   CheckedIf
   CheckedOpaque
   check_expr
@@ -128,6 +129,15 @@ class CheckedIf(cond :: CheckedExpr, then_branch :: CheckedExpr,
 class CheckedBoolOp(op :: Symbol, args :: List.of(CheckedExpr), at :: Syntax):
   extends CheckedExpr
 
+// Equality renders as Racket's own `==`, not a named-constant call, the
+// same reason `CheckedBoolOp` exists -- but is kept as its own node
+// rather than folded into `CheckedBoolOp` because it needs its own
+// bidirectional expected-type ordering (see `check_expr`'s own
+// `CoreCall` case for `eq`), not a fixed Boolean expectation on every
+// operand.
+class CheckedEq(left :: CheckedExpr, right :: CheckedExpr, at :: Syntax):
+  extends CheckedExpr
+
 // `opaque` is `fallback`'s own already-rendered runtime `Syntax`;
 // `check_expr` never inspects it, only `ty` for further type propagation.
 class CheckedOpaque(opaque :: Syntax, ty :: HType, at :: Syntax):
@@ -143,6 +153,7 @@ fun checked_ty(c :: CheckedExpr) :: HType:
   | CheckedString(_, ty, _): ty
   | CheckedSet(_, ty, _): ty
   | CheckedBoolOp(_, _, _): mk_tyapp(#'bool, [])
+  | CheckedEq(_, _, _): mk_tyapp(#'bool, [])
   | CheckedIf(_, _, _, ty, _): ty
   | CheckedOpaque(_, ty, _): ty
   | ~else: error(~who: #'checked_ty, "unknown CheckedExpr variant")
@@ -169,12 +180,20 @@ fun core_location(expr :: CoreExpr) :: Syntax:
 
 // A Theory-free type-checking pass over exactly `CoreRef`, `CoreNumeral`,
 // `CoreTypedExpr`, `CorePairExpr`, `CoreListExpr`, `CoreStringExpr`,
-// `CoreSetExpr`, `CoreIf`, and a `CoreCall` to `conj`/`disj`/`imp`/`neg`
-// at their special-cased arity -- the vertical slice proven end to end
-// first. Any other `CoreExpr` shape, and a `CoreRef` naming neither a
-// local variable nor an entry `lookup` knows, is handed
+// `CoreSetExpr`, `CoreIf`, and a `CoreCall` to `conj`/`disj`/`imp`/`neg`/
+// `eq` at their special-cased arity -- the vertical slice proven end to
+// end first. Any other `CoreExpr` shape, and a `CoreRef` naming neither
+// a local variable nor an entry `lookup` knows, is handed
 // to `fallback` unchanged: this is the seam a later migration step
 // widens, not a boundary `check_expr` itself needs to know the shape of.
+//
+// `needs_expected(expr)` mirrors `runtime_needs_expected` exactly: a
+// pure (non-unifying) predicate deciding whether `expr` can only
+// elaborate given an expected type handed in, used by `eq`'s
+// bidirectional ordering below to decide which operand to check first
+// -- unification is stateful and side-effecting, so this decision has
+// to be made by inspection before committing to check either operand,
+// not by speculatively trying one and rolling back on failure.
 //
 // `unify`/`resolve` are the caller's own unification state -- not a second,
 // competing substitution: `fallback` ultimately runs whatever un-migrated
@@ -200,13 +219,15 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
                ~parse_type: parse_type :: Function.of_arity(1),
                ~vars: vars :: Map.of(Symbol, HType),
                ~fallback: fallback :: Function.of_arity(2),
+               ~needs_expected: needs_expected :: Function.of_arity(1),
                expr :: CoreExpr,
                expected :: maybe(HType))
      :: CheckedExpr:
   fun check_sub(e :: CoreExpr, exp :: maybe(HType)) :: CheckedExpr:
     check_expr(
       ~unify: unify, ~resolve: resolve, ~lookup: lookup,
-      ~parse_type: parse_type, ~vars: vars, ~fallback: fallback, e, exp)
+      ~parse_type: parse_type, ~vars: vars, ~fallback: fallback,
+      ~needs_expected: needs_expected, e, exp)
   fun unify_with(ty :: HType, at :: Syntax):
     match expected
     | #false: #void
@@ -399,6 +420,33 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
   // needs. Any other name, arity, or non-`CoreRef` function defers to
   // `fallback`, which is the general-apply/overload path this slice
   // does not yet migrate.
+  // Mirrors `runtime_expr`'s own dedicated `eq` case exactly: whichever
+  // operand `needs_expected` says can only elaborate given a type gets
+  // deferred until the other, self-sufficient operand's own checked
+  // type is available to hand it; if neither or both need one, check
+  // both independently and unify their types directly. `eq` gets this
+  // dedicated bidirectional ordering (unlike the general apply case's
+  // uniform left-to-right-then-deferred-fill scan) because either
+  // operand may need the other's type, not just a later one a domain
+  // metavariable is waiting on.
+  | CoreCall(CoreRef(name, _), args, at) when name == #'eq && args.length() == 2:
+      let left_core :~ CoreExpr = args[0]
+      let right_core :~ CoreExpr = args[1]
+      let (checked_left, checked_right):
+        cond
+        | needs_expected(right_core) && !needs_expected(left_core):
+            let left = check_sub(left_core, #false)
+            values(left, check_sub(right_core, checked_ty(left)))
+        | needs_expected(left_core) && !needs_expected(right_core):
+            let right = check_sub(right_core, #false)
+            values(check_sub(left_core, checked_ty(right)), right)
+        | ~else:
+            let left = check_sub(left_core, #false)
+            let right = check_sub(right_core, #false)
+            unify(checked_ty(left), checked_ty(right), at)
+            values(left, right)
+      unify_with(mk_tyapp(#'bool, []), at)
+      CheckedEq(checked_left, checked_right, at)
   | CoreCall(CoreRef(name, _), args, at) when (name == #'conj
                                                  || name == #'disj
                                                  || name == #'imp)

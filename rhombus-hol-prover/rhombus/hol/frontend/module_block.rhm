@@ -111,12 +111,11 @@ meta:
   // Per-module expansion state. The syntax-parameter binding is rebound at
   // the start of every module, so no value is shared through the transformer
   // instance that `raco make` reuses for other modules.
-  class ExpansionState(next_index :: NonnegInt,
-                       surface :: SurfaceContext,
+  class ExpansionState(surface :: SurfaceContext,
                        steps_rev :: List.of(Syntax))
 
   fun initial_expansion_state() :: ExpansionState:
-    ExpansionState(0, initial_surface_context, [])
+    ExpansionState(initial_surface_context, [])
 
   fun imported_surface_context(terms :: List.of(Syntax)) :: SurfaceContext:
     let [t, ...] = terms
@@ -1617,59 +1616,65 @@ meta:
     let steps_stx = option_int_stx(search_steps)
     '(core_tactic $induct_stx [$u, ...] [$d, ...] [$r, ...] [$c, ...] [$w, ...] $steps_stx $extensionality_stx)'.relocate_span([at])
 
-  fun render_step(step :: Syntax) :: List.of(Syntax):
+  fun render_step(step :: Syntax, n :: Int) :: values(List.of(Syntax), Int):
     let step = step.replace_scopes(id_ctx)
+    let cur = st(n)
+    let nxt = st(n + 1)
+    let forms:
+      match step
+      | '(~import $alias [$term, ...])':
+          let [t, ...] = [term, ...]
+          let path = '$t ...'
+          ['import: $path!hol_theory as $alias']
+      | '(~adopt $alias [$at])':
+          ['def $nxt = _hol_driver.adopt($cur, $(alias).theory, '$at')']
+      | '(~datatype [$form, ...] [$at])':
+          ['def $nxt = _hol_driver.add_datatypes($cur, ['$form', ...], '$at')']
+      | '(~function [$core, ...] [$at])':
+          ['def $nxt:
+             let specs = try:
+                           [_hol_surface.decode_function('$core'), ...]
+                           ~catch e :: Exn.Fail:
+                             _hol_driver.hol_reraise(e, '$at')
+             _hol_driver.add_functions($cur, specs, '$at')']
+      | '(~theorem [$name] [$core] [$tactic] [$at])':
+          ['def $nxt:
+             let statement = try:
+                              _hol_surface.decode_prop('$core')
+                              ~catch e :: Exn.Fail:
+                                _hol_driver.hol_reraise(e, '$at')
+             let proof = try:
+                           _hol_surface.decode_tactic('$tactic')
+                           ~catch e :: Exn.Fail:
+                             _hol_driver.hol_reraise(e, '$at')
+             _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
+                                     statement, proof, '$at')']
+      | '(~definition [$name] [$type] [$core] [$at])':
+          ['def $nxt:
+             let expression = try:
+                              _hol_surface.decode_expr('$core', #'definition)
+                              ~catch e :: Exn.Fail:
+                                _hol_driver.hol_reraise(e, '$at')
+             _hol_driver.add_definition($cur, Syntax.unwrap('$name'),
+                                        '$type', expression, '$at')']
+      | '(~inductive [$name, ...] [$signature, ...] [$rule_name, ...] [$rule_core, ...] [$at])':
+          ['def $nxt:
+             let rules = try:
+                           [_hol_surface.decode_prop('$rule_core'), ...]
+                           ~catch e :: Exn.Fail:
+                             _hol_driver.hol_reraise(e, '$at')
+             _hol_driver.add_inductive(
+               $cur, [Syntax.unwrap('$name'), ...],
+               [_hol_driver.inductive_signature('$signature'), ...],
+               [Syntax.unwrap('$rule_name'), ...], rules, '$at')']
+      | '(~overload_method [$function_name] [$signature] [$constant] [$order, ...] [$at])':
+          ['def $nxt = _hol_driver.add_overload_method_encoded(
+                         $cur, Syntax.unwrap('$function_name'), '$signature',
+                         Syntax.unwrap('$constant'), [$order, ...], '$at')']
+      | ~else: syntax_meta.error("internal malformed logical step", step)
     match step
-    | '(~import $alias [$term, ...])':
-        let [t, ...] = [term, ...]
-        let path = '$t ...'
-        ['import: $path!hol_theory as $alias']
-    | '(~adopt $cur $nxt $alias [$at])':
-        ['def $nxt = _hol_driver.adopt($cur, $(alias).theory, '$at')']
-    | '(~datatype $cur $nxt [$form, ...] [$at])':
-        ['def $nxt = _hol_driver.add_datatypes($cur, ['$form', ...], '$at')']
-    | '(~function $cur $nxt [$core, ...] [$at])':
-        ['def $nxt:
-           let specs = try:
-                         [_hol_surface.decode_function('$core'), ...]
-                         ~catch e :: Exn.Fail:
-                           _hol_driver.hol_reraise(e, '$at')
-           _hol_driver.add_functions($cur, specs, '$at')']
-    | '(~theorem $cur $nxt [$name] [$core] [$tactic] [$at])':
-        ['def $nxt:
-           let statement = try:
-                            _hol_surface.decode_prop('$core')
-                            ~catch e :: Exn.Fail:
-                              _hol_driver.hol_reraise(e, '$at')
-           let proof = try:
-                         _hol_surface.decode_tactic('$tactic')
-                         ~catch e :: Exn.Fail:
-                           _hol_driver.hol_reraise(e, '$at')
-           _hol_driver.add_theorem($cur, Syntax.unwrap('$name'),
-                                   statement, proof, '$at')']
-    | '(~definition $cur $nxt [$name] [$type] [$core] [$at])':
-        ['def $nxt:
-           let expression = try:
-                            _hol_surface.decode_expr('$core', #'definition)
-                            ~catch e :: Exn.Fail:
-                              _hol_driver.hol_reraise(e, '$at')
-           _hol_driver.add_definition($cur, Syntax.unwrap('$name'),
-                                      '$type', expression, '$at')']
-    | '(~inductive $cur $nxt [$name, ...] [$signature, ...] [$rule_name, ...] [$rule_core, ...] [$at])':
-        ['def $nxt:
-           let rules = try:
-                         [_hol_surface.decode_prop('$rule_core'), ...]
-                         ~catch e :: Exn.Fail:
-                           _hol_driver.hol_reraise(e, '$at')
-           _hol_driver.add_inductive(
-             $cur, [Syntax.unwrap('$name'), ...],
-             [_hol_driver.inductive_signature('$signature'), ...],
-             [Syntax.unwrap('$rule_name'), ...], rules, '$at')']
-    | '(~overload_method $cur $nxt [$function_name] [$signature] [$constant] [$order, ...] [$at])':
-        ['def $nxt = _hol_driver.add_overload_method_encoded(
-                       $cur, Syntax.unwrap('$function_name'), '$signature',
-                       Syntax.unwrap('$constant'), [$order, ...], '$at')']
-    | ~else: syntax_meta.error("internal malformed logical step", step)
+    | '(~import $_ [$_, ...])': values(forms, n)
+    | ~else: values(forms, n + 1)
 
   // -- diagnostics -----------------------------------------------------------
 
@@ -1718,10 +1723,8 @@ meta:
              ty)
 
   fun emit_group(kind :: Symbol, decls :: List.of(expand.Decl),
-                 n :: Int, runtime_state :: SurfaceContext)
-       :: values(List.of(Syntax), List.of(Syntax), Int, SurfaceContext):
-    let cur = st(n)
-    let nxt = st(n + 1)
+                 runtime_state :: SurfaceContext)
+       :: values(List.of(Syntax), List.of(Syntax), SurfaceContext):
     let at = head_term((decls[0] :~ expand.Decl).form)
     match kind
     | #'datatype:
@@ -1755,8 +1758,8 @@ meta:
           for values(state :~ SurfaceContext = ready) (spec in specs):
             surface_add_datatype(state, spec :~ DatatypeSpec)
         values(runtime,
-               ['(~datatype $cur $nxt [$form, ...] [$at])'],
-               n + 1, next_runtime)
+               ['(~datatype [$form, ...] [$at])'],
+               next_runtime)
     | #'function:
         let encoded:
           for List (d in decls):
@@ -1785,8 +1788,8 @@ meta:
                    surface_add_function(state, spec, emitted.ty))
         let [core, ...] = encoded.map(fun (entry :: List): entry[0] :~ Syntax)
         values(runtime,
-               ['(~function $cur $nxt [$core, ...] [$at])'],
-               n + 1, next_runtime)
+               ['(~function [$core, ...] [$at])'],
+               next_runtime)
     | #'inductive:
         let [name, ...] = decls.map(
                             fun (d :: expand.Decl): (d.parts :~ List)[0])
@@ -1808,8 +1811,8 @@ meta:
             let [g, ...] = (r :~ List)[1] :~ List
             parse_hol_encoding('$g; ...')
         values([],
-               ['(~inductive $cur $nxt [$name, ...] [$signature, ...] [$rule_name, ...] [$rule_core, ...] [$at])'],
-               n + 1, runtime_state)
+               ['(~inductive [$name, ...] [$signature, ...] [$rule_name, ...] [$rule_core, ...] [$at])'],
+               runtime_state)
     | ~else:
         syntax_meta.error("internal unknown declaration family",
                           (decls[0] :~ expand.Decl).form)
@@ -1820,25 +1823,24 @@ meta:
   // module, and the chain steps go into the `hol_theory` submodule.  Nothing
   // in the runtime half ever refers to the chain, which is what makes the
   // split possible.
-  fun emit_one(d :: expand.Decl, n :: Int, runtime_state :: SurfaceContext)
-       :: values(List.of(Syntax), List.of(Syntax), Int, SurfaceContext):
-    let cur = st(n)
-    let nxt = st(n + 1)
+  fun emit_one(d :: expand.Decl, alias_seed :: Int,
+               runtime_state :: SurfaceContext)
+       :: values(List.of(Syntax), List.of(Syntax), SurfaceContext):
     match d.kind
     | #'import:
         let [paths] = d.parts
         let at = head_term(d.form)
-        let (chain, n2):
-          for values(acc :~ List = [], k = n) (terms in (paths :~ List)):
+        let (chain, _):
+          for values(acc :~ List = [], k = alias_seed) (terms in (paths :~ List)):
             let alias = Syntax.make_id("_hol_used" ++ to_string(k), id_ctx)
             let [t, ...] = (terms :~ List).map(recontext)
             values(acc ++ ['(~import $alias [$t, ...])',
-                           '(~adopt $(st(k)) $(st(k + 1)) $alias [$at])'],
+                           '(~adopt $alias [$at])'],
                    k + 1)
         let next_runtime:
           for values(state :~ SurfaceContext = runtime_state) (terms in (paths :~ List)):
             defer_surface_import(state, terms :~ List.of(Syntax))
-        values([emit_plain_import(d.form)], chain, n2, next_runtime)
+        values([emit_plain_import(d.form)], chain, next_runtime)
     | #'theorem:
         let [name, stmt, tactic] = d.parts
         let at = head_term(d.form)
@@ -1847,16 +1849,16 @@ meta:
         let core = parse_hol_encoding('$g; ...')
         let tactic_core = tactic_encoding(tactic, at)
         values([],
-               ['(~theorem $cur $nxt [$name] [$core] [$tactic_core] [$at])'],
-               n + 1, runtime_state)
+               ['(~theorem [$name] [$core] [$tactic_core] [$at])'],
+               runtime_state)
     | #'definition:
         let [name, type_stx, body_groups] = d.parts
         let at = head_term(d.form)
         let [g, ...] = (body_groups :~ List)
         let core = parse_hol_encoding('$g; ...')
         values([],
-               ['(~definition $cur $nxt [$name] [$type_stx] [$core] [$at])'],
-               n + 1, runtime_state)
+               ['(~definition [$name] [$type_stx] [$core] [$at])'],
+               runtime_state)
     | #'overload_method:
         let [function_name, argument_names, argument_types,
              result_type, constant, template_arguments] = d.parts
@@ -1884,8 +1886,8 @@ meta:
         let [position, ...] = positions.map(
                               fun (value): Syntax.make(value, id_ctx))
         values([],
-               ['(~overload_method $cur $nxt [$function_name] [$signature] [$constant] [$position, ...] [$at])'],
-               n + 1, next_runtime)
+               ['(~overload_method [$function_name] [$signature] [$constant] [$position, ...] [$at])'],
+               next_runtime)
 
 syntax_parameter.bridge hol_expansion_state:
   Box(initial_expansion_state())
@@ -1911,17 +1913,17 @@ meta:
   fun emit_planned(kind :: Symbol, decls :: List.of(expand.Decl)) :: Syntax:
     let box = current_expansion_box()
     let state = box.value :~ ExpansionState
-    let (runtime, chain, next_index, surface):
+    let (runtime, chain, surface):
       cond
       | family_kinds.contains(kind):
-          emit_group(kind, decls, state.next_index, state.surface)
+          emit_group(kind, decls, state.surface)
       | ~else:
-          emit_one(decls[0] :~ expand.Decl, state.next_index, state.surface)
+          emit_one(decls[0] :~ expand.Decl, state.steps_rev.length(),
+                   state.surface)
     let steps_rev:
       for values(acc :~ List.of(Syntax) = state.steps_rev) (step in chain):
         List.cons(step :~ Syntax, acc)
-    box.value := ExpansionState(
-                   next_index :~ NonnegInt, surface, steps_rev)
+    box.value := ExpansionState(surface, steps_rev)
     let [runtime_form, ...] = runtime
     '«
        $runtime_form
@@ -1958,17 +1960,17 @@ meta:
     let box = current_expansion_box()
     let state = box.value :~ ExpansionState
     let ready = force_surface_context(state.surface)
-    box.value := ExpansionState(
-                   state.next_index, ready, state.steps_rev)
+    box.value := ExpansionState(ready, state.steps_rev)
     emit_quickcheck(ready, name, opts, core, at)
 
   fun finish_expansion() :: Syntax:
     let state = current_expansion_state()
-    let final = st(state.next_index)
-    let rendered:
-      for values(acc :~ List.of(Syntax) = []) (
-            encoded in state.steps_rev):
-        render_step(encoded :~ Syntax) ++ acc
+    let (rendered, final_index):
+      for values(acc :~ List.of(Syntax) = [], n = 0) (
+            encoded in state.steps_rev.reverse()):
+        let (forms, next_n) = render_step(encoded :~ Syntax, n)
+        values(acc ++ forms, next_n)
+    let final = st(final_index)
     let [step, ...] = rendered
     let surface_state = emit_surface_state(state.surface)
     '«

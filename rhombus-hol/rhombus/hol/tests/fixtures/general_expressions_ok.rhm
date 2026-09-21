@@ -1,0 +1,58 @@
+#lang rhombus/hol
+
+// `match`, `block:`, and `block: let ...` all work as general expressions
+// usable anywhere an ordinary expression is expected (function arguments,
+// theorem statements), not only in a function's tail position -- and the
+// theorems stating their values prove outright.
+//
+// Regression for a real bug: `elaborate_match_expr_effect` used the raw,
+// possibly-still-unbound expected-type metavariable (generated whenever
+// `===`'s bidirectional argument elaboration checks a match/block against
+// an inferred type) to validate each clause's body type via a naive `==`
+// comparison, instead of resolving it through the substitution built up
+// while elaborating the clauses -- exactly as `CoreFunctionExpr`
+// elaboration already did. This rejected every match/block value used
+// outside a function body with "a local function body has a different
+// type from its result type", even when every branch was correctly and
+// identically typed.
+
+export: Nat zero succ apply1
+
+datatype Nat
+| zero()
+| succ(pred :: Nat)
+
+// A `match` used directly as a general expression value (compared with
+// `===` in a theorem statement, not confined to a function body's tail
+// position). It proves outright because `prove_impl` beta-normalizes the
+// goal before the waterfall runs, so the lambda the match compiles to is
+// applied to its scrutinee first.
+theorem bare_match:
+  (match zero()
+   | zero(): succ(zero())
+   | succ(_): zero()) === succ(zero())
+
+// A `block:` wrapping a `match`, used directly as a general expression
+// value.
+theorem block_with_match:
+  (block:
+     match zero()
+     | zero(): succ(zero())
+     | succ(_): zero()) === succ(zero())
+
+// `block: let x = e1; e2` is the general-expression form of an eager
+// `let`: it is usable anywhere an ordinary expression is expected,
+// including as a function argument, not only in a function's own tail
+// position. It proves outright, since the lambda it desugars to is
+// beta-normalized with the goal before the waterfall runs.
+function apply1(f :: Nat -> Nat, n :: Nat) :: Nat:
+  f(n)
+
+theorem let_as_arg:
+  apply1(
+    function (x :: Nat) :: Nat:
+      let y = succ(x)
+      y,
+    block:
+      let w = succ(zero())
+      w) === succ(succ(zero()))

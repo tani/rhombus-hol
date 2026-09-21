@@ -81,33 +81,32 @@ fun optional_declared_type(type_stx :: maybe(Syntax),
 export:
   function_parts
   function_proof_measure
-  body_clauses
   row_parts
 
 // A declaration split into its parts:
-// `[name, [param, ...], result_type, body]`. The declaration macro calls this
-// once, then both the executable and logical paths consume its encoded
-// `CoreFunctionSpec`.
+// `[name, [param, ...], result_type, body, clauses]`. Exactly one of `body`
+// (a plain expression body) and `clauses` (a clausal `| pat: expr` form's
+// rows) is `#false`. The declaration macro calls this once, then both the
+// executable and logical paths consume its encoded `CoreFunctionSpec`.
 // Raises, with the offending syntax, when the declaration is not one this
 // version can admit.
 fun function_parts(stx :: Syntax) :: List:
   match stx
   | 'function $(name :: Identifier)($param, ...) $rest ...':
-      let [rty, body] = split_signature('$rest ...', stx)
-      [name, [param, ...], rty, body]
+      let [rty, body, clauses] = split_signature('$rest ...', stx)
+      [name, [param, ...], rty, body, clauses]
   | 'function $(name :: Identifier)
      | $c
      | ...':
-      [name, #false, #false, clause_body([c, ...])]
+      [name, #false, #false, #false, [c, ...]]
   | ~else:
       syntax_error(#'function,
                    "expected a named function declaration",
                    stx)
 
-// `:: Type: body`, or the clausal form
-// `:: Type | (pat, ...): body | ...` -- see `clause_rows`. The clausal form
-// is returned as a body of the same shape everything downstream already
-// reads, so only `parse_body` and the emitter have to know about it.
+// `:: Type: body`, or the clausal form `:: Type | (pat, ...): body | ...`
+// -- see `clause_rows`. Returns `[result_type, body_or_false,
+// clauses_or_false]`; exactly one of the last two is present.
 fun split_signature(rest :: Syntax, at :: Syntax) :: List:
   match rest
   | ':: $ty ... ~measure($m): $body; ...':
@@ -122,29 +121,15 @@ fun split_signature(rest :: Syntax, at :: Syntax) :: List:
         #'function,
         "`~measure(...)` must be written in an adjacent `proof:` block as `~measure: expression`",
         m)
-  | ':: $ty ...: $body; ...': ['$ty ...', '$body; ...']
+  | ':: $ty ...: $body; ...': ['$ty ...', '$body; ...', #false]
   | ':: $ty ...
      | $c
-     | ...': ['$ty ...', clause_body([c, ...])]
-  | ': $body; ...': [#false, '$body; ...']
-  | '| $c | ...': [#false, clause_body([c, ...])]
+     | ...': ['$ty ...', #false, [c, ...]]
+  | ': $body; ...': [#false, '$body; ...', #false]
+  | '| $c | ...': [#false, #false, [c, ...]]
   | ~else:
       syntax_error(#'function, "malformed function body", at)
 
-// The clausal form's body is tagged so `parse_body` can distinguish it from
-// an ordinary expression body without adding a second body field.
-fun clause_body(cs :: List.of(Syntax)) :: Syntax:
-  let [c, ...] = cs
-  '#%hol_clauses:
-     $c
-     ...'
-
-// The clauses back out of that shape, for the emitter.  `#false` when the
-// body is an ordinary expression body.
-fun body_clauses(body :: Syntax) :: maybe(List.of(Syntax)):
-  match body
-  | '#%hol_clauses: $c; ...': [c, ...]
-  | ~else: #false
 
 
 // A function proof currently supplies exactly one termination measure. Keeping

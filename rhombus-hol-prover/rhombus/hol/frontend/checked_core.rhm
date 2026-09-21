@@ -63,6 +63,7 @@ export:
   CheckedPair
   CheckedList
   CheckedString
+  CheckedSet
   CheckedIf
   CheckedOpaque
   check_expr
@@ -104,6 +105,16 @@ class CheckedList(elements :: List.of(CheckedExpr), tail :: maybe(CheckedExpr),
 class CheckedString(value :: String, ty :: HType, at :: Syntax):
   extends CheckedExpr
 
+// A set literal renders as a predicate lambda, not a structural value
+// constructor -- but its own soundness rejection (no executable
+// equality over function values) already happened before a `CheckedSet`
+// is ever constructed (see `check_expr`'s own `build`), so `ty` (the
+// overall function-to-Boolean type) is all a lowering needs; the
+// element type is recoverable via `dest_fun(ty)` on the rare occasion
+// something else needs it, rather than duplicating it as its own field.
+class CheckedSet(elements :: List.of(CheckedExpr), ty :: HType, at :: Syntax):
+  extends CheckedExpr
+
 class CheckedIf(cond :: CheckedExpr, then_branch :: CheckedExpr,
                 else_branch :: CheckedExpr, ty :: HType, at :: Syntax):
   extends CheckedExpr
@@ -121,6 +132,7 @@ fun checked_ty(c :: CheckedExpr) :: HType:
   | CheckedPair(_, _, ty, _): ty
   | CheckedList(_, _, ty, _): ty
   | CheckedString(_, ty, _): ty
+  | CheckedSet(_, ty, _): ty
   | CheckedIf(_, _, _, ty, _): ty
   | CheckedOpaque(_, ty, _): ty
   | ~else: error(~who: #'checked_ty, "unknown CheckedExpr variant")
@@ -146,10 +158,10 @@ fun core_location(expr :: CoreExpr) :: Syntax:
   | ~else: error(~who: #'core_location, "unknown CoreExpr variant")
 
 // A Theory-free type-checking pass over exactly `CoreRef`, `CoreNumeral`,
-// `CoreTypedExpr`, `CorePairExpr`, `CoreListExpr`, `CoreStringExpr`, and
-// `CoreIf` -- the vertical slice proven end to end first. Any other
-// `CoreExpr` shape, and a `CoreRef` naming neither a local variable nor
-// an entry `lookup` knows, is handed
+// `CoreTypedExpr`, `CorePairExpr`, `CoreListExpr`, `CoreStringExpr`,
+// `CoreSetExpr`, and `CoreIf` -- the vertical slice proven end to end
+// first. Any other `CoreExpr` shape, and a `CoreRef` naming neither a
+// local variable nor an entry `lookup` knows, is handed
 // to `fallback` unchanged: this is the seam a later migration step
 // widens, not a boundary `check_expr` itself needs to know the shape of.
 //
@@ -322,6 +334,53 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
       let string_ty = mk_tyapp(#'String, [])
       unify_with(string_ty, at)
       CheckedString(value, string_ty, at)
+  | CoreSetExpr(elements, at):
+      // Mirrors `runtime_set_expr`/`runtime_set_element_type` exactly:
+      // an expected function-to-Boolean type destructures into its
+      // domain (the element type); a still-open metavariable gets a
+      // fresh element type, unified back against a function-to-Boolean
+      // shape; any other wrong shape defers to `fallback` rather than
+      // duplicating its error message. Unlike `CoreListExpr`, an empty
+      // set with no expected type needs no peek -- there is no tail to
+      // fall back on, just a fresh element type directly.
+      fun set_element_type(wanted :: HType) :: maybe(HType):
+        match wanted
+        | TyVar(_,):
+            let et = mk_tyvar(Symbol.gen("_set_element"))
+            unify(wanted, mk_fun(et, mk_tyapp(#'bool, [])), at)
+            et
+        | ~else:
+            if is_fun(wanted)
+            | let (dom, rng) = dest_fun(wanted)
+              (if rng == mk_tyapp(#'bool, []) | dom :~ HType | #false)
+            | #false
+      // Mirrors the original's ordering exactly: elements are checked
+      // against `element_type` first (checking may itself refine a
+      // still-open element type further), then the *post-check*
+      // resolved type is what decides soundness -- a function-typed
+      // element has no sound executable equality, so this defers to
+      // `fallback` (not a direct error: `check_expr` never raises its
+      // own diagnostics) which reaches `runtime_set_expr`'s own
+      // identical `is_fun` rejection and its exact message.
+      fun build(element_type :: HType) :: CheckedExpr:
+        let checked_elements:
+          elements.map(fun (e :: CoreExpr): check_sub(e, element_type))
+        let resolved_et = resolve(element_type)
+        if is_fun(resolved_et)
+        | fallback(expr, expected)
+        | CheckedSet(
+            checked_elements, mk_fun(resolved_et, mk_tyapp(#'bool, [])), at)
+      match expected
+      | #false:
+          match elements
+          | List.cons(first, _):
+              let peek = check_sub(first :~ CoreExpr, #false)
+              build(checked_ty(peek))
+          | []: build(mk_tyvar(Symbol.gen("_set_element")))
+      | wanted:
+          match set_element_type(resolve(wanted :~ HType))
+          | #false: fallback(expr, expected)
+          | et: build(et)
   | CoreIf(cond, then_expr, else_expr, at):
       let bool_ty = mk_tyapp(#'bool, [])
       let checked_cond = check_sub(cond, bool_ty)

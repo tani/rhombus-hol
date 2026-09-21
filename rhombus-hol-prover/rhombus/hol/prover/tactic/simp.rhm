@@ -28,8 +28,7 @@ import:
   rhombus/hol/logic/ruledb open
   rhombus/hol/prover/proof/node open
   rhombus/hol/prover/trace open
-  rhombus/hol/effect/core open
-  rhombus/hol/effect/syntax open
+  rhombus/hol/prover/search/limits open
 
 export:
   with_assumptions
@@ -57,34 +56,29 @@ fun with_assumptions(thy :: Theory, db :: RuleDB,
 // Each is simplified against the database plus the assumptions *before* it.
 // Using all of them would let an assumption rewrite itself to `true`, which
 // discards it, and would let two assumptions rewrite each other without end.
-fun simplify_asms(thy :: Theory, db :: RuleDB,
+fun simplify_asms(thy :: Theory, db :: RuleDB, budget :: Budget,
                   asms :: List.of(Term),
-                  ~decide: decide :: maybe(Function) = #false) :: Computation:
+                  ~decide: decide :: maybe(Function) = #false) :: maybe(List):
   recur loop (i = 0, seen :~ List = [], acc :~ List = [], changed = #false):
     cond
-    | i >= asms.length(): return (if changed | acc.reverse() | #false)
+    | i >= asms.length(): (if changed | acc.reverse() | #false)
     | ~else:
         let a = asms[i]
-        effect:
-          let rewritten <- simp_conv_effect(
-                               with_assumptions(thy, db, seen),
-                               ~decide: decide)(thy, a)
-          match rewritten
-          | #false:
-              loop(i + 1, seen ++ [a], List.cons(REFL(thy, a), acc), changed)
-          | eq :~ Thm:
-              loop(i + 1, seen ++ [a], List.cons(eq, acc),
-                   changed || rhs_of(eq) != a)
+        match simp_conv(with_assumptions(thy, db, seen), budget,
+                        ~decide: decide)(thy, a)
+        | #false:
+            loop(i + 1, seen ++ [a], List.cons(REFL(thy, a), acc), changed)
+        | eq :~ Thm:
+            loop(i + 1, seen ++ [a], List.cons(eq, acc),
+                 changed || rhs_of(eq) != a)
 
 // Keep binders and antecedents intact at simplification time. The induction
 // and generalization stages need that structure for termination obligations.
-fun simplify_goal(thy :: Theory, db :: RuleDB, g :: Goal,
-                  ~decide: decide :: maybe(Function) = #false) :: Computation:
-  effect:
-    let eqs <- simplify_asms(thy, db, g.asms, ~decide: decide)
-    match eqs
-    | #false: simplify_concl(thy, db, g, ~decide: decide)
-    | eqs: return rebuild_asms(thy, db, g, eqs :~ List)
+fun simplify_goal(thy :: Theory, db :: RuleDB, budget :: Budget, g :: Goal,
+                  ~decide: decide :: maybe(Function) = #false) :: maybe(Step):
+  match simplify_asms(thy, db, budget, g.asms, ~decide: decide)
+  | #false: simplify_concl(thy, db, budget, g, ~decide: decide)
+  | eqs: rebuild_asms(thy, db, g, eqs :~ List)
 
 // One assumption reduced to `false` closes the goal; otherwise the goal is
 // replaced by the one with reduced assumptions.
@@ -141,38 +135,36 @@ fun extensionalize_concl(thy :: Theory, g :: Goal) :: maybe(Step):
 // recursive call with the raw `WFREC` encoding and the search stops
 // terminating. Applying beta only to a goal the waterfall is holding
 // keeps it away from that derivation.
-fun simp_then_beta(db :: RuleDB, ~decide: decide :: maybe(Function) = #false):
-  fun (thy :: Theory, t :: Term) :: Computation:
-    effect:
-      let rewritten <- simp_conv_effect(db, ~decide: decide)(thy, t)
-      let current = (if rewritten | rhs_of(rewritten :~ Thm) | t)
-      let beta = TOP_DEPTH_CONV(BETA_CONV)(thy, current)
-      return (cond
-              | !beta: rewritten
-              | rewritten: TRANS(rewritten :~ Thm, beta :~ Thm)
-              | ~else: beta)
+fun simp_then_beta(db :: RuleDB, budget :: Budget,
+                   ~decide: decide :: maybe(Function) = #false):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    let rewritten = simp_conv(db, budget, ~decide: decide)(thy, t)
+    let current = (if rewritten | rhs_of(rewritten :~ Thm) | t)
+    let beta = TOP_DEPTH_CONV(BETA_CONV)(thy, current)
+    cond
+    | !beta: rewritten
+    | rewritten: TRANS(rewritten :~ Thm, beta :~ Thm)
+    | ~else: beta
 
-fun simplify_concl(thy :: Theory, db :: RuleDB, g :: Goal,
-                   ~decide: decide :: maybe(Function) = #false) :: Computation:
+fun simplify_concl(thy :: Theory, db :: RuleDB, budget :: Budget, g :: Goal,
+                   ~decide: decide :: maybe(Function) = #false) :: maybe(Step):
   cond
   | g.concl == tm_true:
-      return Step([], fun (_ :: List.of(Thm)): TRUTH(thy), [])
+      Step([], fun (_ :: List.of(Thm)): TRUTH(thy), [])
   | ~else:
       let db2 = with_assumptions(thy, db, g.asms)
-      effect:
-        let rewritten <- simp_then_beta(db2, ~decide: decide)(thy, g.concl)
-        match rewritten
-        | #false: return extensionalize_concl(thy, g)
-        | eqth :~ Thm:
-            let simplified = rhs_of(eqth)
-            cond
-            | simplified == g.concl:
-                return extensionalize_concl(thy, g)
-            | simplified == tm_true:
-                // `|- concl === true`, so the goal is closed outright.
-                return Step([], fun (_ :: List.of(Thm)): EQT_ELIM(thy, eqth), [])
-            | ~else:
-                let sub = Goal(g.asms, simplified)
-                fun restore_conclusion(ths :: List.of(Thm)) :: Thm:
-                  EQ_MP(SYM(thy, eqth), ths[0])
-                return Step([sub], restore_conclusion, [Simplified()])
+      match simp_then_beta(db2, budget, ~decide: decide)(thy, g.concl)
+      | #false: extensionalize_concl(thy, g)
+      | eqth :~ Thm:
+          let simplified = rhs_of(eqth)
+          cond
+          | simplified == g.concl:
+              extensionalize_concl(thy, g)
+          | simplified == tm_true:
+              // `|- concl === true`, so the goal is closed outright.
+              Step([], fun (_ :: List.of(Thm)): EQT_ELIM(thy, eqth), [])
+          | ~else:
+              let sub = Goal(g.asms, simplified)
+              fun restore_conclusion(ths :: List.of(Thm)) :: Thm:
+                EQ_MP(SYM(thy, eqth), ths[0])
+              Step([sub], restore_conclusion, [Simplified()])

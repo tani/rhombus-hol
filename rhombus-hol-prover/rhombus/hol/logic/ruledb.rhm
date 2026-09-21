@@ -20,8 +20,6 @@ import:
   rhombus/hol/logic/drule open
   rhombus/hol/logic/tmatch open
   rhombus/hol/prover/search/limits open
-  rhombus/hol/effect/core open
-  rhombus/hol/effect/syntax open
 
 export:
   RewriteRule
@@ -41,7 +39,6 @@ export:
   db_conv
   refl_conv
   simp_conv
-  simp_conv_effect
 
 class RewriteRule(name :: Symbol,
                   // the specialised theorem `|- cond1 ==> ... ==> lhs === rhs`;
@@ -305,11 +302,12 @@ fun type_facts_of(db :: RuleDB, head :: Symbol) :: List.of(Thm):
 // which would make firing it prove nothing.  A condition that fails to
 // discharge just means the rule does not fire here, exactly like a
 // non-matching left-hand side: never an error, never a wrong rewrite.
-fun apply_rule(r :: RewriteRule, thy :: Theory, db :: RuleDB, t :: Term,
+fun apply_rule(r :: RewriteRule, thy :: Theory, db :: RuleDB, budget :: Budget,
+               t :: Term,
                ~decide: decide :: maybe(Function) = #false)
-     :: Computation:
+     :: maybe(Thm):
   match term_match(r.vars, r.lhs, t)
-  | #false: return #false
+  | #false: #false
   | m :~ MatchResult:
       // Instantiate the theorem first, then read the conditions off *it*.
       //
@@ -327,72 +325,62 @@ fun apply_rule(r :: RewriteRule, thy :: Theory, db :: RuleDB, t :: Term,
       // wrong.
       let inst_th = INST(thy, m.theta, INST_TYPE(thy, m.tyin, r.src))
       let (inst_conds, _) = strip_imp(concl_of(inst_th))
-      effect:
-        let proofs <- discharge_all(
-                        thy, disable(db, [r.name]), inst_conds,
-                        ~decide: decide)
-        match proofs
-        | #false: return #false
-        | proofs :~ List:
-            let th = for values(acc :~ Thm = inst_th) (p in proofs):
-                       MP(thy, acc, p :~ Thm)
-            // Stripping implications off the instantiated theorem can in
-            // principle leave something that is not an equation; that is a
-            // rule which does not apply, not an internal error.
-            match dest_eq(concl_of(th))
-            | #false: return #false
-            | [l, rr]:
-                cond
-                // The match should have produced exactly this term; if it did
-                // not, the rule would silently rewrite something else.
-                | l != t: return #false
-                // A permutative rule fires only when it strictly decreases the
-                // term, so it cannot oscillate.
-                | r.permutative && !term_lt(rr, l): return #false
-                | ~else: return th
+      match discharge_all(thy, disable(db, [r.name]), budget, inst_conds,
+                          ~decide: decide)
+      | #false: #false
+      | proofs :~ List:
+          let th = for values(acc :~ Thm = inst_th) (p in proofs):
+                     MP(thy, acc, p :~ Thm)
+          // Stripping implications off the instantiated theorem can in
+          // principle leave something that is not an equation; that is a
+          // rule which does not apply, not an internal error.
+          match dest_eq(concl_of(th))
+          | #false: #false
+          | [l, rr]:
+              cond
+              // The match should have produced exactly this term; if it did
+              // not, the rule would silently rewrite something else.
+              | l != t: #false
+              // A permutative rule fires only when it strictly decreases the
+              // term, so it cannot oscillate.
+              | r.permutative && !term_lt(rr, l): #false
+              | ~else: th
 
 // A proof of each condition in order, or `#false` if any one does not
 // simplify all the way to `true`.
-fun discharge_all(thy :: Theory, db :: RuleDB, conds :: List.of(Term),
+fun discharge_all(thy :: Theory, db :: RuleDB, budget :: Budget,
+                  conds :: List.of(Term),
                   ~decide: decide :: maybe(Function) = #false)
-     :: Computation:
+     :: maybe(List.of(Thm)):
   match conds
-  | []: return []
+  | []: []
   | List.cons(c, rest):
-      effect:
-        let rewritten <- simp_conv_effect(db, ~decide: decide)(thy, c)
-        match rewritten
-        | #false: return #false
-        | eq :~ Thm when rhs_of(eq) == tm_true:
-            effect:
-              let more <- discharge_all(
-                           thy, db, rest, ~decide: decide)
-              match more
-              | #false: return #false
-              | more: return List.cons(EQT_ELIM(thy, eq), more :~ List)
-        | ~else: return #false
+      match simp_conv(db, budget, ~decide: decide)(thy, c)
+      | #false: #false
+      | eq :~ Thm when rhs_of(eq) == tm_true:
+          match discharge_all(thy, db, budget, rest, ~decide: decide)
+          | #false: #false
+          | more: List.cons(EQT_ELIM(thy, eq), more :~ List)
+      | ~else: #false
 
 // Try every enabled rule whose head matches, newest first.
 // Each candidate costs a step, not just each successful rewrite: a large
 // database tried repeatedly is work whether or not anything fires, and
 // discharging a rule's side conditions recurses back through here.
-fun db_conv(db :: RuleDB, ~decide: decide :: maybe(Function) = #false):
-  fun (thy :: Theory, t :: Term) :: Computation:
+fun db_conv(db :: RuleDB, budget :: Budget,
+            ~decide: decide :: maybe(Function) = #false):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
     match head_symbol(t)
-    | #false: return #false
+    | #false: #false
     | h:
         recur loop (rs :~ List = rules_of(db, h)):
           match rs
-          | []: return #false
+          | []: #false
           | List.cons(r, rest):
               let rule :~ RewriteRule = r
-              effect:
-                let result <- apply_rule(
-                                 rule, thy, db, t, ~decide: decide)
-                match result
-                | #false: loop(rest)
-                | th: return th
-
+              match apply_rule(rule, thy, db, budget, t, ~decide: decide)
+              | #false: loop(rest)
+              | th: th
 
 // Close the tiny equality/implication tautologies that arise before the
 // waterfall's induction stage. Keeping these local avoids a general
@@ -486,27 +474,20 @@ fun refl_conv(thy :: Theory, t :: Term) :: maybe(Thm):
 // decision procedure comes first because the questions it answers are exactly
 // the ones an indexed rule would answer one slow constructor at a time; it
 // returns `#false` for everything else.
-fun simp_step(db :: RuleDB, ~decide: decide :: maybe(Function) = #false):
-  fun (thy :: Theory, t :: Term) :: Computation:
+fun simp_step(db :: RuleDB, budget :: Budget,
+              ~decide: decide :: maybe(Function) = #false):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
     match (if decide | decide(db, thy, t) | #false)
-    | th :: Thm: effect: return th
+    | th :: Thm: th
     | ~else:
         match refl_conv(thy, t)
-        | #false:
-            effect:
-              let result <- db_conv(db, ~decide: decide)(thy, t)
-              return result
-        | th:
-            effect: return th
-// The simplifier's effectful conversion: rewrite top-down, revisiting after
-// each change. It performs SearchBudget requests but installs no handler, so a
-// nested conditional rewrite consumes the caller's allowance.
-fun simp_conv_effect(db :: RuleDB, ~decide: decide :: maybe(Function) = #false):
-  BOUNDED_TOP_DEPTH_CONV(simp_step(db, ~decide: decide))
+        | #false: db_conv(db, budget, ~decide: decide)(thy, t)
+        | th: th
 
-// Standalone conversion boundary. Proof orchestration uses
-// `simp_conv_effect` so its simplifier shares the enclosing proof budget.
-fun simp_conv(db :: RuleDB, ~decide: decide :: maybe(Function) = #false):
-  fun (thy :: Theory, t :: Term) :: maybe(Thm):
-    SearchBudget.run(SearchLimits(),
-                     simp_conv_effect(db, ~decide: decide)(thy, t))
+// Rewrite top-down, revisiting after each change, spending from `budget` as
+// it goes. Passing the caller's own `Budget` shares its allowance with a
+// nested conditional rewrite; passing `fresh_budget(default_search_steps)`
+// gives this call a self-contained one.
+fun simp_conv(db :: RuleDB, budget :: Budget,
+              ~decide: decide :: maybe(Function) = #false):
+  BOUNDED_TOP_DEPTH_CONV(simp_step(db, budget, ~decide: decide), budget)

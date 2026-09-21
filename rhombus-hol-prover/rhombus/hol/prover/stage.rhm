@@ -1,8 +1,8 @@
 #lang rhombus/static
 
-// Domain-specific waterfall stage algebra. A Stage is intentionally not a
-// generic effect interface: its observable contract is Goal -> Computation.
-// Stages request only the proof environment capability they require.
+// Domain-specific waterfall stage algebra. A stage is plainly
+// `(ProofEnv, Goal) -> maybe(Step)`; stages that need the proof environment
+// read it from an explicit parameter instead of asking an ambient effect.
 
 import:
   rhombus/hol/term open
@@ -12,8 +12,7 @@ import:
   rhombus/hol/logic/ruledb open
   rhombus/hol/prover/trace open
   rhombus/hol/prover/proof/node open
-  rhombus/hol/effect/core open
-  rhombus/hol/effect/syntax open
+  rhombus/hol/prover/search/limits open
   rhombus/hol/prover/tactic/simp open
   rhombus/hol/prover/tactic/destruct open
   rhombus/hol/prover/tactic/fertilize open
@@ -24,29 +23,23 @@ import:
   rhombus/hol/prover/context open
 
 export:
-  Stage
   standard_stages
   induction_stage
   first_success
 
-class Stage(name :: Symbol, apply :: Function)
-
 // The native Nat callback decides closed NatLit equality and arithmetic from
 // the exact Peano equations retained in the current Context. Its answers are
 // kernel theorems, not evaluator results.
-fun simplify_stage() :: Stage:
-  fun apply(goal :: Goal) :: Computation:
-    effect:
-      let env :: ProofEnv <- ProofEnv.ask()
-      let numerals = env.base.numerals
-      let decide:
-        match numerals
-        | #false: #false
-        | decider :: Function:
-            fun (db :: RuleDB, thy :: Theory, t :: Term) :: maybe(Thm):
-              decider(env.base, db, thy, t)
-      simplify_goal(env.base.thy, env.db, goal, ~decide: decide)
-  Stage(#'simplify, apply)
+fun simplify_apply(budget :: Budget, env :: ProofEnv, goal :: Goal)
+     :: maybe(Step):
+  let numerals = env.base.numerals
+  let decide:
+    match numerals
+    | #false: #false
+    | decider :: Function:
+        fun (db :: RuleDB, thy :: Theory, t :: Term) :: maybe(Thm):
+          decider(env.base, db, thy, t)
+  simplify_goal(env.base.thy, env.db, budget, goal, ~decide: decide)
 
 // A goal whose conclusion is universally quantified, at a fresh variable.
 //
@@ -59,13 +52,6 @@ fun simplify_stage() :: Stage:
 //
 // `GEN` puts it back, so this proves the goal it was given and not a weaker
 // one: the variable is fresh in the goal, hypotheses included.
-fun specialize_stage() :: Stage:
-  fun apply(goal :: Goal) :: Computation:
-    effect:
-      let env :: ProofEnv <- ProofEnv.ask()
-      return specialize_goal(env.base.thy, goal)
-  Stage(#'specialize, apply)
-
 fun specialize_goal(thy :: Theory, g :: Goal) :: maybe(Step):
   match dest_forall(g.concl)
   | #false: #false
@@ -76,72 +62,62 @@ fun specialize_goal(thy :: Theory, g :: Goal) :: maybe(Step):
         GEN(thy, fresh, ths[0])
       Step([Goal(g.asms, opened)], close, [Specialized(fresh.name)])
 
-fun eliminate_stage() :: Stage:
-  fun apply(goal :: Goal) :: Computation:
-    effect:
-      let env :: ProofEnv <- ProofEnv.ask()
-      return eliminate_goal(env.base.thy, env.base.dts, goal)
-  Stage(#'eliminate, apply)
+fun specialize_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
+  specialize_goal(env.base.thy, goal)
 
-fun fertilize_stage() :: Stage:
-  fun apply(goal :: Goal) :: Computation:
-    effect:
-      let env :: ProofEnv <- ProofEnv.ask()
-      return fertilize_goal(env.base.thy, goal)
-  Stage(#'fertilize, apply)
+fun eliminate_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
+  eliminate_goal(env.base.thy, env.base.dts, goal)
 
-fun generalize_stage() :: Stage:
-  fun apply(goal :: Goal) :: Computation:
-    effect:
-      let env :: ProofEnv <- ProofEnv.ask()
-      return generalize_goal(env.base.thy, env.db, all_ctor_names(env.base.dts), goal)
-  Stage(#'generalize, apply)
+fun fertilize_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
+  fertilize_goal(env.base.thy, goal)
 
-fun irrelevance_stage() :: Stage:
-  fun apply(goal :: Goal) :: Computation:
-    return eliminate_irrelevance_goal(goal)
-  Stage(#'irrelevance, apply)
+fun generalize_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
+  generalize_goal(env.base.thy, env.db, all_ctor_names(env.base.dts), goal)
 
-fun induction_stage(hint :: maybe(FVar)) :: Stage:
-  fun apply(goal :: Goal) :: Computation:
-    effect:
-      let env :: ProofEnv <- ProofEnv.ask()
-      let candidates = (cond
-                        | hint: [hint]
-                        | ~else: candidate_vars(env.base.funs, env.base.dts, goal))
-      recur choose (remaining :~ List = candidates):
-        match remaining
-        | []: return #false
-        | List.cons(variable, rest):
-            let variable :~ FVar = variable
-            match inductive_type_name(variable)
-            | #false: choose(rest)
-            | type_name:
-                match env.base.dts.get(type_name, #false)
-                | #false: choose(rest)
-                | datatype_thms:
-                    return induction_step(env.base.thy, env.base.funs,
-                                          datatype_thms :~ DatatypeThms,
-                                          variable, goal)
-  Stage(#'induct, apply)
+fun irrelevance_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
+  eliminate_irrelevance_goal(goal)
 
-fun standard_stages() :: List.of(Stage):
-  [simplify_stage(), specialize_stage(), eliminate_stage(), fertilize_stage(),
-   generalize_stage(), irrelevance_stage()]
-
-fun first_success(stages :: List.of(Stage), goal :: Goal) :: Computation:
-  effect:
-    let policy :: SearchPolicy <- SearchPolicy.ask()
-    recur loop (remaining :~ List = stages):
+// Induction is not part of `standard_stages`: the waterfall only reaches for
+// it once every other stage has given up on a goal (`waterfall.rhm`).
+fun induction_stage(hint :: maybe(FVar)) :: Function:
+  fun apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
+    let candidates = (cond
+                      | hint: [hint]
+                      | ~else: candidate_vars(env.base.funs, env.base.dts, goal))
+    recur choose (remaining :~ List = candidates):
       match remaining
-      | []: return #false
-      | List.cons(candidate, rest):
-          let candidate :~ Stage = candidate
-          cond
-          | policy.skipped_stages.contains(candidate.name): loop(rest)
-          | ~else:
-              effect:
-                let result <- candidate.apply(goal)
-                match result
-                | #false: loop(rest)
-                | step: return step
+      | []: #false
+      | List.cons(variable, rest):
+          let variable :~ FVar = variable
+          match inductive_type_name(variable)
+          | #false: choose(rest)
+          | type_name:
+              match env.base.dts.get(type_name, #false)
+              | #false: choose(rest)
+              | datatype_thms:
+                  induction_step(env.base.thy, env.base.funs,
+                                 datatype_thms :~ DatatypeThms,
+                                 variable, goal)
+  apply
+
+// One entry per name, filtered by the proof's skipped-stage set once here
+// rather than on every step `first_success` takes: the ordinary loop below
+// then knows nothing about names at all.
+fun standard_stages(env :: ProofEnv, budget :: Budget) :: List.of(Function):
+  [[#'simplify, fun (goal :: Goal): simplify_apply(budget, env, goal)],
+   [#'specialize, fun (goal :: Goal): specialize_apply(env, goal)],
+   [#'eliminate, fun (goal :: Goal): eliminate_apply(env, goal)],
+   [#'fertilize, fun (goal :: Goal): fertilize_apply(env, goal)],
+   [#'generalize, fun (goal :: Goal): generalize_apply(env, goal)],
+   [#'irrelevance, fun (goal :: Goal): irrelevance_apply(env, goal)]]
+    .filter(~keep: fun (entry :: List): !env.skipped_stages.contains(entry[0] :~ Symbol))
+    .map(fun (entry :: List): entry[1] :~ Function)
+
+fun first_success(stages :: List.of(Function), goal :: Goal) :: maybe(Step):
+  recur loop (remaining :~ List = stages):
+    match remaining
+    | []: #false
+    | List.cons(candidate, rest):
+        match (candidate :~ Function)(goal)
+        | #false: loop(rest)
+        | step: step

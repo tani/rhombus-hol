@@ -310,11 +310,11 @@ def initial_context:
   let db = for values(d :~ RuleDB = db) (
                  th in datatype_rules(nat_thy, nat_thms)):
              add_thm(nat_thy, d, #'Nat, th)
-  context_with_numerals(
+  context_update(
     mk_context(nat_thy, ~rules: db,
                ~datatypes: {#'bool: bool_thms, #'Nat: nat_thms},
                ~literal_eq: literal_eq),
-    numeral_conv)
+    ~numerals: numeral_conv)
 
 fun initial_state() :: HolState:
   HolState(initial_context, {}, standard_overload_registry(),
@@ -384,7 +384,8 @@ fun add_datatype_family(st :: HolState, specs :: List.of(DatatypeSpec),
       let db2 = for values(d :~ RuleDB = state.ctx.db) (
                       th in datatype_rules(thy2, thms)):
                   add_thm(thy2, d, spec.name, th)
-      HolState(context_add_datatype(state.ctx, thy2, db2, spec.name, thms),
+      HolState(context_update(state.ctx, ~thy: thy2, ~db: db2,
+                              ~dts: state.ctx.dts ++ {spec.name: thms}),
                state.thms, state.operators, type_constructors,
                state.wfrec_def)
   // The equations that read a member's constructor through to the union are
@@ -392,10 +393,10 @@ fun add_datatype_family(st :: HolState, specs :: List.of(DatatypeSpec),
   // subterm order, and these are what connect the two.
   let with_reps:
     HolState(
-      context_with_rules(
+      context_update(
         installed.ctx,
-        add_thms(thy2, installed.ctx.db, family.union_spec.name,
-                 family.rep_equations)),
+        ~db: add_thms(thy2, installed.ctx.db, family.union_spec.name,
+                      family.rep_equations)),
       installed.thms, installed.operators, installed.type_constructors,
       installed.wfrec_def)
   let with_subterms:
@@ -486,7 +487,8 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
       let db2 = for values(d :~ RuleDB = state.ctx.db) (
                       th in datatype_rules(thy2, thms)):
                   add_thm(thy2, d, spec.name, th)
-      HolState(context_add_datatype(state.ctx, thy2, db2, spec.name, thms),
+      HolState(context_update(state.ctx, ~thy: thy2, ~db: db2,
+                              ~dts: state.ctx.dts ++ {spec.name: thms}),
                state.thms, state.operators, state.type_constructors,
                state.wfrec_def)
   // -- the combined function ------------------------------------------------
@@ -504,8 +506,8 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
   let impl_info :~ FunInfo = impl_info0
   let impl = mk_const(impl_name, fun_type(combined))
   let with_impl:
-    HolState(context_add_function(tagged.ctx, thy3, tagged.ctx.db, impl_name,
-                                  impl_info),
+    HolState(context_update(tagged.ctx, ~thy: thy3,
+                            ~funs: tagged.ctx.funs ++ {impl_name: impl_info}),
              tagged.thms, tagged.operators, tagged.type_constructors,
              tagged.wfrec_def)
   // -- the members ----------------------------------------------------------
@@ -541,8 +543,9 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
     require_closed_theorems(#'function, thy4, spec.name, eqs, at)
     let db2 = add_thms(thy4, state.ctx.db, spec.name, eqs)
     let info = FunInfo(spec, (m :~ FamilyMemberFn).fn, eqs,
-                       member_recursion(combined, spec))
-    HolState(context_add_function(state.ctx, thy4, db2, spec.name, info),
+                       member_recursion(impl_info.recursion, spec))
+    HolState(context_update(state.ctx, ~thy: thy4, ~db: db2,
+                            ~funs: state.ctx.funs ++ {spec.name: info}),
              state.thms, state.operators, state.type_constructors,
              state.wfrec_def)
 
@@ -583,15 +586,28 @@ fun signature_type(signature :: List) :: HType:
         argument in (signature[1] :~ List).reverse()):
     mk_fun(argument :~ HType, ty)
 
-// The members' own recursion record. Only the induction heuristic reads it,
-// to prefer a variable the definition actually descends on; the family's
-// descent itself is the combined function's, and is checked there.
-fun member_recursion(combined :: FunSpec, spec :: FunSpec) :: RecursionPlan:
-  match combined.measure
-  | #false: NoRecursion()
-  | _: MeasuredRecursion(measure_result_type(#'function, spec.name, 1,
-                                             combined.measure :~ Term),
-                         List.iota(spec.arg_types.length()), [], [])
+// The members' own recursion record. Only the induction heuristic reads it
+// (`prover/tactic/induct.rhm`'s `recursive_companions`/`score`), to prefer a
+// variable the definition actually descends on and to know that it descends
+// at all; the family's real descent evidence -- the order, the call sites,
+// any measure decrease proofs -- is the combined function's own, already
+// checked once and carried in `family_recursion`. This derives the honest
+// subset a member can state without re-deriving or re-fabricating that
+// evidence: every member of a family is mutually recursive by construction,
+// so it is exactly as "recursive" as the combined function turned out to be,
+// and every one of its own argument positions is a plausible induction
+// candidate (the combined function's positions are over its one tagged
+// argument, not the member's own parameters, so they cannot be reused
+// directly).
+fun member_recursion(family_recursion :: RecursionPlan,
+                     spec :: FunSpec) :: RecursionPlan:
+  match family_recursion
+  | NoRecursion(): NoRecursion()
+  | MeasuredRecursion(result_type, _, _, _):
+      MeasuredRecursion(result_type, List.iota(spec.arg_types.length()),
+                        [], [])
+  | StructuralRecursion(_, _, _):
+      StructuralRecursion([], List.iota(spec.arg_types.length()), [])
 
 // The order the whole family descends in, as a measure over the tagged
 // argument.
@@ -848,8 +864,8 @@ fun add_datatype(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
       let db2 = for values(d :~ RuleDB = st.ctx.db) (
                       th in datatype_rules(thy2, thms)):
                   add_thm(thy2, d, spec.name, th)
-      let ctx2 = context_add_datatype(
-                   st.ctx, thy2, db2, spec.name, thms)
+      let ctx2 = context_update(st.ctx, ~thy: thy2, ~db: db2,
+                                ~dts: st.ctx.dts ++ {spec.name: thms})
       add_subterm_relation(
         HolState(ctx2, st.thms, st.operators, type_constructors,
                  st.wfrec_def),
@@ -882,7 +898,8 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
       require_no_new_axioms(#'datatype, st.ctx.thy, thy2, fs.name, at)
       require_closed_theorems(#'datatype, thy2, fs.name, info.equations, at)
       let db2 = add_thms(thy2, st.ctx.db, fs.name, info.equations)
-      let ctx2 = context_add_function(st.ctx, thy2, db2, fs.name, info)
+      let ctx2 = context_update(st.ctx, ~thy: thy2, ~db: db2,
+                                ~funs: st.ctx.funs ++ {fs.name: info})
       HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
 
 // -- function ----------------------------------------------------------------
@@ -926,7 +943,8 @@ fun add_function(st0 :: HolState, core :: CoreFunctionSpec,
                                       prepare_measure(st, spec), at)
   require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
   let db2 = add_thms(thy2, st.ctx.db, spec.name, info.equations)
-  let ctx2 = context_add_function(st.ctx, thy2, db2, spec.name, info)
+  let ctx2 = context_update(st.ctx, ~thy: thy2, ~db: db2,
+                            ~funs: st.ctx.funs ++ {spec.name: info})
   HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
 
 // A `definition` is one kernel basic definition, not a one-clause `function`.
@@ -988,7 +1006,7 @@ fun install_definition(st :: HolState, name :: Symbol, ty :: HType,
   require_no_new_axioms(#'definition, st.ctx.thy, thy2, name, at)
   let equation = definition_rewrite_equation(thy2, def_th, ty)
   let db2 = add_thm(thy2, st.ctx.db, name, equation)
-  let ctx2 = context_with_rules(context_with_theory(st.ctx, thy2), db2)
+  let ctx2 = context_update(st.ctx, ~thy: thy2, ~db: db2)
   HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
 
 // An `inductive` declaration: one kernel basic definition per predicate (each
@@ -1069,7 +1087,7 @@ fun add_inductive(st :: HolState, names :: List.of(Symbol),
                   "a theorem of this name already exists: "
                     ++ to_string(thm_name), at)
       acc ++ {thm_name :~ Symbol: th :~ Thm}
-  HolState(context_with_theory(st.ctx, thy2), thms, st.operators,
+  HolState(context_update(st.ctx, ~thy: thy2), thms, st.operators,
            st.type_constructors, st.wfrec_def)
 
 // One predicate's argument types, as written in its head. The encoded step
@@ -1272,10 +1290,10 @@ fun add_theorem(st0 :: HolState, name :: Symbol,
           ~type_constructors: st.type_constructors,
           ~datatypes: dt_specs)
         ~catch e :: Exn.Fail: hol_reraise(e, at)
-  let limits :~ SearchLimits:
+  let limits :~ NonnegInt:
     match search_steps
-    | #false: SearchLimits()
-    | n: SearchLimits(n :~ NonnegInt)
+    | #false: default_search_steps
+    | n: n :~ NonnegInt
   let (proved, node):
     prove(st.ctx, statement, ~names: names,
           ~induct: (induct :~ maybe(Symbol)),

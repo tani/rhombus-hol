@@ -17,8 +17,6 @@ import:
   rhombus/hol/logic/ruledb open
   rhombus/hol/prover/search/limits open
   rhombus/meta open
-  rhombus/hol/effect/core open
-  rhombus/hol/effect/syntax open
 
 
 def nt = mk_tyapp(#'n, [])
@@ -34,7 +32,7 @@ def h = mk_const(#'h, mk_fun(nt, nt))
 fun outcome(db :: RuleDB, t :: Term) :: String:
   try:
     block:
-      match simp_conv(db)(thy, t)
+      match simp_conv(db, fresh_budget(default_search_steps))(thy, t)
       | #false: "no rewrite"
       | _ :: Thm: "rewritten"
     ~catch e :: Exn.Fail: "raised: " ++ e.message.split("\n")[0]
@@ -49,7 +47,7 @@ check:
   outcome(db, a)
   ~is "raised: simplify: rewrite cycle detected"
 
-// -- an explicit limit applies to an effectful simplifier invocation ---------
+// -- an explicit limit applies to a simplifier invocation --------------------
 check:
   let db = add_thm(thy, empty_db, #'grow,
                    ASSUME(thy, mk_eq(a, mk_comb(h, a))))
@@ -57,9 +55,7 @@ check:
     fun ():
       try:
         block:
-          let result = SearchBudget.run(
-                         SearchLimits(32),
-                         simp_conv_effect(db)(thy, a))
+          let result = simp_conv(db, fresh_budget(32))(thy, a)
           (if result | "rewritten" | "no rewrite")
         ~catch e :: Exn.Fail: "raised"
   run()
@@ -68,33 +64,32 @@ check:
 // -- and an ordinary rewrite is unaffected -----------------------------------
 check:
   let db = add_thm(thy, empty_db, #'ab, ASSUME(thy, mk_eq(a, b)))
-  let th = simp_conv(db)(thy, mk_comb(h, a)) :~ Thm
+  let th = simp_conv(db, fresh_budget(default_search_steps))(thy, mk_comb(h, a)) :~ Thm
   concl_of(th)
   ~is mk_eq(mk_comb(h, a), mk_comb(h, b))
 
-// -- nested computations share one immutable handler state ------------------
+// -- nested calls share one mutable budget -----------------------------------
 //
-// Composing computations must not install a new allowance. Eleven spends
-// across two nested calls therefore exhaust a ten-step budget.
-fun spend_steps(count :: NonnegInt) :: Computation:
+// Passing the same `Budget` value into nested search must not install a new
+// allowance. Eleven spends across two nested calls therefore exhaust a
+// ten-step budget.
+fun spend_steps(budget :: Budget, count :: NonnegInt) :: NonnegInt:
   recur loop (remaining :: NonnegInt = count):
     cond
-    | remaining == 0: return count
+    | remaining == 0: count
     | ~else:
-        effect:
-          let _ <- SearchBudget.spend(#'test)
-          loop(remaining - 1)
+        spend(budget, #'test)
+        loop(remaining - 1)
 
-def nested_budget_subject:
-  effect:
-    let _ <- spend_steps(4)
-    spend_steps(7)
+fun nested_budget_subject(budget :: Budget) :: NonnegInt:
+  spend_steps(budget, 4)
+  spend_steps(budget, 7)
 
 check:
-  SearchBudget.run(SearchLimits(10), spend_steps(10))
+  spend_steps(fresh_budget(10), 10)
   ~is 10
 check:
-  SearchBudget.run(SearchLimits(10), nested_budget_subject)
+  nested_budget_subject(fresh_budget(10))
   ~throws "proof-search step limit exceeded"
 
 // -- conditional rewriting spends from that same budget ---------------------
@@ -108,7 +103,7 @@ check:
   let (thy2, conditional) = new_axiom(
                               thy, mk_imp(premise, mk_eq(target, b)))
   let db = add_thm(thy2, empty_db, #'conditional, conditional)
-  SearchBudget.run(SearchLimits(0), db_conv(db)(thy2, target))
+  db_conv(db, fresh_budget(0))(thy2, target)
   ~throws "proof-search step limit exceeded"
 
 // -- the budget is a proof option --------------------------------------------

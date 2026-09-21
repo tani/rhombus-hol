@@ -942,6 +942,40 @@ meta:
                 mk_fun(runtime_resolve_type(element_type),
                        mk_tyapp(#'bool, [])))
 
+  // Mirrors `elab.rhm`'s `requires_expected_type` exactly: an expression
+  // whose own elaboration needs an expected type handed in, rather than
+  // one it can infer bottom-up on its own. Used by the general
+  // application case below to decide whether an argument may be deferred
+  // past a still-open parameter domain.
+  fun runtime_requires_expected_type(state :: SurfaceContext,
+                                     expr :: CoreExpr) :: Boolean:
+    fun any_arg(args :: List.of(CoreExpr)) :: Boolean:
+      for values(found = #false) (arg in args):
+        found || runtime_requires_expected_type(state, arg :~ CoreExpr)
+    match expr
+    | CoreNumeral(_, _): #true
+    | CoreTypedExpr(_, _, _): #false
+    | CoreListExpr(elements, tail, _):
+        elements.length() == 0
+          || any_arg(elements)
+          || (match tail
+              | #false: #false
+              | value: runtime_requires_expected_type(state, value :~ CoreExpr))
+    | CorePairExpr(first, second, _):
+        runtime_requires_expected_type(state, first)
+          || runtime_requires_expected_type(state, second)
+    | CoreSetExpr(elements, _):
+        elements.length() == 0 || any_arg(elements)
+    | CoreCall(CoreRef(name, _), args, _):
+        (if overload_arity(state.surface.operators, name) != #false
+         | args.length() == 0 || any_arg(args)
+         | any_arg(args))
+    | CoreCall(_, args, _): any_arg(args)
+    | CoreIf(_, then_expr, else_expr, _):
+        runtime_requires_expected_type(state, then_expr)
+          || runtime_requires_expected_type(state, else_expr)
+    | ~else: #false
+
 
   fun runtime_expr(state :: SurfaceContext, env :: Map.of(Symbol, HType),
                    expr :: CoreExpr,
@@ -1067,24 +1101,50 @@ meta:
                             state, env, args[0] :~ CoreExpr, bool_ty)
             ensure(RuntimeExpr('! ($((operand.stx)))', bool_ty))
         | ~else:
+            // Mirrors `elab.rhm`'s `apply_arguments`/`requires_expected_type`
+            // two-pass scan: an argument that needs an expected type to
+            // elaborate at all (a numeral, an overloaded call, ...) and a
+            // parameter whose domain is still an open metavariable are
+            // useless to each other, so it is deferred until a later
+            // argument's own unification has pinned the domain down.
+            // Without this, `f(1, x)` for a polymorphic `f :: ?a -> ?a ->
+            // ...` would fail to compile as a `function` body even though
+            // the identical call already elaborates as a `theorem`.
             let head = runtime_expr(state, env, func, #false)
-            recur apply (remaining :~ List = args,
-                         current :~ HType = head.ty,
-                         rendered :~ List = []):
-              match remaining
+            fun splice(xs :: List, index :: Int, value) :: List:
+              for List (x in xs, k in List.iota(xs.length())):
+                (if k == index | value | x)
+            recur scan (rest :~ List = args,
+                        index = 0,
+                        current :~ HType = head.ty,
+                        rendered :~ List = [],
+                        domains :~ List = [],
+                        deferred :~ List = []):
+              match rest
               | []:
-                  let rendered_call:
-                    match func
-                    | CoreRef(name, _) when !env.get(name, #false)
-                                              && surface_const_type(state, name):
-                        runtime_named_apply(state, name, rendered, at)
-                    | ~else:
-                        let [arg, ...] = rendered
-                        '$((head.stx))($arg, ...)'
-                  ensure(RuntimeExpr(
-                           rendered_call,
-                           runtime_resolve_type(current)))
-              | List.cons(arg, rest):
+                  recur fill (pending :~ List = deferred, out :~ List = rendered):
+                    match pending
+                    | []:
+                        let rendered_call:
+                          match func
+                          | CoreRef(name, _) when !env.get(name, #false)
+                                                    && surface_const_type(state, name):
+                              runtime_named_apply(state, name, out, at)
+                          | ~else:
+                              let [arg, ...] = out
+                              '$((head.stx))($arg, ...)'
+                        ensure(RuntimeExpr(
+                                 rendered_call, runtime_resolve_type(current)))
+                    | List.cons(i, more):
+                        let idx :: Int = i :~ Int
+                        let arg = args[idx] :~ CoreExpr
+                        let domain = runtime_resolve_type(domains[idx] :~ HType)
+                        let value = runtime_expr(state, env, arg, domain)
+                        runtime_unify(
+                          domain, value.ty, at,
+                          "operand type does not match function domain")
+                        fill(more, splice(out, idx, value.stx))
+              | List.cons(arg, more):
                   let instantiated = runtime_resolve_type(current)
                   when instantiated is_a TyVar
                   | let domain = mk_tyvar(Symbol.gen("_domain"))
@@ -1097,13 +1157,20 @@ meta:
                   | syntax_meta.error(
                       "the applied expression is not a function", at)
                   let (domain, range) = dest_fun(instantiated)
-                  let value = runtime_expr(
-                                state, env, arg :~ CoreExpr,
-                                runtime_resolve_type(domain))
-                  runtime_unify(
-                    domain, value.ty, at,
-                    "operand type does not match function domain")
-                  apply(rest, range, rendered ++ [value.stx])
+                  cond
+                  | runtime_requires_expected_type(state, arg :~ CoreExpr)
+                      && runtime_resolve_type(domain) is_a TyVar:
+                      scan(more, index + 1, range, rendered ++ [#false],
+                           domains ++ [domain], deferred ++ [index])
+                  | ~else:
+                      let value = runtime_expr(
+                                    state, env, arg :~ CoreExpr,
+                                    runtime_resolve_type(domain))
+                      runtime_unify(
+                        domain, value.ty, at,
+                        "operand type does not match function domain")
+                      scan(more, index + 1, range, rendered ++ [value.stx],
+                           domains ++ [domain], deferred)
     | CoreFunctionExpr(params, result_type_stx, body, at):
         let contextual:
           match expected

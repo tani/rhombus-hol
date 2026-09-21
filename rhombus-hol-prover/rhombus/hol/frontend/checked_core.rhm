@@ -64,6 +64,7 @@ export:
   CheckedList
   CheckedString
   CheckedSet
+  CheckedBoolOp
   CheckedIf
   CheckedOpaque
   check_expr
@@ -119,6 +120,14 @@ class CheckedIf(cond :: CheckedExpr, then_branch :: CheckedExpr,
                 else_branch :: CheckedExpr, ty :: HType, at :: Syntax):
   extends CheckedExpr
 
+// `conj`/`disj`/`imp` (arity 2) and `neg` (arity 1) render as Racket's
+// own short-circuiting operators, not an ordinary named-constant call --
+// `op` tags which rendering `checked_to_runtime` uses. Every operand is
+// already `Boolean`, and so is the overall result: no separate `ty`
+// field, unlike `CheckedSet`'s genuinely non-Boolean overall type.
+class CheckedBoolOp(op :: Symbol, args :: List.of(CheckedExpr), at :: Syntax):
+  extends CheckedExpr
+
 // `opaque` is `fallback`'s own already-rendered runtime `Syntax`;
 // `check_expr` never inspects it, only `ty` for further type propagation.
 class CheckedOpaque(opaque :: Syntax, ty :: HType, at :: Syntax):
@@ -133,6 +142,7 @@ fun checked_ty(c :: CheckedExpr) :: HType:
   | CheckedList(_, _, ty, _): ty
   | CheckedString(_, ty, _): ty
   | CheckedSet(_, ty, _): ty
+  | CheckedBoolOp(_, _, _): mk_tyapp(#'bool, [])
   | CheckedIf(_, _, _, ty, _): ty
   | CheckedOpaque(_, ty, _): ty
   | ~else: error(~who: #'checked_ty, "unknown CheckedExpr variant")
@@ -159,7 +169,8 @@ fun core_location(expr :: CoreExpr) :: Syntax:
 
 // A Theory-free type-checking pass over exactly `CoreRef`, `CoreNumeral`,
 // `CoreTypedExpr`, `CorePairExpr`, `CoreListExpr`, `CoreStringExpr`,
-// `CoreSetExpr`, and `CoreIf` -- the vertical slice proven end to end
+// `CoreSetExpr`, `CoreIf`, and a `CoreCall` to `conj`/`disj`/`imp`/`neg`
+// at their special-cased arity -- the vertical slice proven end to end
 // first. Any other `CoreExpr` shape, and a `CoreRef` naming neither a
 // local variable nor an entry `lookup` knows, is handed
 // to `fallback` unchanged: this is the seam a later migration step
@@ -381,6 +392,28 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
           match set_element_type(resolve(wanted :~ HType))
           | #false: fallback(expr, expected)
           | et: build(et)
+  // Mirrors `runtime_expr`'s own special-cased rendering for `conj`/
+  // `disj`/`imp`/`neg` exactly: each operand is `Boolean`, and so is the
+  // whole call -- no function-type consultation, no overload
+  // resolution, no deferred-argument scan the general apply case below
+  // needs. Any other name, arity, or non-`CoreRef` function defers to
+  // `fallback`, which is the general-apply/overload path this slice
+  // does not yet migrate.
+  | CoreCall(CoreRef(name, _), args, at) when (name == #'conj
+                                                 || name == #'disj
+                                                 || name == #'imp)
+                                                && args.length() == 2:
+      let bool_ty = mk_tyapp(#'bool, [])
+      let checked_args:
+        args.map(fun (a :: CoreExpr): check_sub(a, bool_ty))
+      unify_with(bool_ty, at)
+      CheckedBoolOp(name, checked_args, at)
+  | CoreCall(CoreRef(name, _), args, at) when name == #'neg && args.length() == 1:
+      let bool_ty = mk_tyapp(#'bool, [])
+      let checked_args:
+        args.map(fun (a :: CoreExpr): check_sub(a, bool_ty))
+      unify_with(bool_ty, at)
+      CheckedBoolOp(name, checked_args, at)
   | CoreIf(cond, then_expr, else_expr, at):
       let bool_ty = mk_tyapp(#'bool, [])
       let checked_cond = check_sub(cond, bool_ty)

@@ -62,6 +62,7 @@ export:
   CheckedNumeral
   CheckedPair
   CheckedList
+  CheckedString
   CheckedIf
   CheckedOpaque
   check_expr
@@ -95,6 +96,14 @@ class CheckedList(elements :: List.of(CheckedExpr), tail :: maybe(CheckedExpr),
                   ty :: HType, at :: Syntax):
   extends CheckedExpr
 
+// A string literal's own contents -- `checked_to_runtime` reuses the
+// existing `runtime_string_expr` unicode-scalar-to-`text`-of-`Nat`-`cons`-
+// chain encoding directly rather than reconstructing it, since it has no
+// further type-propagation decision left to make once `check_expr` has
+// pinned the result to `String`.
+class CheckedString(value :: String, ty :: HType, at :: Syntax):
+  extends CheckedExpr
+
 class CheckedIf(cond :: CheckedExpr, then_branch :: CheckedExpr,
                 else_branch :: CheckedExpr, ty :: HType, at :: Syntax):
   extends CheckedExpr
@@ -111,6 +120,7 @@ fun checked_ty(c :: CheckedExpr) :: HType:
   | CheckedNumeral(_, ty, _): ty
   | CheckedPair(_, _, ty, _): ty
   | CheckedList(_, _, ty, _): ty
+  | CheckedString(_, ty, _): ty
   | CheckedIf(_, _, _, ty, _): ty
   | CheckedOpaque(_, ty, _): ty
   | ~else: error(~who: #'checked_ty, "unknown CheckedExpr variant")
@@ -136,9 +146,10 @@ fun core_location(expr :: CoreExpr) :: Syntax:
   | ~else: error(~who: #'core_location, "unknown CoreExpr variant")
 
 // A Theory-free type-checking pass over exactly `CoreRef`, `CoreNumeral`,
-// `CoreTypedExpr`, `CorePairExpr`, `CoreListExpr`, and `CoreIf` -- the
-// vertical slice proven end to end first. Any other `CoreExpr` shape, and
-// naming neither a local variable nor an entry `lookup` knows, is handed
+// `CoreTypedExpr`, `CorePairExpr`, `CoreListExpr`, `CoreStringExpr`, and
+// `CoreIf` -- the vertical slice proven end to end first. Any other
+// `CoreExpr` shape, and a `CoreRef` naming neither a local variable nor
+// an entry `lookup` knows, is handed
 // to `fallback` unchanged: this is the seam a later migration step
 // widens, not a boundary `check_expr` itself needs to know the shape of.
 //
@@ -302,6 +313,15 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
           match list_element_type(resolve(wanted :~ HType))
           | #false: fallback(expr, expected)
           | et: build(et)
+  | CoreStringExpr(value, at):
+      // Mirrors `runtime_string_expr`/`elaborate_string_effect` exactly:
+      // a string literal always has type `String`, unconditionally --
+      // there is no destructuring decision to make from `expected` the
+      // way a pair or list has, only `unify_with`'s usual check that a
+      // caller's own `expected` (if any) agrees.
+      let string_ty = mk_tyapp(#'String, [])
+      unify_with(string_ty, at)
+      CheckedString(value, string_ty, at)
   | CoreIf(cond, then_expr, else_expr, at):
       let bool_ty = mk_tyapp(#'bool, [])
       let checked_cond = check_sub(cond, bool_ty)

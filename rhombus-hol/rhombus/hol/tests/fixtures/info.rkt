@@ -77,4 +77,19 @@
     "type_bare_constructor.rhm"
     "type_old_application.rhm"
     "type_old_function.rhm"
-    "type_negative.rhm"))
+    "type_negative.rhm"
+    ;; Negative fixtures for `check_expr`'s shared, Theory-free typing
+    ;; pass (checked_core.rhm): each one is a well-formed surface
+    ;; program whose types do not check, so like every entry above it
+    ;; must stay uncompiled for its diagnostic to reach the harness.
+    "typed_branch_mismatch_bad.rhm"
+    "pair_branch_mismatch_bad.rhm"
+    "list_expr_branch_mismatch_bad.rhm"
+    "string_expr_branch_mismatch_bad.rhm"
+    "set_expr_branch_mismatch_bad.rhm"
+    "set_expr_fn_element_bad.rhm"
+    "bool_op_branch_mismatch_bad.rhm"
+    "eq_branch_mismatch_bad.rhm"
+    "apply_branch_mismatch_bad.rhm"
+    "apply_overapplied_bad.rhm"
+    "numeral_concrete_mismatch_bad.rhm"))

@@ -25,7 +25,6 @@ import:
   rhombus/hol/recursion/recdef open
   rhombus/hol/recursion/dtree open
   rhombus/hol/number/literal open
-  rhombus/hol/frontend/core open
   rhombus/hol/frontend/surface_core open
   rhombus/hol/logic/bool open
   rhombus/hol/frontend/tyunify open
@@ -171,15 +170,6 @@ fun peel_fun(ty :: HType, n :: Int) :: values(List.of(HType), HType):
     | ~else:
         let (d, r) = dest_fun(ty)
         loop(r, k - 1, List.cons(d, acc))
-
-// Rebuild a clause's evaluation core so an enclosing `let` can prepend its
-// initializer obligation without duplicating obligation logic.
-fun clause_core(c :: DefClause) :: EvalCoreExpr:
-  recur loop (obs :~ List = c.obligations):
-    match obs
-    | []: EvalCoreLeaf(c.rhs)
-    | [_]: EvalCoreLeaf(c.rhs)
-    | List.cons(o, rest): EvalCoreLet(EvalCoreLeaf(o :~ Term), loop(rest))
 
 // Reify eager initializer evaluation as beta-redexes when a clause is used
 // inside a lambda or expression-level match. The logical normal form remains
@@ -1532,10 +1522,16 @@ fun core_parse_body(body :: CoreFunBody) :: Computation:
                                   bind_let, core_parse_body(tail))
           return for List (clause in clauses):
                    let clause :~ DefClause = clause
-                   let core = EvalCoreLet(EvalCoreLeaf(value),
-                                          clause_core(clause))
-                   DefClause(clause.pats, eval_core_term(core),
-                             eval_core_obligations(core))
+                   // The `let`'s own initializer is evaluated before
+                   // anything in the body, so it goes at the front of
+                   // the obligation list; `clause_terms` supplies the
+                   // body's own evaluated terms, standing in its
+                   // right-hand side when a clause carries no explicit
+                   // obligations of its own. The logical reading is
+                   // unchanged: `let` substitutes, so an initializer
+                   // the body never reads is an obligation only.
+                   DefClause(clause.pats, clause.rhs,
+                             List.cons(value :~ Term, clause_terms(clause)))
     | CoreBodyExpr(expr):
         let elab_env = ElabEnv(
                          env.thy, env.tyvars, env.vars, #'function,

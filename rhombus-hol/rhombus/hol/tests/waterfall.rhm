@@ -24,22 +24,29 @@ import:
 def st0 = initial_state()
 def nat = mk_tyapp(#'Nat, [])
 def thy1 = new_constant(st0.ctx.thy, #'p, mk_fun(nat, bool))
-def thy = new_constant(thy1, #'k, nat)
+def thy2 = new_constant(thy1, #'k, nat)
+def thy = new_constant(thy2, #'j, nat)
 def ctx = context_update(st0.ctx, ~thy: thy)
 
 def n = mk_var(#'n, nat)
 def px = mk_comb(mk_const(#'p, mk_fun(nat, bool)), n)
 def kk = mk_const(#'k, nat)
+def jj = mk_const(#'j, nat)
 // Stage selection remains policy-only: the ordinary waterfall closes a
 // reflexive goal, omitting simplification leaves it open, and skipping
 // unrelated stages does not change the result.
 def reflexive_goal = mk_goal([], mk_eq(kk, kk))
-check closed(prove_goal(ctx, reflexive_goal)) ~is #true
 check:
-  closed(prove_goal(ctx, reflexive_goal, ~skipped_stages: Set(#'simplify)))
+  let (th, _) = prove_goal(ctx, reflexive_goal)
+  th != #false
+  ~is #true
+check:
+  let (th, _) = prove_goal(ctx, reflexive_goal, ~skipped_stages: Set(#'simplify))
+  th != #false
   ~is #false
 check:
-  closed(prove_goal(ctx, reflexive_goal, ~skipped_stages: Set(#'eliminate, #'fertilize)))
+  let (th, _) = prove_goal(ctx, reflexive_goal, ~skipped_stages: Set(#'eliminate, #'fertilize))
+  th != #false
   ~is #true
 check:
   prove_goal(ctx, reflexive_goal,
@@ -49,25 +56,11 @@ check:
 // A proof-local rule scope is derived from, never written back to, durable
 // module state.
 check:
-  let (_proved, _node) = prove(
-                            ctx, mk_eq(kk, kk),
-                            ~scope: RuleScope([], [#'propositional]))
+  let (_proved, _residues) = prove(
+                                ctx, mk_eq(kk, kk),
+                                ~scope: RuleScope([], [#'propositional]))
   ctx.db.disabled
   ~is Set()
-
-check:
-  let left = mk_goal([], mk_eq(kk, kk))
-  let right = mk_goal([], px)
-  let left_event = CaseSplit(px, #true)
-  let right_event = CaseSplit(px, #false)
-  let node = Derived(
-               Step([left, right], fun (_): REFL(thy, kk),
-                    [left_event, right_event]),
-               [Open(Residue(left, [left_event])),
-                Open(Residue(right, [right_event]))])
-  collect_residues(node).map(
-    fun (residue :: Residue): residue.goal.concl)
-  ~is [mk_eq(kk, kk), px]
 
 // `if p(n) | k | k === k`: both branches of the conditional are identical,
 // but nothing simplifies `if p(n) | k | k` without first knowing whether
@@ -102,3 +95,31 @@ check:
   | #false: #false
   | proved :~ Thm: hyps_of(proved)
   ~is []
+
+// Case splitting on a term unrelated to `px` leaves both branches exactly as
+// stuck as the unsplit goal, each for the same reason: a case split always
+// searches every branch, so a failure that is stuck in more than one
+// subgoal at once reports every one of them, not just the first found.
+// Induction is skipped here so the search settles on that one reason
+// immediately, instead of cascading into an unrelated induction search.
+check:
+  let unrelated = mk_comb(mk_const(#'p, mk_fun(nat, bool)), kk)
+  let (th, residues) = prove(ctx, goal_stmt, ~names: [#'n], ~cases: [unrelated],
+                             ~scope: RuleScope([], [], Set(#'induct)))
+  [th, residues.length(), residues.map(fun (r :: Residue): r.goal.concl)]
+  ~is [#false, 2, [goal_stmt, goal_stmt]]
+
+// `if p(n) | k | j`: splitting on `p(n)` settles the true branch (the
+// conditional reduces to `k === k`, a real theorem) but leaves the false
+// branch stuck (it reduces to `j === k`, and `j`/`k` are unrelated
+// uninterpreted constants). The search still resolves the true branch's own
+// `Thm` along the way, but the overall proof must come back exactly as
+// stuck as the false branch alone, not silently accept the true branch's
+// theorem for a statement it does not prove, and the residue reported must
+// name the branch that is actually stuck, not the one that succeeded.
+check:
+  let mixed_goal = mk_eq(mk_cond(px, kk, jj), kk)
+  let (th, residues) = prove(ctx, mixed_goal, ~names: [#'n], ~cases: [px],
+                             ~scope: RuleScope([], [], Set(#'induct)))
+  [th, residues.length(), residues.map(fun (r :: Residue): r.goal.concl)]
+  ~is [#false, 1, [mk_eq(jj, kk)]]

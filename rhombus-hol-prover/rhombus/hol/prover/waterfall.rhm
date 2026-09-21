@@ -20,8 +20,8 @@
 // confusing the induction heuristics that come after it.
 //
 // Nothing here can produce a theorem on its own.  Each stage hands back a
-// `Step` carrying its own justification, and `run` composes them; the only
-// theorems that exist are the ones the kernel made.
+// `Step` carrying its own justification, and `node.rhm`'s `solve_step`
+// composes them; the only theorems that exist are the ones the kernel made.
 
 import:
   rhombus/hol/htype open
@@ -94,7 +94,8 @@ fun check_skipped_stages(skipped :: Set.of(Symbol)) :: Void:
 fun prove_goal(ctx :: Context, g :: Goal,
                ~induct: hint :: maybe(FVar) = #false,
                ~skipped_stages: skipped :: Set.of(Symbol) = Set(),
-               ~limits: steps :: NonnegInt = default_search_steps) :: ProofNode:
+               ~limits: steps :: NonnegInt = default_search_steps)
+     :: values(maybe(Thm), List.of(Residue)):
   let env = run_proof_scope(ctx, RuleScope([], [], skipped))
   prove_goal_impl(env, g, fresh_budget(steps), [], ~induct: hint)
 
@@ -105,12 +106,14 @@ fun prove_goal(ctx :: Context, g :: Goal,
 // so a goal that reaches here through that preprocessing keeps its history.
 fun prove_goal_impl(env :: ProofEnv, g :: Goal, budget :: Budget,
                     path :: List.of(TraceEvent),
-                    ~induct: hint :: maybe(FVar) = #false) :: ProofNode:
-  fun open_goal(g :: Goal, path :: List.of(TraceEvent)) :: ProofNode:
-    Open(Residue(g, path.reverse()))
+                    ~induct: hint :: maybe(FVar) = #false)
+     :: values(maybe(Thm), List.of(Residue)):
+  fun open_goal(g :: Goal, path :: List.of(TraceEvent))
+       :: values(maybe(Thm), List.of(Residue)):
+    values(#false, [Residue(g, path.reverse())])
 
   fun go(g :: Goal, inducted :: List, hint :: maybe(FVar),
-         path :: List.of(TraceEvent)) :: ProofNode:
+         path :: List.of(TraceEvent)) :: values(maybe(Thm), List.of(Residue)):
     // One step per waterfall visit, on the same budget the simplifier spends
     // from. Each individual simplification can terminate while the stages
     // cycle between themselves; the shared total is what stops that.
@@ -135,25 +138,16 @@ fun prove_goal_impl(env :: ProofEnv, g :: Goal, budget :: Budget,
   // is not what the option says. An induction consumes it; deeper ones choose
   // for themselves.
   fun descend(step :: Step, inducted :: List, hint :: maybe(FVar),
-              path :: List.of(TraceEvent)) :: ProofNode:
-    unless step.subgoals.length() == step.events.length()
-    | error(~who: #'proof, "proof step has unpaired trace events")
-    recur loop (remaining_goals :~ List = step.subgoals,
-                remaining_events :~ List = step.events,
-                children_rev :~ List = []):
-      match [remaining_goals, remaining_events]
-      | [[], []]: Derived(step, children_rev.reverse())
-      | [List.cons(subgoal, rest), List.cons(event, event_rest)]:
-          let subgoal :~ Goal = subgoal
-          // Only where the variable is still there to induct on.
-          let carried = (cond
-                         | !hint: #false
-                         | free_vars(subgoal.concl).contains(hint :~ Term):
-                             hint
-                         | ~else: #false)
-          let child = go(subgoal, inducted, carried,
-                         List.cons(event :~ TraceEvent, path))
-          loop(rest, event_rest, List.cons(child, children_rev))
+              path :: List.of(TraceEvent)) :: values(maybe(Thm), List.of(Residue)):
+    solve_step(step, path,
+               fun (subgoal :: Goal, subpath :: List.of(TraceEvent)):
+                 // Only where the variable is still there to induct on.
+                 let carried = (cond
+                                | !hint: #false
+                                | free_vars(subgoal.concl).contains(hint :~ Term):
+                                    hint
+                                | ~else: #false)
+                 go(subgoal, inducted, carried, subpath))
 
   check_skipped_stages(env.skipped_stages)
   go(g, [], hint, path)
@@ -172,8 +166,6 @@ fun prove_goal_impl(env :: ProofEnv, g :: Goal, budget :: Budget,
 // The public entry point builds the proof environment and the shared search
 // budget once; `prove_impl` and everything beneath it only receive the
 // capabilities they were handed -- nested work cannot reset the allowance.
-class ProofResult(proved :: maybe(Thm), node :: ProofNode)
-
 fun prove(ctx :: Context, statement :: Term,
           ~names: names :: List.of(Symbol) = [],
           ~induct: hint :: maybe(Symbol) = #false,
@@ -182,13 +174,11 @@ fun prove(ctx :: Context, statement :: Term,
           ~witnesses: witnesses :: List.of(Term) = [],
           ~limits: steps :: NonnegInt = default_search_steps,
           ~extensionality: extensionality :: maybe(Symbol) = #false)
-     :: values(maybe(Thm), ProofNode):
+     :: values(maybe(Thm), List.of(Residue)):
   let env = run_proof_scope(ctx, scope)
-  let result :~ ProofResult:
-    prove_impl(env, statement, fresh_budget(steps), ~names: names,
-               ~induct: hint, ~cases: cases, ~witnesses: witnesses,
-               ~extensionality: extensionality)
-  values(result.proved, result.node)
+  prove_impl(env, statement, fresh_budget(steps), ~names: names,
+             ~induct: hint, ~cases: cases, ~witnesses: witnesses,
+             ~extensionality: extensionality)
 
 fun prove_impl(env :: ProofEnv, statement :: Term, budget :: Budget,
                ~names: names :: List.of(Symbol) = [],
@@ -196,7 +186,7 @@ fun prove_impl(env :: ProofEnv, statement :: Term, budget :: Budget,
                ~cases: cases :: List.of(Term) = [],
                ~witnesses: witnesses :: List.of(Term) = [],
                ~extensionality: extensionality :: maybe(Symbol) = #false)
-     :: ProofResult:
+     :: values(maybe(Thm), List.of(Residue)):
   let thy = env.base.thy
   let (vars, matrix) = strip_forall_all(statement, names)
   let hint_var = (cond
@@ -228,12 +218,11 @@ fun prove_impl(env :: ProofEnv, statement :: Term, budget :: Budget,
   // calls are themselves redexes that must stay unreduced.
   let beta = TOP_DEPTH_CONV(BETA_CONV)(thy, matrix)
   let reduced = (if beta | rhs_of(beta :~ Thm) | matrix)
-  let node = apply_explicit_extensionality(
-               env, budget, extensionality, witnesses, cases,
-               mk_goal([], reduced), hint_var, [])
-  let executed = execute(node)
-  match executed
-  | #false: ProofResult(#false, node)
+  let (thm, residues) = apply_explicit_extensionality(
+                           env, budget, extensionality, witnesses, cases,
+                           mk_goal([], reduced), hint_var, [])
+  match thm
+  | #false: values(#false, residues)
   | th :~ Thm:
       let restored = (if beta
                       | EQ_MP(SYM(thy, beta :~ Thm), th)
@@ -248,7 +237,7 @@ fun prove_impl(env :: ProofEnv, statement :: Term, budget :: Budget,
           error(~who: #'prove, "proof does not match the statement",
                 error.val(~label: "asked", show(statement)),
                 error.val(~label: "got", show(concl_of(closed))))
-      | ~else: ProofResult(closed, node)
+      | ~else: values(closed, [])
 
 // An explicit extensionality request is one derived `EXT` step before the
 // ordinary proof controls. It is accepted only for equality at function type;
@@ -257,7 +246,7 @@ fun apply_explicit_extensionality(
       env :: ProofEnv, budget :: Budget, requested :: maybe(Symbol),
       witnesses :: List.of(Term), cases :: List.of(Term),
       g :: Goal, hint :: maybe(FVar), path :: List.of(TraceEvent))
-     :: ProofNode:
+     :: values(maybe(Thm), List.of(Residue)):
   match requested
   | #false: apply_witnesses(env, budget, witnesses, cases, g, hint, path)
   | name:
@@ -268,10 +257,11 @@ fun apply_explicit_extensionality(
           fun discharge(ths :: List.of(Thm)) :: Thm:
             DISCH(env.base.thy, antecedent, ths[0])
           let step = Step([subgoal], discharge, [event])
-          let child = apply_explicit_extensionality(
-                        env, budget, requested, witnesses, cases, subgoal,
-                        hint, List.cons(event, path))
-          Derived(step, [child])
+          solve_step(step, path,
+                     fun (sg :: Goal, subpath :: List.of(TraceEvent)):
+                       apply_explicit_extensionality(
+                         env, budget, requested, witnesses, cases, sg,
+                         hint, subpath))
       | #false:
           match dest_eq(g.concl)
           | [left, right]:
@@ -293,10 +283,10 @@ fun apply_explicit_extensionality(
               fun justify(ths :: List.of(Thm)) :: Thm:
                 EXT(env.base.thy, variable, ths[0])
               let step = Step([subgoal], justify, [event])
-              let child = apply_witnesses(
-                            env, budget, witnesses, cases, subgoal, hint,
-                            List.cons(event, path))
-              Derived(step, [child])
+              solve_step(step, path,
+                         fun (sg :: Goal, subpath :: List.of(TraceEvent)):
+                           apply_witnesses(env, budget, witnesses, cases,
+                                           sg, hint, subpath))
           | #false:
               error(
                 ~who: #'proof,
@@ -309,7 +299,8 @@ fun apply_explicit_extensionality(
 fun apply_witnesses(env :: ProofEnv, budget :: Budget,
                     witnesses :: List.of(Term), cases :: List.of(Term),
                     g :: Goal, hint :: maybe(FVar),
-                    path :: List.of(TraceEvent)) :: ProofNode:
+                    path :: List.of(TraceEvent))
+     :: values(maybe(Thm), List.of(Residue)):
   match witnesses
   | []: apply_cases(env, budget, cases, g, hint, path)
   | List.cons(witness, rest):
@@ -320,9 +311,10 @@ fun apply_witnesses(env :: ProofEnv, budget :: Budget,
           fun discharge_antecedent(ths :: List.of(Thm)) :: Thm:
             DISCH(env.base.thy, antecedent, ths[0])
           let step = Step([sub], discharge_antecedent, [event])
-          let child = apply_witnesses(env, budget, witnesses, cases, sub,
-                                      hint, List.cons(event, path))
-          Derived(step, [child])
+          solve_step(step, path,
+                     fun (sg :: Goal, subpath :: List.of(TraceEvent)):
+                       apply_witnesses(env, budget, witnesses, cases, sg,
+                                       hint, subpath))
       | ~else:
           match dest_exists(g.concl)
           | #false:
@@ -341,9 +333,10 @@ fun apply_witnesses(env :: ProofEnv, budget :: Budget,
               fun introduce_witness(ths :: List.of(Thm)) :: Thm:
                 EXISTS(env.base.thy, g.concl, witness, ths[0])
               let step = Step([sub], introduce_witness, [event])
-              let child = apply_witnesses(env, budget, rest :~ List, cases,
-                                          sub, hint, List.cons(event, path))
-              Derived(step, [child])
+              solve_step(step, path,
+                         fun (sg :: Goal, subpath :: List.of(TraceEvent)):
+                           apply_witnesses(env, budget, rest :~ List, cases,
+                                           sg, hint, subpath))
 
 // `~split: p`, applied before the waterfall runs: split the goal on each term
 // in turn, true branch and false branch, so `n` terms give `2^n` subgoals.
@@ -353,9 +346,11 @@ fun apply_witnesses(env :: ProofEnv, budget :: Budget,
 // costs search effort, never soundness. Every subgoal, however deep the
 // nesting, restarts at the top of the ordinary waterfall, so case splitting
 // composes with induction and stage skipping rather than replacing them.
+// Both branches are always searched, even once one is known stuck, so a
+// genuinely double-stuck case split reports both residues, not just one.
 fun apply_cases(env :: ProofEnv, budget :: Budget, cases :: List.of(Term),
                 g :: Goal, hint :: maybe(FVar), path :: List.of(TraceEvent))
-     :: ProofNode:
+     :: values(maybe(Thm), List.of(Residue)):
   match cases
   | []: prove_goal_impl(env, g, budget, path, ~induct: hint)
   | List.cons(c, rest):
@@ -369,11 +364,9 @@ fun apply_cases(env :: ProofEnv, budget :: Budget, cases :: List.of(Term),
         DISJ_CASES(env.base.thy, em, ths[0], ths[1])
       let step = Step([sub_true, sub_false], discharge_cases,
                       [true_event, false_event])
-      let true_child = apply_cases(env, budget, rest, sub_true, hint,
-                                   List.cons(true_event, path))
-      let false_child = apply_cases(env, budget, rest, sub_false, hint,
-                                    List.cons(false_event, path))
-      Derived(step, [true_child, false_child])
+      solve_step(step, path,
+                 fun (sg :: Goal, subpath :: List.of(TraceEvent)):
+                   apply_cases(env, budget, rest, sg, hint, subpath))
 
 fun strip_forall_all(t :: Term, names :: List.of(Symbol))
      :: values(List.of(FVar), Term):
@@ -438,11 +431,10 @@ fun show_residue(residue :: Residue) :~ String:
   head ++ asms ++ "    " ++ show(goal.concl)
 
 // The stuck-residue message: what is left, and how it got there.
-fun residue_message(name :: Symbol, node :: ProofNode) :~ String:
-  let open_goals = collect_residues(node)
-  let body = String.join(open_goals.map(show_residue), "\n\n")
+fun residue_message(name :: Symbol, residues :: List.of(Residue)) :~ String:
+  let body = String.join(residues.map(show_residue), "\n\n")
   to_string(name) ++ ": could not prove.\n"
-    ++ (if open_goals.length() == 1
+    ++ (if residues.length() == 1
         | "Remaining goal,\n"
-        | to_string(open_goals.length()) ++ " remaining goals,\n")
+        | to_string(residues.length()) ++ " remaining goals,\n")
     ++ body

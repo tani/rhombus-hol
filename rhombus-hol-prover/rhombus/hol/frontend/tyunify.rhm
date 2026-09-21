@@ -14,8 +14,6 @@
 import:
   lib("racket/base.rkt") as rb
   rhombus/hol/htype open
-  rhombus/hol/effect/core open
-  rhombus/hol/effect/syntax open
 
 
 export:
@@ -30,93 +28,58 @@ export:
 fun is_generated_tyvar(name :: Symbol) :: Boolean:
   !rb.#{symbol-interned?}(name)
 
-class.together:
-  class UnifyError():
-    nonfinal
-
-  class OccursCheck(variable :: Symbol, value :: HType):
-    extends UnifyError
-
-  class TypeMismatch(left :: HType, right :: HType):
-    extends UnifyError
-
-class Substitution():
-  state_effect
-
-class UnifyFailure():
-  failure_effect
-
-// Follow substitutions through variables. The lookup is deliberately an
-// effect request: recursive unification never receives an explicit
-// substitution parameter.
-fun resolve(t :: HType) :: Computation:
+// Follow substitutions through variables.
+fun resolve(substitution :: Map.of(Symbol, HType), t :: HType) :: HType:
   match t
   | TyVar(n):
-      effect:
-        let substitution :: Map.of(Symbol, HType) <- Substitution.get()
-        match substitution.get(n, #false)
-        | #false: return t
-        | next: resolve(next)
-  | ~else: return t
+      match substitution.get(n, #false)
+      | #false: t
+      | next: resolve(substitution, next :~ HType)
+  | ~else: t
 
-fun bind_variable(name :: Symbol, value :: HType) :: Computation:
-  effect:
-    let substitution :: Map.of(Symbol, HType) <- Substitution.get()
-    let value = type_subst(substitution, value)
-    cond
-    | value is_a TyVar && (value :~ TyVar).name == name:
-        return #void
-    | type_occurs(name, value):
-        UnifyFailure.fail(OccursCheck(name, value))
-    | ~else:
-        effect:
-          let _ <- Substitution.put(substitution ++ {name: value})
-          return #void
+fun bind_variable(substitution :: Map.of(Symbol, HType),
+                  name :: Symbol, value :: HType)
+     :: maybe(Map.of(Symbol, HType)):
+  let value = type_subst(substitution, value)
+  cond
+  | value is_a TyVar && (value :~ TyVar).name == name: substitution
+  | type_occurs(name, value): #false
+  | ~else: substitution ++ {name: value}
 
-// Unification owns two nominal capabilities: substitution state and semantic
-// failure. `type_unify` installs both handlers and preserves the existing
-// result contract.
-fun unify(a :: HType, b :: HType) :: Computation:
-  fun unify_arguments(left :: List.of(HType), right :: List.of(HType))
-      :: Computation:
+fun unify(substitution :: Map.of(Symbol, HType), a :: HType, b :: HType)
+     :: maybe(Map.of(Symbol, HType)):
+  fun unify_arguments(substitution :: Map.of(Symbol, HType),
+                      left :: List.of(HType), right :: List.of(HType))
+       :: maybe(Map.of(Symbol, HType)):
     match left
     | []:
         match right
-        | []: return #void
-        | ~else: UnifyFailure.fail(TypeMismatch(a, b))
+        | []: substitution
+        | ~else: #false
     | List.cons(first, rest):
         match right
         | List.cons(other, others):
-            effect:
-              let _ <- unify(first, other)
-              unify_arguments(rest, others)
-        | ~else: UnifyFailure.fail(TypeMismatch(a, b))
-  fun after_left(left :: HType) :: Computation:
-    fun after_right(right :: HType) :: Computation:
-      match left
-      | TyVar(lname):
-          match right
-          | TyVar(rname) when is_generated_tyvar(lname) && !is_generated_tyvar(rname):
-              bind_variable(lname, right)
-          | TyVar(rname) when is_generated_tyvar(rname):
-              bind_variable(rname, left)
-          | ~else: bind_variable(lname, right)
-      | TyApp(left_name, left_args):
-          match right
-          | TyVar(name): bind_variable(name, left)
-          | TyApp(right_name, right_args) when left_name == right_name:
-              unify_arguments(left_args, right_args)
-          | ~else: UnifyFailure.fail(TypeMismatch(left, right))
-    effect:
-      let right :: HType <- resolve(b)
-      after_right(right)
-  effect:
-    let left :: HType <- resolve(a)
-    after_left(left)
+            match unify(substitution, first, other)
+            | #false: #false
+            | next: unify_arguments(next :~ Map, rest, others)
+        | ~else: #false
+  let left = resolve(substitution, a)
+  let right = resolve(substitution, b)
+  match left
+  | TyVar(lname):
+      match right
+      | TyVar(rname) when is_generated_tyvar(lname) && !is_generated_tyvar(rname):
+          bind_variable(substitution, lname, right)
+      | TyVar(rname) when is_generated_tyvar(rname):
+          bind_variable(substitution, rname, left)
+      | ~else: bind_variable(substitution, lname, right)
+  | TyApp(left_name, left_args):
+      match right
+      | TyVar(name): bind_variable(substitution, name, left)
+      | TyApp(right_name, right_args) when left_name == right_name:
+          unify_arguments(substitution, left_args, right_args)
+      | ~else: #false
 
 fun type_unify(a :: HType, b :: HType, initial :: Map.of(Symbol, HType))
      :: maybe(Map.of(Symbol, HType)):
-  match UnifyFailure.handle(Substitution.handle(initial, unify(a, b)))
-  | Pure(Substitution.Result(_, substitution)): substitution
-  | UnifyFailure.Failed(_): #false
-  | ~else: error(~who: #'type_unify, "internal error: unhandled effect")
+  unify(initial, a, b)

@@ -148,6 +148,7 @@ fun fresh_instance(ty :: HType) :: HType:
 fun check_expr(~unify: unify :: Function.of_arity(3),
                ~resolve: resolve :: Function.of_arity(1),
                ~lookup: lookup :: Function.of_arity(1),
+               ~parse_type: parse_type :: Function.of_arity(1),
                ~vars: vars :: Map.of(Symbol, HType),
                ~fallback: fallback :: Function.of_arity(2),
                expr :: CoreExpr,
@@ -156,7 +157,7 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
   fun check_sub(e :: CoreExpr, exp :: maybe(HType)) :: CheckedExpr:
     check_expr(
       ~unify: unify, ~resolve: resolve, ~lookup: lookup,
-      ~vars: vars, ~fallback: fallback, e, exp)
+      ~parse_type: parse_type, ~vars: vars, ~fallback: fallback, e, exp)
   fun unify_with(ty :: HType, at :: Syntax):
     match expected
     | #false: #void
@@ -190,6 +191,18 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
                 || resolved == mk_tyapp(#'Rational, [])
            | CheckedNumeral(value, resolved, at)
            | fallback(expr, expected))
+  | CoreTypedExpr(inner, type_stx, at):
+      // The annotation is purely a type hint with no runtime
+      // representation of its own: `inner`'s own checked node, unified
+      // against the annotation and then (via `unify_with` below) against
+      // whatever `expected` this `CoreTypedExpr` itself was checked
+      // against, is the entire result. Matches both `elab.rhm`'s
+      // `check_core(inner, annotated)` and the un-migrated runtime path's
+      // `runtime_expr(state, env, inner, annotated)` -- neither wraps.
+      let annotated = parse_type(type_stx)
+      let checked_inner = check_sub(inner, annotated)
+      unify_with(checked_ty(checked_inner), at)
+      checked_inner
   | CoreIf(cond, then_expr, else_expr, at):
       let bool_ty = mk_tyapp(#'bool, [])
       let checked_cond = check_sub(cond, bool_ty)

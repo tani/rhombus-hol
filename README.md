@@ -1,25 +1,39 @@
 # Rhombus/HOL
 
-Rhombus/HOL is an LCF-style higher-order-logic kernel embedded in Rhombus,
-with a machine-checked Isabelle/HOL development behind it.
-
-This branch (`rhombus-hol-native-arith`) carries only the kernel: the
-prover, standard library, and `#lang rhombus/hol` surface language are being
-rebuilt on top of it with a native (not Peano-unary) arithmetic
-representation, and are not present here. See `main` for the working
-language and prover.
+Rhombus/HOL is an LCF-style higher-order-logic theorem prover embedded in
+Rhombus, with a machine-checked Isabelle/HOL kernel behind it: the `#lang
+rhombus/hol` surface language, its derived prover, and a proved standard
+library all sit on top of that kernel.
 
 ## Packages
 
-- `rhombus-hol-kernel` — the LCF kernel: the whole trust boundary.
+- `rhombus-hol-kernel` — the LCF kernel: the whole trust boundary, generated
+  from and checked against `isabelle-hol-kernel`.
 - `isabelle-hol-kernel` — the Isabelle/HOL formalization the kernel is
   generated from and checked against.
+- `rhombus-hol-quickcheck` — runtime property-checking support, independent
+  of the prover.
+- `rhombus-hol-prover` — the derived layer built over the kernel and
+  QuickCheck: tactics, conversions, and the `#lang rhombus/hol` language
+  surface (frontend elaboration, the waterfall proof procedure, recursive
+  function and datatype definition).
+- `rhombus-hol-stdlib` — a proved standard library built on the prover.
+- `rhombus-hol` — the top-level package: `#lang rhombus/hol` itself, the
+  test suite, and the documentation.
 
 ## Building
 
 ```sh
-raco pkg install --link ./rhombus-hol-kernel
-raco make rhombus-hol-kernel/rhombus/hol/kernel.rhm
+raco pkg install --auto --link \
+  ./rhombus-hol-kernel ./rhombus-hol-quickcheck ./rhombus-hol-prover \
+  ./rhombus-hol-stdlib ./rhombus-hol
+raco make rhombus-hol-prover/rhombus/hol.rkt
+```
+
+## Testing
+
+```sh
+raco test --jobs 4 rhombus-hol/rhombus/hol/tests
 ```
 
 ## Formal kernel generation
@@ -37,19 +51,19 @@ committed artifact exactly matches the Isabelle export.
 
 ## Documentation
 
-The language decisions for that rebuild are recorded in
-[`LANGUAGE_SPEC.md`](LANGUAGE_SPEC.md).
+[`LANGUAGE_SPEC.md`](LANGUAGE_SPEC.md) is the normative specification for
+the `#lang rhombus/hol` surface language: the language layer, the logical
+effect of declarations, and the required trust and execution boundaries.
 
-The published documentation for the full system (kernel, prover, standard
-library) is built from `main`:
+The published documentation is built from this branch:
 
 - [Rhombus/HOL manual](https://tani.github.io/rhombus-hol/rhombus-hol/index.html)
 - [Isabelle/HOL kernel verification](https://tani.github.io/rhombus-hol/isabelle/Unsorted/Rhombus_HOL_Kernel/index.html)
 - [Verification audit theory](https://tani.github.io/rhombus-hol/isabelle/Unsorted/Rhombus_HOL_Kernel/Rhombus_HOL_Audit.html)
 
-GitHub Actions regenerates these pages from `main`; the Isabelle presentation
-contains the checked source, definitions, theorem statements, proof text, and
-links into the imported HOL and HOL-ZF sessions.
+GitHub Actions regenerates these pages; the Isabelle presentation contains
+the checked source, definitions, theorem statements, proof text, and links
+into the imported HOL and HOL-ZF sessions.
 
 ## License
 

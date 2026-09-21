@@ -2,11 +2,14 @@
 
 ## Status and scope
 
-This is the normative specification for the rebuilt `#lang rhombus/hol`
-surface language. The current branch contains the verified kernel only; the
-frontend, derived prover, executable lowering, and standard library are being
-rebuilt above it. A construct specified here is a required language feature,
-not evidence that it is already present on this branch.
+This is the normative specification for the `#lang rhombus/hol` surface
+language. The frontend, derived prover, executable lowering, and standard
+library specified here are implemented in `rhombus-hol-prover` and
+`rhombus-hol-stdlib`, built over the verified kernel in `rhombus-hol-kernel`.
+This document remains the normative reference for the language's required
+behavior: where the implementation and this specification disagree on a
+point this document covers, that is an implementation defect to fix, not a
+specification to relax.
 
 This document specifies the language layer, the logical effect of declarations,
 and the required trust and execution boundaries. It does **not** specify a

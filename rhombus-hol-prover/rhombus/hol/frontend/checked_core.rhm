@@ -53,12 +53,14 @@
 import:
   rhombus/hol/htype open
   rhombus/hol/frontend/surface_core open
+  rhombus/hol/datatype/algebra open
 
 export:
   CheckedExpr
   CheckedLocal
   CheckedConstant
   CheckedNumeral
+  CheckedPair
   CheckedIf
   CheckedOpaque
   check_expr
@@ -82,6 +84,10 @@ class CheckedConstant(name :: Symbol, ty :: HType, at :: Syntax):
 class CheckedNumeral(value :: NonnegInt, ty :: HType, at :: Syntax):
   extends CheckedExpr
 
+class CheckedPair(first :: CheckedExpr, second :: CheckedExpr,
+                  ty :: HType, at :: Syntax):
+  extends CheckedExpr
+
 class CheckedIf(cond :: CheckedExpr, then_branch :: CheckedExpr,
                 else_branch :: CheckedExpr, ty :: HType, at :: Syntax):
   extends CheckedExpr
@@ -96,6 +102,7 @@ fun checked_ty(c :: CheckedExpr) :: HType:
   | CheckedLocal(_, ty, _): ty
   | CheckedConstant(_, ty, _): ty
   | CheckedNumeral(_, ty, _): ty
+  | CheckedPair(_, _, ty, _): ty
   | CheckedIf(_, _, _, ty, _): ty
   | CheckedOpaque(_, ty, _): ty
   | ~else: error(~who: #'checked_ty, "unknown CheckedExpr variant")
@@ -121,11 +128,11 @@ fun core_location(expr :: CoreExpr) :: Syntax:
   | ~else: error(~who: #'core_location, "unknown CoreExpr variant")
 
 // A Theory-free type-checking pass over exactly `CoreRef`, `CoreNumeral`,
-// `CoreTypedExpr`, and `CoreIf` -- the vertical slice proven end to end
-// first. Any other `CoreExpr` shape, and a `CoreRef` naming neither a
-// local variable nor an entry `lookup` knows, is handed to `fallback`
-// unchanged: this is the seam a later migration step widens, not a
-// boundary `check_expr` itself needs to know the shape of.
+// `CoreTypedExpr`, `CorePairExpr`, and `CoreIf` -- the vertical slice
+// proven end to end first. Any other `CoreExpr` shape, and a `CoreRef`
+// naming neither a local variable nor an entry `lookup` knows, is handed
+// to `fallback` unchanged: this is the seam a later migration step
+// widens, not a boundary `check_expr` itself needs to know the shape of.
 //
 // `unify`/`resolve` are the caller's own unification state -- not a second,
 // competing substitution: `fallback` ultimately runs whatever un-migrated
@@ -203,6 +210,42 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
       let checked_inner = check_sub(inner, annotated)
       unify_with(checked_ty(checked_inner), at)
       checked_inner
+  | CorePairExpr(first, second, at):
+      // Mirrors `elaborate_pair_effect`/`runtime_pair_expr` exactly: an
+      // expected `Pair.of(...)` type destructures into its two component
+      // types; a still-open metavariable gets two fresh ones, unified
+      // back against it (so a sibling that later resolves this pair's
+      // type also resolves the two components); anything else -- wrong
+      // shape entirely -- defers to `fallback` rather than duplicating
+      // its error message.
+      fun pair_component_types(wanted :: HType) :: maybe(List):
+        match wanted
+        | TyApp(name, [a, b]) when name == ty_prod: [a :~ HType, b :~ HType]
+        | TyVar(_,):
+            let ft = mk_tyvar(Symbol.gen("_pair_first"))
+            let st = mk_tyvar(Symbol.gen("_pair_second"))
+            unify(wanted, prod_ty(ft, st), at)
+            [ft, st]
+        | ~else: #false
+      match expected
+      | #false:
+          let checked_first = check_sub(first, #false)
+          let checked_second = check_sub(second, #false)
+          CheckedPair(
+            checked_first, checked_second,
+            resolve(prod_ty(checked_ty(checked_first), checked_ty(checked_second))),
+            at)
+      | wanted:
+          match pair_component_types(resolve(wanted :~ HType))
+          | #false: fallback(expr, expected)
+          | [first_type, second_type]:
+              let checked_first = check_sub(first, first_type)
+              let checked_second = check_sub(second, second_type)
+              CheckedPair(
+                checked_first, checked_second,
+                resolve(
+                  prod_ty(checked_ty(checked_first), checked_ty(checked_second))),
+                at)
   | CoreIf(cond, then_expr, else_expr, at):
       let bool_ty = mk_tyapp(#'bool, [])
       let checked_cond = check_sub(cond, bool_ty)

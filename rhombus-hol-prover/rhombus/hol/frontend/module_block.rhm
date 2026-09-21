@@ -43,6 +43,7 @@ import:
     rhombus/hol/frontend/type/registry open
     rhombus/hol/frontend/type/parse as type_parser
     rhombus/hol/frontend/surface_core open
+    rhombus/hol/frontend/checked_core open
 export:
   module_block
   datatype
@@ -1173,20 +1174,53 @@ meta:
           RuntimeExpr(rendered_function,
                       runtime_resolve_type(function_type)))
     | CoreIf(condition, then_expr, else_expr, at):
-        let condition_value = runtime_expr(
-                                state, env, condition,
-                                mk_tyapp(#'bool, []))
-        let then_value = runtime_expr(state, env, then_expr, expected)
-        let else_value = runtime_expr(
-                           state, env, else_expr, then_value.ty)
-        let rendered:
-          'if $((condition_value.stx))
-           | $((then_value.stx))
-           | $((else_value.stx))'
-        ensure(RuntimeExpr(rendered, then_value.ty))
+        // `check_expr`/`checked_to_runtime` (checked_core.rhm) are the
+        // shared, Theory-free type-checking pass -- see that module's
+        // header for why a live `Theory` cannot be built here to reuse
+        // `elab.rhm`'s Term-building elaboration directly. `fallback`
+        // wraps this same `runtime_expr`, but `check_expr`'s own match
+        // consumes every `CoreIf` itself (recursing through `check_sub`,
+        // never through `fallback`), so a `CoreIf`-shaped `expr` can never
+        // reach `fallback` and loop back into this arm.
+        fun fallback(e :: CoreExpr, exp :: maybe(HType)) :: CheckedExpr:
+          let r = runtime_expr(state, env, e, exp)
+          CheckedOpaque(r.stx, r.ty, core_location(e))
+        fun unify_cb(l :: HType, r :: HType, at2 :: Syntax):
+          runtime_unify(l, r, at2, "expression has an unexpected type")
+        fun lookup_cb(name :: Symbol) :: maybe(HType):
+          surface_const_type(state, name)
+        let checked = check_expr(
+          ~unify: unify_cb, ~resolve: runtime_resolve_type,
+          ~lookup: lookup_cb, ~vars: env, ~fallback: fallback,
+          expr, expected)
+        ensure(checked_to_runtime(state, checked))
     | ~else:
         syntax_meta.error("expression has no runtime meaning",
                           runtime_context())
+
+  // Reads a `CheckedExpr` back into `Syntax` -- purely structural, no
+  // further type propagation, since `check_expr` already made every type
+  // decision. `CheckedOpaque` carries `fallback`'s own already-rendered
+  // result straight through.
+  fun checked_to_runtime(state :: SurfaceContext,
+                         checked :: CheckedExpr) :: RuntimeExpr:
+    match checked
+    | CheckedOpaque(opaque, ty, _): RuntimeExpr(opaque :~ Syntax, ty)
+    | CheckedLocal(name, ty, at): RuntimeExpr(source_id(name, at), ty)
+    | CheckedConstant(name, ty, at):
+        RuntimeExpr(runtime_named_apply(state, name, [], at), ty)
+    | CheckedNumeral(value, ty, at): runtime_numeral(state, value, ty, at)
+    | CheckedIf(cond, then_branch, else_branch, ty, at):
+        let cond_r = checked_to_runtime(state, cond)
+        let then_r = checked_to_runtime(state, then_branch)
+        let else_r = checked_to_runtime(state, else_branch)
+        RuntimeExpr(
+          'if $((cond_r.stx))
+           | $((then_r.stx))
+           | $((else_r.stx))',
+          ty)
+    | ~else:
+        error(~who: #'checked_to_runtime, "unknown CheckedExpr variant")
 
   fun merge_runtime_pattern_bindings(
         left :: Map.of(Symbol, HType),

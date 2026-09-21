@@ -1,0 +1,200 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+// A Theory-independent, type-checked reading of a `CoreExpr`.
+//
+// `module_block.rhm`'s runtime codegen and `elab.rhm`'s logical elaboration
+// both walk the same `CoreExpr` tree and make the same type-propagation
+// decisions (what does an `if`'s condition need, what does a numeral's
+// expected type resolve to, ...), but do so with two separately written
+// implementations, because `elab.rhm`'s path builds a kernel `Term` (which
+// needs a live `Theory` for named-constant lookups and numeral-literal
+// validation) while the runtime path runs at macro-expansion time, before
+// any `Theory` for the user's module exists.
+//
+// A live `Theory` cannot be built at macro-expansion time to paper over
+// that gap: `Theory.stamp` is minted fresh per bootstrap
+// (`new_nat_type`/`new_basic_definition`/... each call `fresh_generation()`),
+// so a `Theory` built once during compilation and a second one built again
+// when the compiled module actually runs are not the same value and do not
+// share a stamp lineage -- confirmed directly: `base_theory()` alone
+// already fails a typed numeral literal with `check_term: undeclared type
+// constructor Nat`, since `Nat` is only declared by the real pipeline's
+// `install_native_nat`, itself a trust-sensitive, `Theory`-mutating,
+// freshly-stamped kernel call. Reproducing that at expansion time would
+// mean invoking real kernel definitional machinery from a macro
+// transformer, paying its cost twice per module compile, and handing
+// downstream code a `Term` whose apparent well-formedness rests on a
+// `Theory` object with no relationship to the one the module actually
+// runs against.
+//
+// `CheckedExpr` is the piece that actually is shareable: the type
+// propagated through a `CoreIf`/`CoreNumeral`/`CoreRef` node depends only
+// on a name's declared type (a plain lookup, not a Theory), not on the
+// mechanism that eventually turns the checked tree into a kernel `Term` or
+// into runtime syntax. `check_expr` is that shared, Theory-free pass --
+// its own logic never touches a `Theory`, though it runs its unification
+// decisions through the caller's own `unify`/`resolve` (see below), which
+// may be effectful. Reading a `CheckedExpr` back into a kernel `Term`
+// (elab.rhm, using a live Theory only for name lookup and numeral
+// validation) or into runtime syntax (module_block.rhm, no Theory at all)
+// are two independent, much smaller functions once the type-checking
+// decision is already made.
+//
+// `CheckedOpaque` is the migration seam: a subexpression kind
+// `check_expr` does not yet handle is deferred to a caller-supplied
+// fallback, which renders it however the un-migrated path already does and
+// hands back its already-known type. A `CheckedOpaque` carries no further
+// structure `check_expr` needs to see again.
+
+import:
+  rhombus/hol/htype open
+  rhombus/hol/frontend/surface_core open
+
+export:
+  CheckedExpr
+  CheckedLocal
+  CheckedConstant
+  CheckedNumeral
+  CheckedIf
+  CheckedOpaque
+  check_expr
+  checked_ty
+  core_location
+
+class CheckedExpr():
+  nonfinal
+
+// A reference already resolved to which of the two name spaces it came
+// from: a local (lambda/let-bound) variable renders as a bare identifier;
+// a named constant renders through the runtime's curry-adapting call
+// machinery. Keeping this as two node shapes rather than one node plus a
+// runtime re-lookup means a lowering never has to repeat the resolution
+// `check_expr` already did.
+class CheckedLocal(name :: Symbol, ty :: HType, at :: Syntax):
+  extends CheckedExpr
+class CheckedConstant(name :: Symbol, ty :: HType, at :: Syntax):
+  extends CheckedExpr
+
+class CheckedNumeral(value :: NonnegInt, ty :: HType, at :: Syntax):
+  extends CheckedExpr
+
+class CheckedIf(cond :: CheckedExpr, then_branch :: CheckedExpr,
+                else_branch :: CheckedExpr, ty :: HType, at :: Syntax):
+  extends CheckedExpr
+
+// `opaque` is already-produced output from the fallback (e.g. rendered
+// runtime `Syntax`, or a lowering-specific placeholder); `checked_expr`
+// never inspects it, only `ty` for further type propagation.
+class CheckedOpaque(opaque :: Syntax, ty :: HType, at :: Syntax):
+  extends CheckedExpr
+
+fun checked_ty(c :: CheckedExpr) :: HType:
+  match c
+  | CheckedLocal(_, ty, _): ty
+  | CheckedConstant(_, ty, _): ty
+  | CheckedNumeral(_, ty, _): ty
+  | CheckedIf(_, _, _, ty, _): ty
+  | CheckedOpaque(_, ty, _): ty
+  | ~else: error(~who: #'checked_ty, "unknown CheckedExpr variant")
+
+// Every `CoreExpr` variant's own `at` field. `check_expr`'s `fallback` seam
+// needs this for a `CoreExpr` it does not itself destructure.
+fun core_location(expr :: CoreExpr) :: Syntax:
+  match expr
+  | CoreRef(_, at): at
+  | CoreCall(_, _, at): at
+  | CoreNumeral(_, at): at
+  | CoreIf(_, _, _, at): at
+  | CoreForall(_, _, at): at
+  | CoreExists(_, _, at): at
+  | CoreFunctionExpr(_, _, _, at): at
+  | CoreBlockExpr(_, at): at
+  | CoreMatchExpr(_, _, at): at
+  | CoreTypedExpr(_, _, at): at
+  | CoreListExpr(_, _, at): at
+  | CorePairExpr(_, _, at): at
+  | CoreStringExpr(_, at): at
+  | CoreSetExpr(_, at): at
+  | ~else: error(~who: #'core_location, "unknown CoreExpr variant")
+
+// A Theory-free type-checking pass over exactly `CoreRef`, `CoreNumeral`,
+// and `CoreIf` -- the vertical slice proven end to end first. Any other
+// `CoreExpr` shape, and a `CoreRef` naming neither a local variable nor an
+// entry `lookup` knows, is handed to `fallback` unchanged: this is the
+// seam a later migration step widens, not a boundary `check_expr` itself
+// needs to know the shape of.
+//
+// `unify`/`resolve` are the caller's own unification state -- not a second,
+// competing substitution: `fallback` ultimately runs whatever un-migrated
+// code the caller already has, and that code mutates its own substitution
+// through its own `unify`/`resolve` operations. Routing every unification
+// decision `check_expr` makes through the SAME two callbacks, rather than
+// threading a separate pure substitution map, is what keeps a type
+// variable `fallback` and `check_expr` both touch from resolving two
+// different ways.
+//
+// `lookup(name)` answers a named constant's declared (schematic) type, or
+// `#false`; `check_expr` freshens it before unifying, the same way a
+// polymorphic constant's every other use site does.
+fun fresh_instance(ty :: HType) :: HType:
+  let renaming:
+    for values(out :~ Map = {}) (v in type_vars(ty)):
+      out ++ {v: mk_tyvar(Symbol.gen(to_string(v))) :~ HType}
+  type_subst(renaming, ty)
+
+fun check_expr(~unify: unify :: Function.of_arity(3),
+               ~resolve: resolve :: Function.of_arity(1),
+               ~lookup: lookup :: Function.of_arity(1),
+               ~vars: vars :: Map.of(Symbol, HType),
+               ~fallback: fallback :: Function.of_arity(2),
+               expr :: CoreExpr,
+               expected :: maybe(HType))
+     :: CheckedExpr:
+  fun check_sub(e :: CoreExpr, exp :: maybe(HType)) :: CheckedExpr:
+    check_expr(
+      ~unify: unify, ~resolve: resolve, ~lookup: lookup,
+      ~vars: vars, ~fallback: fallback, e, exp)
+  fun unify_with(ty :: HType, at :: Syntax):
+    match expected
+    | #false: #void
+    | wanted: unify(ty, wanted :~ HType, at)
+  match expr
+  | CoreRef(name, at):
+      match vars.get(name, #false)
+      | found :: HType:
+          unify_with(found, at)
+          CheckedLocal(name, resolve(found), at)
+      | #false:
+          match lookup(name)
+          | #false: fallback(expr, expected)
+          | found :: HType:
+              let fresh = fresh_instance(found)
+              unify_with(fresh, at)
+              CheckedConstant(name, resolve(fresh), at)
+  | CoreNumeral(value, at):
+      match expected
+      | #false: fallback(expr, expected)
+      | wanted:
+          let resolved = resolve(wanted :~ HType)
+          // Mirrors `runtime_numeral`'s admissibility cond exactly: a
+          // numeral has a representation only at these three types.
+          // Anything else -- including a still-open metavariable, which
+          // needs an ambient numeric context this call cannot supply --
+          // defers to `fallback` rather than accepting an arbitrary
+          // concrete `HType`.
+          (if resolved == mk_tyapp(#'Nat, [])
+                || resolved == mk_tyapp(#'Integer, [])
+                || resolved == mk_tyapp(#'Rational, [])
+           | CheckedNumeral(value, resolved, at)
+           | fallback(expr, expected))
+  | CoreIf(cond, then_expr, else_expr, at):
+      let bool_ty = mk_tyapp(#'bool, [])
+      let checked_cond = check_sub(cond, bool_ty)
+      let checked_then = check_sub(then_expr, expected)
+      let checked_else = check_sub(else_expr, checked_ty(checked_then))
+      let result_ty = resolve(checked_ty(checked_else))
+      unify_with(result_ty, at)
+      CheckedIf(
+        checked_cond, checked_then, checked_else, resolve(result_ty), at)
+  | ~else: fallback(expr, expected)

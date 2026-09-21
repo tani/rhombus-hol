@@ -6,6 +6,7 @@
 
 import:
   rhombus/hol/htype open
+  rhombus/hol/frontend/tyunify open
 
 export:
   OverloadMethod
@@ -82,50 +83,6 @@ fun valid_argument_order(order :: List.of(NonnegInt), arity :: NonnegInt)
           && !(position in seen)
           && loop(rest, seen ++ {position})
 
-fun normalize_type(theta :: Map.of(Symbol, HType), ty :: HType) :: HType:
-  match ty
-  | TyVar(name):
-      match theta.get(name, #false)
-      | #false: ty
-      | replacement: normalize_type(theta, replacement :~ HType)
-  | TyApp(name, args):
-      mk_tyapp(name, args.map(fun (arg): normalize_type(theta, arg)))
-
-fun unify_type(left :: HType, right :: HType,
-               theta :: Map.of(Symbol, HType)) :: maybe(Map.of(Symbol, HType)):
-  let a = normalize_type(theta, left)
-  let b = normalize_type(theta, right)
-  cond
-  | a == b: theta
-  | a is_a TyVar:
-      let TyVar(name) = a
-      (if type_occurs(name, b)
-       | #false
-       | theta ++ {name: b})
-  | b is_a TyVar:
-      let TyVar(name) = b
-      (if type_occurs(name, a)
-       | #false
-       | theta ++ {name: a})
-  | ~else:
-      match a
-      | TyApp(name, args):
-          match b
-          | TyApp(other, other_args) when name == other
-                                            && args.length() == other_args.length():
-              recur loop (xs = args, ys = other_args, current = theta):
-                match xs
-                | []: current
-                | List.cons(x, more_x):
-                    match ys
-                    | List.cons(y, more_y):
-                        match unify_type(x, y, current)
-                        | #false: #false
-                        | next: loop(more_x, more_y, next :~ Map)
-                    | ~else: #false
-          | ~else: #false
-      | ~else: #false
-
 fun fresh_type(ty :: HType) :: HType:
   let renaming:
     for values(out :~ Map = {}) (name in type_vars(ty)):
@@ -164,7 +121,7 @@ fun build_overload_method(
       cond
       | index == arity: current
       | ~else:
-          match unify_type(domains[index],
+          match type_unify(domains[index],
                            argument_types[argument_order[index]],
                            current)
           | #false:
@@ -176,7 +133,7 @@ fun build_overload_method(
     match declared_result
     | #false: theta
     | expected:
-        match unify_type(raw_result, expected :~ HType, theta)
+        match type_unify(raw_result, expected :~ HType, theta)
         | #false:
             error(~who: #'overload,
                   "overload result type does not match the "
@@ -185,8 +142,8 @@ fun build_overload_method(
   OverloadMethod(
     function,
     argument_types.map(
-      fun (ty): normalize_type(final_theta, ty)),
-    normalize_type(final_theta, raw_result),
+      fun (ty): deep_resolve(final_theta, ty, [])),
+    deep_resolve(final_theta, raw_result, []),
     constant,
     argument_order)
 
@@ -215,7 +172,7 @@ fun methods_overlap(left :: OverloadMethod, right :: OverloadMethod)
     | List.cons(x, more_x):
         match ys
         | List.cons(y, more_y):
-            match unify_type(x, y, theta)
+            match type_unify(x, y, theta)
             | #false: #false
             | next: loop(more_x, more_y, next :~ Map)
         | ~else: #false
@@ -263,21 +220,21 @@ fun resolve_method(method :: OverloadMethod,
           match expected_result
           | #false: theta
           | expected:
-              match unify_type(result_pattern, expected :~ HType, theta)
+              match type_unify(result_pattern, expected :~ HType, theta)
               | #false: #false
               | next: next :~ Map
         if final_theta
         | OverloadResolution(
             method,
             patterns.map(
-              fun (ty): normalize_type(final_theta :~ Map, ty)),
-            normalize_type(final_theta :~ Map, result_pattern))
+              fun (ty): deep_resolve(final_theta :~ Map, ty, [])),
+            deep_resolve(final_theta :~ Map, result_pattern, []))
         | #false
     | ~else:
         match argument_types[index]
         | #false: match_arguments(index + 1, theta)
         | actual:
-            match unify_type(patterns[index], actual :~ HType, theta)
+            match type_unify(patterns[index], actual :~ HType, theta)
             | #false: #false
             | next: match_arguments(index + 1, next :~ Map)
 

@@ -290,7 +290,6 @@ export:
   elaborate_function_decl
   core_type_vars
   parse_tactic
-  deep_resolve
   ElabEnv
   RefRestriction
   elaborate_effect
@@ -327,27 +326,12 @@ class ElabEnv(thy :: Theory,
 fun current_substitution(env :: ElabEnv) :: Map.of(Symbol, HType):
   env.inference.value :~ Map
 
-// The accumulated unification substitution chains: unifying two still-open
-// metavariables binds one to the other before either resolves to something
-// concrete, so a single-level `type_subst` can leave a stale intermediate
-// variable in the result. Chase each variable to a fixed point (bounded by
-// `seen` against a pathological cycle) before substituting.
-fun deep_resolve(theta :: Map.of(Symbol, HType), ty :: HType,
-                 seen :: List.of(Symbol)) :: HType:
-  match ty
-  | TyVar(n):
-      cond
-      | seen.contains(n): ty
-      | ~else:
-          match theta.get(n, #false)
-          | #false: ty
-          | replacement:
-              deep_resolve(theta, replacement :~ HType, seen ++ [n])
-  | TyApp(n, args):
-      mk_tyapp(n, args.map(fun (a): deep_resolve(theta, a, seen)))
-
-// A copy of `theta` with every chain chased to its end, safe to hand to the
-// ordinary (single-level) `type_subst`/`inst_type`.
+// Unifying two still-open metavariables binds one to the other before
+// either resolves to something concrete, so a single-level `type_subst`
+// can leave a stale intermediate variable in the result.
+// `deep_resolve` (tyunify.rhm) chases each variable to a fixed point; this
+// closes every chain in `theta` at once, safe to hand to the ordinary
+// (single-level) `type_subst`/`inst_type`.
 fun close_substitution(theta :: Map.of(Symbol, HType))
      :: Map.of(Symbol, HType):
   for values(out :~ Map = {}) ((name, ty) in theta):

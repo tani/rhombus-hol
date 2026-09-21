@@ -18,6 +18,7 @@ import:
 
 export:
   type_unify
+  deep_resolve
 
 // `Symbol.gen` mints uninterned symbols for call-site metavariables
 // (`fresh_type` and friends); ordinary source identifiers, including a
@@ -83,3 +84,24 @@ fun unify(substitution :: Map.of(Symbol, HType), a :: HType, b :: HType)
 fun type_unify(a :: HType, b :: HType, initial :: Map.of(Symbol, HType))
      :: maybe(Map.of(Symbol, HType)):
   unify(initial, a, b)
+
+// A copy of `ty` with every substitution chain chased to a fixed point,
+// not just the outermost variable: unifying two still-open metavariables
+// binds one to the other before either resolves to something concrete, so
+// a single-level lookup can leave a stale intermediate variable nested
+// inside a `TyApp`. `seen` bounds the chase against a pathological cycle
+// (unification's own occurs check should prevent one from ever entering
+// `theta`, but resolution does not re-derive that guarantee).
+fun deep_resolve(theta :: Map.of(Symbol, HType), ty :: HType,
+                 seen :: List.of(Symbol)) :: HType:
+  match ty
+  | TyVar(n):
+      cond
+      | seen.contains(n): ty
+      | ~else:
+          match theta.get(n, #false)
+          | #false: ty
+          | replacement:
+              deep_resolve(theta, replacement :~ HType, seen ++ [n])
+  | TyApp(n, args):
+      mk_tyapp(n, args.map(fun (a): deep_resolve(theta, a, seen)))

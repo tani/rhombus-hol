@@ -62,16 +62,6 @@ meta:
   // introduction scope lands on them alike.
   def id_ctx :: Syntax = 'hol_state'
   Parameter.def runtime_context :: Syntax = id_ctx
-  // Mirrors `elab.rhm`'s `restricted_refs`: a local `let`-bound function's own
-  // name, and every later local function name in the same body, is off
-  // limits while elaborating *that* `let`'s initializer -- self- and
-  // forward-recursion through local function sugar are not supported. The
-  // logical path enforces this in `ElabEnv.restricted_refs`; this parameter
-  // gives the runtime/executable emission path (a separate walk over the
-  // same `CoreFunBody`, see the note atop `elab.rhm`) the same check, so a
-  // rejected declaration is rejected for the reason it actually violates
-  // instead of falling through to a generic "unknown constant".
-  Parameter.def runtime_restricted_names :: Map.of(Symbol, String) = {}
 
   fun st(n :: Int) :: Syntax:
     Syntax.make_id("_hol_st" ++ to_string(n), id_ctx)
@@ -211,16 +201,6 @@ meta:
         syntax_meta.error(
           who ++ " currently needs a named binding pattern",
           pattern_at(pat))
-
-  fun following_local_function_names(body :: CoreFunBody) :: List.of(Symbol):
-    match body
-    | CoreBodyLet(binding_pat, init, tail, _):
-        let following = following_local_function_names(tail)
-        (if init is_a CoreFunctionExpr
-         | [core_pattern_name(binding_pat, "a local function needs a name")]
-             ++ following
-         | following)
-    | ~else: []
 
   fun surface_optional_type(type_stx :: maybe(Syntax),
                             registry :: TypeConstructorRegistry,
@@ -570,85 +550,46 @@ meta:
                   argument in args.drop(arity)):
               '$call($argument)'
 
-
-  fun runtime_peel(ty :: HType, arity :: NonnegInt)
-       :: values(List.of(HType), HType):
-    recur loop (current = ty, remaining = arity,
-                domains :~ List.of(HType) = []):
+  // The runtime `CheckEnv`: `lookup` and `lookup_global` resolve `true`,
+  // `false`, the `Pair` constructor, and every registered surface constant
+  // (function, definition, or datatype constructor) identically, since
+  // nothing here distinguishes an ordinary reference from a global one.
+  // `restricted_refs` starts empty -- `check_body` adds a local function's
+  // own forward- and self-recursion restrictions as it descends, exactly as
+  // it does for the logical elaboration path.
+  fun runtime_check_env(inference :: CheckedInference, state :: SurfaceContext,
+                        vars :: Map.of(Symbol, HType)) :: CheckEnv:
+    fun lookup_cb(name :: Symbol) :: maybe(HType):
       cond
-      | remaining == 0: values(domains, current)
-      | is_fun(current):
-          let (domain, range) = dest_fun(current)
-          loop(range, remaining - 1, domains ++ [domain])
-      | ~else:
-          error(~who: #'overload,
-                "constant has fewer arguments than required")
+      | name == #'true || name == #'false: mk_tyapp(#'bool, [])
+      | name == c_pair:
+          let first_type = mk_tyvar(#'a)
+          let second_type = mk_tyvar(#'b)
+          mk_fun(first_type,
+                 mk_fun(second_type, prod_ty(first_type, second_type)))
+      | ~else: surface_const_type(state, name)
+    CheckEnv(
+      inference, vars, lookup_cb, lookup_cb,
+      fun (type_stx :: Syntax) :: HType:
+        type_parser.parse_open_type(type_stx, state.surface.type_constructors),
+      state.surface.operators,
+      fun (ty :: HType) :: String:
+        type_to_surface_string(state.surface.type_constructors, ty),
+      fun (message :: String, at :: Syntax):
+        syntax_meta.error(message, at))
 
-  fun runtime_expected_function_types(inference :: CheckedInference,
-                                      wanted :: HType,
-                                      arity :: NonnegInt,
-                                      at :: Syntax)
-       :: values(List.of(HType), HType):
-    recur loop (remaining = arity,
-                current :~ HType = wanted,
-                domains :~ List = []):
-      cond
-      | remaining == 0:
-          values(domains, checked_resolve(inference, current))
-      | ~else:
-          let current = checked_resolve(inference, current)
-          when current is_a TyVar
-          | let domain = mk_tyvar(Symbol.gen("_domain"))
-            let range = mk_tyvar(Symbol.gen("_range"))
-            unless checked_unify(
-                     inference, current, mk_fun(domain, range))
-            | syntax_meta.error(
-                "a function expression does not match its expected type", at)
-          let current = checked_resolve(inference, current)
-          unless is_fun(current)
-          | syntax_meta.error(
-              "a function expression has more parameters than its expected type",
-              at)
-          let (domain, range) = dest_fun(current)
-          loop(remaining - 1, range, domains ++ [domain])
-
-
-  fun runtime_fresh_type(ty :: HType) :: HType:
-    let renaming:
-      for values(out :~ Map = {}) (v in type_vars(ty)):
-        out ++ {v: mk_tyvar(Symbol.gen(to_string(v))) :~ HType}
-    type_subst(renaming, ty)
-
-  fun runtime_needs_expected(state :: SurfaceContext,
-                             expr :: CoreExpr) :: Boolean:
-    fun every_arg(args :: List.of(CoreExpr)) :: Boolean:
-      args.length() == 0
-        || for values(all = #true) (arg in args):
-             all && runtime_needs_expected(state, arg :~ CoreExpr)
-    match expr
-    | CoreNumeral(_, _): #true
-    | CoreTypedExpr(_, _, _): #false
-    | CoreCall(CoreRef(name, _), args, _) when overload_arity(state.surface.operators, name) != #false:
-        every_arg(args)
-    | CoreCall(_, args, _):
-        for values(found = #false) (arg in args):
-          found || runtime_needs_expected(state, arg :~ CoreExpr)
-    | CoreIf(_, then_expr, else_expr, _):
-        runtime_needs_expected(state, then_expr)
-          || runtime_needs_expected(state, else_expr)
-    | ~else: #false
-
-  fun runtime_numeral(state :: SurfaceContext, value :: NonnegInt,
-                      expected :: HType, at :: Syntax) :: RuntimeExpr:
+  // The executable reading of a literal is the value `succ` applied that
+  // many times to `zero()`, but the *code* for it need not be that deep:
+  // the expander walks generated syntax, so a nested chain made compiling
+  // `function f() :: Nat: 800` quadratic long before anything ran. A
+  // counted loop builds the same value from syntax of constant size.
+  // `check_expr`/`check_pattern` already rejected any type but Nat,
+  // Integer, or Rational before a `CheckedNumeral`/`CheckedPatLiteral`
+  // could exist, so the `~else` branch below is unreachable.
+  fun checked_numeral_stx(value :: NonnegInt, ty :: HType, at :: Syntax) :: Syntax:
     let nat_ty = mk_tyapp(#'Nat, [])
     let int_ty = mk_tyapp(#'Integer, [])
     let rational_ty = mk_tyapp(#'Rational, [])
-    // The executable reading of a literal is the value `succ` applied that
-    // many times to `zero()`, but the *code* for it need not be that deep:
-    // the expander walks generated syntax, so a nested chain made compiling
-    // `function f() :: Nat: 800` quadratic long before anything ran. A
-    // counted loop builds the same value from syntax of constant size.
-    //
     fun nat_syntax() :: Syntax:
       let go = source_id(Symbol.gen("_hol_numeral"), at)
       let count = source_id(Symbol.gen("_hol_count"), at)
@@ -662,293 +603,164 @@ meta:
             | $succ_case
           $go($literal))'
     cond
-    | expected == nat_ty: RuntimeExpr(nat_syntax(), nat_ty)
-    | expected == int_ty:
-        RuntimeExpr(runtime_call_syntax(#'int_from_nat, [nat_syntax()], at),
-                    int_ty)
-    | expected == rational_ty:
-        let integer = runtime_call_syntax(
-                        #'int_from_nat, [nat_syntax()], at)
-        RuntimeExpr(runtime_call_syntax(
-                      #'rational_from_integer, [integer], at),
-                    rational_ty)
+    | ty == nat_ty: nat_syntax()
+    | ty == int_ty: runtime_call_syntax(#'int_from_nat, [nat_syntax()], at)
+    | ty == rational_ty:
+        let integer = runtime_call_syntax(#'int_from_nat, [nat_syntax()], at)
+        runtime_call_syntax(#'rational_from_integer, [integer], at)
     | ~else:
-        syntax_meta.error(
-          "a numeral has no representation at type "
-            ++ type_to_surface_string(
-                 state.surface.type_constructors, expected),
-          at)
+        error(~who: #'checked_to_runtime,
+              "a numeral has no representation at type " ++ to_string(ty))
 
-  fun runtime_overload_expr(inference :: CheckedInference,
-                            state :: SurfaceContext,
-                            env :: Map.of(Symbol, HType),
-                            function_name :: Symbol,
-                            args :: List.of(CoreExpr),
-                            expected :: maybe(HType),
-                            at :: Syntax) :: RuntimeExpr:
-    let arity = overload_arity(state.surface.operators, function_name)
-    unless arity
-    | syntax_meta.error(
-        "unknown overload function " ++ to_string(function_name), at)
-    let arity :~ NonnegInt = arity
-    unless args.length() == arity
-    | syntax_meta.error(
-        "`" ++ to_string(function_name) ++ "` expects "
-          ++ to_string(arity) ++ " arguments",
-        at)
-    let known:
-      for List (arg in args):
-        let arg :~ CoreExpr = arg
-        (if runtime_needs_expected(state, arg)
-         | #false
-         | runtime_expr(inference, state, env, arg, #false))
-    let argument_types:
-      known.map(
-        fun (value):
-          match value
-          | #false: #false
-          | runtime: (runtime :~ RuntimeExpr).ty)
-    let matches = resolve_overload(
-                    state.surface.operators, function_name,
-                    argument_types, expected)
-    when matches.length() == 0
-    | syntax_meta.error(
-        "`" ++ to_string(function_name) ++ "` has no applicable overload",
-        at)
-    when matches.length() > 1
-    | syntax_meta.error(
-        "`" ++ to_string(function_name) ++ "` has ambiguous overload",
-        at)
-    let resolution :~ OverloadResolution = matches[0]
-    let method = resolution.method
-    let rendered:
-      for List (arg in args, prior in known,
-                expected_type in resolution.argument_types):
-        match prior
-        | runtime :: RuntimeExpr:
-            match type_unify(runtime.ty, expected_type, {})
-            | #false:
-                syntax_meta.error(
-                  "overload argument has an unexpected type", at)
-            | _:
-                RuntimeExpr(runtime.stx, expected_type)
-        | #false:
-            runtime_expr(
-              inference, state, env, arg :~ CoreExpr, expected_type)
-    let ordered = method.argument_order.map(
-                    fun (index):
-                      (rendered[index] :~ RuntimeExpr).stx)
-    RuntimeExpr(runtime_named_apply(state, method.constant, ordered, at),
-                resolution.result_type)
+  // Rhombus's guarded binding keeps executable literal patterns constant
+  // size: bind the matched Nat, then compare it with the ordinary executable
+  // reading of the literal. This is numeric structural equality, not a
+  // string-specific or host-string comparison.
+  fun checked_numeral_pattern(value :: NonnegInt, ty :: HType, at :: Syntax) :: Syntax:
+    let matched = source_id(Symbol.gen("_hol_literal"), at)
+    let literal = checked_numeral_stx(value, ty, at)
+    '($matched when $matched == $literal)'
 
-  fun runtime_pair_types(expected :: HType, at :: Syntax)
-      :: values(HType, HType):
-    match expected
-    | TyApp(name, [first_type, second_type]) when name == ty_prod:
-        values(first_type, second_type)
+  // Reads a `CheckedPattern` back into `Syntax` -- purely structural, since
+  // `check_pattern` already resolved every field's type and constructor
+  // identity. `Pair` and Boolean patterns have no generic runtime datatype
+  // behind them and render specially; every other constructor pattern
+  // renders as a direct positional application.
+  fun checked_pattern_to_runtime(pat :: CheckedPattern) :: Syntax:
+    match pat
+    | CheckedPatWildcard(_, at): source_id(#'_, at)
+    | CheckedPatVar(name, _, at): source_id(name, at)
+    | CheckedPatLiteral(value, ty, at): checked_numeral_pattern(value, ty, at)
+    | CheckedPatCtor(name, args, _, _, at) when name == c_pair:
+        let [first, second] = args.map(
+                                 fun (a :: CheckedPattern):
+                                   checked_pattern_to_runtime(a))
+        'Pair($first, $second)'
+    | CheckedPatCtor(name, _, _, _, at) when name == #'true || name == #'false:
+        Syntax.make(name == #'true, runtime_context())
+    | CheckedPatCtor(name, args, _, _, at):
+        let [arg_stx, ...] = args.map(
+                               fun (a :: CheckedPattern):
+                                 checked_pattern_to_runtime(a))
+        let constructor = source_id(name, at)
+        '$constructor($arg_stx, ...)'
+    | ~else: error(~who: #'checked_to_runtime, "unknown checked pattern")
+
+  // Reads a `CheckedBody` back into `Syntax`. Every nested `CheckedNode`
+  // renders through `checked_to_runtime` (cast to `CheckedExpr`, which is
+  // the only shape a checked body's `expr`/`init`/`scrutinee` ever holds);
+  // nothing here parses a type, unifies, or looks up a name -- `check_body`
+  // already made every such decision.
+  fun checked_body_to_runtime(inference :: CheckedInference,
+                              state :: SurfaceContext,
+                              body :: CheckedBody) :: RuntimeExpr:
+    match body
+    | CheckedBodyExpr(expr):
+        checked_to_runtime(inference, state, expr :~ CheckedExpr)
+    | CheckedBodyLet(pat, init, tail, ty, at):
+        let pattern_stx = checked_pattern_to_runtime(pat)
+        let value = checked_to_runtime(
+                      inference, state, init :~ CheckedExpr)
+        let rest = checked_body_to_runtime(inference, state, tail)
+        RuntimeExpr(
+          'block:
+             let $pattern_stx = $((value.stx))
+             $((rest.stx))',
+          checked_resolve(inference, ty))
+    | CheckedBodyMatch(scrutinee, matrix, ty, at):
+        let target = checked_to_runtime(
+                       inference, state, scrutinee :~ CheckedExpr)
+        RuntimeExpr(
+          checked_matrix_stx(inference, state, target.stx, matrix),
+          checked_resolve(inference, ty))
     | ~else:
-        syntax_meta.error(
-          "a Pair expression needs a `Pair.of(...)` type", at)
+        error(~who: #'checked_to_runtime, "unknown checked body")
 
+  // A single-scrutinee `CheckedPatternMatrix` -- the shape both
+  // `CheckedMatch` and `CheckedBodyMatch` carry -- renders as an ordinary
+  // `match`.
+  fun checked_matrix_stx(
+        inference :: CheckedInference,
+        state :: SurfaceContext,
+        scrutinee_stx :: Syntax,
+        matrix :: CheckedPatternMatrix)
+      :: Syntax:
+    let [clause, ...] = matrix.rows.map(
+                          fun (row :: CheckedMatchRow):
+                            let [pat] = row.patterns
+                            let pattern_stx = checked_pattern_to_runtime(pat)
+                            let result = checked_body_to_runtime(
+                                           inference, state, row.body)
+                            '$pattern_stx: $((result.stx))')
+    'match ($scrutinee_stx)
+     | $clause
+     | ...'
 
-  fun runtime_expr(inference :: CheckedInference,
-                   state :: SurfaceContext, env :: Map.of(Symbol, HType),
-                   expr :: CoreExpr,
-                   expected :: maybe(HType) = #false) :: RuntimeExpr:
-    fun ensure(value :: RuntimeExpr) :: RuntimeExpr:
-      match expected
-      | #false:
-          RuntimeExpr(value.stx, checked_resolve(inference, value.ty))
-      | wanted:
-          unless checked_unify(inference, value.ty, wanted :~ HType)
-          | syntax_meta.error(
-              "expression has an unexpected type", runtime_context())
-          RuntimeExpr(
-            value.stx, checked_resolve(inference, wanted :~ HType))
-    match expr
-    | CoreRef(name, at) when name == #'true:
-        ensure(RuntimeExpr(Syntax.make(#true, runtime_context()),
-                           mk_tyapp(#'bool, [])))
-    | CoreRef(name, at) when name == #'false:
-        ensure(RuntimeExpr(Syntax.make(#false, runtime_context()),
-                           mk_tyapp(#'bool, [])))
-    | ~else:
-        // The checked pass owns references, numerals, calls, conditionals,
-        // and annotations. Fallback retains bodies, matches, overload
-        // resolution, and constructs with no executable meaning.
-        fun fallback(e :: CoreExpr, exp :: maybe(HType)) :: CheckedExpr:
-          let r = runtime_expr_fallback(inference, state, env, e, exp)
-          CheckedOpaque(r.stx, r.ty, core_location(e))
-        fun lookup_cb(name :: Symbol) :: maybe(HType):
-          cond
-          | name == #'true || name == #'false: mk_tyapp(#'bool, [])
-          | name == c_pair:
-              let first_type = mk_tyvar(#'a)
-              let second_type = mk_tyvar(#'b)
-              mk_fun(first_type,
-                     mk_fun(second_type, prod_ty(first_type, second_type)))
-          | ~else: surface_const_type(state, name)
-        fun parse_type_cb(type_stx :: Syntax) :: HType:
-          type_parser.parse_open_type(type_stx, state.surface.type_constructors)
-        fun needs_expected_cb(e :: CoreExpr) :: Boolean:
-          runtime_needs_expected(state, e)
-        fun is_overloaded_name_cb(name :: Symbol) :: Boolean:
-          overload_arity(state.surface.operators, name) != #false
-        fun error_cb(message :: String, at2 :: Syntax):
-          syntax_meta.error(message, at2)
-        let checked = check_expr(
-          ~inference: inference,
-          ~lookup: lookup_cb, ~parse_type: parse_type_cb,
-          ~vars: env, ~fallback: fallback,
-          ~needs_expected: needs_expected_cb,
-          ~is_overloaded_name: is_overloaded_name_cb,
-          ~error: error_cb,
-          expr, expected)
-        ensure(checked_to_runtime(state, checked))
+  // One row of a multi-clause `CheckedFunction` body -- a parameter list per
+  // row rather than one shared parameter list. Named when rendering a
+  // top-level declaration (every row repeats the same name, which is how
+  // Rhombus groups multiple `fun` clauses under it), anonymous when
+  // rendering a function expression.
+  fun checked_function_row(inference :: CheckedInference,
+                           state :: SurfaceContext,
+                           name :: maybe(Syntax),
+                           row :: CheckedMatchRow) :: Syntax:
+    let [pattern_stx, ...] = row.patterns.map(
+                               fun (pat :: CheckedPattern):
+                                 checked_pattern_to_runtime(pat))
+    let body_stx = checked_body_to_runtime(
+                     inference, state, row.body).stx
+    match name
+    | #false: '($pattern_stx, ...): $body_stx'
+    | id :: Syntax: '$id($pattern_stx, ...): $body_stx'
 
-  // Runtime-only fallback for expression shapes not yet represented in
-  // `CheckedExpr`, plus diagnostics that need surface registries.
-  fun runtime_expr_fallback(inference :: CheckedInference,
-                            state :: SurfaceContext,
-                            env :: Map.of(Symbol, HType),
-                            expr :: CoreExpr,
-                            expected :: maybe(HType)) :: RuntimeExpr:
-    fun ensure(value :: RuntimeExpr) :: RuntimeExpr:
-      match expected
-      | #false:
-          RuntimeExpr(value.stx, checked_resolve(inference, value.ty))
-      | wanted:
-          unless checked_unify(inference, value.ty, wanted :~ HType)
-          | syntax_meta.error(
-              "expression has an unexpected type", runtime_context())
-          RuntimeExpr(
-            value.stx, checked_resolve(inference, wanted :~ HType))
-    fun unknown_reference(name :: Symbol, at :: Syntax) :: RuntimeExpr:
-      match runtime_restricted_names().get(name, #false)
-      | message :: String: syntax_meta.error(message, at)
-      | #false:
-          syntax_meta.error(
-            "unknown constant " ++ to_string(name),
-            source_id(name, at))
-    match expr
-    | CoreNumeral(value, at):
-        // Reached only for a concrete, resolved, but inadmissible
-        // expected type (not an open metavariable, not a missing
-        // expected type at all -- check_expr's own CoreNumeral case
-        // reports both of those directly): `runtime_numeral` performs
-        // the identical admissibility check and raises its own exact
-        // formatted diagnostic, naming the offending type.
-        match expected
-        | #false:
-            syntax_meta.error("a numeral needs an expected numeric type", at)
-        | wanted:
-            runtime_numeral(
-              state, value, checked_resolve(inference, wanted :~ HType), at)
-    | CoreRef(name, at): unknown_reference(name, at)
-    | CoreGlobalRef(name, at): unknown_reference(name, at)
-    | CoreBlockExpr(body, _):
-        ensure(runtime_body_expr(
-                 inference, state, env, body, expected))
-    | CoreMatchExpr(scrutinee, clauses, at):
-        ensure(runtime_match_expr(
-                 inference, state, env, scrutinee, clauses, at, expected))
-    | CoreCall(CoreRef(name, _), args, at) when !env.get(name, #false)
-                                                 && !surface_const_type(state, name)
-                                                 && overload_arity(state.surface.operators, name) != #false:
-        runtime_overload_expr(
-          inference, state, env, name, args, expected, at)
-    | CoreFunctionExpr(params, result_type_stx, body, at):
-        let contextual:
-          match expected
-          | #false: #false
-          | wanted:
-              let (domains, range) = runtime_expected_function_types(
-                                       inference, wanted :~ HType,
-                                       params.length(), at)
-              [domains, range]
-        let parameter_types:
-          for List (binder in params, index in List.iota(params.length())):
-            let binder :~ CoreBinder = binder
-            let declared = surface_optional_type(
-                             binder.type_stx,
-                             state.surface.type_constructors,
-                             "_parameter")
-            match contextual
-            | #false: declared
-            | [domains, _]:
-                let contextual_type = (domains :~ List)[index] :~ HType
-                unless checked_unify(
-                         inference, declared, contextual_type)
-                | syntax_meta.error(
-                    "a function parameter does not match its expected type",
-                    binder.at)
-                checked_resolve(inference, declared)
-        let result_type = surface_optional_type(
-                            result_type_stx,
-                            state.surface.type_constructors,
-                            "_result")
-        match contextual
-        | [_, contextual_result]:
-            unless checked_unify(
-                     inference, result_type, contextual_result :~ HType)
-            | syntax_meta.error(
-                "a function result does not match its expected type", at)
-        | #false: #void
-        let function_type:
-          for values(current :~ HType = result_type) (
-                parameter_type in parameter_types.reverse()):
-            mk_fun(parameter_type :~ HType, current)
-        let rendered_function:
-          match body
-          | matrix :: CorePatternMatrix:
-              let rendered:
-                matrix.rows.map(
-                  fun (row :: CoreMatchRow):
-                    runtime_anonymous_row(
-                      inference, state, env,
-                      parameter_types, result_type, row))
-              let [alternative, ...] = rendered
-              'fun
-               | $alternative
-               | ...'
-          | other_body:
-              let parsed:
-                for List (binder in params,
-                          parameter_type in parameter_types):
-                  let binder :~ CoreBinder = binder
-                  let (rendered, bindings) = runtime_pattern(
-                                                inference, state,
-                                                binder.pattern,
-                                                parameter_type :~ HType)
-                  [rendered, bindings]
-              let (parameters, local_bindings) = runtime_pattern_entries(
-                                                   parsed, at)
-              let local_env = env ++ local_bindings
-              let [parameter, ...] = parameters
-              let result = runtime_body(
-                             inference, state, local_env,
-                             other_body, result_type)
-              '(fun ($parameter, ...): $result)'
-        ensure(
-          RuntimeExpr(rendered_function,
-                      checked_resolve(inference, function_type)))
-    | ~else:
-        syntax_meta.error("expression has no runtime meaning",
-                          runtime_context())
+  // Renders a `CheckedFunction`'s parameters and body as `Syntax`: a
+  // multi-clause `fun` when the body is a `CheckedPatternMatrix`, a single
+  // `fun (params): body` (parenthesized when anonymous, so it stays a valid
+  // subexpression) otherwise.
+  fun checked_function_stx(inference :: CheckedInference,
+                           state :: SurfaceContext,
+                           params :: List.of(CheckedBinder),
+                           body :: CheckedBody,
+                           name :: maybe(Syntax)) :: Syntax:
+    match body
+    | matrix :: CheckedPatternMatrix:
+        let [row_stx, ...] = matrix.rows.map(
+                               fun (row :: CheckedMatchRow):
+                                 checked_function_row(
+                                   inference, state, name, row))
+        'fun
+         | $row_stx
+         | ...'
+    | other:
+        let [param_stx, ...] = params.map(
+                                 fun (binder :: CheckedBinder):
+                                   checked_pattern_to_runtime(binder.pat))
+        let body_stx = checked_body_to_runtime(
+                         inference, state, other).stx
+        match name
+        | #false: '(fun ($param_stx, ...): $body_stx)'
+        | id :: Syntax:
+            'fun $id($param_stx, ...):
+               $body_stx'
 
   // Reads a `CheckedExpr` back into `Syntax` -- purely structural, no
-  // further type propagation, since `check_expr` already made every type
-  // decision. `CheckedOpaque` carries `fallback`'s own already-rendered
-  // result straight through.
-  fun checked_to_runtime(state :: SurfaceContext,
-                         checked :: CheckedExpr) :: RuntimeExpr:
+  // further type propagation, since `check_expr` already made every name,
+  // type, overload, application, pattern, and body decision.
+  fun checked_to_runtime(
+        inference :: CheckedInference,
+        state :: SurfaceContext,
+        checked :: CheckedExpr)
+      :: RuntimeExpr:
     match checked
-    | CheckedOpaque(opaque, ty, _): RuntimeExpr(opaque :~ Syntax, ty)
-    | CheckedLocal(name, ty, at): RuntimeExpr(source_id(name, at), ty)
+    | CheckedLocal(name, ty, at):
+        RuntimeExpr(source_id(name, at), checked_resolve(inference, ty))
     | CheckedConstant(name, ty, at) when name == #'true:
-        RuntimeExpr(Syntax.make(#true, at), ty)
+        RuntimeExpr(
+          Syntax.make(#true, at), checked_resolve(inference, ty))
     | CheckedConstant(name, ty, at) when name == #'false:
-        RuntimeExpr(Syntax.make(#false, at), ty)
+        RuntimeExpr(
+          Syntax.make(#false, at), checked_resolve(inference, ty))
     | CheckedConstant(name, ty, at) when name == c_pair:
         let first = source_id(Symbol.gen("_pair_first"), at)
         let second = source_id(Symbol.gen("_pair_second"), at)
@@ -956,23 +768,29 @@ meta:
           '(fun ($first):
               fun ($second):
                 Pair($first, $second))',
-          ty)
+          checked_resolve(inference, ty))
     | CheckedConstant(name, ty, at):
-        RuntimeExpr(runtime_named_apply(state, name, [], at), ty)
-    | CheckedNumeral(value, ty, at): runtime_numeral(state, value, ty, at)
+        RuntimeExpr(
+          runtime_named_apply(state, name, [], at),
+          checked_resolve(inference, ty))
+    | CheckedNumeral(value, ty, at):
+        let ty = checked_resolve(inference, ty)
+        RuntimeExpr(checked_numeral_stx(value, ty, at), ty)
     | CheckedIf(cond, then_branch, else_branch, ty, at):
-        let cond_r = checked_to_runtime(state, cond)
-        let then_r = checked_to_runtime(state, then_branch)
-        let else_r = checked_to_runtime(state, else_branch)
+        let cond_r = checked_to_runtime(inference, state, cond)
+        let then_r = checked_to_runtime(inference, state, then_branch)
+        let else_r = checked_to_runtime(inference, state, else_branch)
         RuntimeExpr(
           'if $((cond_r.stx))
            | $((then_r.stx))
            | $((else_r.stx))',
-          ty)
+          checked_resolve(inference, ty))
     | CheckedBoolOp(op, args, at):
         let bool_ty = mk_tyapp(#'bool, [])
         let rendered:
-          args.map(fun (a :: CheckedExpr): checked_to_runtime(state, a).stx)
+          args.map(
+            fun (a :: CheckedExpr):
+              checked_to_runtime(inference, state, a).stx)
         let stx:
           match op
           | #'conj:
@@ -989,26 +807,25 @@ meta:
               '! ($(operand :~ Syntax))'
         RuntimeExpr(stx, bool_ty)
     | CheckedEq(left, right, operand_ty, at):
-        when is_fun(operand_ty)
+        when is_fun(checked_resolve(inference, operand_ty))
         | syntax_meta.error(
             "function equality has no sound executable interpretation", at)
-        let left_stx = checked_to_runtime(state, left).stx
-        let right_stx = checked_to_runtime(state, right).stx
+        let left_stx = checked_to_runtime(inference, state, left).stx
+        let right_stx = checked_to_runtime(inference, state, right).stx
         RuntimeExpr(
           '($(left_stx :~ Syntax)) == ($(right_stx :~ Syntax))',
           mk_tyapp(#'bool, []))
     | CheckedApply(head, args, ty, at):
-        // `head` renders via `runtime_named_apply` (curry-adapting,
-        // taking the constant's own name) exactly when `check_expr`'s
-        // own `CoreRef` case would have produced a `CheckedConstant`
-        // for it -- the same "not a local, has a lookup entry" shape
-        // the un-migrated path's own `CoreRef(name,_) when ...` guard
-        // checks, reached here for free by matching the already-
-        // checked node's own shape rather than re-deriving it.
-        // Anything else (a local variable, a more complex expression)
-        // renders `head` itself and applies it directly.
+        // `head` renders via `runtime_named_apply` (curry-adapting, taking
+        // the constant's own name) exactly when it is a `CheckedConstant` --
+        // the same "not a local, has a lookup entry" shape `check_expr`'s
+        // own `CoreRef` case used to decide the same thing. Anything else (a
+        // local variable, a more complex expression) renders `head` itself
+        // and applies it directly.
         let args_stx:
-          args.map(fun (a :: CheckedExpr): checked_to_runtime(state, a).stx)
+          args.map(
+            fun (a :: CheckedExpr):
+              checked_to_runtime(inference, state, a).stx)
         let rendered_call:
           match head
           | CheckedConstant(name, _, _) when name == c_pair:
@@ -1025,302 +842,55 @@ meta:
           | CheckedConstant(name, _, _):
               runtime_named_apply(state, name, args_stx, at)
           | ~else:
-              let head_stx = checked_to_runtime(state, head).stx
+              let head_stx = checked_to_runtime(
+                               inference, state, head).stx
               let [arg, ...] = args_stx
               '$(head_stx :~ Syntax)($arg, ...)'
-        RuntimeExpr(rendered_call, ty)
-    | ~else:
-        error(~who: #'checked_to_runtime, "unknown CheckedExpr variant")
-
-  fun merge_runtime_pattern_bindings(
-        left :: Map.of(Symbol, HType),
-        right :: Map.of(Symbol, HType),
-        at :: Syntax) :: Map.of(Symbol, HType):
-    for values(out :~ Map = left) ((name, ty) in right):
-      when out.get(name, #false)
-      | syntax_meta.error(
-          "a pattern repeats `" ++ to_string(name) ++ "`", at)
-      out ++ {name: ty :~ HType}
-
-  fun runtime_pattern_entries(parsed :: List, at :: Syntax)
-       :: values(List.of(Syntax), Map.of(Symbol, HType)):
-    let rendered:
-      parsed.map(fun (entry :: List): entry[0] :~ Syntax)
-    let bindings:
-      for values(out :~ Map = {}) (entry in parsed):
-        merge_runtime_pattern_bindings(
-          out, (entry :~ List)[1] :~ Map, at)
-    values(rendered, bindings)
-
-  // Rhombus's guarded binding keeps executable literal patterns constant
-  // size: bind the matched Nat, then compare it with the ordinary executable
-  // reading of the literal. This is numeric structural equality, not a
-  // string-specific or host-string comparison.
-  fun runtime_numeral_pattern(
-        state :: SurfaceContext, value :: NonnegInt,
-        expected :: HType, at :: Syntax) :: Syntax:
-    let matched = source_id(Symbol.gen("_hol_literal"), at)
-    let literal = runtime_numeral(state, value, expected, at).stx
-    '($matched when $matched == $literal)'
-
-  fun runtime_pattern(inference :: CheckedInference,
-                      state :: SurfaceContext, pat :: CorePattern,
-                      expected :: HType)
-       :: values(Syntax, Map.of(Symbol, HType)):
-    let expected = checked_resolve(inference, expected)
-    match pat
-    | CorePatWildcard(at): values(source_id(#'_, at), {})
-    | CorePatVar(name, at):
-        values(source_id(name, at), {name: expected})
-    | CorePatTyped(inner, type_stx, at):
-        let annotated = type_parser.parse_open_type(
-                          type_stx, state.surface.type_constructors)
-        unless checked_unify(inference, expected, annotated)
-        | syntax_meta.error(
-            "a pattern annotation does not match the expected type", at)
-        runtime_pattern(
-          inference, state, inner, checked_resolve(inference, annotated))
-    | CorePatLiteral(value_stx, at):
-        let raw = Syntax.unwrap(value_stx)
-        cond
-        | raw is_a NonnegInt:
-            let expected = checked_resolve(inference, expected)
-            when expected is_a TyVar
-            | syntax_meta.error(
-                "a numeral pattern needs a type annotation or an unambiguous context",
-                at)
-            values(runtime_numeral_pattern(
-                     state, raw, expected, at),
-                   {})
-        | ~else:
-            syntax_meta.error("unsupported literal pattern", at)
-    | CorePatCtor(name, args, at) when name == c_pair:
-        unless args.length() == 2
-        | syntax_meta.error(
-            "a Pair pattern needs exactly two fields", at)
-        let expected = checked_resolve(inference, expected)
-        let (first_type, second_type):
-          match expected
-          | TyVar(_,):
-              let first_type = mk_tyvar(Symbol.gen("_pair_first"))
-              let second_type = mk_tyvar(Symbol.gen("_pair_second"))
-              unless checked_unify(
-                       inference, expected,
-                       prod_ty(first_type, second_type))
-              | syntax_meta.error(
-                  "a Pair pattern needs a `Pair.of(...)` value", at)
-              values(first_type, second_type)
-          | ~else: runtime_pair_types(expected, at)
-        let (first_stx, first_bindings) = runtime_pattern(
-          inference, state, args[0] :~ CorePattern, first_type)
-        let (second_stx, second_bindings) = runtime_pattern(
-          inference, state, args[1] :~ CorePattern, second_type)
-        values(
-          'Pair($first_stx, $second_stx)',
-          merge_runtime_pattern_bindings(
-            first_bindings, second_bindings, at))
-    | CorePatCtor(name, args, at) when (name == #'true || name == #'false):
-        unless args.length() == 0
-        | syntax_meta.error(
-            "a Boolean pattern constructor takes no fields", at)
-        unless checked_unify(
-                 inference, expected, mk_tyapp(#'bool, []))
-        | syntax_meta.error(
-            "a Boolean pattern needs a Boolean value", at)
-        values(Syntax.make(name == #'true, runtime_context()), {})
-    | CorePatCtor(name, args, at):
-        let generic:
-          match surface_const_type(state, name)
-          | #false:
-              syntax_meta.error("unknown constructor " ++ to_string(name), at)
-          | ty: runtime_fresh_type(ty :~ HType)
-        let (domains, result) = runtime_peel(generic, args.length())
-        unless checked_unify(inference, result, expected)
-        | syntax_meta.error(
-            "constructor does not build the matched type", at)
-        let parsed:
-          for List (arg in args, domain in domains):
-            let (rendered, bindings) = runtime_pattern(
-              inference, state, arg :~ CorePattern,
-              checked_resolve(inference, domain :~ HType))
-            [rendered, bindings]
-        let (rendered, bindings) = runtime_pattern_entries(parsed, at)
-        let [rendered_stx, ...] = rendered
-        let constructor = source_id(name, at)
-        values('$constructor($rendered_stx, ...)', bindings)
-
-  fun runtime_match_expr(inference :: CheckedInference,
-                         state :: SurfaceContext,
-                         env :: Map.of(Symbol, HType),
-                         scrutinee :: CoreExpr,
-                         matrix :: CorePatternMatrix,
-                         at :: Syntax,
-                         expected :: maybe(HType)) :: RuntimeExpr:
-    when matrix.rows.length() == 0
-    | syntax_meta.error("a match expression needs at least one clause", at)
-    let target = runtime_expr(
-                   inference, state, env, scrutinee, #false)
-    let (rendered, result_type):
-      for values(out :~ List.of(Syntax) = [],
-                 current :~ maybe(HType) = expected) (
-            row in matrix.rows):
-        let row :~ CoreMatchRow = row
-        let [source_pat] = row.patterns
-        let (pattern_stx, bindings) = runtime_pattern(
-          inference, state, source_pat :~ CorePattern, target.ty)
-        let result = runtime_body_expr(
-          inference, state, env ++ bindings, row.body, current)
-        values(out ++ ['$pattern_stx: $((result.stx))'],
-               result.ty)
-    let [clause_stx, ...] = rendered
-    RuntimeExpr(
-      'match ($((target.stx)))
-       | $clause_stx
-       | ...',
-      result_type :~ HType)
-
-  fun runtime_body_expr(inference :: CheckedInference,
-                        state :: SurfaceContext,
-                        env :: Map.of(Symbol, HType),
-                        body :: CoreFunBody,
-                        expected :: maybe(HType)) :: RuntimeExpr:
-    match body
-    | CoreBodyExpr(expr):
-        runtime_expr(inference, state, env, expr, expected)
-    | CoreBodyLet(binding_pat, init, tail, at):
-        let local_name:
-          (if init is_a CoreFunctionExpr
-           | core_pattern_name(binding_pat, "a local function needs a name")
-           | #false)
-        let forward_restricted:
-          for values(out :~ Map = runtime_restricted_names()) (
-                name in following_local_function_names(tail)):
-            out ++ {name: "forward local-function reference is not supported"}
-        let init_restricted:
-          match local_name
-          | #false: forward_restricted
-          | name:
-              forward_restricted
-                ++ {name: "local recursive functions are not supported"}
-        let value = parameterize { runtime_restricted_names: init_restricted }:
-                      runtime_expr(inference, state, env, init, #false)
-        let (pattern_stx, bindings) = runtime_pattern(
-          inference, state, binding_pat, value.ty)
-        let rest = runtime_body_expr(
-          inference, state, env ++ bindings, tail, expected)
+        RuntimeExpr(rendered_call, checked_resolve(inference, ty))
+    | CheckedQuantifier(_, _, _, at):
+        syntax_meta.error("a quantifier has no runtime meaning", at)
+    | CheckedFunction(params, _, body, ty, at):
         RuntimeExpr(
-          'block:
-             let $pattern_stx = $((value.stx))
-             $((rest.stx))',
-          rest.ty)
-    | CoreBodyMatch(scrutinee, matrix, at):
-        runtime_match_expr(
-          inference, state, env,
-          CoreRef(scrutinee, at), matrix, at, expected)
+          checked_function_stx(inference, state, params, body, #false),
+          checked_resolve(inference, ty))
+    | CheckedBlock(body, ty, at):
+        RuntimeExpr(
+          checked_body_to_runtime(inference, state, body).stx,
+          checked_resolve(inference, ty))
+    | CheckedMatch(scrutinee, matrix, ty, at):
+        let scrutinee_r = checked_to_runtime(inference, state, scrutinee)
+        RuntimeExpr(
+          checked_matrix_stx(inference, state, scrutinee_r.stx, matrix),
+          checked_resolve(inference, ty))
     | ~else:
-        error(~who: #'function, "invalid nested function body")
+        error(~who: #'checked_to_runtime, "unknown checked expression")
 
-  fun runtime_body(inference :: CheckedInference,
-                   state :: SurfaceContext,
-                   env :: Map.of(Symbol, HType),
-                   body :: CoreFunBody,
-                   expected :: HType) :: Syntax:
-    runtime_body_expr(inference, state, env, body, expected).stx
-
-  fun runtime_row(inference :: CheckedInference,
-                  state :: SurfaceContext,
-                  base_env :: Map.of(Symbol, HType),
-                  name :: Syntax,
-                  parameter_types :: List.of(HType),
-                  expected :: HType,
-                  row :: CoreMatchRow) :: Syntax:
-    let parsed:
-      for List (pat in row.patterns, ty in parameter_types):
-        let (rendered, bindings) = runtime_pattern(
-          inference, state, pat :~ CorePattern, ty :~ HType)
-        [rendered, bindings]
-    let bindings:
-      for values(out :~ Map = base_env) (entry in parsed):
-        out ++ ((entry :~ List)[1] :~ Map)
-    let result = runtime_body(
-                   inference, state, bindings, row.body, expected)
-    let [pattern_stx, ...] = parsed.map(
-                               fun (entry :: List): entry[0] :~ Syntax)
-    '$name($pattern_stx, ...): $result'
-
-  fun runtime_anonymous_row(
-        inference :: CheckedInference,
-        state :: SurfaceContext,
-        base_env :: Map.of(Symbol, HType),
-        parameter_types :: List.of(HType),
-        expected :: HType,
-        row :: CoreMatchRow) :: Syntax:
-    let parsed:
-      for List (pat in row.patterns, ty in parameter_types):
-        let (rendered, bindings) = runtime_pattern(
-          inference, state, pat :~ CorePattern, ty :~ HType)
-        [rendered, bindings]
-    let (patterns, local_bindings) = runtime_pattern_entries(
-                                       parsed, row.at)
-    let result = runtime_body(
-      inference, state, base_env ++ local_bindings, row.body, expected)
-    let [pattern_stx, ...] = patterns
-    '($pattern_stx, ...): $result'
-
-  // The executable half lowers the same CoreExpr tree as the logical half.
-  // Overload methods are therefore selected at expansion time from declared
-  // argument and expected-result types; generated code contains only direct
-  // named calls.
+  // The executable half lowers the same `CoreExpr` tree as the logical
+  // half, through the same `check_expr`: every name, type, overload,
+  // application, pattern, and body decision is made exactly once here, and
+  // `checked_to_runtime` only renders the result.
+  fun runtime_expr(inference :: CheckedInference,
+                   state :: SurfaceContext, vars :: Map.of(Symbol, HType),
+                   expr :: CoreExpr,
+                   expected :: maybe(HType) = #false) :: RuntimeExpr:
+    let env = runtime_check_env(inference, state, vars)
+    checked_to_runtime(inference, state, check_expr(env, expr, expected))
 
   fun emit_function(spec :: CoreFunctionSpec, state :: SurfaceContext,
                     name :: Syntax) :: RuntimeFunction:
     parameterize { runtime_context: name }:
       let inference = make_checked_inference()
-      let parameter_types = spec.params.map(
-                              fun (binder :: CoreBinder):
-                                surface_optional_type(
-                                  binder.type_stx,
-                                  state.surface.type_constructors,
-                                  "_parameter"))
-      let result_type = surface_optional_type(
-                          spec.result_type,
-                          state.surface.type_constructors,
-                          "_result")
-      let parsed_parameters:
-        for List (binder in spec.params, ty in parameter_types):
-          let binder :~ CoreBinder = binder
-          let (rendered, bindings) = runtime_pattern(
-                                        inference, state, binder.pattern,
-                                        ty :~ HType)
-          [rendered, bindings]
-      let (parameters, parameter_bindings) = runtime_pattern_entries(
-                                                parsed_parameters, name)
-      let function_type:
-        for values(ty :~ HType = result_type) (
-              domain in parameter_types.reverse()):
-          mk_fun(domain :~ HType, ty)
-      let env = {spec.name: function_type} ++ parameter_bindings
-      let rendered_function:
-        match spec.body
-        | matrix :: CorePatternMatrix:
-            let rendered = matrix.rows.map(
-                             fun (row :: CoreMatchRow):
-                               runtime_row(
-                                 inference, state, env, name,
-                                 parameter_types, result_type, row))
-            let [alternative, ...] = rendered
-            'fun
-             | $alternative
-             | ...'
-        | body:
-            let [parameter, ...] = parameters
-            let result = runtime_body(
-                           inference, state, env, body, result_type)
-            'fun $name($parameter, ...):
-               $result'
+      let full_type = declared_function_type(state, spec)
+      let check_env = runtime_check_env(inference, state, {spec.name: full_type})
+      let checked = check_expr(
+                     check_env,
+                     CoreFunctionExpr(spec.params, spec.result_type, spec.body,
+                                      spec.at),
+                     full_type) :~ CheckedFunction
       RuntimeFunction(
-        rendered_function,
-        checked_resolve(inference, function_type))
+        checked_function_stx(
+          inference, state, checked.params, checked.body, name),
+        checked_resolve(inference, checked.ty))
 
   // -- HOL surface parsing ---------------------------------------------------
 

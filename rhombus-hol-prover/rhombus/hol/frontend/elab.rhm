@@ -28,6 +28,7 @@ import:
   rhombus/hol/frontend/surface_core open
   rhombus/hol/logic/bool open
   rhombus/hol/frontend/tyunify open
+  rhombus/hol/frontend/checked_core open
   rhombus/hol/frontend/overload open
   rhombus/hol/frontend/type/registry open
   rhombus/hol/frontend/type/parse open
@@ -282,7 +283,6 @@ export:
   parse_tactic
   ElabEnv
   RefRestriction
-  elaborate_effect
   parse_type_effect
   run_type_elaboration
   infer_core
@@ -292,7 +292,6 @@ export:
 // `self_name` and `self` are the definition being elaborated, so that a
 // recursive call resolves before the constant exists in the theory.  In
 // `#'prop` mode there is no such definition and both are `#false`.
-class RefRestriction(message :: String, block_global :: Boolean)
 
 class ElabEnv(thy :: Theory,
               tyvars :: List.of(Symbol),
@@ -304,7 +303,7 @@ class ElabEnv(thy :: Theory,
               type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry(),
               datatypes :: Map.of(Symbol, DatatypeSpec) = {},
               restricted_refs :: Map.of(Symbol, RefRestriction) = {},
-              inference :: Box = Box({})):
+              inference :: CheckedInference = make_checked_inference()):
   property who :: Symbol:
     cond
     | mode == #'definition: #'definition
@@ -314,87 +313,49 @@ class ElabEnv(thy :: Theory,
   reader_effect
 
 fun current_substitution(env :: ElabEnv) :: Map.of(Symbol, HType):
-  env.inference.value :~ Map
+  env.inference.substitution.value :~ Map
 
-// Unifying two still-open metavariables binds one to the other before
-// either resolves to something concrete, so a single-level `type_subst`
-// can leave a stale intermediate variable in the result.
-// `deep_resolve` (tyunify.rhm) chases each variable to a fixed point; this
-// closes every chain in `theta` at once, safe to hand to the ordinary
-// (single-level) `type_subst`/`inst_type`.
+// Terms constructed before inference closes can still contain generated type
+// variables. Apply the final fixed-point substitution at lowering boundaries.
 fun close_substitution(theta :: Map.of(Symbol, HType))
      :: Map.of(Symbol, HType):
   for values(out :~ Map = {}) ((name, ty) in theta):
     out ++ {name: deep_resolve(theta, ty :~ HType, [])}
 
 fun resolve_type(env :: ElabEnv, ty :: HType) :: HType:
-  deep_resolve(current_substitution(env), ty, [])
+  checked_resolve(env.inference, ty)
 
 fun resolve_term(env :: ElabEnv, term :: Term) :: Term:
   inst_type(close_substitution(current_substitution(env)), term)
 
-fun unify_types(env :: ElabEnv, left :: HType, right :: HType,
-                at :: Syntax, message :: String):
-  match type_unify(resolve_type(env, left), resolve_type(env, right),
-                   current_substitution(env))
-  | #false: syntax_error(env.who, message, at)
-  | substitution:
-      env.inference.value := substitution
+fun logical_check_vars(env :: ElabEnv) :: Map.of(Symbol, HType):
+  let with_self:
+    match env.self_name
+    | name :: Symbol:
+        match env.self
+        | term :: Term: {name: type_of(term)}
+        | #false: {}
+    | #false: {}
+  for values(out :~ Map = with_self) ((name, term) in env.vars):
+    out ++ {name: type_of(term :~ Term) :~ HType}
 
-fun reject_restricted_reference(env :: ElabEnv, name :: Symbol,
-                                at :: Syntax, before_global :: Boolean):
-  match env.restricted_refs.get(name, #false)
-  | restriction :: RefRestriction when restriction.block_global || !before_global:
-      syntax_error(env.who, restriction.message, at)
-  | ~else: #void
+fun logical_check_env(env :: ElabEnv) :: CheckEnv:
+  CheckEnv(
+    env.inference,
+    logical_check_vars(env),
+    fun (name): const_type(env.thy, name),
+    fun (name): const_type(env.thy, name),
+    fun (stx): parse_type(
+                 stx :~ Syntax, env.tyvars, env.type_constructors),
+    env.operators,
+    fun (ty): type_to_surface_string(env.type_constructors, ty :~ HType),
+    fun (message, at): syntax_error(
+                         env.who, message :~ String, at :~ Syntax),
+    env.restricted_refs)
 
-fun blocks_global_reference(env :: ElabEnv, name :: Symbol) :: Boolean:
-  match env.restricted_refs.get(name, #false)
-  | restriction :: RefRestriction: restriction.block_global
-  | ~else: #false
 
 // -- CoreExpr elaboration ----------------------------------------------------
 
-fun core_const_instance(env :: ElabEnv, name :: Symbol,
-                        args :: List.of(Term), at :: Syntax) :: HType:
-  reject_restricted_reference(env, name, at, #true)
-  let generic = (match const_type(env.thy, name)
-                 | #false:
-                     reject_restricted_reference(env, name, at, #false)
-                     syntax_error(env.who, "unknown constant", at)
-                 | t: t)
-  // A constant's type variables are schematic. Freshen them before
-  // unification so a surrounding theorem variable with the same printed name
-  // cannot fail the occurs check (for example, equality on `List.of(?a)`).
-  let renaming:
-    for values(m :~ Map = {}) (v in type_vars(generic)):
-      m ++ {v: mk_tyvar(Symbol.gen(to_string(v))) :~ HType}
-  let gty = type_subst(renaming, generic)
-  let res = mk_tyvar(Symbol.gen("_result"))
-  let want = for values(ty :~ HType = res) (a in args.reverse()):
-               mk_fun(type_of(a), ty)
-  match type_unify(resolve_type(env, gty), resolve_type(env, want),
-                   current_substitution(env))
-  | #false:
-      syntax_error(env.who,
-                   "constant is applied at a type it does not have",
-                   at)
-  | sub:
-      env.inference.value := sub
-      resolve_type(env, gty)
-
-fun core_lookup(env :: ElabEnv, n :: Symbol, at :: Syntax) :: Term:
-  match env.vars.get(n, #false)
-  | #false:
-      reject_restricted_reference(env, n, at, #true)
-      cond
-      | n == env.self_name:
-          resolve_term(env, env.self :~ Term)
-      | ~else: mk_const(n, core_const_instance(env, n, [], at))
-  | v: resolve_term(env, v :~ Term)
-
-fun core_global_lookup(env :: ElabEnv, n :: Symbol, at :: Syntax) :: Term:
-  mk_const(n, core_const_instance(env, n, [], at))
 
 // Specialize phantom type variables in already-elaborated arguments from the
 // function domains selected by unification. This is needed for expressions
@@ -417,146 +378,6 @@ fun specialize_call_args(fty :: HType, args :: List.of(Term)) :: List.of(Term):
         loop(range, more, acc ++ [arg2])
 
 
-fun core_location(expr :: CoreExpr) :: Syntax:
-  match expr
-  | CoreRef(_, at): at
-  | CoreGlobalRef(_, at): at
-  | CoreCall(_, _, at): at
-  | CoreNumeral(_, at): at
-  | CoreIf(_, _, _, at): at
-  | CoreForall(_, _, at): at
-  | CoreExists(_, _, at): at
-  | CoreFunctionExpr(_, _, _, at): at
-  | CoreBlockExpr(_, at): at
-  | CoreMatchExpr(_, _, at): at
-  | CoreTypedExpr(_, _, at): at
-  | ~else: error(~who: #'elaborate, "unknown CoreExpr variant")
-
-fun core_apply_effect(func :: CoreExpr, args :: List.of(CoreExpr),
-                      at :: Syntax,
-                      ~expected: expected :: maybe(HType) = #false)
-     :: Computation:
-  // Discover the full application shape before elaborating operands. This
-  // lets an expected result type refine polymorphic domains first; operands
-  // such as numerals can then receive the concrete type they require.
-  fun application_types(env :: ElabEnv, head :: Term)
-      :: values(List.of(HType), HType):
-    for values(domains :~ List.of(HType) = [],
-               current :~ HType = type_of(head)) (_arg in args):
-      let current = resolve_type(env, current)
-      when current is_a TyVar
-      | let domain = mk_tyvar(Symbol.gen("_domain"))
-        let range = mk_tyvar(Symbol.gen("_range"))
-        unify_types(
-          env, current, mk_fun(domain, range), at,
-          "the applied expression is not a function")
-      let current = resolve_type(env, current)
-      unless is_fun(current)
-      | syntax_error(
-          env.who, "the applied expression is not a function", at)
-      let (domain, range) = dest_fun(current)
-      values(domains ++ [domain], range)
-  fun replace(xs :: List, index :: Int, value) :: List:
-    for List (x in xs, k in List.iota(xs.length())):
-      (if k == index | value | x)
-  fun apply_arguments(head :: Term) :: Computation:
-    effect:
-      let env :: ElabEnv <- ElabEnv.ask()
-      let (domains, result_type) = application_types(env, head)
-      match expected
-      | #false: #void
-      | wanted:
-          unify_types(
-            env, result_type, wanted :~ HType, at,
-            "expression has an unexpected type")
-      fun fit(arg :: CoreExpr, domain :: HType,
-              operand :: Term) :: Void:
-        unify_types(
-          env, domain, type_of(operand), core_location(arg),
-          "operand type does not match function domain")
-      recur scan (remaining :~ List = args,
-                  index = 0,
-                  operands :~ List = [],
-                  deferred :~ List = []):
-        match remaining
-        | []:
-            recur fill (pending :~ List = deferred,
-                        out :~ List = operands):
-              match pending
-              | []:
-                  return for values(term :~ Term = resolve_term(env, head)) (
-                               operand in out):
-                    mk_comb(
-                      resolve_term(env, term),
-                      resolve_term(env, operand :~ Term))
-              | List.cons(i, more):
-                  let arg = args[i] :~ CoreExpr
-                  let domain = resolve_type(env, domains[i] :~ HType)
-                  effect:
-                    let operand :: Term <- check_core(arg, domain)
-                    fit(arg, domain, operand)
-                    fill(more, replace(out, i :~ Int, operand))
-        | List.cons(arg, more):
-            let domain = resolve_type(env, domains[index] :~ HType)
-            cond
-            | requires_expected_type(arg :~ CoreExpr, env.operators)
-                && domain is_a TyVar:
-                scan(more, index + 1, operands ++ [#false],
-                     deferred ++ [index])
-            | ~else:
-                effect:
-                  let operand :: Term <- check_core(arg :~ CoreExpr, domain)
-                  fit(arg :~ CoreExpr, domain, operand)
-                  scan(more, index + 1, operands ++ [operand], deferred)
-  effect:
-    let env :: ElabEnv <- ElabEnv.ask()
-    match func
-    | CoreRef(name, _) when !env.vars.get(name, #false)
-                              && name != env.self_name
-                              && !blocks_global_reference(env, name)
-                              && !const_type(env.thy, name)
-                              && overload_arity(env.operators, name) != #false:
-        elaborate_overload_effect(name, args, at, ~expected: expected)
-    | ~else:
-        effect:
-          let head :: Term <- infer_core(func)
-          apply_arguments(head)
-fun elaborate_non_numerals_effect(args :: List.of(CoreExpr)) :: Computation:
-  effect:
-    let env :: ElabEnv <- ElabEnv.ask()
-    recur loop (remaining :~ List = args, terms :~ List = []):
-      match remaining
-      | []: return terms
-      | List.cons(first, rest):
-          cond
-          | requires_expected_type(first :~ CoreExpr, env.operators):
-              loop(rest, terms ++ [#false])
-          | ~else:
-              effect:
-                let term :: Term <- elaborate_effect(first :~ CoreExpr)
-                loop(rest, terms ++ [term])
-
-fun overload_signature(method :: OverloadMethod,
-                       registry :: TypeConstructorRegistry) :: String:
-  String.join(
-    method.argument_types.map(
-      fun (type): type_to_surface_string(registry, type)),
-    " * ")
-    ++ " -> " ++ type_to_surface_string(registry, method.result_type)
-    ++ " via " ++ to_string(method.constant)
-
-fun specialize_overload_term(term :: Term, expected :: HType) :: Term:
-  cond
-  | type_of(term) == expected: term
-  | ~else:
-      match type_match(type_of(term), expected, {})
-      | #false: term
-      | theta: inst_type(theta :~ Map, term)
-
-fun numeral_apply(env :: ElabEnv, name :: Symbol,
-                  args :: List.of(Term), at :: Syntax) :: Term:
-  let cty = core_const_instance(env, name, args, at)
-  list_mk_comb(mk_const(name, cty), specialize_call_args(cty, args))
 
 // The kernel stores a checked natural literal compactly. Its conversion API
 // exposes `zero`/`succ` only when a proof needs one step, so elaboration never
@@ -566,15 +387,20 @@ fun nat_numeral(env :: ElabEnv, value :: NonnegInt, _at :: Syntax) :: Term:
 
 fun elaborate_numeral(env :: ElabEnv, value :: NonnegInt,
                       expected :: HType, at :: Syntax) :: Term:
+  let nat_ty = mk_tyapp(#'Nat, [])
+  let int_ty = mk_tyapp(#'Integer, [])
+  let rational_ty = mk_tyapp(#'Rational, [])
+  let natural = nat_numeral(env, value, at)
+  fun integer() :: Term:
+    mk_comb(mk_const(#'int_from_nat, mk_fun(nat_ty, int_ty)), natural)
   cond
-  | expected == mk_tyapp(#'Nat, []): nat_numeral(env, value, at)
-  | expected == mk_tyapp(#'Integer, []):
-      numeral_apply(env, #'int_from_nat, [nat_numeral(env, value, at)], at)
-  | expected == mk_tyapp(#'Rational, []):
-      let integer = numeral_apply(
-                      env, #'int_from_nat,
-                      [nat_numeral(env, value, at)], at)
-      numeral_apply(env, #'rational_from_integer, [integer], at)
+  | expected == nat_ty: natural
+  | expected == int_ty: integer()
+  | expected == rational_ty:
+      mk_comb(
+        mk_const(
+          #'rational_from_integer, mk_fun(int_ty, rational_ty)),
+        integer())
   | ~else:
       syntax_error(
         env.who,
@@ -582,110 +408,8 @@ fun elaborate_numeral(env :: ElabEnv, value :: NonnegInt,
           ++ type_to_surface_string(env.type_constructors, expected),
         at)
 
-fun elaborate_overload_effect(function_name :: Symbol,
-                              args :: List.of(CoreExpr),
-                              at :: Syntax,
-                              ~expected: expected_result :: maybe(HType) = #false)
-     :: Computation:
-  effect:
-    let env :: ElabEnv <- ElabEnv.ask()
-    let arity = overload_arity(env.operators, function_name)
-    unless arity
-    | syntax_error(env.who,
-                   "unknown overload function " ++ to_string(function_name),
-                   at)
-    let arity :~ NonnegInt = arity
-    unless args.length() == arity
-    | syntax_error(env.who,
-                   "`" ++ to_string(function_name) ++ "` expects "
-                     ++ to_string(arity) ++ " arguments",
-                   at)
-    let known :: List <- elaborate_non_numerals_effect(args)
-    let argument_types:
-      known.map(
-        fun (term):
-          match term
-          | #false: #false
-          | value: resolve_type(env, type_of(value :~ Term)))
-    let resolved_expected:
-      match expected_result
-      | #false: #false
-      | wanted: resolve_type(env, wanted :~ HType)
-    let matches = resolve_overload(
-                    env.operators, function_name,
-                    argument_types, resolved_expected)
-    when matches.length() == 0
-    | let signatures = overload_candidates(env.operators, function_name).map(
-                         fun (method :: OverloadMethod):
-                           overload_signature(method, env.type_constructors))
-      syntax_error(
-        env.who,
-        "`" ++ to_string(function_name) ++ "` has no applicable overload"
-          ++ (if signatures.length() == 0
-              | ""
-              | "\navailable methods:\n  "
-                  ++ String.join(signatures, "\n  ")),
-        at)
-    when matches.length() > 1
-    | let signatures = matches.map(
-                         fun (resolution :: OverloadResolution):
-                           overload_signature(
-                             resolution.method, env.type_constructors))
-      syntax_error(env.who,
-                   "`" ++ to_string(function_name) ++ "` has ambiguous overload"
-                     ++ "\ncandidates:\n  "
-                     ++ String.join(signatures, "\n  "),
-                   at)
-    let resolution :~ OverloadResolution = matches[0]
-    // A placeholder argument -- one whose type only the selected method can
-    // supply -- is `#false` here, and `#false` matches a bare pattern
-    // variable, so the `#false` case has to come first or it is dead code
-    // and `type_of` is handed a non-term.
-    for (term in known, expected_type in resolution.argument_types):
-      match term
-      | #false: #void
-      | value:
-          unify_types(
-            env, type_of(value :~ Term), expected_type :~ HType, at,
-            "overload operand type does not match the selected method")
-    match expected_result
-    | #false: #void
-    | wanted:
-        unify_types(
-          env, resolution.result_type, wanted :~ HType, at,
-          "overload result type does not match the expected type")
-    let method = resolution.method
-    fun finish(index :: NonnegInt,
-               out :: List.of(Term)) :: Computation:
-      cond
-      | index == args.length(): return out
-      | ~else:
-          match known[index]
-          | #false:
-              effect:
-                let term :: Term <- check_core(
-                                     args[index] :~ CoreExpr,
-                                     resolution.argument_types[index])
-                finish(index + 1, out ++ [term])
-          | term:
-              finish(
-                index + 1,
-                out ++ [specialize_overload_term(
-                          term :~ Term,
-                          resolution.argument_types[index])])
-    let terms :: List.of(Term) <- finish(0, [])
-    let ordered = method.argument_order.map(
-                    fun (index): terms[index] :~ Term)
-    return resolve_term(
-             env, numeral_apply(env, method.constant, ordered, at))
 
 
-fun pattern_root_name(pat :: CorePattern, hint :: String) :: Symbol:
-  match pat
-  | CorePatVar(name, _): name
-  | CorePatTyped(inner, _, _):
-      pattern_root_name(inner, hint)
-  | ~else: Symbol.gen(hint)
 
 fun merge_pattern_bindings(who :: Symbol,
                            left :: Map.of(Symbol, Term),
@@ -718,226 +442,155 @@ fun single_constructor(env :: ElabEnv, name :: Symbol, at :: Syntax) :: List:
           ++ "` is not the sole constructor of its datatype",
         at)
 
-fun bind_irrefutable_pattern(env :: ElabEnv, pat :: CorePattern,
-                             value :: Term) :: Map.of(Symbol, Term):
+fun checked_pattern_root_name(pat :: CheckedPattern,
+                              hint :: String) :: Symbol:
   match pat
-  | CorePatWildcard(_): {}
-  | CorePatVar(name, _): {name: value}
-  | CorePatTyped(inner, type_stx, at):
-      let annotated = parse_type(
-                        type_stx, env.tyvars, env.type_constructors)
-      unify_types(
-        env, type_of(value), annotated, at,
-        "a binding pattern annotation does not match its value")
-      bind_irrefutable_pattern(env, inner, resolve_term(env, value))
-  | CorePatCtor(name, args, at) when name == c_pair:
-      unless args.length() == 2
-      | syntax_error(
-          env.who, "a Pair pattern needs exactly two fields", at)
-      let first = args[0] :~ CorePattern
-      let second = args[1] :~ CorePattern
-      let current = resolve_type(env, type_of(value))
-      when current is_a TyVar
-      | let first_type = mk_tyvar(Symbol.gen("_pair_first"))
-        let second_type = mk_tyvar(Symbol.gen("_pair_second"))
-        unify_types(
-          env, current, prod_ty(first_type, second_type), at,
-          "a Pair binding pattern needs a `Pair.of(...)` value")
+  | CheckedPatVar(name, _, _): name
+  | ~else: Symbol.gen(hint)
+
+fun bind_checked_irrefutable_pattern(
+      env :: ElabEnv,
+      pat :: CheckedPattern,
+      value :: Term)
+    :: Map.of(Symbol, Term):
+  match pat
+  | CheckedPatWildcard(_, _): {}
+  | CheckedPatVar(name, _, _): {name: value}
+  | CheckedPatCtor(name, args, _, _, at) when name == c_pair:
       let resolved = resolve_term(env, value)
-      let first_bindings = bind_irrefutable_pattern(
-                             env, first, mk_fst(resolved))
-      let second_bindings = bind_irrefutable_pattern(
-                              env, second, mk_snd(resolved))
-      merge_pattern_bindings(env.who, first_bindings, second_bindings, at)
-  | CorePatCtor(name, args, at):
+      let first_bindings = bind_checked_irrefutable_pattern(
+                             env, args[0] :~ CheckedPattern,
+                             mk_fst(resolved))
+      let second_bindings = bind_checked_irrefutable_pattern(
+                              env, args[1] :~ CheckedPattern,
+                              mk_snd(resolved))
+      merge_pattern_bindings(
+        env.who, first_bindings, second_bindings, at)
+  | CheckedPatCtor(name, args, _, _, at):
       let [_spec, ctor] = single_constructor(env, name, at)
       let ctor :~ Ctor = ctor
-      unless args.length() == ctor.fields.length()
-      | syntax_error(
-          env.who, "constructor pattern has the wrong number of fields", at)
-      let constructor_type = core_const_instance(env, name, [], at)
-      let (field_types, result_type) = peel_fun(
-                                         constructor_type, args.length())
-      unify_types(
-        env, type_of(value), result_type, at,
-        "constructor pattern does not match the bound value type")
       let resolved_value = resolve_term(env, value)
       let parsed:
-        for List (arg in args, field in ctor.fields,
-                  field_type in field_types):
+        for List (arg in args, field in ctor.fields):
+          let arg :~ CheckedPattern = arg
           let selector_type = mk_fun(
                                 type_of(resolved_value),
-                                resolve_type(env, field_type :~ HType))
+                                resolve_type(env, checked_pattern_ty(arg)))
           let selected = mk_comb(
                            mk_const(
                              selector_name(ctor, field :~ Field),
                              selector_type),
                            resolved_value)
-          bind_irrefutable_pattern(env, arg :~ CorePattern, selected)
+          bind_checked_irrefutable_pattern(env, arg, selected)
       for values(out :~ Map = {}) (bindings in parsed):
-        merge_pattern_bindings(
-          env.who, out, bindings :~ Map, at)
-  | CorePatLiteral(_, at):
+        merge_pattern_bindings(env.who, out, bindings :~ Map, at)
+  | CheckedPatLiteral(_, _, at):
       syntax_error(
         env.who, "a literal pattern is refutable and cannot bind here", at)
 
-fun elaborate_binders_effect(binders :: List.of(CoreBinder), body :: CoreExpr,
-                             is_forall :: Boolean) :: Computation:
-  effect:
-    let env :: ElabEnv <- ElabEnv.ask()
-    let variables:
-      for List (binder in binders):
-        let binder :~ CoreBinder = binder
-        mk_var(
-          pattern_root_name(binder.pattern, "_bound"),
-          optional_declared_type(
-            binder.type_stx, env.tyvars, env.type_constructors, "_bound"))
-    let local_bindings:
-      for values(out :~ Map = {}) (binder in binders,
-                                   variable in variables):
-        let binder :~ CoreBinder = binder
-        merge_pattern_bindings(
-          env.who, out,
-          bind_irrefutable_pattern(
-            env, binder.pattern, variable :~ Term),
-          binder.at)
-    let inner :: Term <- ElabEnv.local(
-                         fun (_):
-                           sub_env(env, env.vars ++ local_bindings),
-                         check_core(body, bool))
-    let resolved_inner = resolve_term(env, inner)
-    let resolved_variables:
-      variables.map(
-        fun (variable :: FVar):
-          resolve_term(env, variable) :~ FVar)
-    let build = (if is_forall | mk_forall | mk_exists)
-    return for values(term :~ Term = resolved_inner) (variable in resolved_variables.reverse()):
-             build(variable :~ FVar, term)
 
-fun elaborate_if_effect(condition_expr :: CoreExpr, then_expr :: CoreExpr,
-                        else_expr :: CoreExpr, at :: Syntax) :: Computation:
-  effect:
-    let condition :: Term <- elaborate_effect(condition_expr)
-    let env :: ElabEnv <- ElabEnv.ask()
-    unless type_of(condition) == bool
-    | syntax_error(env.who, "the condition of an `if` must be a Boolean", at)
-    let then_term :: Term <- elaborate_effect(then_expr)
-    let else_term :: Term <- elaborate_effect(else_expr)
-    unless type_of(then_term) == type_of(else_term)
-    | syntax_error(env.who,
-                   "the two branches of an `if` have different types",
-                   at)
-    return mk_cond(condition, then_term, else_term)
+fun checked_local_term(env :: ElabEnv, name :: Symbol,
+                       at :: Syntax) :: Term:
+  match env.vars.get(name, #false)
+  | term :: Term: resolve_term(env, term)
+  | #false:
+      match env.self_name
+      | self_name :: Symbol when self_name == name:
+          match env.self
+          | term :: Term: resolve_term(env, term)
+          | #false:
+              error(~who: #'checked_local_term,
+                    "checked recursive reference has no logical term")
+      | ~else:
+          error(~who: #'checked_local_term,
+                "checked local reference is absent from the logical environment")
 
-fun elaborate_effect(expr :: CoreExpr) :: Computation:
+fun checked_quantifier_term(env :: ElabEnv,
+                            binders :: List.of(CheckedBinder),
+                            body :: CheckedExpr,
+                            is_forall :: Boolean) :: Term:
+  let variables:
+    for List (binder in binders):
+      let binder :~ CheckedBinder = binder
+      mk_var(checked_pattern_root_name(binder.pat, "_bound"),
+             resolve_type(env, binder.ty))
+  let local_bindings:
+    for values(out :~ Map = {}) (binder in binders,
+                                 variable in variables):
+      let binder :~ CheckedBinder = binder
+      merge_pattern_bindings(
+        env.who, out,
+        bind_checked_irrefutable_pattern(
+          env, binder.pat, variable :~ Term),
+        binder.at)
+  let inner = checked_to_term(
+                sub_env(env, env.vars ++ local_bindings), body)
+  let build = (if is_forall | mk_forall | mk_exists)
+  for values(term :~ Term = resolve_term(env, inner)) (
+        variable in variables.reverse()):
+    build(resolve_term(env, variable :~ FVar) :~ FVar, term)
+
+fun checked_to_term(env :: ElabEnv, expr :: CheckedExpr) :: Term:
   match expr
-  | CoreRef(name, at):
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        return core_lookup(env, name, at)
-  | CoreGlobalRef(name, at):
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        return core_global_lookup(env, name, at)
-  | CoreCall(func, args, at): core_apply_effect(func, args, at)
-  | CoreNumeral(_, at):
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        syntax_error(env.who,
-                     "a numeral needs an expected numeric type from an operator",
-                     at)
-  | CoreIf(condition_expr, then_expr, else_expr, at):
-      elaborate_if_effect(condition_expr, then_expr, else_expr, at)
-  | CoreForall(binders, body, _):
-      elaborate_binders_effect(binders, body, #true)
-  | CoreExists(binders, body, _):
-      elaborate_binders_effect(binders, body, #false)
-  | CoreFunctionExpr(params, result_type, body, at):
-      elaborate_function_expr_effect(params, result_type, body, at)
-  | CoreTypedExpr(inner, type_stx, _):
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        let annotated = parse_type(
-                          type_stx, env.tyvars,
-                          env.type_constructors)
-        check_core(inner, annotated)
-  | CoreBlockExpr(body, _):
-      elaborate_body_effect(body, #false)
-  | CoreMatchExpr(scrutinee, clauses, at):
-      elaborate_match_expr_effect(
-        scrutinee, clauses, at, #false)
-  | ~else: error(~who: #'elaborate_effect, "unknown CoreExpr variant")
+  | CheckedLocal(name, _, at): checked_local_term(env, name, at)
+  | CheckedConstant(name, ty, _):
+      mk_const(name, resolve_type(env, ty))
+  | CheckedNumeral(value, ty, at):
+      elaborate_numeral(env, value, resolve_type(env, ty), at)
+  | CheckedIf(condition, then_branch, else_branch, _, _):
+      mk_cond(checked_to_term(env, condition),
+              checked_to_term(env, then_branch),
+              checked_to_term(env, else_branch))
+  | CheckedBoolOp(op, args, _):
+      let terms = args.map(
+                    fun (arg :: CheckedExpr):
+                      checked_to_term(env, arg))
+      cond
+      | op == #'conj:
+          mk_conj(terms[0] :~ Term, terms[1] :~ Term)
+      | op == #'disj:
+          mk_disj(terms[0] :~ Term, terms[1] :~ Term)
+      | op == #'imp:
+          mk_imp(terms[0] :~ Term, terms[1] :~ Term)
+      | op == #'neg:
+          mk_neg(terms[0] :~ Term)
+      | ~else:
+          error(~who: #'checked_to_term, "unknown checked Boolean operator")
+  | CheckedEq(left, right, _, _):
+      mk_eq(checked_to_term(env, left), checked_to_term(env, right))
+  | CheckedApply(head, args, _, _):
+      let head_term = checked_to_term(env, head)
+      let arg_terms = args.map(
+                        fun (arg :: CheckedExpr):
+                          checked_to_term(env, arg))
+      list_mk_comb(
+        head_term, specialize_call_args(type_of(head_term), arg_terms))
+  | CheckedQuantifier(binders, body, is_forall, _):
+      checked_quantifier_term(env, binders, body, is_forall)
+  | fn :: CheckedFunction:
+      checked_function_term(env, fn)
+  | CheckedBlock(body, _, _):
+      checked_body_term(env, body)
+  | CheckedMatch(scrutinee, matrix, _, at):
+      checked_match_term(env, scrutinee, matrix, at)
+  | ~else:
+      error(~who: #'checked_to_term, "unknown CheckedExpr variant")
 
-// Domain operations expose inference and checking without leaking Reader,
-// State, or Fail into callers. `type_unify` installs its State/Fail handlers
-// locally while Reader remains ambient to this expression computation.
+
+
+// The shared checker owns every source-level type decision. Logical
+// elaboration only lowers its semantic result into kernel terms.
 fun infer_core(expr :: CoreExpr) :: Computation:
-  elaborate_effect(expr)
-
-fun requires_expected_type(
-      expr :: CoreExpr,
-      operators :: maybe(OverloadRegistry) = #false) :: Boolean:
-  fun any_arg(args :: List.of(CoreExpr)) :: Boolean:
-    for values(found = #false) (arg in args):
-      found || requires_expected_type(arg :~ CoreExpr, operators)
-  match expr
-  | CoreNumeral(_, _): #true
-  | CoreTypedExpr(_, _, _): #false
-  | CoreGlobalRef(_, _): #false
-  | CoreCall(CoreRef(name, _), args, _):
-      any_arg(args)
-        || (args.length() == 0
-              && operators
-              && overload_arity(
-                   operators :~ OverloadRegistry, name) != #false)
-  | CoreCall(_, args, _): any_arg(args)
-  | CoreIf(_, then_expr, else_expr, _):
-      requires_expected_type(then_expr, operators)
-        || requires_expected_type(else_expr, operators)
-  | ~else: #false
+  effect:
+    let env :: ElabEnv <- ElabEnv.ask()
+    let checked = check_expr(logical_check_env(env), expr, #false)
+    return resolve_term(env, checked_to_term(env, checked))
 
 fun check_core(expr :: CoreExpr, expected :: HType) :: Computation:
-  fun finish(term :: Term) :: Computation:
-    effect:
-      let env :: ElabEnv <- ElabEnv.ask()
-      unify_types(
-        env, type_of(term), expected, core_location(expr),
-        "expression has an unexpected type")
-      return resolve_term(env, term)
-  match expr
-  | CoreFunctionExpr(params, result_type, body, at):
-      elaborate_function_expr_effect(
-        params, result_type, body, at, ~expected: expected)
-  | CoreNumeral(value, at):
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        let wanted = resolve_type(env, expected)
-        when wanted is_a TyVar
-        | syntax_error(
-            env.who,
-            "a numeral needs a type ascription or an unambiguous numeric context",
-            at)
-        return elaborate_numeral(env, value, wanted, at)
-  | CoreBlockExpr(body, _):
-      elaborate_body_effect(body, expected)
-  | CoreMatchExpr(scrutinee, clauses, at):
-      elaborate_match_expr_effect(
-        scrutinee, clauses, at, expected)
-  | CoreCall(func, args, at):
-      core_apply_effect(func, args, at, ~expected: expected)
-  | CoreIf(condition_expr, then_expr, else_expr, at):
-      effect:
-        let condition :: Term <- check_core(condition_expr, bool)
-        let then_term :: Term <- check_core(then_expr, expected)
-        let else_term :: Term <- check_core(else_expr, expected)
-        let env :: ElabEnv <- ElabEnv.ask()
-        return mk_cond(resolve_term(env, condition),
-                       resolve_term(env, then_term),
-                       resolve_term(env, else_term))
-  | ~else:
-      effect:
-        let term :: Term <- infer_core(expr)
-        finish(term)
+  effect:
+    let env :: ElabEnv <- ElabEnv.ask()
+    let checked = check_expr(logical_check_env(env), expr, expected)
+    return resolve_term(env, checked_to_term(env, checked))
 
 fun run_elaboration(env :: ElabEnv, expr :: CoreExpr) :: Term:
   match ElabEnv.handle(env, infer_core(expr))
@@ -1084,66 +737,34 @@ fun spec_type_vars(spec :: CoreFunctionSpec) :: List.of(Symbol):
         append_unique(pattern_types, optional_vars(binder.type_stx)))
   append_unique(from_params, optional_vars(spec.result_type))
 
-fun core_ctor_pattern(env :: ElabEnv, cname :: Symbol,
-                      args :: List.of(CorePattern), scrut_ty :: HType,
-                      at :: Syntax)
-    :: values(Term, Map.of(Symbol, Term)):
-  let gty = core_const_instance(env, cname, [], at)
-  let (doms, res) = peel_fun(gty, args.length())
-  unify_types(
-    env, res, scrut_ty, at,
-    "constructor does not build the matched type")
-  let field_tys = doms.map(
-                     fun (domain :: HType):
-                       resolve_type(env, domain))
-  let parsed = for List (arg in args, ty in field_tys):
-                 core_sub_pattern(env, arg, ty :~ HType)
-  let subpats = parsed.map(fun (pair :: List): pair[0] :~ Term)
-  let bindings:
-    for values(out :~ Map = {}) (pair in parsed):
-      merge_pattern_bindings(
-        env.who, out, (pair :~ List)[1] :~ Map, at)
-  values(
-    list_mk_comb(
-      mk_const(cname, resolve_type(env, gty)), subpats),
-    bindings)
-
-
-fun core_sub_pattern(env :: ElabEnv, pat :: CorePattern,
-                     ty :: HType) :: List:
+fun checked_sub_pattern(env :: ElabEnv,
+                        pat :: CheckedPattern) :: List:
   match pat
-  | CorePatWildcard(_):
+  | CheckedPatWildcard(ty, _):
       [fresh_wildcard(resolve_type(env, ty)) :~ Term, {}]
-  | CorePatVar(name, _):
+  | CheckedPatVar(name, ty, _):
       let variable = mk_var(name, resolve_type(env, ty))
       [variable :~ Term, {name: variable :~ Term}]
-  | CorePatTyped(inner, type_stx, at):
-      let annotated = parse_type(
-                        type_stx, env.tyvars, env.type_constructors)
-      unify_types(
-        env, ty, annotated, at,
-        "a pattern annotation does not match the expected type")
-      core_sub_pattern(env, inner, resolve_type(env, annotated))
-  // Products are not declared datatypes, so the decision tree cannot split
-  // their fields. The surface decoder admits only irrefutable components.
-  | CorePatCtor(name, _, _) when name == c_pair:
+  // Products are not declared datatypes, so retain their irrefutable binding
+  // interpretation while using the checked component types.
+  | CheckedPatCtor(name, _, _, ty, _) when name == c_pair:
       let root = fresh_wildcard(resolve_type(env, ty))
-      [root :~ Term, bind_irrefutable_pattern(env, pat, root)]
-  | CorePatCtor(name, args, at):
-      let (term, bindings) = core_ctor_pattern(
-                                   env, name, args, ty, at)
-      [term, bindings]
-  | CorePatLiteral(value_stx, at):
-      let raw = Syntax.unwrap(value_stx)
-      let literal_expr:
-        cond
-        | raw is_a NonnegInt:
-            CoreNumeral(raw, at)
-        | ~else:
-            syntax_error(env.who, "unsupported literal pattern", at)
-      let literal = run_checked_elaboration(
-                      env, literal_expr, resolve_type(env, ty))
-      [literal, {}]
+      [root :~ Term, bind_checked_irrefutable_pattern(env, pat, root)]
+  | CheckedPatCtor(name, args, constructor_ty, _, at):
+      let parsed:
+        args.map(
+          fun (arg :: CheckedPattern): checked_sub_pattern(env, arg))
+      let subpats = parsed.map(fun (pair :: List): pair[0] :~ Term)
+      let bindings:
+        for values(out :~ Map = {}) (pair in parsed):
+          merge_pattern_bindings(
+            env.who, out, (pair :~ List)[1] :~ Map, at)
+      [list_mk_comb(
+         mk_const(name, resolve_type(env, constructor_ty)), subpats),
+       bindings]
+  | CheckedPatLiteral(value, ty, at):
+      [elaborate_numeral(env, value, resolve_type(env, ty), at), {}]
+
 
 class ClauseEnv(thy :: Theory,
                 self_name :: maybe(Symbol),
@@ -1157,7 +778,7 @@ class ClauseEnv(thy :: Theory,
                 tyvars :: List.of(Symbol),
                 datatypes :: Map.of(Symbol, DatatypeSpec),
                 restricted_refs :: Map.of(Symbol, RefRestriction),
-                inference :: Box):
+                inference :: CheckedInference):
   reader_effect
 fun clause_elab_env(env :: ClauseEnv) :: ElabEnv:
   ElabEnv(env.thy, env.tyvars, env.vars, #'function,
@@ -1166,63 +787,27 @@ fun clause_elab_env(env :: ClauseEnv) :: ElabEnv:
           env.restricted_refs, env.inference)
 
 
-fun following_local_function_names(body :: CoreFunBody) :: List.of(Symbol):
-  match body
-  | CoreBodyLet(binding_pat, init, tail, _):
-      let following = following_local_function_names(tail)
-      (if init is_a CoreFunctionExpr
-       | [required_pattern_name(
-            binding_pat, #'function,
-            "a local function needs a name")] ++ following
-       | following)
-  | ~else: []
 
-fun add_reference_restrictions(
-      base :: Map.of(Symbol, RefRestriction),
-      names :: List.of(Symbol), message :: String,
-      block_global :: Boolean)
-     :: Map.of(Symbol, RefRestriction):
-  for values(out :~ Map = base) (name in names):
-    out ++ {name: RefRestriction(message, block_global)}
-
-fun core_parse_body(body :: CoreFunBody) :: Computation:
+fun checked_parse_body(body :: CheckedBody) :: Computation:
   effect:
     let env :: ClauseEnv <- ClauseEnv.ask()
     match body
-    | matrix :: CorePatternMatrix:
-        core_clause_rows(matrix)
-    | CoreBodyMatch(scrutinee, matrix, body_at):
-        let v = matched_var(env.vars, env.pats, scrutinee, body_at)
-        core_parse_clauses(v, matrix)
-    | CoreBodyLet(binding_pat, init, tail, body_at):
+    | matrix :: CheckedPatternMatrix:
+        checked_clause_rows(matrix)
+    | CheckedBodyMatch(target, matrix, _, body_at):
+        let name:
+          match target :~ CheckedExpr
+          | CheckedLocal(local_name, _, _): local_name
+          | ~else:
+              error(~who: #'checked_parse_body,
+                    "checked clause refinement target is not local")
+        let v = matched_var(env.vars, env.pats, name, body_at)
+        checked_parse_clauses(v, matrix)
+    | CheckedBodyLet(binding_pat, init, tail, _, body_at):
         effect:
-          let local_name:
-            (if init is_a CoreFunctionExpr
-             | required_pattern_name(
-                 binding_pat, #'function,
-                 "a local function needs a name")
-             | #false)
-          let forward_restricted = add_reference_restrictions(
-                                     env.restricted_refs,
-                                     following_local_function_names(tail),
-                                     "forward local-function reference is not supported",
-                                     #false)
-          let init_restricted:
-            match local_name
-            | #false: forward_restricted
-            | name:
-                forward_restricted
-                  ++ {name:
-                        RefRestriction(
-                          "local recursive functions are not supported",
-                          #false)}
-          let elab_env = ElabEnv(
-                           env.thy, env.tyvars, env.vars, #'function,
-                           env.self_name, env.self, env.operators,
-                           env.type_constructors, env.datatypes,
-                           init_restricted, env.inference)
-          let value = run_elaboration(elab_env, init)
-          let bindings = bind_irrefutable_pattern(
+          let elab_env = clause_elab_env(env)
+          let value = checked_to_term(elab_env, init :~ CheckedExpr)
+          let bindings = bind_checked_irrefutable_pattern(
                            elab_env, binding_pat, value)
           let vars2 = env.vars ++ bindings
           fun bind_let(_):
@@ -1231,49 +816,38 @@ fun core_parse_body(body :: CoreFunBody) :: Computation:
                       env.type_constructors, env.tyvars, env.datatypes,
                       env.restricted_refs, env.inference)
           let clauses :: List <- ClauseEnv.local(
-                                  bind_let, core_parse_body(tail))
+                                  bind_let, checked_parse_body(tail))
           return for List (clause in clauses):
                    let clause :~ DefClause = clause
-                   // The `let`'s own initializer is evaluated before
-                   // anything in the body, so it goes at the front of
-                   // the obligation list; `clause_terms` supplies the
-                   // body's own evaluated terms, standing in its
-                   // right-hand side when a clause carries no explicit
-                   // obligations of its own. The logical reading is
-                   // unchanged: `let` substitutes, so an initializer
-                   // the body never reads is an obligation only.
-                   DefClause(clause.pats, clause.rhs,
-                             List.cons(value :~ Term, clause_terms(clause)))
-    | CoreBodyExpr(expr):
-        let elab_env = ElabEnv(
-                         env.thy, env.tyvars, env.vars, #'function,
-                         env.self_name, env.self, env.operators,
-                         env.type_constructors, env.datatypes,
-                         env.restricted_refs, env.inference)
-        let value = run_checked_elaboration(
-                      elab_env, expr, env.result_type)
+                   DefClause(
+                     clause.pats, clause.rhs,
+                     List.cons(value, clause_terms(clause)))
+    | CheckedBodyExpr(expr):
+        let value = checked_to_term(
+                      clause_elab_env(env), expr :~ CheckedExpr)
         return [DefClause(env.pats, value, [value])]
-    | ~else: error(~who: #'function, "unknown CoreFunBody variant")
+    | ~else:
+        error(~who: #'checked_parse_body, "unknown CheckedBody variant")
 
-fun core_parse_clauses(v :: FVar,
-                       matrix :: CorePatternMatrix) :: Computation:
+fun checked_parse_clauses(v :: FVar,
+                          matrix :: CheckedPatternMatrix) :: Computation:
   recur loop (remaining :~ List = matrix.rows, acc :~ List = []):
     match remaining
     | []: return acc
     | List.cons(row, rest):
         effect:
-          let parsed :: List <- core_parse_clause(
-                                  v, row :~ CoreMatchRow)
+          let parsed :: List <- checked_parse_clause(
+                                  v, row :~ CheckedMatchRow)
           loop(rest, acc ++ parsed)
 
-fun core_parse_clause(v :: FVar,
-                      row :: CoreMatchRow) :: Computation:
+fun checked_parse_clause(v :: FVar,
+                         row :: CheckedMatchRow) :: Computation:
   effect:
     let env :: ClauseEnv <- ClauseEnv.ask()
-    let elab_env = clause_elab_env(env)
     let [source_pat] = row.patterns
-    let [pat, bindings] = core_sub_pattern(
-                            elab_env, source_pat :~ CorePattern, v.ty)
+    let [pat, bindings] = checked_sub_pattern(
+                            clause_elab_env(env),
+                            source_pat :~ CheckedPattern)
     let vars2 = env.vars ++ (bindings :~ Map)
     fun bind_pattern(_):
       ClauseEnv(env.thy, env.self_name, env.self,
@@ -1281,126 +855,37 @@ fun core_parse_clause(v :: FVar,
                 vars2, env.at, env.result_type, env.operators,
                 env.type_constructors, env.tyvars, env.datatypes,
                 env.restricted_refs, env.inference)
-    ClauseEnv.local(bind_pattern, core_parse_body(row.body))
+    ClauseEnv.local(bind_pattern, checked_parse_body(row.body))
 
-fun elaborate_body_effect(body :: CoreFunBody,
-                          expected :: maybe(HType)) :: Computation:
-  match body
-  | CoreBodyExpr(expr):
-      match expected
-      | #false: infer_core(expr)
-      | wanted: check_core(expr, wanted :~ HType)
-  | CoreBodyLet(binding_pat, init, tail, at):
-      effect:
-        let value :: Term <- infer_core(init)
-        let root = mk_var(
-                     pattern_root_name(binding_pat, "_let"),
-                     type_of(value))
-        let env :: ElabEnv <- ElabEnv.ask()
-        let bindings = bind_irrefutable_pattern(
-                         env, binding_pat, root)
-        let result :: Term <- ElabEnv.local(
-                               fun (_):
-                                 sub_env(env, env.vars ++ bindings),
-                               elaborate_body_effect(tail, expected))
-        return mk_comb(mk_abs(resolve_term(env, root) :~ FVar,
-                              resolve_term(env, result)),
-                       resolve_term(env, value))
-  | CoreBodyMatch(scrutinee, matrix, at):
-      elaborate_match_expr_effect(
-        CoreRef(scrutinee, at), matrix, at, expected)
-  | _ :: CorePatternMatrix:
-      error(~who: #'function,
-            "function clauses are not an expression block")
-  | ~else:
-      error(~who: #'function, "unknown CoreFunBody variant")
-
-fun elaborate_match_expr_effect(
-      scrutinee :: CoreExpr,
-      matrix :: CorePatternMatrix,
-      at :: Syntax,
-      expected :: maybe(HType)) :: Computation:
-  match expected
-  | #false:
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        syntax_error(
-          env.who,
-          "a match expression needs an expected result type",
-          at)
-  | wanted:
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        let scrutinee_term :: Term <- infer_core(scrutinee)
-        let root = mk_var(
-                     Symbol.gen("_match_scrutinee"),
-                     type_of(scrutinee_term))
-        let clause_env = ClauseEnv(
-                           env.thy, env.self_name, env.self,
-                           [root :~ Term],
-                           env.vars,
-                           at, wanted :~ HType, env.operators,
-                           env.type_constructors, env.tyvars,
-                           env.datatypes, env.restricted_refs,
-                           env.inference)
-        let parsed :~ List:
-          match ClauseEnv.handle(
-                  clause_env, core_clause_rows(matrix))
-          | Pure(value): value :~ List
-          | ~else:
-              error(~who: #'function,
-                    "internal error: unhandled match expression effect")
-        let wanted = resolve_type(env, wanted :~ HType)
-        check_local_function_clauses(parsed, wanted :~ HType, at)
-        let local_name = Symbol.gen("_match_expression")
-        let spec = FunSpec(
-                     local_name,
-                     [type_of(scrutinee_term)],
-                     wanted :~ HType,
-                     parsed)
-        let tree = compile_patterns(
-                     env.thy, env.who, local_name,
-                     parsed.map(
-                       fun (clause :: DefClause): clause.pats),
-                     env.datatypes,
-                     ~show_clause:
-                       fun (_ :: Int): "match expression clause")
-        let body_term = local_tree_term(
-                          spec, env.datatypes,
-                          [root :~ Term], tree)
-        return mk_comb(mk_abs(root, body_term), scrutinee_term)
-
-fun core_clause_rows(matrix :: CorePatternMatrix) :: Computation:
+fun checked_clause_rows(matrix :: CheckedPatternMatrix) :: Computation:
   recur loop (remaining :~ List = matrix.rows, acc :~ List = []):
     match remaining
     | []: return acc
     | List.cons(row, rest):
         effect:
-          let parsed :: List <- core_clause_row(row :~ CoreMatchRow)
+          let parsed :: List <- checked_clause_row(
+                                  row :~ CheckedMatchRow)
           loop(rest, acc ++ parsed)
 
-fun core_clause_row(row :: CoreMatchRow) :: Computation:
+fun checked_clause_row(row :: CheckedMatchRow) :: Computation:
   effect:
     let env :: ClauseEnv <- ClauseEnv.ask()
     unless row.patterns.length() == env.pats.length()
-    | syntax_error(#'function,
-                   "this clause has " ++ to_string(row.patterns.length())
-                     ++ " patterns but the function takes "
-                     ++ to_string(env.pats.length()),
-                   row.at)
+    | error(~who: #'checked_clause_row,
+            "checked clause arity differs from its function")
     let elab_env = clause_elab_env(env)
     let (pats2, local_bindings):
-      for values(ps :~ List = env.pats, bindings :~ Map = {}) (col in List.iota(row.patterns.length())):
+      for values(ps :~ List = env.pats, bindings :~ Map = {}) (
+            col in List.iota(row.patterns.length())):
         let v :~ FVar:
           match ps[col]
           | FVar(_, _): ps[col]
           | ~else:
-              syntax_error(#'function,
-                           "this argument has already been matched",
-                           row.at)
-        let [pat, bound] = core_sub_pattern(
+              error(~who: #'checked_clause_row,
+                    "checked argument has already been matched")
+        let [pat, bound] = checked_sub_pattern(
                              elab_env,
-                             row.patterns[col] :~ CorePattern, v.ty)
+                             row.patterns[col] :~ CheckedPattern)
         values(
           refine_pats(ps, v, pat :~ Term),
           merge_pattern_bindings(
@@ -1411,7 +896,8 @@ fun core_clause_row(row :: CoreMatchRow) :: Computation:
                 env.result_type, env.operators, env.type_constructors,
                 env.tyvars, env.datatypes, env.restricted_refs,
                 env.inference)
-    ClauseEnv.local(bind_row, core_parse_body(row.body))
+    ClauseEnv.local(bind_row, checked_parse_body(row.body))
+
 
 fun local_pattern_variables(pat :: Term) :: List.of(FVar):
   match pat
@@ -1492,134 +978,135 @@ fun local_tree_term(spec :: FunSpec,
               branch_term(rest))
   | ~else:
       error(~who: #'function, "unknown local function decision-tree node")
+fun checked_body_term(env :: ElabEnv, body :: CheckedBody) :: Term:
+  match body
+  | CheckedBodyExpr(expr):
+      checked_to_term(env, expr :~ CheckedExpr)
+  | CheckedBodyLet(pat, init, tail, _, _):
+      let value = checked_to_term(env, init :~ CheckedExpr)
+      let root = mk_var(
+                   checked_pattern_root_name(pat, "_let"),
+                   checked_pattern_ty(pat))
+      let bindings = bind_checked_irrefutable_pattern(env, pat, root)
+      let result = checked_body_term(
+                     sub_env(env, env.vars ++ bindings), tail)
+      mk_comb(mk_abs(resolve_term(env, root) :~ FVar,
+                     resolve_term(env, result)),
+              resolve_term(env, value))
+  | CheckedBodyMatch(scrutinee, matrix, _, at):
+      checked_match_term(env, scrutinee :~ CheckedExpr, matrix, at)
+  | _ :: CheckedPatternMatrix:
+      error(~who: #'checked_body_term,
+            "checked function clauses are not an expression block")
+  | ~else:
+      error(~who: #'checked_body_term, "unknown CheckedBody variant")
 
-fun expected_function_types(env :: ElabEnv, wanted :: HType,
-                            arity :: NonnegInt, at :: Syntax)
-    :: values(List.of(HType), HType):
-  recur loop (remaining = arity,
-              current :~ HType = wanted,
-              domains :~ List = []):
-    cond
-    | remaining == 0:
-        values(domains, resolve_type(env, current))
+fun checked_match_term(env :: ElabEnv,
+                       scrutinee :: CheckedExpr,
+                       matrix :: CheckedPatternMatrix,
+                       at :: Syntax) :: Term:
+  let scrutinee_term = checked_to_term(env, scrutinee)
+  let root = mk_var(
+               Symbol.gen("_match_scrutinee"), type_of(scrutinee_term))
+  let result_type = resolve_type(env, matrix.ty)
+  let clause_env = ClauseEnv(
+                     env.thy, env.self_name, env.self,
+                     [root :~ Term], env.vars, at, result_type,
+                     env.operators, env.type_constructors, env.tyvars,
+                     env.datatypes, env.restricted_refs, env.inference)
+  let parsed :~ List:
+    match ClauseEnv.handle(clause_env, checked_clause_rows(matrix))
+    | Pure(value): value :~ List
     | ~else:
-        let current = resolve_type(env, current)
-        when current is_a TyVar
-        | let domain = mk_tyvar(Symbol.gen("_domain"))
-          let range = mk_tyvar(Symbol.gen("_range"))
-          unify_types(
-            env, current, mk_fun(domain, range), at,
-            "a function expression does not match its expected type")
-        let current = resolve_type(env, current)
-        unless is_fun(current)
-        | syntax_error(
-            env.who,
-            "a function expression has more parameters than its expected type",
-            at)
-        let (domain, range) = dest_fun(current)
-        loop(remaining - 1, range, domains ++ [domain])
+        error(~who: #'checked_match_term,
+              "internal error: unhandled checked match effect")
+  check_local_function_clauses(parsed, result_type, at)
+  let local_name = Symbol.gen("_match_expression")
+  let spec = FunSpec(
+               local_name, [type_of(scrutinee_term)], result_type, parsed)
+  let tree = compile_patterns(
+               env.thy, env.who, local_name,
+               parsed.map(fun (clause :: DefClause): clause.pats),
+               env.datatypes,
+               ~show_clause:
+                 fun (_ :: Int): "match expression clause")
+  let body_term = local_tree_term(
+                    spec, env.datatypes, [root :~ Term], tree)
+  mk_comb(mk_abs(root, body_term), scrutinee_term)
 
-fun elaborate_function_expr_effect(
-      params :: List.of(CoreBinder),
-      result_type_stx :: maybe(Syntax),
-      body :: CoreFunBody, at :: Syntax,
-      ~expected: expected :: maybe(HType) = #false)
-     :: Computation:
-  effect:
-    let env :: ElabEnv <- ElabEnv.ask()
-    let contextual:
-      match expected
-      | #false: #false
-      | wanted:
-          let (domains, range) = expected_function_types(
-                                   env, wanted :~ HType,
-                                   params.length(), at)
-          [domains, range]
-    let parameter_types:
-      for List (binder in params, index in List.iota(params.length())):
-        let binder :~ CoreBinder = binder
-        let declared = optional_declared_type(
-                         binder.type_stx, env.tyvars,
-                         env.type_constructors, "_parameter")
-        match contextual
-        | #false: declared
-        | [domains, _]:
-            let contextual_type = (domains :~ List)[index] :~ HType
-            unify_types(
-              env, declared, contextual_type, binder.at,
-              "a function parameter does not match its expected type")
-            resolve_type(env, declared)
-    let result_type = optional_declared_type(
-                        result_type_stx, env.tyvars,
-                        env.type_constructors, "_result")
-    match contextual
-    | [_, contextual_result]:
-        unify_types(
-          env, result_type, contextual_result :~ HType, at,
-          "a function result does not match its expected type")
-    | #false: #void
-    let parameter_vars:
-      for List (binder in params, parameter_type in parameter_types):
-        let binder :~ CoreBinder = binder
-        mk_var(
-          pattern_root_name(binder.pattern, "_parameter"),
-          parameter_type :~ HType)
-    let local_bindings:
-      for values(out :~ Map = {}) (binder in params,
-                                   variable in parameter_vars):
-        let binder :~ CoreBinder = binder
-        merge_pattern_bindings(
-          env.who, out,
-          bind_irrefutable_pattern(
-            env, binder.pattern, variable :~ Term),
-          binder.at)
-    let vars = env.vars ++ local_bindings
-    let clause_env = ClauseEnv(
-                       env.thy, env.self_name, env.self,
-                       parameter_vars.map(
-                         fun (variable :: FVar): variable :~ Term),
-                       vars, at, result_type, env.operators,
-                       env.type_constructors, env.tyvars, env.datatypes,
-                       env.restricted_refs, env.inference)
-    let clauses :~ List:
-      match ClauseEnv.handle(clause_env, core_parse_body(body))
-      | Pure(value): value :~ List
-      | ~else:
-          error(~who: #'function,
-                "internal error: unhandled local function effect")
-    let result_type = resolve_type(env, result_type)
-    let parameter_vars:
-      parameter_vars.map(
-        fun (variable :: FVar):
-          resolve_term(env, variable) :~ FVar)
-    let clauses:
-      clauses.map(
-        fun (clause :: DefClause):
-          DefClause(
-            clause.pats.map(fun (pat :: Term): resolve_term(env, pat)),
-            resolve_term(env, clause.rhs),
-            clause.obligations.map(
-              fun (obligation :: Term):
-                resolve_term(env, obligation))))
-    check_local_function_clauses(clauses, result_type, at)
-    let local_name = Symbol.gen("_local_function")
-    let spec = FunSpec(
-                 local_name,
-                 parameter_vars.map(
-                   fun (variable :: FVar): variable.ty),
-                 result_type, clauses)
-    let tree = compile_patterns(
-                 env.thy, #'function, local_name,
-                 clauses.map(fun (clause :: DefClause): clause.pats),
-                 env.datatypes,
-                 ~show_clause:
-                   fun (_ :: Int): "local function clause")
-    let body_term = local_tree_term(
-                      spec, env.datatypes,
-                      parameter_vars.map(
-                        fun (variable :: FVar): variable :~ Term),
-                      tree)
-    return list_mk_abs(parameter_vars, body_term)
+fun checked_function_clauses(
+      env :: ElabEnv,
+      fn :: CheckedFunction)
+    :: values(List.of(FVar), HType, List.of(DefClause)):
+  let parameter_vars:
+    for List (binder in fn.params):
+      let binder :~ CheckedBinder = binder
+      mk_var(
+        checked_pattern_root_name(binder.pat, "_parameter"),
+        resolve_type(env, binder.ty))
+  let local_bindings:
+    for values(out :~ Map = {}) (binder in fn.params,
+                                 variable in parameter_vars):
+      let binder :~ CheckedBinder = binder
+      merge_pattern_bindings(
+        env.who, out,
+        bind_checked_irrefutable_pattern(
+          env, binder.pat, variable :~ Term),
+        binder.at)
+  let vars = env.vars ++ local_bindings
+  let result_type = resolve_type(env, fn.result_ty)
+  let clause_env = ClauseEnv(
+                     env.thy, env.self_name, env.self,
+                     parameter_vars.map(
+                       fun (variable :: FVar): variable :~ Term),
+                     vars, fn.at, result_type, env.operators,
+                     env.type_constructors, env.tyvars, env.datatypes,
+                     env.restricted_refs, env.inference)
+  let clauses0 :~ List:
+    match ClauseEnv.handle(clause_env, checked_parse_body(fn.body))
+    | Pure(value): value :~ List
+    | ~else:
+        error(~who: #'checked_function_clauses,
+              "internal error: unhandled checked function effect")
+  let parameter_vars:
+    parameter_vars.map(
+      fun (variable :: FVar):
+        resolve_term(env, variable) :~ FVar)
+  let clauses:
+    clauses0.map(
+      fun (clause :: DefClause):
+        DefClause(
+          clause.pats.map(fun (pat :: Term): resolve_term(env, pat)),
+          resolve_term(env, clause.rhs),
+          clause.obligations.map(
+            fun (obligation :: Term):
+              resolve_term(env, obligation))))
+  check_local_function_clauses(clauses, result_type, fn.at)
+  values(parameter_vars, result_type, clauses)
+
+fun checked_function_term(env :: ElabEnv,
+                          fn :: CheckedFunction) :: Term:
+  let (parameter_vars, result_type, clauses) = checked_function_clauses(
+                                                  env, fn)
+  let local_name = Symbol.gen("_local_function")
+  let spec = FunSpec(
+               local_name,
+               parameter_vars.map(
+                 fun (variable :: FVar): variable.ty),
+               result_type, clauses)
+  let tree = compile_patterns(
+               env.thy, #'function, local_name,
+               clauses.map(fun (clause :: DefClause): clause.pats),
+               env.datatypes,
+               ~show_clause:
+                 fun (_ :: Int): "local function clause")
+  let body_term = local_tree_term(
+                    spec, env.datatypes,
+                    parameter_vars.map(
+                      fun (variable :: FVar): variable :~ Term),
+                    tree)
+  list_mk_abs(parameter_vars, body_term)
+
 
 fun elaborate_function_decl(
       thy :: Theory, spec :: CoreFunctionSpec,
@@ -1630,32 +1117,46 @@ fun elaborate_function_decl(
   let tyvars = spec_type_vars(spec)
   unless spec.result_type
   | syntax_error(#'function, "a function needs a result type", spec.at)
-  let inference = Box({})
-  let arg_tys:
+  let inference = make_checked_inference()
+  let declared_arg_tys:
     spec.params.map(
       fun (binder :: CoreBinder):
         optional_declared_type(
           binder.type_stx, tyvars, type_constructors, "_parameter"))
-  let result_ty = optional_declared_type(
-                    spec.result_type, tyvars, type_constructors, "_result")
-  let fty = for values(t :~ HType = result_ty) (a in arg_tys.reverse()):
-              mk_fun(a, t)
-  let self = mk_const(spec.name, fty)
-  let pvars:
-    for List (binder in spec.params, ty in arg_tys):
-      let binder :~ CoreBinder = binder
-      mk_var(pattern_root_name(binder.pattern, "_parameter"),
-             ty :~ HType)
+  let declared_result_ty = optional_declared_type(
+                             spec.result_type, tyvars,
+                             type_constructors, "_result")
+  let declared_function_ty:
+    for values(ty :~ HType = declared_result_ty) (
+          arg_ty in declared_arg_tys.reverse()):
+      mk_fun(arg_ty :~ HType, ty)
+  let self = mk_const(spec.name, declared_function_ty)
   let binding_env = ElabEnv(
                       thy, tyvars, {}, #'function, spec.name, self,
                       operators, type_constructors, datatypes, {}, inference)
+  let checked_value = check_expr(
+                        logical_check_env(binding_env),
+                        CoreFunctionExpr(
+                          spec.params, spec.result_type, spec.body, spec.at),
+                        declared_function_ty)
+  let checked_fn :: CheckedFunction:
+    match checked_value
+    | fn :: CheckedFunction: fn
+    | ~else:
+        error(~who: #'elaborate_function_decl,
+              "shared checker did not return a checked function")
+  let (pvars, result_ty, clauses0) = checked_function_clauses(
+                                           binding_env, checked_fn)
+  let arg_tys = checked_fn.params.map(
+                  fun (binder :: CheckedBinder): binder.ty)
   let env0:
-    for values(out :~ Map = {}) (binder in spec.params, variable in pvars):
-      let binder :~ CoreBinder = binder
+    for values(out :~ Map = {}) (binder in checked_fn.params,
+                                 variable in pvars):
+      let binder :~ CheckedBinder = binder
       merge_pattern_bindings(
         #'function, out,
-        bind_irrefutable_pattern(
-          binding_env, binder.pattern, variable :~ Term),
+        bind_checked_irrefutable_pattern(
+          binding_env, binder.pat, variable :~ Term),
         binder.at)
   let measure:
     match spec.measure
@@ -1667,18 +1168,8 @@ fun elaborate_function_decl(
                               {}, inference),
                       expr :~ CoreExpr)
         list_mk_abs(pvars, value)
-  let clause_env = ClauseEnv(
-                     thy, spec.name, self,
-                     pvars.map(fun (v :: FVar): v :~ Term),
-                     env0, spec.at, result_ty, operators, type_constructors,
-                     tyvars, datatypes, {}, inference)
-  let clauses0 :~ List:
-    match ClauseEnv.handle(clause_env, core_parse_body(spec.body))
-    | Pure(clauses): clauses :~ List
-    | ~else:
-        error(~who: #'elaborate_function_decl,
-              "internal error: unhandled effect")
-  let substitution :~ Map = close_substitution(inference.value :~ Map)
+  let substitution :~ Map = close_substitution(
+                                   inference.substitution.value :~ Map)
   let arg_tys = arg_tys.map(
                   fun (ty :: HType): type_subst(substitution, ty))
   let result_ty = type_subst(substitution, result_ty)

@@ -900,10 +900,10 @@ meta:
             mk_fun(parameter_type :~ HType, current)
         let rendered_function:
           match body
-          | CoreBodyRows(rows):
+          | matrix :: CorePatternMatrix:
               let rendered:
-                rows.map(
-                  fun (row :: CoreRow):
+                matrix.rows.map(
+                  fun (row :: CoreMatchRow):
                     runtime_anonymous_row(
                       inference, state, env,
                       parameter_types, result_type, row))
@@ -1153,22 +1153,23 @@ meta:
                          state :: SurfaceContext,
                          env :: Map.of(Symbol, HType),
                          scrutinee :: CoreExpr,
-                         clauses :: List.of(CoreMatchClause),
+                         matrix :: CorePatternMatrix,
                          at :: Syntax,
                          expected :: maybe(HType)) :: RuntimeExpr:
-    when clauses.length() == 0
+    when matrix.rows.length() == 0
     | syntax_meta.error("a match expression needs at least one clause", at)
     let target = runtime_expr(
                    inference, state, env, scrutinee, #false)
     let (rendered, result_type):
       for values(out :~ List.of(Syntax) = [],
                  current :~ maybe(HType) = expected) (
-            clause in clauses):
-        let clause :~ CoreMatchClause = clause
+            row in matrix.rows):
+        let row :~ CoreMatchRow = row
+        let [source_pat] = row.patterns
         let (pattern_stx, bindings) = runtime_pattern(
-          inference, state, clause.pattern, target.ty)
+          inference, state, source_pat :~ CorePattern, target.ty)
         let result = runtime_body_expr(
-          inference, state, env ++ bindings, clause.body, current)
+          inference, state, env ++ bindings, row.body, current)
         values(out ++ ['$pattern_stx: $((result.stx))'],
                result.ty)
     let [clause_stx, ...] = rendered
@@ -1212,10 +1213,10 @@ meta:
              let $pattern_stx = $((value.stx))
              $((rest.stx))',
           rest.ty)
-    | CoreBodyMatch(scrutinee, clauses, at):
+    | CoreBodyMatch(scrutinee, matrix, at):
         runtime_match_expr(
           inference, state, env,
-          CoreRef(scrutinee, at), clauses, at, expected)
+          CoreRef(scrutinee, at), matrix, at, expected)
     | ~else:
         error(~who: #'function, "invalid nested function body")
 
@@ -1232,7 +1233,7 @@ meta:
                   name :: Syntax,
                   parameter_types :: List.of(HType),
                   expected :: HType,
-                  row :: CoreRow) :: Syntax:
+                  row :: CoreMatchRow) :: Syntax:
     let parsed:
       for List (pat in row.patterns, ty in parameter_types):
         let (rendered, bindings) = runtime_pattern(
@@ -1253,7 +1254,7 @@ meta:
         base_env :: Map.of(Symbol, HType),
         parameter_types :: List.of(HType),
         expected :: HType,
-        row :: CoreRow) :: Syntax:
+        row :: CoreMatchRow) :: Syntax:
     let parsed:
       for List (pat in row.patterns, ty in parameter_types):
         let (rendered, bindings) = runtime_pattern(
@@ -1301,9 +1302,9 @@ meta:
       let env = {spec.name: function_type} ++ parameter_bindings
       let rendered_function:
         match spec.body
-        | CoreBodyRows(rows):
-            let rendered = rows.map(
-                             fun (row :: CoreRow):
+        | matrix :: CorePatternMatrix:
+            let rendered = matrix.rows.map(
+                             fun (row :: CoreMatchRow):
                                runtime_row(
                                  inference, state, env, name,
                                  parameter_types, result_type, row))
@@ -1356,7 +1357,7 @@ meta:
     let (patterns, body) = elab.row_parts(row, arity)
     let [p, ...] = patterns.map(encode_pattern)
     let b = encode_function_body(body)
-    '(core_row [$p, ...] $b)'.relocate_span([row])
+    '(core_match_row [$p, ...] $b)'.relocate_span([row])
 
   fun function_row_arity(row :: Syntax) :: NonnegInt:
     match row
@@ -1394,7 +1395,7 @@ meta:
           let [row, ...] = (rows :~ List).map(
                              fun (r :: Syntax):
                                row_encoding(r, (ps :~ List).length()))
-          '(core_body_rows [$row, ...])'.relocate_span(rows :~ List)
+          '(core_pattern_matrix [$row, ...])'.relocate_span(rows :~ List)
     let result:
       match result_type
       | #false: '#false'

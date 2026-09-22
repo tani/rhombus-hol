@@ -31,9 +31,8 @@ export:
   CoreBodyExpr
   CoreBodyLet
   CoreBodyMatch
-  CoreBodyRows
-  CoreMatchClause
-  CoreRow
+  CoreMatchRow
+  CorePatternMatrix
   CoreFunctionSpec
   CoreTactic
   decode_expr
@@ -131,27 +130,23 @@ class CoreBodyLet(pattern :: CorePattern,
                   at :: Syntax):
   extends CoreFunBody
 
-class CoreMatchClause(pattern :: CorePattern,
-                      body :: CoreFunBody,
-                      at :: Syntax)
+class CoreMatchRow(patterns :: List.of(CorePattern),
+                   body :: CoreFunBody,
+                   at :: Syntax)
 
-class CoreBodyMatch(scrutinee :: Symbol,
-                    clauses :: List.of(CoreMatchClause),
-                    at :: Syntax):
+class CorePatternMatrix(rows :: List.of(CoreMatchRow)):
   extends CoreFunBody
 
-class CoreRow(patterns :: List.of(CorePattern),
-              body :: CoreFunBody,
-              at :: Syntax)
-
-class CoreBodyRows(rows :: List.of(CoreRow)):
+class CoreBodyMatch(scrutinee :: Symbol,
+                    matrix :: CorePatternMatrix,
+                    at :: Syntax):
   extends CoreFunBody
 
 class CoreBlockExpr(body :: CoreFunBody, at :: Syntax):
   extends CoreExpr
 
 class CoreMatchExpr(scrutinee :: CoreExpr,
-                    clauses :: List.of(CoreMatchClause),
+                    matrix :: CorePatternMatrix,
                     at :: Syntax):
   extends CoreExpr
 
@@ -188,6 +183,11 @@ fun core_called_names(spec :: CoreFunctionSpec) :: List.of(Symbol):
 fun add_name(acc :: List.of(Symbol), name :: Symbol) :: List.of(Symbol):
   (if acc.contains(name) | acc | acc ++ [name])
 
+fun matrix_names(matrix :: CorePatternMatrix,
+                 acc :: List.of(Symbol)) :: List.of(Symbol):
+  for values(out :~ List.of(Symbol) = acc) (row in matrix.rows):
+    body_names((row :~ CoreMatchRow).body, out)
+
 fun expr_names(expr :: CoreExpr, acc :: List.of(Symbol)) :: List.of(Symbol):
   match expr
   | CoreRef(name, _): add_name(acc, name)
@@ -201,10 +201,8 @@ fun expr_names(expr :: CoreExpr, acc :: List.of(Symbol)) :: List.of(Symbol):
   | CoreForall(_, body, _): expr_names(body, acc)
   | CoreExists(_, body, _): expr_names(body, acc)
   | CoreBlockExpr(body, _): body_names(body, acc)
-  | CoreMatchExpr(scrutinee, clauses, _):
-      for values(o :~ List.of(Symbol) = expr_names(scrutinee, acc)) (
-            clause in clauses):
-        body_names((clause :~ CoreMatchClause).body, o)
+  | CoreMatchExpr(scrutinee, matrix, _):
+      matrix_names(matrix, expr_names(scrutinee, acc))
   | CoreFunctionExpr(_, _, body, _): body_names(body, acc)
   | ~else: acc
 
@@ -213,13 +211,9 @@ fun body_names(body :: CoreFunBody,
   match body
   | CoreBodyExpr(expr): expr_names(expr, acc)
   | CoreBodyLet(_, init, tail, _): body_names(tail, expr_names(init, acc))
-  | CoreBodyMatch(scrutinee, clauses, _):
-      for values(o :~ List.of(Symbol) = add_name(acc, scrutinee)) (
-            clause in clauses):
-        body_names((clause :~ CoreMatchClause).body, o)
-  | CoreBodyRows(rows):
-      for values(o :~ List.of(Symbol) = acc) (row in rows):
-        body_names((row :~ CoreRow).body, o)
+  | CoreBodyMatch(scrutinee, matrix, _):
+      matrix_names(matrix, add_name(acc, scrutinee))
+  | matrix :: CorePatternMatrix: matrix_names(matrix, acc)
   | ~else: acc
 
 fun surface_error(who :: Symbol, message :: String, at :: Syntax):
@@ -342,10 +336,11 @@ fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
                        stx)
   | '(core_block_expr $body)':
       CoreBlockExpr(decode_body_mode(body, mode), stx)
-  | '(core_match_expr $scrutinee [$clause, ...])':
-      CoreMatchExpr(decode_expr(scrutinee, mode),
-                    [decode_match_clause_mode(clause, mode), ...],
-                    stx)
+  | '(core_match_expr $scrutinee [$row, ...])':
+      CoreMatchExpr(
+        decode_expr(scrutinee, mode),
+        CorePatternMatrix([decode_match_row_mode(row, mode), ...]),
+        stx)
   | '(core_typed_expr $expr ($type ...))':
       CoreTypedExpr(decode_expr(expr, mode), '$type ...', stx)
   | '(core_list_expr [$element, ...] #false)':
@@ -474,26 +469,21 @@ fun decode_body_mode(stx :: Syntax, mode :: Symbol) :: CoreFunBody:
                   decode_expr(init, mode),
                   decode_body_mode(body, mode),
                   stx)
-  | '(core_body_match $(name :: Identifier) [$clause, ...])':
-      CoreBodyMatch(Syntax.unwrap(name),
-                    [decode_match_clause_mode(clause, mode), ...],
-                    stx)
-  | '(core_body_rows [$row, ...])':
-      CoreBodyRows([decode_row_mode(row, mode), ...])
+  | '(core_body_match $(name :: Identifier) [$row, ...])':
+      CoreBodyMatch(
+        Syntax.unwrap(name),
+        CorePatternMatrix([decode_match_row_mode(row, mode), ...]),
+        stx)
+  | '(core_pattern_matrix [$row, ...])':
+      CorePatternMatrix([decode_match_row_mode(row, mode), ...])
   | ~else: surface_error(#'function, "malformed parsed function body", stx)
 
-fun decode_match_clause_mode(stx :: Syntax, mode :: Symbol)
-    :: CoreMatchClause:
+fun decode_match_row_mode(stx :: Syntax, mode :: Symbol) :: CoreMatchRow:
   match stx
-  | '(core_match_clause $pat $body)':
-      CoreMatchClause(decode_pattern(pat), decode_body_mode(body, mode), stx)
-  | ~else: surface_error(#'function, "malformed match clause", stx)
-
-fun decode_row_mode(stx :: Syntax, mode :: Symbol) :: CoreRow:
-  match stx
-  | '(core_row [$pat, ...] $body)':
-      CoreRow([decode_pattern(pat), ...], decode_body_mode(body, mode), stx)
-  | ~else: surface_error(#'function, "malformed function clause", stx)
+  | '(core_match_row [$pat, ...] $body)':
+      CoreMatchRow(
+        [decode_pattern(pat), ...], decode_body_mode(body, mode), stx)
+  | ~else: surface_error(#'function, "malformed match row", stx)
 
 fun decode_function(stx :: Syntax) :: CoreFunctionSpec:
   match stx

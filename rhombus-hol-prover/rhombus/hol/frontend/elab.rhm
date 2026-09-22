@@ -941,9 +941,9 @@ fun local_tree_term(spec :: FunSpec,
   | DTLeaf(clause_index, bindings):
       let clause :~ DefClause = spec.clauses[clause_index]
       let substitutions:
-        for List (binding in bindings):
+        for values(out :~ Map = {}) (binding in bindings):
           let binding :~ DTBinding = binding
-          [path_term(datatype_for, args, binding.path), binding.var]
+          out ++ {binding.var: path_term(datatype_for, args, binding.path)}
       inst_fvar(substitutions, eager_clause_term(clause))
   | DTSwitch(path, self_type, branches):
       let scrutinee = path_term(datatype_for, args, path)
@@ -1206,40 +1206,52 @@ fun sub_env(env :: ElabEnv, vars :: Map.of(Symbol, Term)) :: ElabEnv:
 // rules for this proof only. `~split` splits the goal on Boolean terms before
 // the waterfall; `~choose` supplies existential candidates.
 //
-// Returns `[induct, using, skipped_stages, disabled_rules, cases, witnesses,
-// search_steps, extensionality]`.
-fun parse_tactic(stx :: maybe(Syntax)) :: List:
+// Returns a Map with keys `induct`, `use`, `skip`, `disable`, `split`,
+// `choose`, `limit`, and `extensionality`.
+fun parse_tactic(stx :: maybe(Syntax)) :: Map:
   match stx
-  | #false: [#false, [], [], [], [], [], #false, #false]
+  | #false:
+      {#'induct: #false,
+       #'use: [],
+       #'skip: [],
+       #'disable: [],
+       #'split: [],
+       #'choose: [],
+       #'limit: #false,
+       #'extensionality: #false}
   | s :~ Syntax:
       match s
       | '$group; ...': parse_tactic_groups([group, ...])
       | ~else: syntax_error(#'proof, "unknown proof option", s)
 
-fun parse_tactic_groups(groups :: List.of(Syntax)) :: List:
-  recur loop (remaining :~ List = groups,
-              acc :~ List = [#false, [], [], [], [], [], #false, #false]):
+fun parse_tactic_groups(groups :: List.of(Syntax)) :: Map:
+  recur loop (
+        remaining :~ List = groups,
+        acc :~ Map = {#'induct: #false,
+                      #'use: [],
+                      #'skip: [],
+                      #'disable: [],
+                      #'split: [],
+                      #'choose: [],
+                      #'limit: #false,
+                      #'extensionality: #false}):
     match remaining
     | []: acc
     | List.cons(group, rest):
         let rest :~ List = rest
         match group
         | '~induct: $(n :: Identifier)':
-            match acc[0]
+            match acc[#'induct]
             | #false:
-                loop(rest,
-                     [Syntax.unwrap(n), acc[1], acc[2], acc[3], acc[4],
-                      acc[5], acc[6], acc[7]])
+                loop(rest, acc ++ {#'induct: Syntax.unwrap(n)})
             | ~else:
                 syntax_error(#'proof, "duplicate `~induct` option", group)
         | '~induct: $arg; ...':
             syntax_error(#'proof, "`~induct` expects one identifier", group)
         | '~extensionality: $(n :: Identifier)':
-            match acc[7]
+            match acc[#'extensionality]
             | #false:
-                loop(rest,
-                     [acc[0], acc[1], acc[2], acc[3], acc[4], acc[5],
-                      acc[6], Syntax.unwrap(n)])
+                loop(rest, acc ++ {#'extensionality: Syntax.unwrap(n)})
             | ~else:
                 syntax_error(
                   #'proof, "duplicate `~extensionality` option", group)
@@ -1248,51 +1260,42 @@ fun parse_tactic_groups(groups :: List.of(Syntax)) :: List:
               #'proof, "`~extensionality` expects one identifier", group)
         | '~use: [$(u :: Identifier), ...]':
             loop(rest,
-                 [acc[0], (acc[1] :~ List) ++ [Syntax.unwrap(u), ...],
-                  acc[2], acc[3], acc[4], acc[5], acc[6], acc[7]])
+                 acc ++ {#'use: (acc[#'use] :~ List) ++ [Syntax.unwrap(u), ...]})
         | '~use: $rest; ...':
             syntax_error(#'proof,
                          "`~use` expects one bracketed list of theorem names",
                          group)
         | '~skip: [$(d :: Identifier), ...]':
             loop(rest,
-                 [acc[0], acc[1],
-                  (acc[2] :~ List) ++ [Syntax.unwrap(d), ...],
-                  acc[3], acc[4], acc[5], acc[6], acc[7]])
+                 acc ++ {#'skip: (acc[#'skip] :~ List) ++ [Syntax.unwrap(d), ...]})
         | '~skip: $rest; ...':
             syntax_error(#'proof,
                          "`~skip` expects one bracketed list of stage names",
                          group)
         | '~disable: [$(r :: Identifier), ...]':
             loop(rest,
-                 [acc[0], acc[1], acc[2],
-                  (acc[3] :~ List) ++ [Syntax.unwrap(r), ...],
-                  acc[4], acc[5], acc[6], acc[7]])
+                 acc ++ {#'disable: (acc[#'disable] :~ List) ++ [Syntax.unwrap(r), ...]})
         | '~disable: $rest; ...':
             syntax_error(#'proof,
                          "`~disable` expects one bracketed list of rule names",
                          group)
         | '~split: $c':
             loop(rest,
-                 [acc[0], acc[1], acc[2], acc[3],
-                  (acc[4] :~ List) ++ [c], acc[5], acc[6], acc[7]])
+                 acc ++ {#'split: (acc[#'split] :~ List) ++ [c]})
         | '~split: $rest; ...':
             syntax_error(#'proof, "`~split` expects one proposition", group)
         | '~choose: $w':
             loop(rest,
-                 [acc[0], acc[1], acc[2], acc[3], acc[4],
-                  (acc[5] :~ List) ++ [w], acc[6], acc[7]])
+                 acc ++ {#'choose: (acc[#'choose] :~ List) ++ [w]})
         | '~choose: $rest; ...':
             syntax_error(#'proof, "`~choose` expects one term", group)
         | '~limit: $(n :: Int)':
             let steps = Syntax.unwrap(n)
             unless steps >= 0
             | syntax_error(#'proof, "search steps cannot be negative", group)
-            match acc[6]
+            match acc[#'limit]
             | #false:
-                loop(rest,
-                     [acc[0], acc[1], acc[2], acc[3], acc[4], acc[5],
-                      steps, acc[7]])
+                loop(rest, acc ++ {#'limit: steps})
             | ~else:
                 syntax_error(#'proof, "duplicate `~limit` option", group)
         | '~limit: $rest; ...':

@@ -51,41 +51,22 @@ fun opened_equation(th :: Thm, arity :: NonnegInt) :: maybe(List):
       | [lhs, rhs] when vars.length() == arity: [vars, lhs, rhs]
       | ~else: #false
 
-// Return two exact clauses in zero/successor order. Extra, unknown, or
+// Return exact clauses in the requested tag order. Extra, unknown, or
 // duplicate equations reject the operation.
-fun exact_pair(equations :: List.of(Thm), classify :: Function)
-    :: maybe(List.of(Thm)):
-  match equations
-  | [a :: Thm, b :: Thm]:
-      match [classify(a), classify(b)]
-      | [#'zero, #'succ]: [a, b]
-      | [#'succ, #'zero]: [b, a]
-      | ~else: #false
-  | ~else: #false
-
-// Likewise for the three-clause double recursions.
-fun exact_triple(equations :: List.of(Thm), classify :: Function)
-    :: maybe(List.of(Thm)):
-  unless equations.length() == 3
-  | #false
-  recur scan(rest :~ List = equations,
-             zero :: maybe(Thm) = #false,
-             succ_zero :: maybe(Thm) = #false,
-             succ_succ :: maybe(Thm) = #false):
-    match rest
-    | []:
-        (if zero && succ_zero && succ_succ
-         | [zero :~ Thm, succ_zero :~ Thm, succ_succ :~ Thm]
-         | #false)
-    | List.cons(th, more):
-        let th :~ Thm = th
-        match classify(th)
-        | #'zero when !zero: scan(more :~ List, th, succ_zero, succ_succ)
-        | #'succ_zero when !succ_zero:
-            scan(more :~ List, zero, th, succ_succ)
-        | #'succ_succ when !succ_succ:
-            scan(more :~ List, zero, succ_zero, th)
-        | ~else: #false
+fun exact_clauses(equations :: List.of(Thm), classify :: Function,
+                  tags :: List.of(Symbol)) :: maybe(List.of(Thm)):
+  cond
+  | equations.length() != tags.length(): #false
+  | ~else:
+      recur scan(rest :~ List = equations, acc :~ Map = {}):
+        match rest
+        | []: for List (t in tags): acc[t] :~ Thm
+        | List.cons(th, more):
+            let th :~ Thm = th
+            match classify(th :~ Thm)
+            | tag :: Symbol when tags.contains(tag) && !acc.has_key(tag):
+                scan(more :~ List, acc ++ {tag: th})
+            | ~else: #false
 
 fun info_for(ctx :: Context, fn :: Term) :: maybe(FunInfo):
   match fn
@@ -118,8 +99,9 @@ fun nat_add_evidence(ctx :: Context, fn :: Term) :: maybe(NatAddEvidence):
   match info_for(ctx, fn)
   | #false: #false
   | info :: FunInfo:
-      match exact_pair(info.equations,
-                       fun (th :: Thm): add_clause(fn, th))
+      match exact_clauses(info.equations,
+                          fun (th :: Thm): add_clause(fn, th),
+                          [#'zero, #'succ])
       | [zero, succ]: NatAddEvidence(fn, zero :~ Thm, succ :~ Thm)
       | ~else: #false
 
@@ -149,8 +131,9 @@ fun nat_mul_evidence(ctx :: Context, fn :: Term) :: maybe(NatMulEvidence):
   match info_for(ctx, fn)
   | #false: #false
   | info :: FunInfo:
-      match exact_pair(info.equations,
-                       fun (th :: Thm): mul_clause(fn, th))
+      match exact_clauses(info.equations,
+                          fun (th :: Thm): mul_clause(fn, th),
+                          [#'zero, #'succ])
       | [zero, succ]:
           match mul_succ_add(fn, succ :~ Thm)
           | #false: #false
@@ -190,8 +173,9 @@ fun nat_le_evidence(ctx :: Context, fn :: Term) :: maybe(NatLeEvidence):
   match info_for(ctx, fn)
   | #false: #false
   | info :: FunInfo:
-      match exact_triple(info.equations,
-                         fun (th :: Thm): le_clause(fn, th))
+      match exact_clauses(info.equations,
+                          fun (th :: Thm): le_clause(fn, th),
+                          [#'zero, #'succ_zero, #'succ_succ])
       | [zero, succ_zero, succ_succ]:
           NatLeEvidence(fn, zero :~ Thm, succ_zero :~ Thm,
                         succ_succ :~ Thm)
@@ -226,8 +210,9 @@ fun nat_sub_evidence(ctx :: Context, fn :: Term) :: maybe(NatSubEvidence):
   match info_for(ctx, fn)
   | #false: #false
   | info :: FunInfo:
-      match exact_triple(info.equations,
-                         fun (th :: Thm): sub_clause(fn, th))
+      match exact_clauses(info.equations,
+                          fun (th :: Thm): sub_clause(fn, th),
+                          [#'zero, #'succ_zero, #'succ_succ])
       | [zero, succ_zero, succ_succ]:
           NatSubEvidence(fn, zero :~ Thm, succ_zero :~ Thm,
                          succ_succ :~ Thm)
@@ -261,8 +246,9 @@ fun nat_pow_evidence(ctx :: Context, fn :: Term) :: maybe(NatPowEvidence):
   match info_for(ctx, fn)
   | #false: #false
   | info :: FunInfo:
-      match exact_pair(info.equations,
-                       fun (th :: Thm): pow_clause(fn, th))
+      match exact_clauses(info.equations,
+                          fun (th :: Thm): pow_clause(fn, th),
+                          [#'zero, #'succ])
       | [zero, succ]:
           match pow_succ_mul(fn, succ :~ Thm)
           | #false: #false

@@ -65,14 +65,19 @@ fun fail(message :: String, what :: Term):
 // into. One position per declared predicate, in declaration order.
 class Family(vars :: List.of(FVar),
              constants :: List.of(Term),
-             arities :: List.of(NonnegInt))
+             arities :: List.of(NonnegInt),
+             // The position of each declared predicate variable, keyed by
+             // that variable itself, for O(1) lookup by `family_index`.
+             index :: Map.of(Term, NonnegInt))
 
 fun mk_family(names :: List.of(Symbol),
               vars :: List.of(FVar)) :: Family:
   Family(vars,
          for List (name in names, v in vars):
            mk_const(name, (v :~ FVar).ty),
-         vars.map(fun (v :: FVar): argument_types(v).length()))
+         vars.map(fun (v :: FVar): argument_types(v).length()),
+         for values(m :~ Map = {}) (v in vars, i in List.iota(vars.length())):
+           m ++ {v :~ Term: i})
 
 fun argument_types(pred :: FVar) :: List.of(HType):
   recur loop (ty :: HType = pred.ty, acc :~ List.of(HType) = []):
@@ -87,11 +92,7 @@ fun family_terms(family :: Family) :: List.of(Term):
 
 // The position of `head` in the family, or `#false`.
 fun family_index(family :: Family, head :: Term) :: maybe(NonnegInt):
-  recur loop (i = 0):
-    cond
-    | i >= family.vars.length(): #false
-    | (family.vars[i] :~ FVar) :~ Term == head: i
-    | ~else: loop(i + 1)
+  family.index.get(head, #false)
 
 fun mentions_family(family :: Family, t :: Term) :: Boolean:
   for any (v in family.vars): vfree_in(v :~ Term, t)
@@ -99,7 +100,8 @@ fun mentions_family(family :: Family, t :: Term) :: Boolean:
 // Every predicate variable replaced by its constant.
 fun instantiate(family :: Family, t :: Term) :: Term:
   inst_fvar(
-    for List (v in family.vars, c in family.constants): [c :~ Term, v :~ Term],
+    for values(out :~ Map = {}) (v in family.vars, c in family.constants):
+      out ++ {v :~ FVar: c :~ Term},
     t)
 
 // -- positivity ---------------------------------------------------------------
@@ -587,8 +589,8 @@ fun derive_closure_case(thy :: Theory, family :: Family, rule :: Term,
           given in recovered):
       MP(thy, acc, given :~ Thm)
   let substitution:
-    for List (x in xs, argument in conclusion_args):
-      [argument :~ Term, x :~ Term]
+    for values(out :~ Map = {}) (x in xs, argument in conclusion_args):
+      out ++ {x :~ FVar: argument :~ Term}
   let instances = disjuncts.map(
                     fun (d :: Term): inst_fvar(substitution, d))
   let injected = inject_disjunct(
@@ -644,7 +646,7 @@ fun existential_levels(target :: Term, ys :: List.of(FVar))
     | List.cons(y, rest):
         match dest_exists(current)
         | [v, inner]:
-            loop(inst_fvar([[y :~ Term, v :~ FVar]], inner :~ Term),
+            loop(inst_fvar({v :~ FVar: y :~ Term}, inner :~ Term),
                  rest, acc ++ [current])
         | ~else:
             error(~who: #'inductive, "internal missing inversion binder")

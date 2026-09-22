@@ -153,12 +153,12 @@ fun unpack_general(thy :: Theory, prodthms :: ProdThms, fields :: List.of(Field)
       let [oa, obody] = (match dest_exists(concl_of(surj_at_g)) | l: l)
       let oa :~ FVar = oa
       let ga = genvar(tyF)
-      let obody_ga = inst_fvar([[ga, oa]], obody)
+      let obody_ga = inst_fvar({oa: ga}, obody)
       let asm_outer = ASSUME(thy, obody_ga)
       let [ob, ibody] = (match dest_exists(obody_ga) | l: l)
       let ob :~ FVar = ob
       let gb = genvar(tyRest)
-      let ibody_gb = inst_fvar([[gb, ob]], ibody)
+      let ibody_gb = inst_fvar({ob: gb}, ibody)
       let asm_inner = ASSUME(thy, ibody_gb)
       fun wrap_eq2(inner_eq :: Thm) :: Thm:
         wrap_eq(TRANS(asm_inner, AP_TERM(thy, mk_comb(mk_const(c_pair, mk_fun(tyF, mk_fun(tyRest, prod_ty(tyF, tyRest)))), ga), inner_eq)))
@@ -184,7 +184,7 @@ fun choose_through_and_rewrap(thy :: Theory, ex_th :: Thm, m :: Int, transform) 
       let [ov, obody] = (match dest_exists(concl_of(ex_th)) | l: l)
       let ov :~ FVar = ov
       let gv = genvar(ov.ty)
-      let obody_gv = inst_fvar([[gv, ov]], obody)
+      let obody_gv = inst_fvar({ov: gv}, obody)
       let asm = ASSUME(thy, obody_gv)
       let inner = choose_through_and_rewrap(thy, asm, m - 1, fun (rest_vars, flat_th): transform([gv] ++ rest_vars, flat_th))
       CHOOSE(thy, gv, ex_th, inner)
@@ -320,7 +320,7 @@ fun build_nonrecursive_datatype_thms(thy :: Theory, spec :: DatatypeSpec,
     let rep_of_abs = AP_TERM(thy, rep_c, unfold_ci)
     let payload = pack_fields(args)
     let inj_payload = inject_from(ptys, i, payload)
-    let th_pred_at = INST(thy, [[inj_payload, mk_var(v_rep, ety)]], th_pred)
+    let th_pred_at = INST(thy, {mk_var(v_rep, ety): inj_payload}, th_pred)
     let beta_pred_at = (match BETA_CONV(thy, mk_comb(pred, inj_payload))
                         | th :: Thm: th
                         | #false: error(~who: #'build_nonrecursive_datatype_thms, "beta failed"))
@@ -378,11 +378,10 @@ fun build_nonrecursive_datatype_thms(thy :: Theory, spec :: DatatypeSpec,
     let xs_t = xs.map(fun (v :: FVar): v :~ Term)
     let ys_t = ys.map(fun (v :: FVar): v :~ Term)
     GENL(thy, xs ++ ys, ctor_distinct_raw(i, j, xs_t, ys_t))
-  let distinctness_rev:
-    for values(acc :~ List.of(Thm) = []) (i in List.iota(n)):
-      for values(acc2 :~ List.of(Thm) = acc) (j in List.iota(n)):
-        (if i < j | List.cons(ctor_distinct(i, j), acc2) | acc2)
-  let distinctness = distinctness_rev.reverse()
+  let distinctness:
+    for values(m :~ Map = {}) (i in List.iota(n)):
+      for values(m2 :~ Map = m) (j in List.iota(n)):
+        (if i < j | m2 ++ {[i, j]: ctor_distinct(i, j)} | m2)
 
   // -- cases: `forall x. x=C0 or (?...x=C1(...)) or ...`, left-associated,
   // matching `datatype.rhm`'s own fold direction.
@@ -404,7 +403,7 @@ fun build_nonrecursive_datatype_thms(thy :: Theory, spec :: DatatypeSpec,
     | List.cons(w, wrest):
         let [zv, inner] = (match dest_exists(target) | l: l)
         let zv :~ FVar = zv
-        let inner_at_w = inst_fvar([[w, zv]], inner)
+        let inner_at_w = inst_fvar({zv: w}, inner)
         EXISTS(thy, target, w, exists_intro_chain(thy, inner_at_w, wrest, leaf_prover))
   fun disj_chain_gen(upto :: Int) :: Term:
     (if upto == 0 | ctor_leaf_target(0) | mk_disj(disj_chain_gen(upto - 1), ctor_leaf_target(upto)))
@@ -447,7 +446,7 @@ fun build_nonrecursive_datatype_thms(thy :: Theory, spec :: DatatypeSpec,
           let [oa, obody] = (match dest_exists(ldisj) | l: l)
           let oa :~ FVar = oa
           let ga = genvar(t0)
-          let obody_ga = inst_fvar([[ga, oa]], obody)
+          let obody_ga = inst_fvar({oa: ga}, obody)
           let inner_asm = ASSUME(thy, obody_ga)
           fun wrap_eq_left(th :: Thm) :: Thm:
             wrap_eq(TRANS(inner_asm, AP_TERM(thy, mk_const(c_inl, mk_fun(t0, sum_ty(t0, tyRest))), th)))
@@ -458,7 +457,7 @@ fun build_nonrecursive_datatype_thms(thy :: Theory, spec :: DatatypeSpec,
           let [ob, obody] = (match dest_exists(rdisj) | l: l)
           let ob :~ FVar = ob
           let gb = genvar(tyRest)
-          let obody_gb = inst_fvar([[gb, ob]], obody)
+          let obody_gb = inst_fvar({ob: gb}, obody)
           let inner_asm = ASSUME(thy, obody_gb)
           fun wrap_eq_right(th :: Thm) :: Thm:
             wrap_eq(TRANS(inner_asm, AP_TERM(thy, mk_const(c_inr, mk_fun(tyRest, sum_ty(t0, tyRest))), th)))
@@ -468,7 +467,7 @@ fun build_nonrecursive_datatype_thms(thy :: Theory, spec :: DatatypeSpec,
 
   let cases:
     fun wrap_eq_top(th :: Thm) :: Thm:
-      TRANS(SYM(thy, INST(thy, [[xv, mk_var(v_alpha, self)]], th_abs_rep)), AP_TERM(thy, abs_c, th))
+      TRANS(SYM(thy, INST(thy, {mk_var(v_alpha, self): xv}, th_abs_rep)), AP_TERM(thy, abs_c, th))
     GEN(thy, xv, cases_leaf(ptys, 0, mk_comb(rep_c, xv), wrap_eq_top))
 
   // -- induction: no recursive fields, so `build_induction`'s antecedent
@@ -497,7 +496,7 @@ fun build_nonrecursive_datatype_thms(thy :: Theory, spec :: DatatypeSpec,
           let [ov, obody] = (match dest_exists(stmt) | l: l)
           let ov :~ FVar = ov
           let gv = genvar(ov.ty)
-          let obody_gv = inst_fvar([[gv, ov]], obody)
+          let obody_gv = inst_fvar({ov: gv}, obody)
           let asm = ASSUME(thy, obody_gv)
           let inner = leaf_to_px(obody_gv, asm, chosen ++ [gv])
           CHOOSE(thy, gv, th, inner)

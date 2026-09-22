@@ -150,7 +150,7 @@ fun build_enum_thms(thy :: Theory, spec :: DatatypeSpec,
   fun rep_ctor_eq(i :: Int) :: Thm:
     let unfold_ci = unfold_def(thy, def_of(i), [])
     let rep_of_abs = AP_TERM(thy, rep_c, unfold_ci)
-    let th_pred_at = INST(thy, [[enum_inject(n, i), mk_var(v_rep, ety)]], th_pred)
+    let th_pred_at = INST(thy, {mk_var(v_rep, ety): enum_inject(n, i)}, th_pred)
     let beta_pred_at = (match BETA_CONV(thy, mk_comb(pred, enum_inject(n, i)))
                         | th :: Thm: th
                         | #false: error(~who: #'build_enum_thms, "beta failed"))
@@ -167,12 +167,12 @@ fun build_enum_thms(thy :: Theory, spec :: DatatypeSpec,
     let false_th = MP(thy, NOT_ELIM(thy, enum_distinct_repr(thy, sumthms, n, i, j)), combined)
     NOT_INTRO(thy, DISCH(thy, concl_of(asm), false_th))
 
-  // -- distinctness: one per `i < j` pair, matching `build_distinctness`'s
-  // enumeration order exactly.
-  let pairs = for values(acc :~ List = []) (ci in spec.ctors, i in List.iota(n)):
-                for values(acc2 :~ List = acc) (cj in spec.ctors, j in List.iota(n)):
-                  (if i < j | acc2 ++ [[i, j]] | acc2)
-  let distinctness = for List ([i, j] in pairs): ctor_distinct(i, j)
+  // -- distinctness: one per `i < j` pair, keyed by `[i, j]`, matching
+  // `build_distinctness`'s enumeration order exactly.
+  let distinctness:
+    for values(m :~ Map = {}) (i in List.iota(n)):
+      for values(m2 :~ Map = m) (j in List.iota(n)):
+        (if i < j | m2 ++ {[i, j]: ctor_distinct(i, j)} | m2)
 
   // -- cases: `forall x. x=C0 or x=C1 or ... or x=C(n-1)`.  From `rep(x)`
   // satisfying `pred` trivially and unfolding it through `sum`'s own
@@ -214,7 +214,7 @@ fun build_enum_thms(thy :: Theory, spec :: DatatypeSpec,
             let [oa, obody] = (match dest_exists(ldisj) | l: l)
             let oa :~ FVar = oa
             let ga = genvar(unitty)
-            let obody_ga = inst_fvar([[ga, oa]], obody)
+            let obody_ga = inst_fvar({oa: ga}, obody)
             let inner_asm = ASSUME(thy, obody_ga)
             // `e = inl(ga) = inl(one)` since `ga:unit` and `unit_unique`
             let ga_eq_one = SPEC(thy, ga, unit_unique)
@@ -227,7 +227,7 @@ fun build_enum_thms(thy :: Theory, spec :: DatatypeSpec,
             let [ob, obody] = (match dest_exists(rdisj) | l: l)
             let ob :~ FVar = ob
             let gb = genvar(tyRest)
-            let obody_gb = inst_fvar([[gb, ob]], obody)
+            let obody_gb = inst_fvar({ob: gb}, obody)
             let inner_asm = ASSUME(thy, obody_gb)
             // recurse: `gb` decomposes into one of `E(k-1)`'s `k-1` cases
             let rest = locate(k - 1, gb)
@@ -265,7 +265,7 @@ fun build_enum_thms(thy :: Theory, spec :: DatatypeSpec,
         DISJ1(thy, acc, mk_eq(xv, ctor_term(i + 1 + j)))
     fun to_ctor_eq(i :: Int, disjth :: Thm) :: Thm:
       fun mk_one(a :: Thm) :: Thm:
-        TRANS(SYM(thy, INST(thy, [[xv, mk_var(v_alpha, self)]], th_abs_rep)),
+        TRANS(SYM(thy, INST(thy, {mk_var(v_alpha, self): xv}, th_abs_rep)),
               TRANS(AP_TERM(thy, abs_c, a), SYM(thy, unfold_def(thy, def_of(i), []))))
       cond
       | i == n - 1: inject_left(i, mk_one(disjth))
@@ -363,10 +363,10 @@ fun build_enum_discriminators(thy :: Theory, spec :: DatatypeSpec,
 
 fun build_enum_elim_rules(thy :: Theory, spec :: DatatypeSpec, ctor_term,
                           discriminators :: List.of(Thm), xv :: FVar)
-     :: values(Theory, List.of(Thm)):
+     :: values(Theory, Map.of(Symbol, Thm)):
   let self = mk_tyapp(spec.name, [])
   let n = spec.ctors.length()
-  for values(t :~ Theory = thy, acc :~ List = []) (ci in spec.ctors, i in List.iota(n)):
+  for values(t :~ Theory = thy, acc :~ Map = {}) (ci in spec.ctors, i in List.iota(n)):
     let ci :~ Ctor = ci
     let disc = mk_const(discriminator_name(ci), mk_fun(self, bool))
     // `is_Ci(x) ==> Ci === x`: `is_Ci(x)` unfolds to `x=Ci`, `SYM` gives it.
@@ -377,4 +377,4 @@ fun build_enum_elim_rules(thy :: Theory, spec :: DatatypeSpec, ctor_term,
     let x_eq_ci = EQ_MP(unfolded, asm)
     let ci_eq_x = SYM(t, x_eq_ci)
     let th = GEN(t, xv, DISCH(t, mk_comb(disc, xv), ci_eq_x))
-    values(t, acc ++ [th])
+    values(t, acc ++ {ci.name: th})

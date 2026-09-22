@@ -137,13 +137,23 @@ fun family_members(specs :: List.of(FunSpec),
                    spec.arg_types, spec.ret_type, dom_ctor :~ Term,
                    cod_ctor, cod_selector)
 
-fun member_for_head(members :: List.of(FamilyMemberFn),
-                    head :: Term) :: maybe(FamilyMemberFn):
+// The position of the member whose combined-function head is `head`, or
+// `#false` when no member matches. Shared by every caller that needs to
+// locate a member by its head constant, rather than each re-running its own
+// linear scan.
+fun member_index(members :: List.of(FamilyMemberFn),
+                 head :: Term) :: maybe(NonnegInt):
   recur loop (i = 0):
     cond
     | i >= members.length(): #false
-    | (members[i] :~ FamilyMemberFn).fn == head: members[i] :~ FamilyMemberFn
+    | (members[i] :~ FamilyMemberFn).fn == head: i
     | ~else: loop(i + 1)
+
+fun member_for_head(members :: List.of(FamilyMemberFn),
+                    head :: Term) :: maybe(FamilyMemberFn):
+  match member_index(members, head)
+  | #false: #false
+  | i :: NonnegInt: members[i] :~ FamilyMemberFn
 
 fun tagged_argument(m :: FamilyMemberFn, args :: List.of(Term)) :: Term:
   list_mk_comb(m.dom_ctor, args)
@@ -195,15 +205,9 @@ fun rewrite_family_calls(members :: List.of(FamilyMemberFn), impl :: Term,
 fun fold_family_calls(thy :: Theory, members :: List.of(FamilyMemberFn),
                       definitions :: List.of(Thm), impl :: Term,
                       t :: Term) :: Thm:
-  fun member_index(head :: Term) :: maybe(NonnegInt):
-    recur loop (i = 0):
-      cond
-      | i >= members.length(): #false
-      | (members[i] :~ FamilyMemberFn).fn == head: i
-      | ~else: loop(i + 1)
   fun walk(t :: Term) :: Thm:
     let (head, args) = strip_comb(t)
-    match member_index(head)
+    match member_index(members, head)
     | index :: NonnegInt when args.length()
                                == (members[index] :~ FamilyMemberFn).arg_types.length():
         let m :~ FamilyMemberFn = members[index]
@@ -306,16 +310,23 @@ fun derive_member_equation(thy :: Theory, members :: List.of(FamilyMemberFn),
   let m :~ FamilyMemberFn = members[index]
   let vars = pattern_variables(patterns)
   let rhs_substitution:
-    for values(out :~ List.of(List.of(Term)) = []) (
+    for values(out :~ Map = {}) (
           source in clause.pats, target in patterns):
-      out ++ match_variables(source :~ Term, target :~ Term)
+      for values(acc :~ Map = out) (
+            pair in match_variables(source :~ Term, target :~ Term)):
+        let [t, p] = pair :~ List
+        acc ++ {p :~ FVar: t :~ Term}
   let rhs_here = inst_fvar(rhs_substitution, clause_rhs(clause))
   let lhs_target = mk_comb(impl, tagged_argument(m, patterns))
   let opened = specialize_all(thy, impl_equation)
   let (guards, _) = strip_imp(concl_of(opened))
   let unguarded = UNDISCH_ALL(thy, opened)
-  let substitution = match_variables(
-                       lhs_of_equation(concl_of(unguarded)), lhs_target)
+  let substitution:
+    for values(out :~ Map = {}) (
+          pair in match_variables(
+                    lhs_of_equation(concl_of(unguarded)), lhs_target)):
+      let [t, p] = pair :~ List
+      out ++ {p :~ FVar: t :~ Term}
   let instance = INST(thy, substitution, unguarded)
   let instantiated_guards:
     guards.map(
@@ -438,13 +449,12 @@ fun family_call_sites(members :: List.of(FamilyMemberFn),
   fun calls_in(t :: Term, acc :~ List.of(List)) :: List.of(List):
     let (head, args) = strip_comb(t)
     let here:
-      recur loop (j = 0):
-        cond
-        | j >= members.length(): acc
-        | (members[j] :~ FamilyMemberFn).fn == head
-            && args.length() == (members[j] :~ FamilyMemberFn).arg_types.length():
-            acc ++ [[j, args]]
-        | ~else: loop(j + 1)
+      match member_index(members, head)
+      | #false: acc
+      | j :: NonnegInt when args.length()
+                             == (members[j] :~ FamilyMemberFn).arg_types.length():
+          acc ++ [[j, args]]
+      | ~else: acc
     match t
     | Comb(f, x): calls_in(x :~ Term, calls_in(f :~ Term, here))
     | Abs(_, _):

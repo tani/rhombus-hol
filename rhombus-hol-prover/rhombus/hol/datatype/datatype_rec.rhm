@@ -220,7 +220,7 @@ fun prove_label_distinct(thy :: Theory, alg :: AlgebraThms,
 // them is the next layer's job.  What matters here is that all four are
 // derived, for any spec, from the pieces `carve_recursive_datatype` produced.
 class RecTreeThms(injectivity :: List.of(Thm),
-                  distinctness :: List.of(Thm),
+                  distinctness :: Map.of(List.of(NonnegInt), Thm),
                   induction :: Thm,
                   cases :: Thm)
 
@@ -249,20 +249,21 @@ fun derive_tree_theorems(thy :: Theory, rc :: RecCarving, alg :: AlgebraThms,
                            fun (ts :: List, us :: List, k :: Int):
                              prove_kids_injective(thy, ind, rc.junk, ts, us, k),
                            i)
-  // one per ordered pair `i < j`, the order `DatatypeThms` states them in
+  // keyed by the ordered constructor pair `i < j`
   let distinctness:
-    for values(acc :~ List = []) (i in List.iota(rc.ctors.length())):
-      acc ++ (for values(a2 :~ List = []) (j in List.iota(rc.ctors.length())):
-                cond
-                | j <= i: a2
-                | ~else:
-                    a2 ++ [prove_ctor_distinct(thy, rc.node_inl, rc.junk,
-                                               rc.ctors, cv,
-                                               (closed[i] :~ Thm),
-                                               (closed[j] :~ Thm), node_inj,
-                                               prove_label_distinct(thy, alg,
-                                                                    rc, i, j),
-                                               i, j)])
+    for values(out :~ Map = {}) (i in List.iota(rc.ctors.length())):
+      for values(out2 :~ Map = out) (j in List.iota(rc.ctors.length())):
+        cond
+        | j <= i: out2
+        | ~else:
+            out2 ++ {[i, j]:
+                       prove_ctor_distinct(thy, rc.node_inl, rc.junk,
+                                           rc.ctors, cv,
+                                           (closed[i] :~ Thm),
+                                           (closed[j] :~ Thm), node_inj,
+                                           prove_label_distinct(thy, alg,
+                                                                rc, i, j),
+                                           i, j)}
   let induction:
     prove_datatype_induction(thy, rc.node_inl, rc.junk, rc.ctors, cv,
                              closed, node_inj, rep_at)
@@ -604,7 +605,7 @@ fun restate_cases(thy :: Theory, spec :: DatatypeSpec,
                 | n == k: t
                 | ~else:
                     match dest_exists(t)
-                    | [v, body]: peel(n + 1, inst_fvar([[args[n], v :~ FVar]], body))
+                    | [v, body]: peel(n + 1, inst_fvar({(v :~ FVar): args[n]}, body))
                     | ~else: error(~who: #'restate_cases, "shape")
             loop(k - 1, EXISTS(thy, target, args[k], acc))
     let innermost:
@@ -665,26 +666,20 @@ fun build_recursive_datatype_thms(thy0 :: Theory, spec :: DatatypeSpec,
           acc ++ {(c :~ Ctor).name:
                     restate_injectivity(thy2, spec, alg, rc, cs,
                                         (tree.injectivity[i] :~ Thm), i)}
-  // `i < j` in the order `DatatypeThms` states them, and `derive_tree_theorems`
-  // produced them in that same order
-  let distinctness :~ List:
-    let pairs = for values(acc :~ List = []) (i in List.iota(spec.ctors.length())):
-                  for values(a2 :~ List = acc) (j in List.iota(spec.ctors.length())):
-                    (if i < j | a2 ++ [[i, j]] | a2)
-    for List (ij in pairs, t in tree.distinctness):
-      restate_distinctness(thy2, spec, rc, cs, t :~ Thm,
-                           ((ij :~ List)[0] :~ Int), ((ij :~ List)[1] :~ Int))
+  let distinctness:
+    for values(m :~ Map = {}) (i in List.iota(spec.ctors.length())):
+      for values(m2 :~ Map = m) (j in List.iota(spec.ctors.length())):
+        (if i < j
+         | m2 ++ {[i, j]:
+                    restate_distinctness(
+                      thy2, spec, rc, cs,
+                      tree.distinctness[[i, j]] :~ Thm, i, j)}
+         | m2)
   let induction = restate_induction(thy2, spec, alg, rc, cs, tree.induction)
   let cases = restate_cases(thy2, spec, cs.terms, induction)
 
   fun ctor_distinct(i :: Int, j :: Int) :: Thm:
-    let idx:
-      recur loop (a = 0, b = 1, k = 0):
-        cond
-        | a == i && b == j: k
-        | b == spec.ctors.length() - 1: loop(a + 1, a + 2, k + 1)
-        | ~else: loop(a, b + 1, k + 1)
-    (distinctness[idx] :~ Thm)
+    distinctness[[i, j]] :~ Thm
   let (thy, discriminators, selectors, elim_rules):
     build_observers(thy2, spec, fun (i :: Int): (cs.terms[i] :~ Term),
                     injectivity, ctor_distinct, cases)

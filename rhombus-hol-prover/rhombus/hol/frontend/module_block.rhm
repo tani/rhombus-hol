@@ -96,18 +96,16 @@ meta:
     state.constants.get(name, #false)
 
 
-  fun overload_argument_position(argument_names :: List,
+  fun overload_argument_position(argument_positions :: Map.of(Symbol, NonnegInt),
                                  name :: Symbol,
                                  at :: Syntax) :: NonnegInt:
-    recur find (index = 0):
-      cond
-      | index == argument_names.length():
-          syntax_meta.error(
-            "implementation template uses an unknown overload argument `"
-              ++ to_string(name) ++ "`",
-            at)
-      | argument_names[index] == name: index
-      | ~else: find(index + 1)
+    match argument_positions.get(name, #false)
+    | #false:
+        syntax_meta.error(
+          "implementation template uses an unknown overload argument `"
+            ++ to_string(name) ++ "`",
+          at)
+    | position: position :~ NonnegInt
 
   fun overload_argument_order(argument_names :: List,
                               template_arguments :: maybe(List.of(Symbol)),
@@ -119,9 +117,13 @@ meta:
         when argument_names.contains(#false)
         | syntax_meta.error(
             "an implementation template needs named overload arguments", at)
+        let argument_positions:
+          for values(m :~ Map = {}) (
+                n in argument_names, i in List.iota(argument_names.length())):
+            m ++ {n :~ Symbol: i}
         let order:
           for List (argument in (arguments :~ List.of(Symbol))):
-            overload_argument_position(argument_names, argument, at)
+            overload_argument_position(argument_positions, argument, at)
         unless valid_argument_order(order, arity)
         | syntax_meta.error(
             "implementation template must use every overload argument "
@@ -284,11 +286,22 @@ meta:
          rhombus/hol/frontend/surface_state open
          rhombus/hol/frontend/type/registry open
        export: state
+       def function_map:
+         for values(out :~ Map = {}) (
+               [name, arity] in [$overload_function, ...]):
+           out ++ {name :~ Symbol: arity :~ NonnegInt}
+       def constant_map:
+         for values(out :~ Map = {}) ([name, ty] in [$constant, ...]):
+           out ++ {name :~ Symbol: ty :~ HType}
+       def runtime_arity_map:
+         for values(out :~ Map = {}) (
+               [name, arity] in [$runtime_arity, ...]):
+           out ++ {name :~ Symbol: arity :~ NonnegInt}
        def state = make_surface_state(
-                     [$overload_function, ...],
+                     function_map,
                      [$method, ...],
-                     [$constant, ...],
-                     [$runtime_arity, ...],
+                     constant_map,
+                     runtime_arity_map,
                      [$type_constructor, ...])'
 
 
@@ -959,8 +972,15 @@ meta:
       | groups:
           let [g, ...] = groups :~ List
           '$g; ...'
-    let [induct, using_names, skipped_stage_names, disabled_rule_names,
-         case_stxs, witness_stxs, search_steps, extensionality] = elab.parse_tactic(tactic_stx)
+    let parsed = elab.parse_tactic(tactic_stx)
+    let induct = parsed[#'induct]
+    let using_names = parsed[#'use]
+    let skipped_stage_names = parsed[#'skip]
+    let disabled_rule_names = parsed[#'disable]
+    let case_stxs = parsed[#'split]
+    let witness_stxs = parsed[#'choose]
+    let search_steps = parsed[#'limit]
+    let extensionality = parsed[#'extensionality]
     let induct_stx = option_symbol_stx(induct)
     let extensionality_stx = option_symbol_stx(extensionality)
     let [u, ...] = (using_names :~ List).map(fun (n): symbol_id(n :~ Symbol))

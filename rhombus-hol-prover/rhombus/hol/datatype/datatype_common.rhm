@@ -54,7 +54,7 @@ fun exists_intro_chain(thy :: Theory, target :: Term, ws :: List.of(Term),
   | List.cons(w, wrest):
       let [zv, inner] = (match dest_exists(target) | l: l)
       let zv :~ FVar = zv
-      let inner_at_w = inst_fvar([[w, zv]], inner)
+      let inner_at_w = inst_fvar({zv: w}, inner)
       EXISTS(thy, target, w, exists_intro_chain(thy, inner_at_w, wrest, leaf_prover))
 
 fun congruence_chain(thy :: Theory, f :: Term, eqs :: List.of(Thm)) :: Thm:
@@ -100,7 +100,7 @@ fun build_observers(thy :: Theory, spec :: DatatypeSpec,
                     injectivity :: Map.of(Symbol, Thm),
                     ctor_distinct :: Function.of_arity(2),
                     cases :: Thm)
-     :: values(Theory, List.of(Thm), List.of(Thm), List.of(Thm)):
+     :: values(Theory, List.of(Thm), List.of(Thm), Map.of(Symbol, Thm)):
   let n = spec.ctors.length()
   let self = mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol): mk_tyvar(p)))
   fun ctor_applied(i :: Int, args :: List.of(Term)) :: Term:
@@ -141,7 +141,7 @@ fun build_observers(thy :: Theory, spec :: DatatypeSpec,
         let [zv, ibody] = (match dest_exists(stmt) | l: l)
         let zv :~ FVar = zv
         let gv = genvar(zv.ty)
-        let ibody_gv = inst_fvar([[gv, zv]], ibody)
+        let ibody_gv = inst_fvar({zv: gv}, ibody)
         CHOOSE(thy, gv, ASSUME(thy, stmt), disc_disprove(i, j, ys, ibody_gv, chosen ++ [gv]))
   fun discriminator_pair(i :: Int, j :: Int) :: Thm:
     let cj = spec.ctors[j] :~ Ctor
@@ -193,7 +193,7 @@ fun build_observers(thy :: Theory, spec :: DatatypeSpec,
     let (vv2, body_at_xs) = dest_abs(pred_abs)
     let vv2 :~ FVar = vv2
     let pred = mk_abs(vv2, body_at_xs)
-    let body_at_xs_j = inst_fvar([[target_j, vv2]], body_at_xs)
+    let body_at_xs_j = inst_fvar({vv2: target_j}, body_at_xs)
     let leaf_pf = CONJ(thy, REFL(thy, ctor_applied(i, xs_t)), REFL(thy, target_j))
     let pa_reduced = exists_intro_chain(thy, body_at_xs_j, xs_t, fun (leaf :: Term) :: Thm: leaf_pf)
     let beta_pa = (match BETA_CONV(thy, mk_comb(pred, target_j))
@@ -201,14 +201,14 @@ fun build_observers(thy :: Theory, spec :: DatatypeSpec,
                    | #false: error(~who: #'build_observers, "beta failed"))
     let pa = EQ_MP(SYM(thy, beta_pa), pa_reduced)
     let vfresh = genvar(f.ty)
-    let body_at_v = inst_fvar([[vfresh, vv2]], body_at_xs)
+    let body_at_v = inst_fvar({vv2: vfresh}, body_at_xs)
     fun uniq_peel(stmt :: Term, th :: Thm, chosen :: List.of(Term)) :: Thm:
       cond
       | is_exists(stmt):
           let [zv, ibody] = (match dest_exists(stmt) | l: l)
           let zv :~ FVar = zv
           let gv = genvar(zv.ty)
-          let ibody_gv = inst_fvar([[gv, zv]], ibody)
+          let ibody_gv = inst_fvar({zv: gv}, ibody)
           let inner = uniq_peel(ibody_gv, ASSUME(thy, ibody_gv), chosen ++ [gv])
           CHOOSE(thy, gv, th, inner)
       | ~else:
@@ -229,7 +229,8 @@ fun build_observers(thy :: Theory, spec :: DatatypeSpec,
 
   // -- elim rules: `forall x. is_Ci(x) ==> Ci(Ci_f0(x),...) === x`, from
   // `is_Ci`'s own unfolding (an `x = Ci(chosen)` witness once every
-  // existential is peeled) rewritten through `selector_theorem`.
+  // existential is peeled) rewritten through `selector_theorem`, keyed by
+  // constructor name as `DatatypeThms` keys it.
   fun elim_rule(i :: Int) :: Thm:
     let c = spec.ctors[i] :~ Ctor
     let k = c.fields.length()
@@ -241,7 +242,7 @@ fun build_observers(thy :: Theory, spec :: DatatypeSpec,
           let [zv, ibody] = (match dest_exists(stmt) | l: l)
           let zv :~ FVar = zv
           let gv = genvar(zv.ty)
-          let ibody_gv = inst_fvar([[gv, zv]], ibody)
+          let ibody_gv = inst_fvar({zv: gv}, ibody)
           let inner = peel(ibody_gv, ASSUME(thy, ibody_gv), chosen ++ [gv])
           CHOOSE(thy, gv, th, inner)
       | ~else:
@@ -255,5 +256,5 @@ fun build_observers(thy :: Theory, spec :: DatatypeSpec,
            | SYM(thy, x_eq_ci)
            | TRANS(congruence_chain(thy, ctor_const(i), sel_eqs), SYM(thy, x_eq_ci)))
     GEN(thy, xv, DISCH(thy, disc_x, peel(concl_of(exists_th), exists_th, [])))
-  let elim_rules = for List (i in List.iota(n)): elim_rule(i)
+  let elim_rules = for values(m :~ Map = {}) (i in List.iota(n)): m ++ {(spec.ctors[i] :~ Ctor).name: elim_rule(i)}
   values(thy, discriminators, selectors, elim_rules)

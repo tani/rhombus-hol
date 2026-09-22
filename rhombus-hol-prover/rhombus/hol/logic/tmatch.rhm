@@ -21,9 +21,9 @@ export:
   term_match
 
 class MatchResult(tyin :: Map.of(Symbol, HType),
-                  // `[replacement, variable]` pairs, ready for `INST`, with
-                  // the variables already type-instantiated
-                  theta :: List)
+                  // a map from target term to replacement term, ready for
+                  // `INST`, with the variables already type-instantiated
+                  theta :: Map.of(Term, Term))
 
 // Match `pat` against `t`, where `pvars` are the pattern's variables.
 // Everything else in `pat` -- constants, and free variables not in `pvars` --
@@ -33,7 +33,7 @@ fun term_match(pvars :: List.of(FVar), pat :: Term, t :: Term)
   // Bindings are keyed by the *uninstantiated* pattern variable, since that is
   // what appears in the pattern.
   fun go(pat :: Term, t :: Term, depth :: NonnegInt,
-         tyin :: Map.of(Symbol, HType), binds :~ List) :: maybe(List):
+         tyin :: Map.of(Symbol, HType), binds :~ Map) :: maybe(List):
     match pat
     | FVar(_, _) when pvars.contains(pat):
         // A pattern variable may not capture a bound variable of the target.
@@ -45,8 +45,8 @@ fun term_match(pvars :: List.of(FVar), pat :: Term, t :: Term)
             match type_match((pat :~ FVar).ty, type_of(t), tyin)
             | #false: #false
             | tyin2:
-                match lookup(binds, pat)
-                | #false: [tyin2, List.cons([pat, t], binds)]
+                match binds.get(pat :~ FVar, #false)
+                | #false: [tyin2, binds ++ {pat :~ FVar: t}]
                 | prev: (if prev == t | [tyin2, binds] | #false)
     | FVar(_, _): (if pat == t | [tyin, binds] | #false)
     | BVar(i, _):
@@ -78,23 +78,32 @@ fun term_match(pvars :: List.of(FVar), pat :: Term, t :: Term)
             | #false: #false
             | tyin2: go(pbody, tbody, depth + 1, tyin2, binds)
         | ~else: #false
-  match go(pat, t, 0, {}, [])
+  match go(pat, t, 0, {}, {})
   | #false: #false
   | [tyin, binds]:
       let tyin :~ Map = tyin
+      let binds :~ Map = binds
       // Report the variables as `INST` will see them: after `INST_TYPE` has
-      // run, a pattern variable's type has been instantiated too.
-      let theta = (binds :~ List).map(
-        fun ([v, s]): [s, inst_type(tyin, v :~ FVar)])
-      // Every pattern variable must have been bound, or the instantiation
-      // would leave a variable behind and the rule would not be an instance.
-      cond
-      | (for all (pv in pvars): lookup(binds, pv) != #false):
-          MatchResult(tyin, theta)
+      // run, a pattern variable's type has been instantiated too. Type
+      // instantiation can merge two distinct source variables; accept that
+      // only when both bindings agree, since one Map key cannot denote two
+      // replacements.
+      let theta:
+        for values(out :~ maybe(Map) = {}) ((v, s) in binds):
+          match out
+          | #false: #false
+          | out :~ Map:
+              let key = inst_type(tyin, v :~ FVar) :~ Term
+              match out.get(key, #false)
+              | #false: out ++ {key: s}
+              | prior: (if prior == s | out | #false)
+      match theta
+      | #false: #false
+      | theta :~ Map:
+          // Every pattern variable must have been bound, or the instantiation
+          // would leave a variable behind and the rule would not be an instance.
+          cond
+          | (for all (pv in pvars): binds.has_key(pv)):
+              MatchResult(tyin, theta)
+          | ~else: #false
       | ~else: #false
-
-fun lookup(binds :~ List, v :: Term) :: maybe(Term):
-  recur loop (bs :~ List = binds):
-    match bs
-    | []: #false
-    | List.cons([x, s], rest): (if x == v | s | loop(rest))

@@ -39,28 +39,24 @@ check const_type(thy, #'plus) ~is mk_fun(nat_ty, mk_fun(nat_ty, nat_ty))
 // This is also the induction-scheme generator's input, so it has to name the
 // argument the prover should induct on.
 
-check (P.funs[#'app] :~ FunInfo).recursion ~matches StructuralRecursion([0], [0], _)
-check (P.funs[#'rev] :~ FunInfo).recursion ~matches StructuralRecursion([0], [0], _)
-check (P.funs[#'plus] :~ FunInfo).recursion ~matches StructuralRecursion([0], [0], _)
-check (P.funs[#'length] :~ FunInfo).recursion ~matches StructuralRecursion([0], [0], _)
-// `size` and `flatten` recurse on both subtrees, so both calls must descend.
-check (P.funs[#'size] :~ FunInfo).recursion ~matches StructuralRecursion([0], [0], _)
+check (P.funs[#'app] :~ FunInfo).induction ~matches RecursiveInduction([0])
+check (P.funs[#'rev] :~ FunInfo).induction ~matches RecursiveInduction([0])
+check (P.funs[#'plus] :~ FunInfo).induction ~matches RecursiveInduction([0])
+check (P.funs[#'length] :~ FunInfo).induction ~matches RecursiveInduction([0])
+// `size` recurses structurally on its tree argument.
+check (P.funs[#'size] :~ FunInfo).induction ~matches RecursiveInduction([0])
+
 check:
-  match (P.funs[#'size] :~ FunInfo).recursion
-  | StructuralRecursion(_, _, sites): sites.length()
-  ~is 2
-check:
-  match (P.funs[#'flatten] :~ FunInfo).recursion
-  | StructuralRecursion(_, _, sites): sites.length()
-  ~is 2
+  clause_rhs(DefClause([], []))
+  ~throws "a clause needs at least one body term"
 
 check:
   // A non-recursive definition carries no structural order.
   let n = v(#'n, nat_ty)
   let spec = FunSpec(#'twice, [nat_ty], nat_ty,
-                     [DefClause([n], ap2(P.plus, n, n))])
-  let info = prepare_function(thy, spec, P.dts)
-  match info.recursion
+                     [DefClause([n], [ap2(P.plus, n, n)])])
+  let prepared = prepare_function(thy, spec, P.dts)
+  match prepared.recursion
   | NoRecursion(): #true
   ~is #true
 
@@ -95,16 +91,16 @@ check:
   // `loop(n) = loop(n)` -- the argument does not shrink
   let loop_c = mk_const(#'loopy, mk_fun(nat_ty, nat_ty))
   prepare_function(thy, FunSpec(#'loopy, [nat_ty], nat_ty,
-                                [DefClause([n], ap1(loop_c, n))]),
+                                [DefClause([n], [ap1(loop_c, n)])]),
                    P.dts)
   ~throws "cannot see that the definition terminates"
 check:
   // recursing on the successor rather than the predecessor
   let up = mk_const(#'up, mk_fun(nat_ty, nat_ty))
   prepare_function(thy, FunSpec(#'up, [nat_ty], nat_ty,
-                                [DefClause([P.zero], P.zero),
+                                [DefClause([P.zero], [P.zero]),
                                  DefClause([ap1(P.succ, m)],
-                                           ap1(up, ap1(P.succ, ap1(P.succ, m))))]),
+                                           [ap1(up, ap1(P.succ, ap1(P.succ, m)))])]),
                    P.dts)
   ~throws "cannot see that the definition terminates"
 
@@ -114,7 +110,7 @@ check:
   let loop_c = mk_const(#'loopy2, mk_fun(nat_ty, nat_ty))
   try:
     prepare_function(thy, FunSpec(#'loopy2, [nat_ty], nat_ty,
-                                  [DefClause([n], ap1(loop_c, n))]),
+                                  [DefClause([n], [ap1(loop_c, n)])]),
                      P.dts)
     ~catch _: #void
   const_type(thy, #'loopy2)
@@ -126,7 +122,7 @@ check:
   // missing the `cons` case
   let f = mk_const(#'partial, mk_fun(list_ty(A), nat_ty))
   prepare_function(thy, FunSpec(#'partial, [list_ty(A)], nat_ty,
-                                [DefClause([P.nil], P.zero)]),
+                                [DefClause([P.nil], [P.zero])]),
                    P.dts)
   ~throws "not exhaustive"
 check:
@@ -134,9 +130,9 @@ check:
   // wins nowhere, which is a mistake however clauses are ordered.
   let f = mk_const(#'dup, mk_fun(list_ty(A), nat_ty))
   prepare_function(thy, FunSpec(#'dup, [list_ty(A)], nat_ty,
-                                [DefClause([P.nil], P.zero),
-                                 DefClause([ap2(P.cons, hd, tl)], P.zero),
-                                 DefClause([P.nil], P.zero)]),
+                                [DefClause([P.nil], [P.zero]),
+                                 DefClause([ap2(P.cons, hd, tl)], [P.zero]),
+                                 DefClause([P.nil], [P.zero])]),
                    P.dts)
   ~throws "this clause can never match"
 check:
@@ -146,8 +142,8 @@ check:
   // second for `Cons` -- the shape the catch-all is left holding.
   let (_, info) = derive_nonrecursive(
     thy, FunSpec(#'mixed, [list_ty(A)], nat_ty,
-                 [DefClause([P.nil], P.zero),
-                  DefClause([xs], ap1(P.succ, P.zero))]),
+                 [DefClause([P.nil], [P.zero]),
+                  DefClause([xs], [ap1(P.succ, P.zero)])]),
     P.dts)
   let equations = (info :~ FunInfo).equations
   equations.length() == 2
@@ -158,8 +154,8 @@ check:
   // unreachable.
   let f = mk_const(#'mixed2, mk_fun(list_ty(A), nat_ty))
   prepare_function(thy, FunSpec(#'mixed2, [list_ty(A)], nat_ty,
-                                [DefClause([xs], P.zero),
-                                 DefClause([P.nil], P.zero)]),
+                                [DefClause([xs], [P.zero]),
+                                 DefClause([P.nil], [P.zero])]),
                    P.dts)
   ~throws "this clause can never match"
 
@@ -175,10 +171,10 @@ check:
   let two_or_more = ap2(P.cons, hd, ap2(P.cons, hd2, tl))
   let (_, info) = derive_nonrecursive(
     thy, FunSpec(#'by_length, [list_ty(A)], nat_ty,
-                 [DefClause([P.nil], P.zero),
-                  DefClause([one_elem], ap1(P.succ, P.zero)),
+                 [DefClause([P.nil], [P.zero]),
+                  DefClause([one_elem], [ap1(P.succ, P.zero)]),
                   DefClause([two_or_more],
-                            ap1(P.succ, ap1(P.succ, P.zero)))]),
+                            [ap1(P.succ, ap1(P.succ, P.zero))])]),
     P.dts)
   (info :~ FunInfo).equations.length()
   ~is 3
@@ -189,8 +185,8 @@ check:
   let one_elem = ap2(P.cons, hd, P.nil)
   prepare_function(
     thy, FunSpec(#'by_length2, [list_ty(A)], nat_ty,
-                 [DefClause([P.nil], P.zero),
-                  DefClause([one_elem], ap1(P.succ, P.zero))]),
+                 [DefClause([P.nil], [P.zero]),
+                  DefClause([one_elem], [ap1(P.succ, P.zero)])]),
     P.dts)
   ~throws "not exhaustive"
 check:
@@ -200,16 +196,16 @@ check:
   let f = mk_const(#'nested_reused, mk_fun(list_ty(A), nat_ty))
   let deep = ap2(P.cons, hd, ap2(P.cons, hd, tl))
   prepare_function(thy, FunSpec(#'nested_reused, [list_ty(A)], nat_ty,
-                                [DefClause([P.nil], P.zero),
-                                 DefClause([deep], P.zero)]),
+                                [DefClause([P.nil], [P.zero]),
+                                 DefClause([deep], [P.zero])]),
                    P.dts)
   ~throws "pattern variable is repeated"
 check:
   let f = mk_const(#'rep, mk_fun(list_ty(A), list_ty(A)))
   let same = ap2(P.cons, hd, tl)
   prepare_function(thy, FunSpec(#'rep, [list_ty(A), list_ty(A)], list_ty(A),
-                                [DefClause([P.nil, ys], ys),
-                                 DefClause([same, tl], ys)]),
+                                [DefClause([P.nil, ys], [ys]),
+                                 DefClause([same, tl], [ys])]),
                    P.dts)
   ~throws "repeated"
 
@@ -218,21 +214,21 @@ check:
 check:
   let f = mk_const(#'wrongty, mk_fun(list_ty(A), nat_ty))
   prepare_function(thy, FunSpec(#'wrongty, [list_ty(A)], nat_ty,
-                                [DefClause([P.nil], P.nil),
-                                 DefClause([ap2(P.cons, hd, tl)], P.zero)]),
+                                [DefClause([P.nil], [P.nil]),
+                                 DefClause([ap2(P.cons, hd, tl)], [P.zero])]),
                    P.dts)
   ~throws "clause result has the wrong type"
 check:
   // `m` is not bound by any pattern
   let f = mk_const(#'openvar, mk_fun(list_ty(A), nat_ty))
   prepare_function(thy, FunSpec(#'openvar, [list_ty(A)], nat_ty,
-                                [DefClause([P.nil], m),
-                                 DefClause([ap2(P.cons, hd, tl)], P.zero)]),
+                                [DefClause([P.nil], [m]),
+                                 DefClause([ap2(P.cons, hd, tl)], [P.zero])]),
                    P.dts)
   ~throws "unbound variable"
 check:
   prepare_function(thy, FunSpec(#'app, [list_ty(A)], nat_ty,
-                                [DefClause([xs], P.zero)]),
+                                [DefClause([xs], [P.zero])]),
                    P.dts)
   ~throws "already declared"
 check:
@@ -248,9 +244,9 @@ check:
 check:
   let (_, info) = derive_nonrecursive(
     thy, FunSpec(#'two, [nat_ty, nat_ty], nat_ty,
-                 [DefClause([P.zero, n], P.zero),
-                  DefClause([ap1(P.succ, m), P.zero], P.zero),
-                  DefClause([ap1(P.succ, m), ap1(P.succ, n)], P.zero)]),
+                 [DefClause([P.zero, n], [P.zero]),
+                  DefClause([ap1(P.succ, m), P.zero], [P.zero]),
+                  DefClause([ap1(P.succ, m), ap1(P.succ, n)], [P.zero])]),
     P.dts)
   (info :~ FunInfo).equations.length()
   ~is 3
@@ -258,8 +254,8 @@ check:
 check:
   // `[zero, succ]` and `[succ, zero]` are missing.
   prepare_function(thy, FunSpec(#'two, [nat_ty, nat_ty], nat_ty,
-                                [DefClause([P.zero, P.zero], P.zero),
+                                [DefClause([P.zero, P.zero], [P.zero]),
                                  DefClause([ap1(P.succ, m), ap1(P.succ, n)],
-                                           P.zero)]),
+                                           [P.zero])]),
                    P.dts)
   ~throws "not exhaustive"

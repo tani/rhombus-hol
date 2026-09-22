@@ -32,7 +32,8 @@ class OverloadRegistry(arities :: Map.of(Symbol, NonnegInt),
 
 class OverloadResolution(method :: OverloadMethod,
                          argument_types :: List.of(HType),
-                         result_type :: HType)
+                         result_type :: HType,
+                         constant_type :: HType)
 
 fun standard_overload_registry() :: OverloadRegistry:
   let functions = [
@@ -223,13 +224,21 @@ fun resolve_method(method :: OverloadMethod,
               match type_unify(result_pattern, expected :~ HType, theta)
               | #false: #false
               | next: next :~ Map
-        if final_theta
-        | OverloadResolution(
-            method,
-            patterns.map(
-              fun (ty): deep_resolve(final_theta :~ Map, ty, [])),
-            deep_resolve(final_theta :~ Map, result_pattern, []))
-        | #false
+        match final_theta
+        | #false: #false
+        | resolved :~ Map:
+            let resolved_arguments:
+              patterns.map(fun (ty): deep_resolve(resolved, ty, []))
+            let resolved_result = deep_resolve(resolved, result_pattern, [])
+            let ordered_types:
+              method.argument_order.map(
+                fun (index): resolved_arguments[index] :~ HType)
+            let constant_type:
+              for values(ty :~ HType = resolved_result) (
+                    domain in ordered_types.reverse()):
+                mk_fun(domain :~ HType, ty)
+            OverloadResolution(method, resolved_arguments, resolved_result,
+                               constant_type)
     | ~else:
         match argument_types[index]
         | #false: match_arguments(index + 1, theta)

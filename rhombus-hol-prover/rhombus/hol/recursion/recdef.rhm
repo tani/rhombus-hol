@@ -25,45 +25,77 @@ import:
 
 export:
   DefClause
-  clause_terms
+  clause_rhs
   FunSpec
   FunInfo
+  InductionInfo
+  NonRecursiveInduction
+  RecursiveInduction
+  induction_info
   PreparedFunction
   fun_type
   prepare_function
   recursive_calls
 
 // `f(pats...) === rhs`.  The variables are those bound by the patterns.
-// `rhs` is the logical reading of the body; `obligations` is every term the
-// compiled program evaluates on the way to it (`core.rhm`).  For a body with
-// no `let` the two carry the same information, and `obligations` is the
-// single-element list holding `rhs`.  They come apart exactly where a `let`
-// initializer's value is not read: the equation does not mention it, and the
-// program still runs it, so termination has to see it.
-class DefClause(pats :: List.of(Term), rhs :: Term,
-                obligations :: List.of(Term) = [])
+// `terms` is every term the compiled program evaluates, in the order it
+// evaluates them, ending with the logical right-hand side -- `rhs` is
+// derived as its last element (`clause_rhs`), never stored separately.  For
+// a body with no `let` this is the one-element list holding `rhs`, and it
+// grows by one entry per `let` on the way in. They come apart from a bare
+// `rhs` exactly where a `let` initializer's value is not read: the equation
+// does not mention it, and the program still runs it, so termination has to
+// see it.
+class DefClause(pats :: List.of(Term), terms :: List.of(Term))
+
+// The clause's logical right-hand side: the last term it evaluates.  A
+// `DefClause` built without intermediate lets -- by a library that
+// generates its own clauses rather than elaborating a body -- has exactly
+// one term, and this is it.
+fun clause_rhs(cl :: DefClause) :: Term:
+  let length = cl.terms.length()
+  when length == 0
+  | error(~who: #'function, "a clause needs at least one body term")
+  cl.terms[length - 1]
 
 // `measure` is the adjacent proof block's `~measure: expression`, abstracted
 // over the parameters; `#false` when none was supplied and the definition has
 // to descend structurally.
-// Every term of a clause the compiled program evaluates.  A `DefClause`
-// built without obligations -- by a library that generates its own clauses
-// rather than elaborating a body -- evaluates exactly its right-hand side.
-fun clause_terms(cl :: DefClause) :: List.of(Term):
-  cond
-  | cl.obligations.length() == 0: [cl.rhs]
-  | ~else: cl.obligations
-
 class FunSpec(name :: Symbol,
               arg_types :: List.of(HType),
               ret_type :: HType,
               clauses :: List.of(DefClause),
               measure :: maybe(Term) = #false)
 
+// The durable induction hint every installed function keeps: whether it is
+// recursive at all, and which argument positions are plausible induction
+// candidates (`prover/tactic/induct.rhm`'s `recursive_companions`/`score`).
+// Deliberately smaller than `RecursionPlan`: nothing durable reads the exact
+// order, the call sites, or a measure's decrease proofs once a function is
+// installed, so keeping them in every `Context` entry would just be dead
+// weight. The full plan lives only in `PreparedFunction`/`DerivationPlan`,
+// while a function is being derived.
+class.together:
+  class InductionInfo():
+    nonfinal
+
+  class NonRecursiveInduction():
+    extends InductionInfo
+
+  class RecursiveInduction(positions :: List.of(Int)):
+    extends InductionInfo
+
+// The induction hint a `RecursionPlan` implies.
+fun induction_info(recursion :: RecursionPlan) :: InductionInfo:
+  match recursion
+  | NoRecursion(): NonRecursiveInduction()
+  | StructuralRecursion(_, positions, _): RecursiveInduction(positions)
+  | MeasuredRecursion(_, positions, _, _): RecursiveInduction(positions)
+
 class FunInfo(spec :: FunSpec,
               fn :: Term,                  // the declared constant
               equations :: List.of(Thm),   // one per clause, universally closed
-              recursion :: RecursionPlan)
+              induction :: InductionInfo)
 
 // The single analysis product shared by every definition backend. The
 // decision tree is both coverage evidence and the executable/logical pattern
@@ -156,13 +188,13 @@ fun check_function_shape(thy :: Theory, spec :: FunSpec) :: Void:
               error.val(~label: "expected", type_to_string(ty)))
     let vs = clause_vars(who, cl)
     check_distinct(who, vs)
-    unless type_of(cl.rhs) == spec.ret_type
+    unless type_of(clause_rhs(cl)) == spec.ret_type
     | error(~who: who, "clause result has the wrong type",
             error.val(~label: "expected", type_to_string(spec.ret_type)),
-            error.val(~label: "given", type_to_string(type_of(cl.rhs))))
+            error.val(~label: "given", type_to_string(type_of(clause_rhs(cl)))))
     // A variable free in the body but not bound by the patterns would make
     // the equation say something about an arbitrary value.
-    for (v in free_vars(cl.rhs)):
+    for (v in free_vars(clause_rhs(cl))):
       unless vs.contains(v) || v == mk_var(spec.name, fty)
       | error(~who: who, "clause body mentions an unbound variable",
               error.val(~label: "variable", (v :~ FVar).name))
@@ -177,7 +209,7 @@ fun prepare_function(thy :: Theory, spec :: FunSpec,
   let placeholder = mk_const(spec.name, fun_type(spec))
   let clauses = for List (cl in spec.clauses, i in List.iota(spec.clauses.length())):
                   let cl :~ DefClause = cl
-                  [i, cl.pats, clause_terms(cl)]
+                  [i, cl.pats, cl.terms]
   let recursion = check_termination(#'function, spec.name, arity, clauses,
                                     placeholder, ~measure: measure)
   PreparedFunction(spec, tree, recursion)

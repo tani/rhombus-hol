@@ -163,8 +163,10 @@ accepted as an unproved host computation.
 
 The same representation is used in patterns. A literal pattern is an atomic
 numeric discrimination and never expands to @tt{succ(...succ(zero())...)}.
-A bare numeral is rejected when its numeric type cannot be determined from
-an overload argument, function domain, checked result, or type ascription.
+It therefore requires type @tt{Nat}; @tt{Integer} and @tt{Rational} numerals
+are conversion expressions, not atomic @tt{NatLit} patterns. A bare numeral
+is rejected when its type cannot be determined from a function domain,
+checked result, or type ascription.
 The lexical form @tt{-1} remains the @tt{negate} call applied to the
 nonnegative numeral @tt{1}.
 

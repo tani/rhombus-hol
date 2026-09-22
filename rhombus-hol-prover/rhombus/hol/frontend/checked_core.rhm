@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: 0BSD
 
 // Theory-independent typing and name resolution for surface-core expressions.
-// Both backends consume this checked tree; neither repeats reference,
-// annotation, overload, application, pattern, or body typing decisions.
+// Both backends consume this representation; neither has a separate
+// implementation of reference, annotation, overload, application, pattern,
+// or body typing.
 
 import:
   rhombus/hol/htype open
@@ -18,7 +19,6 @@ export:
   checked_unify
   RefRestriction
   CheckEnv
-  CheckedNode
   check_env_with
   CheckedPattern
   CheckedPatWildcard
@@ -47,9 +47,6 @@ export:
   CheckedBlock
   CheckedMatch
   checked_ty
-  core_location
-  requires_expected_type
-  following_local_function_names
   check_expr
 
 class CheckedInference(substitution :: Box)
@@ -94,7 +91,7 @@ fun check_env_with(env :: CheckEnv,
   CheckEnv(env.inference, vars, env.lookup, env.lookup_global,
            env.parse_type, env.operators, env.show_type, env.error,
            restricted_refs)
-class CheckedNode():
+class CheckedExpr():
   nonfinal
 
 
@@ -125,7 +122,6 @@ fun checked_pattern_ty(pat :: CheckedPattern) :: HType:
 class CheckedBinder(pat :: CheckedPattern, ty :: HType, at :: Syntax)
 
 class CheckedBody():
-  extends CheckedNode
   nonfinal
 
 class CheckedMatchRow(patterns :: List.of(CheckedPattern),
@@ -135,15 +131,15 @@ class CheckedMatchRow(patterns :: List.of(CheckedPattern),
 class CheckedPatternMatrix(rows :: List.of(CheckedMatchRow), ty :: HType):
   extends CheckedBody
 
-class CheckedBodyExpr(expr :: CheckedNode):
+class CheckedBodyExpr(expr :: CheckedExpr):
   extends CheckedBody
 class CheckedBodyLet(pat :: CheckedPattern,
-                     init :: CheckedNode,
+                     init :: CheckedExpr,
                      body :: CheckedBody,
                      ty :: HType,
                      at :: Syntax):
   extends CheckedBody
-class CheckedBodyMatch(scrutinee :: CheckedNode,
+class CheckedBodyMatch(scrutinee :: CheckedExpr,
                        matrix :: CheckedPatternMatrix,
                        ty :: HType,
                        at :: Syntax):
@@ -151,15 +147,12 @@ class CheckedBodyMatch(scrutinee :: CheckedNode,
 
 fun checked_body_ty(body :: CheckedBody) :: HType:
   match body
-  | CheckedBodyExpr(expr): checked_ty(expr :~ CheckedExpr)
+  | CheckedBodyExpr(expr): checked_ty(expr)
   | CheckedBodyLet(_, _, _, ty, _): ty
   | CheckedBodyMatch(_, _, ty, _): ty
   | CheckedPatternMatrix(_, ty): ty
   | ~else: error(~who: #'checked_body_ty, "unknown checked body")
 
-class CheckedExpr():
-  extends CheckedNode
-  nonfinal
 
 class CheckedLocal(name :: Symbol, ty :: HType, at :: Syntax):
   extends CheckedExpr
@@ -220,21 +213,6 @@ fun checked_ty(expr :: CheckedExpr) :: HType:
   | CheckedBlock(_, ty, _): ty
   | CheckedMatch(_, _, ty, _): ty
   | ~else: error(~who: #'checked_ty, "unknown checked expression")
-
-fun core_location(expr :: CoreExpr) :: Syntax:
-  match expr
-  | CoreRef(_, at): at
-  | CoreGlobalRef(_, at): at
-  | CoreCall(_, _, at): at
-  | CoreNumeral(_, at): at
-  | CoreIf(_, _, _, at): at
-  | CoreForall(_, _, at): at
-  | CoreExists(_, _, at): at
-  | CoreFunctionExpr(_, _, _, at): at
-  | CoreBlockExpr(_, at): at
-  | CoreMatchExpr(_, _, at): at
-  | CoreTypedExpr(_, _, at): at
-  | ~else: error(~who: #'core_location, "unknown CoreExpr variant")
 
 fun requires_expected_type(expr :: CoreExpr,
                            operators :: OverloadRegistry) :: Boolean:
@@ -385,8 +363,6 @@ fun check_pattern(env :: CheckEnv, pat :: CorePattern,
              "a numeral pattern needs a type annotation or an unambiguous context",
              at)
       unless ty == mk_tyapp(#'Nat, [])
-               || ty == mk_tyapp(#'Integer, [])
-               || ty == mk_tyapp(#'Rational, [])
       | fail(env,
              "a numeral has no representation at type " ++ env.show_type(ty),
              at)
@@ -709,15 +685,8 @@ fun check_overload(env :: CheckEnv, name :: Symbol,
   let ordered_args:
     method.argument_order.map(
       fun (index): checked_args[index] :~ CheckedExpr)
-  let ordered_types:
-    method.argument_order.map(
-      fun (index): resolution.argument_types[index] :~ HType)
-  let constant_type:
-    for values(ty :~ HType = resolution.result_type) (
-          domain in ordered_types.reverse()):
-      mk_fun(domain :~ HType, ty)
   CheckedApply(
-    CheckedConstant(method.constant, resolve(env, constant_type), at),
+    CheckedConstant(method.constant, resolve(env, resolution.constant_type), at),
     ordered_args, resolve(env, resolution.result_type), at)
 
 fun check_expr(env :: CheckEnv, expr :: CoreExpr,
@@ -776,22 +745,40 @@ fun check_expr(env :: CheckEnv, expr :: CoreExpr,
                                       && args.length() == 2:
       let left_core :~ CoreExpr = args[0]
       let right_core :~ CoreExpr = args[1]
+      // Infer both sides independently when possible. This preserves the
+      // equality-specific mismatch diagnostic for two well-typed operands;
+      // when one side needs context, the other side supplies it. A failed
+      // attempt restores inference because overload checking can unify part
+      // of a signature before discovering ambiguity.
+      fun infer(core :: CoreExpr) :: maybe(CheckedExpr):
+        let substitution = env.inference.substitution.value
+        try:
+          check_expr(env, core, #false)
+          ~catch _ :: Exn.Fail:
+            env.inference.substitution.value := substitution
+            #false
+      let left_guess = infer(left_core)
+      let right_guess = infer(right_core)
       let (left, right):
-        cond
-        | requires_expected_type(right_core, env.operators)
-            && !requires_expected_type(left_core, env.operators):
-            let left = check_expr(env, left_core, #false)
-            values(left, check_expr(env, right_core, checked_ty(left)))
-        | requires_expected_type(left_core, env.operators)
-            && !requires_expected_type(right_core, env.operators):
-            let right = check_expr(env, right_core, #false)
-            values(check_expr(env, left_core, checked_ty(right)), right)
-        | ~else:
-            let left = check_expr(env, left_core, #false)
-            let right = check_expr(env, right_core, #false)
-            unify(env, checked_ty(left), checked_ty(right), at,
-                  "equality operands have different types")
-            values(left, right)
+        match left_guess
+        | left :: CheckedExpr:
+            match right_guess
+            | right :: CheckedExpr: values(left, right)
+            | #false:
+                values(left, check_expr(env, right_core, checked_ty(left)))
+        | #false:
+            match right_guess
+            | right :: CheckedExpr:
+                values(check_expr(env, left_core, checked_ty(right)), right)
+            | #false:
+                // Neither side supplies a concrete type. Check against one
+                // shared metavariable so genuinely ambiguous literals retain
+                // the type-ascription diagnostic instead of losing context.
+                let common = mk_tyvar(Symbol.gen("_equality"))
+                let left = check_expr(env, left_core, common)
+                values(left, check_expr(env, right_core, checked_ty(left)))
+      unify(env, checked_ty(left), checked_ty(right), at,
+            "equality operands have different types")
       unify_with(mk_tyapp(#'bool, []), at)
       CheckedEq(left, right, resolve(env, checked_ty(left)), at)
   | CoreCall(func, args, at) when (callable_name(func) == #'conj

@@ -24,13 +24,13 @@ import:
   rhombus/hol/logic/conv open
   rhombus/hol/logic/drule open
   rhombus/hol/datatype/datatype open
-  rhombus/hol/recursion/terminate open
   rhombus/hol/recursion/recdef open
   rhombus/hol/prover/proof/node open
   rhombus/hol/prover/trace open
 
 export:
   induction_step
+  induction_attempt
   candidate_vars
   inductive_type_name
 
@@ -105,28 +105,69 @@ fun induction_step(thy :: Theory, funs :: Map.of(Symbol, FunInfo),
                          | pair: pair)
   let case_terms = split_cases(cases_term, spec.ctors.length())
 
-  // Turn each case into a goal, remembering what has to be put back.
+  // Turn each case into a goal. The scheme's predicate quantifies recursive
+  // companion variables, so open those quantifiers here and remember how to
+  // close them. This keeps specialization local to the induction step while
+  // still letting the ordinary waterfall simplify each opened case before it
+  // considers another induction.
   let avoid0 = g.asms ++ [g.concl]
   let prepared = for List (ct in case_terms, c in spec.ctors):
-                   let (vars, body0) = open_foralls(ct, avoid0)
-                   let (ihs, body) = strip_imp(body0)
-                   [vars, ihs, body, (c :~ Ctor).name]
-  let subgoals = for List ([_, ihs, body, _] in prepared):
+                   let (case_vars, body0) = open_foralls(ct, avoid0)
+                   let (ihs, body1) = strip_imp(body0)
+                   let (companion_vars, body):
+                     open_foralls(body1, avoid0 ++ case_vars ++ ihs)
+                   [case_vars, ihs, companion_vars, body,
+                    (c :~ Ctor).name]
+  let subgoals = for List ([_, ihs, _, body, _] in prepared):
                    Goal(g.asms ++ (ihs :~ List), body)
-  let events = for List ([_, _, _, cname] in prepared):
+  let events = for List ([_, _, _, _, cname] in prepared):
                  Inducted(v.name, cname :~ Symbol)
 
-  fun close_case(th :: Thm, vars :~ List, ihs :~ List) :: Thm:
-    let discharged = for values(acc :~ Thm = th) (ih in ihs.reverse()):
+  fun close_case(th :: Thm, case_vars :~ List, ihs :~ List,
+                 companion_vars :~ List) :: Thm:
+    let specialized = GENL(thy, companion_vars, th)
+    let discharged = for values(acc :~ Thm = specialized) (ih in ihs.reverse()):
                        DISCH(thy, ih, acc)
-    GENL(thy, vars, discharged)
+    GENL(thy, case_vars, discharged)
 
   fun rebuild_induction(ths :: List.of(Thm)) :: Thm:
     let case_thms = for List (th in ths, pr in prepared):
-                      close_case(th, (pr :~ List)[0], (pr :~ List)[1])
+                      close_case(th, (pr :~ List)[0], (pr :~ List)[1],
+                                 (pr :~ List)[2])
     SPECL(thy, others.map(fun (u :: FVar): u :~ Term),
           SPEC(thy, v, MP(thy, sp, LIST_CONJ(thy, case_thms))))
   Step(subgoals, rebuild_induction, events)
+
+
+// The first candidate variable of a declared datatype, in ranked order, or
+// `#false` when none of them is.
+fun choose_induction_variable(thy :: Theory, funs :: Map.of(Symbol, FunInfo),
+                              dts :: Map.of(Symbol, DatatypeThms),
+                              candidates :: List, g :: Goal) :: maybe(Step):
+  match candidates
+  | []: #false
+  | List.cons(variable, rest):
+      let variable :~ FVar = variable
+      match inductive_type_name(variable)
+      | #false: choose_induction_variable(thy, funs, dts, rest, g)
+      | type_name:
+          match dts.get(type_name, #false)
+          | #false: choose_induction_variable(thy, funs, dts, rest, g)
+          | datatype_thms:
+              induction_step(thy, funs, datatype_thms :~ DatatypeThms, variable, g)
+
+// The waterfall's induction attempt: choose a variable (`hint` forces the
+// choice; without one, `candidate_vars` ranks the goal's free variables) and
+// instantiate its datatype scheme. Quantifiers introduced for recursive
+// companion variables are opened when `induction_step` constructs its case
+// goals, not as a separate waterfall stage.
+fun induction_attempt(thy :: Theory, funs :: Map.of(Symbol, FunInfo),
+                      dts :: Map.of(Symbol, DatatypeThms),
+                      hint :: maybe(FVar), g :: Goal) :: maybe(Step):
+  let candidates = (cond
+                    | hint: [hint]
+                    | ~else: candidate_vars(funs, dts, g))
+  choose_induction_variable(thy, funs, dts, candidates, g)
 
 // Free variables of the goal that could be inducted on, best first.
 //
@@ -205,8 +246,8 @@ fun recursive_companions(funs :: Map.of(Symbol, FunInfo), t :: Term,
           | #false: acc
           | fi:
               let recursive:
-                match (fi :~ FunInfo).recursion
-                | NoRecursion(): #false
+                match (fi :~ FunInfo).induction
+                | NonRecursiveInduction(): #false
                 | ~else: #true
               let vars = for values(a :~ List = []) (arg in args):
                            a ++ free_vars(arg :~ Term)
@@ -230,10 +271,9 @@ fun score(funs :: Map.of(Symbol, FunInfo), t :: Term, v :: FVar) :: Int:
           | fi:
               let fi :~ FunInfo = fi
               let positions :~ List.of(Int):
-                match fi.recursion
-                | StructuralRecursion(_, ps, _): ps
-                | MeasuredRecursion(_, ps, _, _): ps
-                | NoRecursion(): []
+                match fi.induction
+                | RecursiveInduction(ps): ps
+                | NonRecursiveInduction(): []
               cond
               | positions == []: acc
               | ~else:

@@ -17,19 +17,20 @@
 // in HOL, where functions are total; what it is not is a statement about the
 // program that was compiled.
 //
-// The clause now carries its evaluation obligations beside its right-hand
-// side (`core.rhm`), and the termination checker reads both.  So the call is
-// *seen*: `bad` is refused because it does not terminate, and a recursive
-// initializer that does terminate is accepted.
+// The clause therefore retains initializer evaluation beside its logical
+// right-hand side, and termination checks both. The call is *seen*: `bad` is
+// refused because it does not terminate, while a decreasing initializer is
+// accepted.
 
 import:
   "fixture_load.rhm" open
   rhombus/hol/kernel open
   rhombus/hol/frontend/driver open
-  rhombus/hol/recursion/terminate open
+  rhombus/hol/recursion/recdef open
   "fixtures/let_recursive_ok.rhm" as ok
   "fixtures/let_recursive_ok.rhm"!hol_theory as okm
   "fixtures/let_guarded.rhm"!hol_theory as guarded
+
 
 fun load(mp :: ModulePath):
   instantiate_hol_fixture(mp)
@@ -47,10 +48,8 @@ check:
 // A `function name(...): ...` local binding is sugar, not a second
 // recursion-checked definition form (`AGENTS.md` 1.2/4.2): it may call an
 // *earlier* local function, but not itself or a function defined later in
-// the same body. Both restrictions apply identically on the executable path
-// (this file, compiling `function`'s generated Rhombus) and the logical
-// path (`decl_theorem.rhm`/`elab.rhm`'s `ClauseEnv`) -- one `CoreFunBody`,
-// walked twice, cannot drift into rejecting on one side and not the other.
+// the same body. Shared CheckedCore restriction handling keeps the executable
+// and logical paths from accepting different references.
 check:
   load(ModulePath'lib("rhombus/hol/tests/fixtures/let_local_self_bad.rhm")')
   ~throws "local recursive functions are not supported"
@@ -64,7 +63,7 @@ check:
 // -- and a terminating one is accepted ---------------------------------------
 def st :~ HolState = okm.theory
 
-check st.ctx.funs[#'dbl].recursion ~matches StructuralRecursion(_, _, _)
+check st.ctx.funs[#'dbl].induction ~matches RecursiveInduction(_)
 check st.ctx.funs[#'dbl].equations.length() ~is 2
 
 // and it runs, which is the half the logic cannot see
@@ -73,31 +72,14 @@ check ok.dbl(ok.succ(ok.zero())) ~is ok.succ(ok.succ(ok.zero()))
 // `unread`'s initializer recurses and its body never reads it.  The call
 // descends, so it is fine -- and the equation says nothing about it, which
 // is correct: the equation is about the value.
-check st.ctx.funs[#'unread].recursion ~matches StructuralRecursion(_, _, _)
+check st.ctx.funs[#'unread].induction ~matches RecursiveInduction(_)
 check st.ctx.funs[#'unread].equations.length() ~is 2
 
 check ok.unread(ok.succ(ok.zero())) ~is ok.succ(ok.zero())
 
-// -- the same call is one site, unless its guards differ ---------------------
-//
-// A `let` initializer is an obligation and, where the body reads it, also a
-// subterm of the right-hand side, so the same call is found twice.  That is
-// one call, and for a `~measure` it would be the same obligation discharged
-// twice.
-//
-// `dbl` reads its initializer: one call, one site.
-check:
-  match st.ctx.funs[#'dbl].recursion
-  | StructuralRecursion(_, _, sites): sites.length()
-  ~is 1
-
-// `pick` runs its initializer unconditionally and reads it under an `if`.
-// Those are two sites, and collapsing them would be wrong -- the guarded
-// occurrence alone does not account for the unconditional evaluation.
-check:
-  match (guarded.theory :~ HolState).ctx.funs[#'pick].recursion
-  | StructuralRecursion(_, _, sites): sites.length()
-  ~is 2
+// `pick` runs an initializer unconditionally and also reads it under an `if`.
+// Its successful derivation and executable fixture cover the evaluation-aware
+// body without retaining or re-running installation-only call-site analysis.
 check:
   (guarded.theory :~ HolState).ctx.funs[#'pick].equations.length()
   ~is 2

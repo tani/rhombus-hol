@@ -58,6 +58,7 @@
     "numeral_disable_arithmetic_bad.rhm"
     "numeral_disable_exposure_bad.rhm"
     "numeral_pattern_partial.rhm"
+    "numeral_pattern_integer_bad.rhm"
     "ordered_partial.rhm"
     "ordered_unreachable.rhm"
     "qc_variable_type.rhm"

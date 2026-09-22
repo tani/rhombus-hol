@@ -176,8 +176,8 @@ A `datatype.together:` block declares a family of datatypes simultaneously:
 a constructor field may be at any member of the family. Every member must
 declare the same type parameters, every constructor name in the family must
 be distinct, and each member must be inhabited by values the family's own
-constructors build. A single `datatype` declaration is the one-member case of
-this form, and the two spellings share one implementation.
+constructors build. A single `datatype` declaration has the same member-level
+semantics as a one-member family.
 
 A family is read as one ordinary self-recursive datatype -- the union of every
 member's constructors, with a field at a member replaced by the union type --
@@ -614,6 +614,10 @@ Boolean, pair, list, and numeral patterns refine a pattern matrix. Rows are
 ordered, but totality is mandatory: every constructor shape must be covered and
 every written row must be reachable.
 
+A numeral pattern is the kernel's atomic `NatLit` discriminator and therefore
+requires a `Nat` scrutinee. `Integer` and `Rational` numerals elaborate as
+conversion expressions and are not patterns.
+
 List expression and pattern syntax desugars through constructors supplied by a
 list datatype:
 
@@ -894,11 +898,9 @@ The pipeline is:
    fresh variables to strengthen an induction goal.
 5. **Irrelevance elimination:** discard assumptions that share no variables,
    transitively, with the conclusion.
-6. **Specialization:** normalize universally quantified intermediate goals for
-   the following induction phase. This is an internal stage and not a normal
-   `~skip:` target.
-7. **Induction:** choose a datatype variable using recursion-descent metadata or
-   the user `~induct:` override; split over constructors and add induction
+6. **Induction:** choose a datatype variable using recursion-descent metadata or
+   the user `~induct:` override; split over constructors, open the companion
+   quantifiers introduced by the induction predicate, and add induction
    hypotheses for recursive fields. Nested induction is bounded at depth six.
 
 A goal is immutable data: a list of assumptions plus a conclusion. A stage does

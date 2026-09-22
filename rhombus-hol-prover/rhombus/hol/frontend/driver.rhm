@@ -6,11 +6,11 @@
 // The glue the generated phase-1 code calls.
 //
 // Declaration macros accumulate encoded logical transitions while the source
-// body expands. Their module finalizer emits `def _hol_st0 = initial_state()`
-// and then one phase-1 `def _hol_stN = <step>(_hol_stN-1, ...)` per
-// declaration in the private `hol_theory` submodule. The logical state is
-// therefore an ordinary value in the user's compilation unit; only its
-// expansion-local description is held by the macros.
+// body expands. Their module finalizer emits those transitions as functions
+// and folds them left to right over one `initial_state()` value in the private
+// `hol_theory` submodule. The logical state is therefore an ordinary value in
+// the user's compilation unit; only its expansion-local description is held
+// by the macros.
 //
 // Surface syntax is enforested by each declaration macro into Core values.
 // Driver steps receive those Core values and perform only theory-dependent
@@ -321,36 +321,21 @@ fun initial_state() :: HolState:
 
 // -- datatype ----------------------------------------------------------------
 
-// A `datatype.together:` family, and every ordinary `datatype` declaration
-// as its one-member case.
-//
-// Members that do not mention each other are ordinary independent
-// declarations and are built one at a time. Members that do are mutually
-// recursive, and no member is a datatype on its own: the family is carved
-// out of one union type in `datatype/family.rhm`.
+// An ordinary declaration uses the direct path. A `datatype.together:` group
+// always takes the union-family path, whether or not its members refer to
+// each other; this keeps one semantics for the family spelling.
 fun add_datatypes(st :: HolState, forms :: List.of(Syntax),
-                  at :: Syntax) :: HolState:
-  let specs = try:
-                type_parser.parse_datatype_decls(forms, st.type_constructors)
-                ~catch e :: Exn.Fail: hol_reraise(e, at)
+                  at :: Syntax, family :: Boolean) :: HolState:
   cond
-  | mutually_recursive_specs(specs):
+  | family:
+      let specs :: List.of(DatatypeSpec) = try:
+                  type_parser.parse_datatype_decls(
+                    forms, st.type_constructors)
+                  ~catch e :: Exn.Fail: hol_reraise(e, at)
       add_datatype_family(st, specs, at)
   | ~else:
       for values(state :~ HolState = st) (form in forms):
         add_datatype(state, form, at)
-
-// Does any member's constructor field mention another member?  That, and
-// nothing about how the declarations were spelled, is what makes a family
-// mutually recursive.
-fun mutually_recursive_specs(specs :: List.of(DatatypeSpec)) :: Boolean:
-  let names = specs.map(fun (spec :: DatatypeSpec): spec.name)
-  for any (spec in specs):
-    for any (ctor in (spec :~ DatatypeSpec).ctors):
-      for any (field in (ctor :~ Ctor).fields):
-        for any (name in names):
-          name != (spec :~ DatatypeSpec).name
-            && occurs_in_type(name :~ Symbol, (field :~ Field).ty)
 
 // The family is built as one union datatype with the members carved out of
 // it (`datatype/family.rhm`). The union is installed like any other
@@ -499,9 +484,10 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
   let tagged_dt_specs:
     for values(m :~ Map = {}) ((n, thms) in tagged.ctx.dts):
       m ++ {n: (thms :~ DatatypeThms).spec}
-  let (thy3, impl_info0) = define_from_spec(
-                             tagged, combined, tagged_dt_specs,
-                             prepare_measure(tagged, combined), at)
+  let impl_prepared = prepare_spec(
+                        tagged, combined, tagged_dt_specs,
+                        prepare_measure(tagged, combined), at)
+  let (thy3, impl_info0) = define_prepared(tagged, impl_prepared, at)
   let impl_info :~ FunInfo = impl_info0
   let impl = mk_const(impl_name, fun_type(combined))
   let with_impl:
@@ -532,17 +518,22 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
   let equations :~ List.of(List.of(Thm)):
     try:
       derive_member_equations(
-        thy4, specs, members, definitions, impl,
-        selector_theorems, impl_info.equations)
+        thy4, specs, members, definitions, impl, selector_theorems,
+        impl_prepared, tagged_dt_specs, impl_info.equations)
       ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let recursive_members:
+    for values(indices :~ Set = Set()) (
+          site in family_call_sites(members, specs)):
+      indices ++ {(site :~ List)[0] :~ Int}
   for values(state :~ HolState = with_impl) (
-        spec in specs, m in members, member_equations in equations):
+        spec in specs, m in members, member_equations in equations,
+        index in List.iota(specs.length())):
     let spec :~ FunSpec = spec
     let eqs = member_equations :~ List.of(Thm)
     require_closed_theorems(#'function, thy4, spec.name, eqs, at)
     let db2 = add_thms(thy4, state.ctx.db, spec.name, eqs)
     let info = FunInfo(spec, (m :~ FamilyMemberFn).fn, eqs,
-                       member_recursion(impl_info.recursion, spec))
+                       member_induction(recursive_members.contains(index), spec))
     HolState(context_update(state.ctx, ~thy: thy4, ~db: db2,
                             ~funs: state.ctx.funs ++ {spec.name: info}),
              state.thms, state.operators, state.type_constructors,
@@ -585,28 +576,17 @@ fun signature_type(signature :: List) :: HType:
         argument in (signature[1] :~ List).reverse()):
     mk_fun(argument :~ HType, ty)
 
-// The members' own recursion record. Only the induction heuristic reads it
-// (`prover/tactic/induct.rhm`'s `recursive_companions`/`score`), to prefer a
-// variable the definition actually descends on and to know that it descends
-// at all; the family's real descent evidence -- the order, the call sites,
-// any measure decrease proofs -- is the combined function's own, already
-// checked once and carried in `family_recursion`. This derives the honest
-// subset a member can state without re-deriving or re-fabricating that
-// evidence: every member of a family is mutually recursive by construction,
-// so it is exactly as "recursive" as the combined function turned out to be,
-// and every one of its own argument positions is a plausible induction
-// candidate (the combined function's positions are over its one tagged
-// argument, not the member's own parameters, so they cannot be reused
-// directly).
-fun member_recursion(family_recursion :: RecursionPlan,
-                     spec :: FunSpec) :: RecursionPlan:
-  match family_recursion
-  | NoRecursion(): NoRecursion()
-  | MeasuredRecursion(result_type, _, _, _):
-      MeasuredRecursion(result_type, List.iota(spec.arg_types.length()),
-                        [], [])
-  | StructuralRecursion(_, _, _):
-      StructuralRecursion([], List.iota(spec.arg_types.length()), [])
+// The members' own induction hints. Only the induction heuristic reads one
+// (`prover/tactic/induct.rhm`'s `recursive_companions`/`score`), so retain
+// exactly whether this member makes a family call. The combined function owns
+// the real termination evidence; a calling member's tagged order does not
+// identify one original argument, making each of its parameters only a
+// plausible candidate. A member that makes no family call is non-recursive
+// even when another member in the explicit `.together` group recurses.
+fun member_induction(recursive :: Boolean, spec :: FunSpec) :: InductionInfo:
+  (if recursive
+   | RecursiveInduction(List.iota(spec.arg_types.length()))
+   | NonRecursiveInduction())
 
 // The order the whole family descends in, as a measure over the tagged
 // argument.
@@ -654,7 +634,11 @@ fun family_measure(st :: HolState, specs :: List.of(FunSpec),
       hol_error(#'function,
                 "either every member of a function family supplies a "
                   ++ "`proof: ~measure:` or none does", at)
-  | ~else: automatic_family_measure(st, specs, members, dom, d, at)
+  | ~else:
+      let sites = family_call_sites(members, specs)
+      (if sites == []
+       | #false
+       | automatic_family_measure(st, specs, sites, dom, d, at))
 
 fun domain_type(dom :: DatatypeSpec) :: HType:
   mk_tyapp(dom.name, dom.params.map(fun (p :: Symbol): mk_tyvar(p)))
@@ -748,10 +732,9 @@ fun column_measure(st :: HolState, ty :: HType, t :: Term,
          | loop(rest))
 
 fun automatic_family_measure(st :: HolState, specs :: List.of(FunSpec),
-                             members :: List.of(FamilyMemberFn),
+                             sites :: List.of(List),
                              dom :: DatatypeSpec, d :: FVar,
                              at :: Syntax) :: Term:
-  let sites = family_call_sites(members, specs)
   // For each member, the columns that could carry the order, with the type
   // the order lives in.
   let candidates:
@@ -763,16 +746,28 @@ fun automatic_family_measure(st :: HolState, specs :: List.of(FunSpec),
               option in column_options(st, ty :~ HType,
                                        mk_var(#'_column, ty :~ HType))):
           out ++ [[k, (option :~ List)[0] :~ HType]]
+  let active:
+    for List (i in List.iota(specs.length())):
+      for any (site in sites):
+        let site = site :~ List
+        (site[0] :~ Int) == i || (site[2] :~ Int) == i
   let order_types:
-    for values(acc :~ List.of(HType) = []) (entry in (candidates[0] :~ List)):
-      let ty = (entry :~ List)[1] :~ HType
-      (if acc.contains(ty) | acc | acc ++ [ty])
+    for values(acc :~ List.of(HType) = []) (
+          i in List.iota(specs.length())):
+      cond
+      | !(active[i] :~ Boolean): acc
+      | ~else:
+          for values(out :~ List.of(HType) = acc) (
+                entry in (candidates[i] :~ List)):
+            let ty = ((entry :~ List)[1]) :~ HType
+            (if out.contains(ty) | out | out ++ [ty])
   let chosen:
     recur try_type (remaining :~ List.of(HType) = order_types):
       match remaining
       | []: #false
       | List.cons(ty, rest):
-          match choose_columns(st, specs, sites, candidates, ty :~ HType):
+          match choose_columns(
+                  st, specs, sites, active, candidates, ty :~ HType)
           | #false: try_type(rest)
           | columns: [ty :~ HType, columns]
   match chosen
@@ -790,18 +785,25 @@ fun automatic_family_measure(st :: HolState, specs :: List.of(FunSpec),
       measure_by_cases(
         dom, d,
         for List (i in List.iota(specs.length())):
-          let k = columns[i] :~ Int
-          let argument = domain_selectors(dom, i, d :~ Term)[k]
-          (column_measure(st, ((specs[i] :~ FunSpec).arg_types[k]) :~ HType,
-                          argument :~ Term, ty) :~ Term))
+          match columns[i]
+          | #false:
+              mk_select(
+                mk_var(Symbol.gen("_family_measure_default"), ty),
+                tm_true)
+          | k:
+              let k = k :~ Int
+              let argument = domain_selectors(dom, i, d :~ Term)[k]
+              (column_measure(
+                 st, ((specs[i] :~ FunSpec).arg_types[k]) :~ HType,
+                 argument :~ Term, ty) :~ Term))
 
-// One column per member, all at the order's own type, such that every call
-// between members descends. Backtracking, over as many columns as the
-// members have arguments: the members' arities are small, and a wrong first
-// choice would otherwise reject a family that does terminate.
+// One column per active member, all at the order's own type, such that every
+// call between members descends. Members absent from all call sites need no
+// column: their measure branch can be any value because no decrease
+// obligation refers to it.
 fun choose_columns(st :: HolState, specs :: List.of(FunSpec),
-                   sites :: List.of(List), candidates :: List,
-                   ty :: HType) :: maybe(List):
+                   sites :: List.of(List), active :: List.of(Boolean),
+                   candidates :: List, ty :: HType) :: maybe(List):
   let types = ordered_types(st, ty)
   recur extend (i = 0, picked :~ List = []):
     cond
@@ -810,6 +812,8 @@ fun choose_columns(st :: HolState, specs :: List.of(FunSpec),
                                                    site :~ List)
          | picked
          | #false)
+    | !(active[i] :~ Boolean):
+        extend(i + 1, picked ++ [#false])
     | ~else:
         recur pick (options :~ List = (candidates[i] :~ List)):
           match options
@@ -903,25 +907,16 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
 
 // -- function ----------------------------------------------------------------
 
-// A `function.together:` family, and every ordinary `function` declaration
-// as its one-member case. Members that call each other are mutually
-// recursive and are derived as one tagged function in
-// `recursion/family.rhm`; members that do not are ordinary declarations.
+// An ordinary declaration uses the direct path. A `function.together:` group
+// always takes the family path; no syntactic call-name approximation decides
+// its semantics.
 fun add_functions(st :: HolState, cores :: List.of(CoreFunctionSpec),
-                  at :: Syntax) :: HolState:
+                  at :: Syntax, family :: Boolean) :: HolState:
   cond
-  | mutually_recursive_functions(cores):
-      add_function_family(st, cores, at)
+  | family: add_function_family(st, cores, at)
   | ~else:
       for values(state :~ HolState = st) (core in cores):
         add_function(state, core :~ CoreFunctionSpec, at)
-
-fun mutually_recursive_functions(cores :: List.of(CoreFunctionSpec))
-     :: Boolean:
-  let names = cores.map(fun (core :: CoreFunctionSpec): core.name)
-  for any (core in cores):
-    for any (called in core_called_names(core :~ CoreFunctionSpec)):
-      names.contains(called) && called != (core :~ CoreFunctionSpec).name
 
 // `function` never adds an axiom.  A definition it cannot derive is refused,
 // naming what about the recursion the deriver could not handle, so that
@@ -1099,18 +1094,22 @@ fun inductive_signature(stx :: Syntax) :: List.of(Syntax):
       rb.#{raise-syntax-error}(#'inductive,
                                "internal malformed inductive head", stx)
 
-// Derive one function from an already elaborated specification: directly when
-// it does not call itself, from the well-founded recursion theorem when it
-// does.
-fun define_from_spec(st :: HolState, spec :: FunSpec,
-                     dt_specs :: Map.of(Symbol, DatatypeSpec),
-                     measure :: maybe(Measure),
-                     at :: Syntax) :: values(Theory, FunInfo):
-  let prepared :~ PreparedFunction = try:
-                                       prepare_function(st.ctx.thy, spec,
-                                                        dt_specs,
-                                                        ~measure: measure)
-                                       ~catch e :: Exn.Fail: hol_reraise(e, at)
+// Prepare once at the declaration boundary. Callers that need transient
+// analysis metadata (function-family leaf ownership) keep this value through
+// installation; ordinary callers immediately discard it afterward.
+fun prepare_spec(st :: HolState, spec :: FunSpec,
+                 dt_specs :: Map.of(Symbol, DatatypeSpec),
+                 measure :: maybe(Measure),
+                 at :: Syntax) :: PreparedFunction:
+  try:
+    prepare_function(st.ctx.thy, spec, dt_specs, ~measure: measure)
+    ~catch e :: Exn.Fail: hol_reraise(e, at)
+
+// Derive one already-prepared function: directly when it does not call
+// itself, from the well-founded recursion theorem when it does.
+fun define_prepared(st :: HolState, prepared :: PreparedFunction,
+                    at :: Syntax) :: values(Theory, FunInfo):
+  let spec = prepared.spec
   let (thy2, info0) = try:
                         cond
                         | prepared.recursion is_a NoRecursion:
@@ -1127,6 +1126,12 @@ fun define_from_spec(st :: HolState, spec :: FunSpec,
                         ~catch e :: Exn.Fail: hol_reraise(e, at)
   require_no_new_axioms(#'function, st.ctx.thy, thy2, spec.name, at)
   values(thy2, info0 :~ FunInfo)
+
+fun define_from_spec(st :: HolState, spec :: FunSpec,
+                     dt_specs :: Map.of(Symbol, DatatypeSpec),
+                     measure :: maybe(Measure),
+                     at :: Syntax) :: values(Theory, FunInfo):
+  define_prepared(st, prepare_spec(st, spec, dt_specs, measure, at), at)
 
 
 // A path that claims to derive must not have added an axiom.  Every

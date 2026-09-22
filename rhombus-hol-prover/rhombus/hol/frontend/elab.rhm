@@ -11,10 +11,9 @@
 // from a macro reports `def: unbound identifier`.  Emission therefore lives in
 // `module_block.rhm`; see the note at the top of `expand.rhm`.
 //
-// Everything here is called twice: once at expansion time, so that the runtime
-// code can be generated, and once at phase 1, so that the logical declaration
-// can be made.  Both go through the same functions on the same syntax, so the
-// two views of a declaration cannot drift apart.
+// Shared source-level typing and name resolution live in `checked_core.rhm`.
+// This module only lowers that representation into kernel terms and function
+// specifications.
 
 import:
   rhombus/hol/htype open
@@ -174,12 +173,12 @@ fun peel_fun(ty :: HType, n :: Int) :: values(List.of(HType), HType):
 
 // Reify eager initializer evaluation as beta-redexes when a clause is used
 // inside a lambda or expression-level match. The logical normal form remains
-// the clause RHS, while recursive-call traversal still sees every initializer.
+// the clause's last term, while recursive-call traversal still sees every
+// initializer.
 fun eager_clause_term(c :: DefClause) :: Term:
-  recur loop (remaining :~ List.of(Term) = c.obligations):
+  recur loop (remaining :~ List.of(Term) = c.terms):
     match remaining
-    | []: c.rhs
-    | [_]: c.rhs
+    | [last]: last
     | List.cons(initializer, rest):
         let initializer :~ Term = initializer
         let ignored = mk_var(Symbol.gen("_eager"), type_of(initializer))
@@ -796,7 +795,7 @@ fun checked_parse_body(body :: CheckedBody) :: Computation:
         checked_clause_rows(matrix)
     | CheckedBodyMatch(target, matrix, _, body_at):
         let name:
-          match target :~ CheckedExpr
+          match target
           | CheckedLocal(local_name, _, _): local_name
           | ~else:
               error(~who: #'checked_parse_body,
@@ -806,7 +805,7 @@ fun checked_parse_body(body :: CheckedBody) :: Computation:
     | CheckedBodyLet(binding_pat, init, tail, _, body_at):
         effect:
           let elab_env = clause_elab_env(env)
-          let value = checked_to_term(elab_env, init :~ CheckedExpr)
+          let value = checked_to_term(elab_env, init)
           let bindings = bind_checked_irrefutable_pattern(
                            elab_env, binding_pat, value)
           let vars2 = env.vars ++ bindings
@@ -819,13 +818,10 @@ fun checked_parse_body(body :: CheckedBody) :: Computation:
                                   bind_let, checked_parse_body(tail))
           return for List (clause in clauses):
                    let clause :~ DefClause = clause
-                   DefClause(
-                     clause.pats, clause.rhs,
-                     List.cons(value, clause_terms(clause)))
+                   DefClause(clause.pats, List.cons(value, clause.terms))
     | CheckedBodyExpr(expr):
-        let value = checked_to_term(
-                      clause_elab_env(env), expr :~ CheckedExpr)
-        return [DefClause(env.pats, value, [value])]
+        let value = checked_to_term(clause_elab_env(env), expr)
+        return [DefClause(env.pats, [value])]
     | ~else:
         error(~who: #'checked_parse_body, "unknown CheckedBody variant")
 
@@ -912,7 +908,7 @@ fun check_local_function_clauses(clauses :: List.of(DefClause),
                                  at :: Syntax):
   for (clause in clauses):
     let clause :~ DefClause = clause
-    unless type_of(clause.rhs) == result_type
+    unless type_of(clause_rhs(clause)) == result_type
     | syntax_error(
         #'function,
         "a local function body has a different type from its result type",
@@ -981,9 +977,9 @@ fun local_tree_term(spec :: FunSpec,
 fun checked_body_term(env :: ElabEnv, body :: CheckedBody) :: Term:
   match body
   | CheckedBodyExpr(expr):
-      checked_to_term(env, expr :~ CheckedExpr)
+      checked_to_term(env, expr)
   | CheckedBodyLet(pat, init, tail, _, _):
-      let value = checked_to_term(env, init :~ CheckedExpr)
+      let value = checked_to_term(env, init)
       let root = mk_var(
                    checked_pattern_root_name(pat, "_let"),
                    checked_pattern_ty(pat))
@@ -994,7 +990,7 @@ fun checked_body_term(env :: ElabEnv, body :: CheckedBody) :: Term:
                      resolve_term(env, result)),
               resolve_term(env, value))
   | CheckedBodyMatch(scrutinee, matrix, _, at):
-      checked_match_term(env, scrutinee :~ CheckedExpr, matrix, at)
+      checked_match_term(env, scrutinee, matrix, at)
   | _ :: CheckedPatternMatrix:
       error(~who: #'checked_body_term,
             "checked function clauses are not an expression block")
@@ -1077,10 +1073,9 @@ fun checked_function_clauses(
       fun (clause :: DefClause):
         DefClause(
           clause.pats.map(fun (pat :: Term): resolve_term(env, pat)),
-          resolve_term(env, clause.rhs),
-          clause.obligations.map(
-            fun (obligation :: Term):
-              resolve_term(env, obligation))))
+          clause.terms.map(
+            fun (term :: Term):
+              resolve_term(env, term))))
   check_local_function_clauses(clauses, result_type, fn.at)
   values(parameter_vars, result_type, clauses)
 
@@ -1179,10 +1174,9 @@ fun elaborate_function_decl(
       DefClause(
         cl.pats.map(
           fun (pat :: Term): inst_type(substitution, pat)),
-        inst_type(substitution, cl.rhs),
-        cl.obligations.map(
-          fun (obligation :: Term):
-            inst_type(substitution, obligation)))
+        cl.terms.map(
+          fun (term :: Term):
+            inst_type(substitution, term)))
   let measure:
     match measure
     | #false: #false

@@ -39,7 +39,6 @@ export:
   decode_prop
   decode_function
   decode_tactic
-  core_called_names
   pattern_at
 
 class CoreExpr():
@@ -172,49 +171,6 @@ class CoreTactic(induct :: maybe(Symbol),
                  search_steps :: maybe(NonnegInt),
                  extensionality :: maybe(Symbol))
 
-// Every name a declaration's body mentions, as written.  Used to decide
-// whether the members of a `function.together:` family actually call each
-// other; nothing downstream depends on the answer being exact, and a local
-// binding that shadows a sibling's name only makes the family path run for
-// a family that did not need it.
-fun core_called_names(spec :: CoreFunctionSpec) :: List.of(Symbol):
-  body_names(spec.body, [])
-
-fun add_name(acc :: List.of(Symbol), name :: Symbol) :: List.of(Symbol):
-  (if acc.contains(name) | acc | acc ++ [name])
-
-fun matrix_names(matrix :: CorePatternMatrix,
-                 acc :: List.of(Symbol)) :: List.of(Symbol):
-  for values(out :~ List.of(Symbol) = acc) (row in matrix.rows):
-    body_names((row :~ CoreMatchRow).body, out)
-
-fun expr_names(expr :: CoreExpr, acc :: List.of(Symbol)) :: List.of(Symbol):
-  match expr
-  | CoreRef(name, _): add_name(acc, name)
-  | CoreGlobalRef(_, _): acc
-  | CoreCall(func, args, _):
-      for values(out :~ List.of(Symbol) = expr_names(func, acc)) (a in args):
-        expr_names(a :~ CoreExpr, out)
-  | CoreIf(c, t, e, _):
-      expr_names(e, expr_names(t, expr_names(c, acc)))
-  | CoreTypedExpr(inner, _, _): expr_names(inner, acc)
-  | CoreForall(_, body, _): expr_names(body, acc)
-  | CoreExists(_, body, _): expr_names(body, acc)
-  | CoreBlockExpr(body, _): body_names(body, acc)
-  | CoreMatchExpr(scrutinee, matrix, _):
-      matrix_names(matrix, expr_names(scrutinee, acc))
-  | CoreFunctionExpr(_, _, body, _): body_names(body, acc)
-  | ~else: acc
-
-fun body_names(body :: CoreFunBody,
-               acc :: List.of(Symbol)) :: List.of(Symbol):
-  match body
-  | CoreBodyExpr(expr): expr_names(expr, acc)
-  | CoreBodyLet(_, init, tail, _): body_names(tail, expr_names(init, acc))
-  | CoreBodyMatch(scrutinee, matrix, _):
-      matrix_names(matrix, add_name(acc, scrutinee))
-  | matrix :: CorePatternMatrix: matrix_names(matrix, acc)
-  | ~else: acc
 
 fun surface_error(who :: Symbol, message :: String, at :: Syntax):
   rb.#{raise-syntax-error}(who, message, at)

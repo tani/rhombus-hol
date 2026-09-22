@@ -169,9 +169,17 @@ the prover fail to find a proof, or find an unnecessary one, but cannot make it
 report a proof that does not exist.
 
 Logical @tt{Goal} values contain only assumptions and a conclusion. Stages
-attach a typed trace event to each generated subgoal; the orchestration layer
-scopes those events while constructing the proof tree, and only a failed
-@tt{Residue} retains them. Terms and symbols are converted to display strings
-only when the residue message is rendered. Proof-tree execution is likewise a
-scoped executor capability, with deterministic sequential execution as the
-default policy.
+attach a typed trace event to each subgoal they produce; search extends an
+explicit trace path with that event on the way into the subgoal, and
+snapshots the path into a @tt{Residue} only where a goal is left open. Terms
+and symbols are converted to display strings only when the residue message
+is rendered.
+
+There is no proof tree built first and executed second. A @tt{Step}'s
+justification function is composed directly into the search that produced
+it, the moment every one of its subgoals has come back with a real theorem;
+if any subgoal is left stuck instead, the justification is never called, and
+the residues of every subgoal that never resolved are returned in its place.
+The theorem the waterfall returns is therefore built by that composition as
+search proceeds, not read back afterward off some separate executed
+structure.

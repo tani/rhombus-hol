@@ -7,10 +7,7 @@
 import:
   rhombus/hol/term open
   rhombus/hol/kernel open
-  rhombus/hol/logic/bool open
-  rhombus/hol/logic/drule open
   rhombus/hol/logic/ruledb open
-  rhombus/hol/prover/trace open
   rhombus/hol/prover/proof/node open
   rhombus/hol/prover/search/limits open
   rhombus/hol/prover/tactic/simp open
@@ -41,30 +38,6 @@ fun simplify_apply(budget :: Budget, env :: ProofEnv, goal :: Goal)
           decider(env.base, db, thy, t)
   simplify_goal(env.base.thy, env.db, budget, goal, ~decide: decide)
 
-// A goal whose conclusion is universally quantified, at a fresh variable.
-//
-// The prover's entry point strips the quantifiers a user wrote, so this is
-// about the ones induction introduces: strengthening the induction predicate
-// to hold for every *other* variable of the goal (`tactic/induct.rhm`) is
-// what lets a fact about two naturals descend on both, and it puts a
-// quantifier in front of each case. Nothing else in the waterfall can attack
-// one, so the case would be stuck the moment it appeared.
-//
-// `GEN` puts it back, so this proves the goal it was given and not a weaker
-// one: the variable is fresh in the goal, hypotheses included.
-fun specialize_goal(thy :: Theory, g :: Goal) :: maybe(Step):
-  match dest_forall(g.concl)
-  | #false: #false
-  | [v, body]:
-      let fresh = variant(g.asms ++ [g.concl], v :~ FVar)
-      let opened = subst_bvar(fresh :~ Term, body :~ Term)
-      fun close(ths :: List.of(Thm)) :: Thm:
-        GEN(thy, fresh, ths[0])
-      Step([Goal(g.asms, opened)], close, [Specialized(fresh.name)])
-
-fun specialize_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
-  specialize_goal(env.base.thy, goal)
-
 fun eliminate_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
   eliminate_goal(env.base.thy, env.base.dts, goal)
 
@@ -78,26 +51,14 @@ fun irrelevance_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
   eliminate_irrelevance_goal(goal)
 
 // Induction is not part of `standard_stages`: the waterfall only reaches for
-// it once every other stage has given up on a goal (`waterfall.rhm`).
+// it once every other stage has given up on a goal (`waterfall.rhm`). Its
+// attempt also folds in the forall specialization/generalization roundtrip
+// the induction hypothesis itself introduces (`tactic/induct.rhm`'s
+// `induction_attempt`), so that is not a stage of its own either -- nothing
+// before this point in the waterfall ever sees a goal it left behind.
 fun induction_stage(hint :: maybe(FVar)) :: Function:
   fun apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
-    let candidates = (cond
-                      | hint: [hint]
-                      | ~else: candidate_vars(env.base.funs, env.base.dts, goal))
-    recur choose (remaining :~ List = candidates):
-      match remaining
-      | []: #false
-      | List.cons(variable, rest):
-          let variable :~ FVar = variable
-          match inductive_type_name(variable)
-          | #false: choose(rest)
-          | type_name:
-              match env.base.dts.get(type_name, #false)
-              | #false: choose(rest)
-              | datatype_thms:
-                  induction_step(env.base.thy, env.base.funs,
-                                 datatype_thms :~ DatatypeThms,
-                                 variable, goal)
+    induction_attempt(env.base.thy, env.base.funs, env.base.dts, hint, goal)
   apply
 
 // One entry per name, filtered by the proof's skipped-stage set once here
@@ -105,7 +66,6 @@ fun induction_stage(hint :: maybe(FVar)) :: Function:
 // then knows nothing about names at all.
 fun standard_stages(env :: ProofEnv, budget :: Budget) :: List.of(Function):
   [[#'simplify, fun (goal :: Goal): simplify_apply(budget, env, goal)],
-   [#'specialize, fun (goal :: Goal): specialize_apply(env, goal)],
    [#'eliminate, fun (goal :: Goal): eliminate_apply(env, goal)],
    [#'fertilize, fun (goal :: Goal): fertilize_apply(env, goal)],
    [#'generalize, fun (goal :: Goal): generalize_apply(env, goal)],

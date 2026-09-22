@@ -393,6 +393,9 @@ fun core_lookup(env :: ElabEnv, n :: Symbol, at :: Syntax) :: Term:
       | ~else: mk_const(n, core_const_instance(env, n, [], at))
   | v: resolve_term(env, v :~ Term)
 
+fun core_global_lookup(env :: ElabEnv, n :: Symbol, at :: Syntax) :: Term:
+  mk_const(n, core_const_instance(env, n, [], at))
+
 // Specialize phantom type variables in already-elaborated arguments from the
 // function domains selected by unification. This is needed for expressions
 // such as `left(x) === left(y)`: each `left` initially has an independent
@@ -417,6 +420,7 @@ fun specialize_call_args(fty :: HType, args :: List.of(Term)) :: List.of(Term):
 fun core_location(expr :: CoreExpr) :: Syntax:
   match expr
   | CoreRef(_, at): at
+  | CoreGlobalRef(_, at): at
   | CoreCall(_, _, at): at
   | CoreNumeral(_, at): at
   | CoreIf(_, _, _, at): at
@@ -426,93 +430,84 @@ fun core_location(expr :: CoreExpr) :: Syntax:
   | CoreBlockExpr(_, at): at
   | CoreMatchExpr(_, _, at): at
   | CoreTypedExpr(_, _, at): at
-  | CoreListExpr(_, _, at): at
-  | CorePairExpr(_, _, at): at
-  | CoreStringExpr(_, at): at
-  | CoreSetExpr(_, at): at
   | ~else: error(~who: #'elaborate, "unknown CoreExpr variant")
 
 fun core_apply_effect(func :: CoreExpr, args :: List.of(CoreExpr),
-                      at :: Syntax) :: Computation:
-  // Applying the arguments takes two passes, because an argument that needs
-  // an expected type and a parameter whose type is still an open variable
-  // are useless to each other. `x === y` is the case that matters: it
-  // applies the polymorphic `eq : ?a -> ?a -> bool`, and checking
-  // `1 === succ(zero())`'s numeral or `map(f, empty()) === seq_nil()`'s
-  // overloaded call against a bare `?a` can only fail (nothing fixes the
-  // numeral's type) or resolve ambiguously (every overload unifies with a
-  // variable). The other argument decides `?a`, so such an argument waits
-  // for it. Type unification is stateful, so the second pass only has to
-  // re-`resolve_type` the domain it recorded.
-  //
-  // Nothing decides it in `1 === 2`; the second pass then checks against the
-  // variable anyway and the same diagnostic comes out, one pass later.
+                      at :: Syntax,
+                      ~expected: expected :: maybe(HType) = #false)
+     :: Computation:
+  // Discover the full application shape before elaborating operands. This
+  // lets an expected result type refine polymorphic domains first; operands
+  // such as numerals can then receive the concrete type they require.
+  fun application_types(env :: ElabEnv, head :: Term)
+      :: values(List.of(HType), HType):
+    for values(domains :~ List.of(HType) = [],
+               current :~ HType = type_of(head)) (_arg in args):
+      let current = resolve_type(env, current)
+      when current is_a TyVar
+      | let domain = mk_tyvar(Symbol.gen("_domain"))
+        let range = mk_tyvar(Symbol.gen("_range"))
+        unify_types(
+          env, current, mk_fun(domain, range), at,
+          "the applied expression is not a function")
+      let current = resolve_type(env, current)
+      unless is_fun(current)
+      | syntax_error(
+          env.who, "the applied expression is not a function", at)
+      let (domain, range) = dest_fun(current)
+      values(domains ++ [domain], range)
   fun replace(xs :: List, index :: Int, value) :: List:
     for List (x in xs, k in List.iota(xs.length())):
       (if k == index | value | x)
-  fun consume(env :: ElabEnv, head :: Term) :: HType:
-    let head_type = type_of(head)
-    when head_type is_a TyVar
-    | let domain = mk_tyvar(Symbol.gen("_domain"))
-      let range = mk_tyvar(Symbol.gen("_range"))
-      unify_types(
-        env, head_type, mk_fun(domain, range), at,
-        "the applied expression is not a function")
-    let function_type = resolve_type(env, type_of(head))
-    unless is_fun(function_type)
-    | syntax_error(env.who,
-                   "the applied expression is not a function", at)
-    function_type
-  fun apply_arguments(head :: Term,
-                      remaining :: List.of(CoreExpr)) :: Computation:
+  fun apply_arguments(head :: Term) :: Computation:
     effect:
       let env :: ElabEnv <- ElabEnv.ask()
+      let (domains, result_type) = application_types(env, head)
+      match expected
+      | #false: #void
+      | wanted:
+          unify_types(
+            env, result_type, wanted :~ HType, at,
+            "expression has an unexpected type")
       fun fit(arg :: CoreExpr, domain :: HType,
               operand :: Term) :: Void:
         unify_types(
           env, domain, type_of(operand), core_location(arg),
           "operand type does not match function domain")
-      recur scan (rest :~ List = remaining,
+      recur scan (remaining :~ List = args,
                   index = 0,
-                  current :~ Term = head,
                   operands :~ List = [],
-                  domains :~ List = [],
                   deferred :~ List = []):
-        match rest
+        match remaining
         | []:
-            recur fill (pending :~ List = deferred, out :~ List = operands):
+            recur fill (pending :~ List = deferred,
+                        out :~ List = operands):
               match pending
               | []:
-                  return for values(t :~ Term = resolve_term(env, head)) (
-                               o in out):
-                    mk_comb(resolve_term(env, t),
-                            resolve_term(env, o :~ Term))
+                  return for values(term :~ Term = resolve_term(env, head)) (
+                               operand in out):
+                    mk_comb(
+                      resolve_term(env, term),
+                      resolve_term(env, operand :~ Term))
               | List.cons(i, more):
-                  let arg = remaining[i] :~ CoreExpr
+                  let arg = args[i] :~ CoreExpr
                   let domain = resolve_type(env, domains[i] :~ HType)
                   effect:
                     let operand :: Term <- check_core(arg, domain)
                     fit(arg, domain, operand)
                     fill(more, replace(out, i :~ Int, operand))
         | List.cons(arg, more):
-            let resolved = resolve_term(env, current)
-            let (domain, range_type) = dest_fun(consume(env, resolved))
-            // `current` only carries the head's remaining type; the applied
-            // term itself is rebuilt once both passes have every operand.
-            let range = mk_var(Symbol.gen("_partial"), range_type)
+            let domain = resolve_type(env, domains[index] :~ HType)
             cond
             | requires_expected_type(arg :~ CoreExpr, env.operators)
-                && resolve_type(env, domain) is_a TyVar:
-                scan(more, index + 1, range, operands ++ [#false],
-                     domains ++ [domain], deferred ++ [index])
+                && domain is_a TyVar:
+                scan(more, index + 1, operands ++ [#false],
+                     deferred ++ [index])
             | ~else:
                 effect:
-                  let operand :: Term <- check_core(
-                                           arg :~ CoreExpr,
-                                           resolve_type(env, domain))
+                  let operand :: Term <- check_core(arg :~ CoreExpr, domain)
                   fit(arg :~ CoreExpr, domain, operand)
-                  scan(more, index + 1, range, operands ++ [operand],
-                       domains ++ [domain], deferred)
+                  scan(more, index + 1, operands ++ [operand], deferred)
   effect:
     let env :: ElabEnv <- ElabEnv.ask()
     match func
@@ -521,11 +516,11 @@ fun core_apply_effect(func :: CoreExpr, args :: List.of(CoreExpr),
                               && !blocks_global_reference(env, name)
                               && !const_type(env.thy, name)
                               && overload_arity(env.operators, name) != #false:
-        elaborate_overload_effect(name, args, at)
+        elaborate_overload_effect(name, args, at, ~expected: expected)
     | ~else:
         effect:
           let head :: Term <- infer_core(func)
-          apply_arguments(head, args)
+          apply_arguments(head)
 fun elaborate_non_numerals_effect(args :: List.of(CoreExpr)) :: Computation:
   effect:
     let env :: ElabEnv <- ElabEnv.ask()
@@ -586,205 +581,6 @@ fun elaborate_numeral(env :: ElabEnv, value :: NonnegInt,
         "a numeral has no representation at type "
           ++ type_to_surface_string(env.type_constructors, expected),
         at)
-
-fun expected_list_element(expected :: HType, at :: Syntax) :: HType:
-  match expected
-  | TyApp(#'List, [element_type]): element_type
-  | ~else:
-      syntax_error(#'function,
-                   "a list expression needs a `List.of(...)` type",
-                   at)
-
-fun elaborate_list_at_type(
-      elements :: List.of(CoreExpr), tail :: maybe(CoreExpr),
-      element_type :: HType, at :: Syntax) :: Computation:
-  effect:
-    let env :: ElabEnv <- ElabEnv.ask()
-    fun elaborate_elements(remaining :: List.of(CoreExpr),
-                           out :: List.of(Term)) :: Computation:
-      match remaining
-      | []: return out
-      | List.cons(element, rest):
-          effect:
-            let term :: Term <- check_core(element :~ CoreExpr, element_type)
-            elaborate_elements(rest, out ++ [term])
-    let terms :: List.of(Term) <- elaborate_elements(elements, [])
-    let list_type = mk_tyapp(#'List, [element_type])
-    fun elaborate_tail() :: Computation:
-      match tail
-      | #false:
-          return specialize_overload_term(
-                   numeral_apply(env, #'nil, [], at),
-                   list_type)
-      | tail_expr:
-          check_core(tail_expr :~ CoreExpr, list_type)
-    let tail_term :: Term <- elaborate_tail()
-    return for values(result :~ Term = tail_term) (term in terms.reverse()):
-             numeral_apply(env, #'cons, [term :~ Term, result], at)
-
-fun elaborate_list_effect(
-      elements :: List.of(CoreExpr), tail :: maybe(CoreExpr),
-      at :: Syntax, expected :: maybe(HType) = #false) :: Computation:
-  match expected
-  | #false:
-      match elements
-      | List.cons(first, _):
-          effect:
-            let first_term :: Term <- infer_core(first :~ CoreExpr)
-            elaborate_list_at_type(elements, tail, type_of(first_term), at)
-      | []:
-          match tail
-          | #false:
-              elaborate_list_at_type(
-                [], #false, mk_tyvar(Symbol.gen("_list_element")), at)
-          | tail_expr:
-              effect:
-                let tail_term :: Term <- infer_core(tail_expr :~ CoreExpr)
-                let element_type = expected_list_element(type_of(tail_term), at)
-                elaborate_list_at_type(elements, tail, element_type, at)
-  | wanted:
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        let wanted = resolve_type(env, wanted :~ HType)
-        let element_type:
-          match wanted
-          | TyVar(_,):
-              let element_type = mk_tyvar(Symbol.gen("_list_element"))
-              unify_types(
-                env, wanted, mk_tyapp(#'List, [element_type]), at,
-                "a list expression needs a `List.of(...)` type")
-              element_type
-          | ~else: expected_list_element(wanted, at)
-        let term :: Term <- elaborate_list_at_type(
-                            elements, tail, element_type, at)
-        return resolve_term(env, term)
-
-fun expected_pair_types(expected :: HType, at :: Syntax)
-    :: values(HType, HType):
-  match expected
-  | TyApp(name, [first_type, second_type]) when name == ty_prod:
-      values(first_type, second_type)
-  | ~else:
-      syntax_error(#'function,
-                   "a Pair expression needs a `Pair.of(...)` type",
-                   at)
-
-fun elaborate_pair_effect(
-      first :: CoreExpr, second :: CoreExpr, at :: Syntax,
-      expected :: maybe(HType) = #false) :: Computation:
-  match expected
-  | #false:
-      effect:
-        let first_term :: Term <- infer_core(first)
-        let second_term :: Term <- infer_core(second)
-        return mk_pair_term(first_term, second_term)
-  | wanted:
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        let wanted = resolve_type(env, wanted :~ HType)
-        let (first_type, second_type):
-          match wanted
-          | TyVar(_,):
-              let first_type = mk_tyvar(Symbol.gen("_pair_first"))
-              let second_type = mk_tyvar(Symbol.gen("_pair_second"))
-              unify_types(
-                env, wanted, prod_ty(first_type, second_type), at,
-                "a Pair expression needs a `Pair.of(...)` type")
-              values(first_type, second_type)
-          | ~else: expected_pair_types(wanted, at)
-        let first_term :: Term <- check_core(first, first_type)
-        let second_term :: Term <- check_core(second, second_type)
-        return resolve_term(env, mk_pair_term(first_term, second_term))
-
-fun string_codepoints(value :: String) :: List.of(NonnegInt):
-  for List (character in value.to_list()):
-    character.to_int()
-
-// A string is `text` applied to the list of its Unicode scalar values. Each
-// codepoint uses the same checked native Nat literal as source numeral syntax,
-// so term size is constant per scalar and no parallel Char encoding exists.
-fun elaborate_string_effect(value :: String, at :: Syntax) :: Computation:
-  effect:
-    let env :: ElabEnv <- ElabEnv.ask()
-    let nat_type = mk_tyapp(#'Nat, [])
-    let list_type = mk_tyapp(#'List, [nat_type])
-    let empty = specialize_overload_term(
-                  numeral_apply(env, #'nil, [], at),
-                  list_type)
-    let codes:
-      string_codepoints(value).map(
-        fun (code :: NonnegInt): nat_numeral(env, code, at))
-    let contents:
-      for values(result :~ Term = empty) (code in codes.reverse()):
-        numeral_apply(env, #'cons, [code :~ Term, result], at)
-    return numeral_apply(env, #'text, [contents], at)
-
-fun expected_set_element(expected :: HType, at :: Syntax) :: HType:
-  unless is_fun(expected)
-  | syntax_error(#'function,
-                 "a set expression needs a function-to-Boolean type",
-                 at)
-  let (element_type, result_type) = dest_fun(expected)
-  unless result_type == bool
-  | syntax_error(#'function,
-                 "a set expression needs a function-to-Boolean type",
-                 at)
-  element_type
-
-fun elaborate_set_at_type(elements :: List.of(CoreExpr),
-                          element_type :: HType,
-                          at :: Syntax) :: Computation:
-  fun elaborate_elements(remaining :: List.of(CoreExpr),
-                         out :: List.of(Term)) :: Computation:
-    match remaining
-    | []: return out
-    | List.cons(element, rest):
-        effect:
-          let term :: Term <- check_core(element :~ CoreExpr, element_type)
-          elaborate_elements(rest, out ++ [term])
-  effect:
-    let terms :: List.of(Term) <- elaborate_elements(elements, [])
-    let env :: ElabEnv <- ElabEnv.ask()
-    // Checking the elements is what decides `element_type` when it arrived
-    // as a metavariable -- `Set{zero()}` against an equation's still-open
-    // `?a`, say -- and unification is stateful, so the binder has to be
-    // built from the resolved type. Built from the metavariable it disagrees
-    // with the very elements it is compared against.
-    let variable = mk_var(Symbol.gen("_set_element"),
-                          resolve_type(env, element_type))
-    let membership:
-      for values(result :~ Term = tm_false) (term in terms.reverse()):
-        mk_disj(mk_eq(variable, resolve_term(env, term :~ Term)), result)
-    return mk_abs(variable, membership)
-
-fun elaborate_set_effect(elements :: List.of(CoreExpr), at :: Syntax,
-                         expected :: maybe(HType) = #false) :: Computation:
-  match expected
-  | #false:
-      match elements
-      | List.cons(first, _):
-          effect:
-            let first_term :: Term <- infer_core(first :~ CoreExpr)
-            elaborate_set_at_type(elements, type_of(first_term), at)
-      | []:
-          elaborate_set_at_type(
-            [], mk_tyvar(Symbol.gen("_set_element")), at)
-  | wanted:
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        let wanted = resolve_type(env, wanted :~ HType)
-        let element_type:
-          match wanted
-          | TyVar(_,):
-              let element_type = mk_tyvar(Symbol.gen("_set_element"))
-              unify_types(
-                env, wanted, mk_fun(element_type, bool), at,
-                "a set expression needs a function-to-Boolean type")
-              element_type
-          | ~else: expected_set_element(wanted, at)
-        let term :: Term <- elaborate_set_at_type(
-                            elements, element_type, at)
-        return resolve_term(env, term)
 
 fun elaborate_overload_effect(function_name :: Symbol,
                               args :: List.of(CoreExpr),
@@ -1039,6 +835,10 @@ fun elaborate_effect(expr :: CoreExpr) :: Computation:
       effect:
         let env :: ElabEnv <- ElabEnv.ask()
         return core_lookup(env, name, at)
+  | CoreGlobalRef(name, at):
+      effect:
+        let env :: ElabEnv <- ElabEnv.ask()
+        return core_global_lookup(env, name, at)
   | CoreCall(func, args, at): core_apply_effect(func, args, at)
   | CoreNumeral(_, at):
       effect:
@@ -1061,14 +861,6 @@ fun elaborate_effect(expr :: CoreExpr) :: Computation:
                           type_stx, env.tyvars,
                           env.type_constructors)
         check_core(inner, annotated)
-  | CoreListExpr(elements, tail, at):
-      elaborate_list_effect(elements, tail, at)
-  | CorePairExpr(first, second, at):
-      elaborate_pair_effect(first, second, at)
-  | CoreStringExpr(value, at):
-      elaborate_string_effect(value, at)
-  | CoreSetExpr(elements, at):
-      elaborate_set_effect(elements, at)
   | CoreBlockExpr(body, _):
       elaborate_body_effect(body, #false)
   | CoreMatchExpr(scrutinee, clauses, at):
@@ -1088,29 +880,16 @@ fun requires_expected_type(
   fun any_arg(args :: List.of(CoreExpr)) :: Boolean:
     for values(found = #false) (arg in args):
       found || requires_expected_type(arg :~ CoreExpr, operators)
-  fun every_arg(args :: List.of(CoreExpr)) :: Boolean:
-    args.length() == 0
-      || for values(all = #true) (arg in args):
-           all && requires_expected_type(arg :~ CoreExpr, operators)
   match expr
   | CoreNumeral(_, _): #true
   | CoreTypedExpr(_, _, _): #false
-  | CoreListExpr(elements, tail, _):
-      elements.length() == 0
-        || any_arg(elements)
-        || (match tail
-            | #false: #false
-            | value: requires_expected_type(value :~ CoreExpr, operators))
-  | CorePairExpr(first, second, _):
-      requires_expected_type(first, operators)
-        || requires_expected_type(second, operators)
-  | CoreSetExpr(elements, _):
-      elements.length() == 0 || any_arg(elements)
+  | CoreGlobalRef(_, _): #false
   | CoreCall(CoreRef(name, _), args, _):
-      (if operators
-            && overload_arity(operators :~ OverloadRegistry, name) != #false
-       | args.length() == 0 || any_arg(args)
-       | any_arg(args))
+      any_arg(args)
+        || (args.length() == 0
+              && operators
+              && overload_arity(
+                   operators :~ OverloadRegistry, name) != #false)
   | CoreCall(_, args, _): any_arg(args)
   | CoreIf(_, then_expr, else_expr, _):
       requires_expected_type(then_expr, operators)
@@ -1139,34 +918,13 @@ fun check_core(expr :: CoreExpr, expected :: HType) :: Computation:
             "a numeral needs a type ascription or an unambiguous numeric context",
             at)
         return elaborate_numeral(env, value, wanted, at)
-  | CoreListExpr(elements, tail, at):
-      elaborate_list_effect(elements, tail, at, expected)
-  | CorePairExpr(first, second, at):
-      elaborate_pair_effect(first, second, at, expected)
-  | CoreSetExpr(elements, at):
-      elaborate_set_effect(elements, at, expected)
   | CoreBlockExpr(body, _):
       elaborate_body_effect(body, expected)
   | CoreMatchExpr(scrutinee, clauses, at):
       elaborate_match_expr_effect(
         scrutinee, clauses, at, expected)
-  | CoreCall(CoreRef(name, ref_at), args, at):
-      effect:
-        let env :: ElabEnv <- ElabEnv.ask()
-        let overloaded = !env.vars.get(name, #false)
-                           && name != env.self_name
-                           && !blocks_global_reference(env, name)
-                           && !const_type(env.thy, name)
-                           && overload_arity(env.operators, name) != #false
-        cond
-        | overloaded:
-            effect:
-              let term :: Term <- elaborate_overload_effect(name, args, at, ~expected: expected)
-              return term
-        | ~else:
-            effect:
-              let term :: Term <- infer_core(expr)
-              finish(term)
+  | CoreCall(func, args, at):
+      core_apply_effect(func, args, at, ~expected: expected)
   | CoreIf(condition_expr, then_expr, else_expr, at):
       effect:
         let condition :: Term <- check_core(condition_expr, bool)
@@ -1265,6 +1023,7 @@ fun core_type_vars(expr :: CoreExpr) :: List.of(Symbol):
     | ~else: []
   match expr
   | CoreRef(_, _): []
+  | CoreGlobalRef(_, _): []
   | CoreCall(func, args, _):
       for values(acc :~ List = core_type_vars(func)) (a in args):
         append_unique(acc, core_type_vars(a))
@@ -1290,20 +1049,6 @@ fun core_type_vars(expr :: CoreExpr) :: List.of(Symbol):
                         body_vars(clause.body)))
   | CoreTypedExpr(inner, type_stx, _):
       append_unique(core_type_vars(inner), collect_type_vars(type_stx))
-  | CoreListExpr(elements, tail, _):
-      let from_elements:
-        for values(acc :~ List = []) (element in elements):
-          append_unique(acc, core_type_vars(element))
-      match tail
-      | #false: from_elements
-      | value: append_unique(from_elements,
-                             core_type_vars(value :~ CoreExpr))
-  | CorePairExpr(first, second, _):
-      append_unique(core_type_vars(first), core_type_vars(second))
-  | CoreStringExpr(_, _): []
-  | CoreSetExpr(elements, _):
-      for values(acc :~ List = []) (element in elements):
-        append_unique(acc, core_type_vars(element))
   | ~else: []
 
 fun leading_core_binder_names(expr :: CoreExpr) :: List.of(Symbol):

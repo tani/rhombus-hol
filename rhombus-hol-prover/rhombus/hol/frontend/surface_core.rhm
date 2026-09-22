@@ -10,6 +10,7 @@ import:
 export:
   CoreExpr
   CoreRef
+  CoreGlobalRef
   CoreCall
   CoreNumeral
   CoreIf
@@ -19,10 +20,6 @@ export:
   CoreBlockExpr
   CoreMatchExpr
   CoreTypedExpr
-  CoreListExpr
-  CorePairExpr
-  CoreStringExpr
-  CoreSetExpr
   CoreBinder
   CorePattern
   CorePatVar
@@ -52,6 +49,11 @@ class CoreExpr():
 class CoreRef(name :: Symbol, at :: Syntax):
   extends CoreExpr
 
+// A name introduced by surface normalization, resolved only in the global
+// declaration space so a same-named local cannot capture literal semantics.
+class CoreGlobalRef(name :: Symbol, at :: Syntax):
+  extends CoreExpr
+
 class CoreCall(func :: CoreExpr,
                args :: List.of(CoreExpr),
                at :: Syntax):
@@ -60,35 +62,16 @@ class CoreCall(func :: CoreExpr,
 class CoreNumeral(value :: NonnegInt, at :: Syntax):
   extends CoreExpr
 
-
 class CoreIf(cond :: CoreExpr,
              then_expr :: CoreExpr,
              else_expr :: CoreExpr,
              at :: Syntax):
   extends CoreExpr
 
-
 class CoreTypedExpr(expr :: CoreExpr,
                     type_stx :: Syntax,
                     at :: Syntax):
   extends CoreExpr
-
-class CoreListExpr(elements :: List.of(CoreExpr),
-                   tail :: maybe(CoreExpr),
-                   at :: Syntax):
-  extends CoreExpr
-
-class CorePairExpr(first :: CoreExpr,
-                   second :: CoreExpr,
-                   at :: Syntax):
-  extends CoreExpr
-
-class CoreStringExpr(value :: String, at :: Syntax):
-  extends CoreExpr
-
-class CoreSetExpr(elements :: List.of(CoreExpr), at :: Syntax):
-  extends CoreExpr
-
 
 class CorePattern():
   nonfinal
@@ -208,24 +191,13 @@ fun add_name(acc :: List.of(Symbol), name :: Symbol) :: List.of(Symbol):
 fun expr_names(expr :: CoreExpr, acc :: List.of(Symbol)) :: List.of(Symbol):
   match expr
   | CoreRef(name, _): add_name(acc, name)
+  | CoreGlobalRef(_, _): acc
   | CoreCall(func, args, _):
       for values(out :~ List.of(Symbol) = expr_names(func, acc)) (a in args):
         expr_names(a :~ CoreExpr, out)
   | CoreIf(c, t, e, _):
       expr_names(e, expr_names(t, expr_names(c, acc)))
   | CoreTypedExpr(inner, _, _): expr_names(inner, acc)
-  | CoreListExpr(elements, tail, _):
-      let out:
-        for values(o :~ List.of(Symbol) = acc) (e in elements):
-          expr_names(e :~ CoreExpr, o)
-      (match tail
-       | #false: out
-       | t: expr_names(t :~ CoreExpr, out))
-  | CorePairExpr(first, second, _):
-      expr_names(second, expr_names(first, acc))
-  | CoreSetExpr(elements, _):
-      for values(o :~ List.of(Symbol) = acc) (e in elements):
-        expr_names(e :~ CoreExpr, o)
   | CoreForall(_, body, _): expr_names(body, acc)
   | CoreExists(_, body, _): expr_names(body, acc)
   | CoreBlockExpr(body, _): body_names(body, acc)
@@ -264,6 +236,47 @@ fun decoder_who(mode :: Symbol) :: Symbol:
 
 fun logical_mode(mode :: Symbol) :: Boolean:
   mode == #'prop || mode == #'definition
+
+
+fun global_ref(name :: Symbol, at :: Syntax) :: CoreExpr:
+  CoreGlobalRef(name, at)
+
+fun named_call(name :: Symbol, args :: List.of(CoreExpr),
+               at :: Syntax) :: CoreExpr:
+  CoreCall(global_ref(name, at), args, at)
+
+fun constructor_list_expr(elements :: List.of(CoreExpr),
+                          tail :: maybe(CoreExpr),
+                          at :: Syntax) :: CoreExpr:
+  let initial:
+    match tail
+    | #false: global_ref(#'nil, at)
+    | present: present :~ CoreExpr
+  for values(out :~ CoreExpr = initial) (element in elements.reverse()):
+    named_call(#'cons, [element :~ CoreExpr, out], at)
+
+fun constructor_string_expr(value :: String, at :: Syntax) :: CoreExpr:
+  let codes:
+    for List (character in value.to_list()):
+      CoreNumeral(character.to_int(), at)
+  named_call(
+    #'text, [constructor_list_expr(codes, #false, at)], at)
+
+fun predicate_set_expr(elements :: List.of(CoreExpr),
+                       at :: Syntax) :: CoreExpr:
+  let parameter_name = Symbol.gen("_set_element")
+  let parameter = CoreRef(parameter_name, at)
+  let predicate:
+    for values(out :~ CoreExpr = global_ref(#'false, at)) (
+          element in elements.reverse()):
+      let equal = named_call(
+                    #'eq, [parameter, element :~ CoreExpr], at)
+      named_call(#'disj, [equal, out], at)
+  CoreFunctionExpr(
+    [CoreBinder(CorePatVar(parameter_name, at), #false, at)],
+    #false,
+    CoreBodyExpr(predicate),
+    at)
 
 fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
   match stx
@@ -336,19 +349,22 @@ fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
   | '(core_typed_expr $expr ($type ...))':
       CoreTypedExpr(decode_expr(expr, mode), '$type ...', stx)
   | '(core_list_expr [$element, ...] #false)':
-      CoreListExpr([decode_expr(element, mode), ...], #false, stx)
+      constructor_list_expr(
+        [decode_expr(element, mode), ...], #false, stx)
   | '(core_list_expr [$element, ...] $tail)':
-      CoreListExpr([decode_expr(element, mode), ...],
-                   decode_expr(tail, mode),
-                   stx)
+      constructor_list_expr(
+        [decode_expr(element, mode), ...],
+        decode_expr(tail, mode),
+        stx)
   | '(core_pair_expr $first $second)':
-      CorePairExpr(decode_expr(first, mode),
-                   decode_expr(second, mode),
-                   stx)
+      named_call(
+        #'pair,
+        [decode_expr(first, mode), decode_expr(second, mode)],
+        stx)
   | '(core_string_expr $(value :: String))':
-      CoreStringExpr(Syntax.unwrap(value), stx)
+      constructor_string_expr(Syntax.unwrap(value), stx)
   | '(core_set_expr [$element, ...])':
-      CoreSetExpr([decode_expr(element, mode), ...], stx)
+      predicate_set_expr([decode_expr(element, mode), ...], stx)
   | '(core_rejected $_)':
       surface_error(
         decoder_who(mode),

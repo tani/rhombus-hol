@@ -628,25 +628,6 @@ meta:
     match expr
     | CoreNumeral(_, _): #true
     | CoreTypedExpr(_, _, _): #false
-    | CoreListExpr(elements, tail, _):
-        let element_needs:
-          for values(found = #false) (element in elements):
-            found || runtime_needs_expected(
-                       state, element :~ CoreExpr)
-        elements.length() == 0
-          || element_needs
-          || (match tail
-              | #false: #false
-              | value:
-                  runtime_needs_expected(state, value :~ CoreExpr))
-    | CorePairExpr(first, second, _):
-        runtime_needs_expected(state, first)
-          || runtime_needs_expected(state, second)
-    | CoreSetExpr(elements, _):
-        elements.length() == 0
-          || (for values(found = #false) (element in elements):
-                found || runtime_needs_expected(
-                           state, element :~ CoreExpr))
     | CoreCall(CoreRef(name, _), args, _) when overload_arity(state.surface.operators, name) != #false:
         every_arg(args)
     | CoreCall(_, args, _):
@@ -769,22 +750,6 @@ meta:
         syntax_meta.error(
           "a Pair expression needs a `Pair.of(...)` type", at)
 
-  // A string is `text` applied to its Unicode scalar-value list. Runtime
-  // numerals use constant-depth emitted syntax; logical numerals use checked
-  // native NatLit terms. Both readings denote the same ordinary Nat values.
-  fun runtime_string_expr(state :: SurfaceContext, value :: String,
-                          at :: Syntax) :: RuntimeExpr:
-    let nat_type = mk_tyapp(#'Nat, [])
-    let codes:
-      for List (character in value.to_list()):
-        runtime_numeral(state, character.to_int(), nat_type, at).stx
-    let contents:
-      for values(out :~ Syntax = runtime_named_apply(
-                                          state, #'nil, [], at)) (
-            code in codes.reverse()):
-        runtime_named_apply(state, #'cons, [code :~ Syntax, out], at)
-    RuntimeExpr(runtime_named_apply(state, #'text, [contents], at),
-                mk_tyapp(#'String, []))
 
   fun runtime_expr(inference :: CheckedInference,
                    state :: SurfaceContext, env :: Map.of(Symbol, HType),
@@ -808,54 +773,21 @@ meta:
         ensure(RuntimeExpr(Syntax.make(#false, runtime_context()),
                            mk_tyapp(#'bool, [])))
     | ~else:
-        // `check_expr`/`checked_to_runtime` (checked_core.rhm) are the
-        // shared, Theory-free type-checking pass -- see that module's
-        // header for why a live `Theory` cannot be built here to reuse
-        // `elab.rhm`'s Term-building elaboration directly. This is now
-        // this function's own single entry point for every expression
-        // shape `check_expr` covers; `runtime_expr_fallback` below
-        // covers exactly what it does not: `true`/`false` is handled
-        // above (a runtime-only rendering optimization with no shared
-        // type-checking story -- `check_expr` is Theory/mechanism-
-        // independent by design and should not know about it);
-        // `CoreBlockExpr`/`CoreMatchExpr`/`CoreFunctionExpr` need
-        // `CoreFunBody` handling `check_expr` does not yet have
-        // (items 6/7/8/10's own territory -- `CoreBodyMatch` in
-        // particular carries a scrutinee-is-a-bound-variable invariant
-        // the termination/recursion-analysis pipeline's own
-        // `core_parse_clauses` depends on, not a decode-time-only
-        // desugaring); an overloaded `CoreCall` needs resolution
-        // `check_expr`'s "check the head's type, then its arguments"
-        // shape structurally can't do; a `CoreRef` naming neither a
-        // local variable nor an entry `lookup` knows needs
-        // `runtime_restricted_names` and an undeclared-name diagnostic;
-        // and `CoreForall`/`CoreExists` have no runtime meaning at all.
-        // Every case `check_expr` DOES cover but cannot validate a
-        // specific input against (a numeral with no admissible type, a
-        // wrong-shaped Pair/list/set expected type, a set literal with
-        // a function-typed element) is reported directly through its
-        // own `~error` capability now, not through `fallback` -- see
-        // `check_expr`'s own header for why that distinction matters.
+        // The checked pass owns references, numerals, calls, conditionals,
+        // and annotations. Fallback retains bodies, matches, overload
+        // resolution, and constructs with no executable meaning.
         fun fallback(e :: CoreExpr, exp :: maybe(HType)) :: CheckedExpr:
-          // A `CoreRef` to `true`/`false` reaches here too: `check_expr`'s
-          // own `CoreRef` case tries `vars`/`lookup` first (neither ever
-          // finds `true`/`false`, since they are a runtime-only rendering
-          // special case with no `surface_const_type` entry -- see this
-          // function's own header comment), so it falls through to
-          // `fallback` exactly like any other undeclared name would.
-          // Routing *this* shape back through `runtime_expr` is safe, not
-          // a re-entry into `check_expr`: `runtime_expr`'s own `true`/
-          // `false` guards match before its `~else` ever dispatches to
-          // `check_expr` again, so this terminates in one hop, not a loop.
-          let r:
-            match e
-            | CoreRef(name, _) when name == #'true || name == #'false:
-                runtime_expr(inference, state, env, e, exp)
-            | ~else:
-                runtime_expr_fallback(inference, state, env, e, exp)
+          let r = runtime_expr_fallback(inference, state, env, e, exp)
           CheckedOpaque(r.stx, r.ty, core_location(e))
         fun lookup_cb(name :: Symbol) :: maybe(HType):
-          surface_const_type(state, name)
+          cond
+          | name == #'true || name == #'false: mk_tyapp(#'bool, [])
+          | name == c_pair:
+              let first_type = mk_tyvar(#'a)
+              let second_type = mk_tyvar(#'b)
+              mk_fun(first_type,
+                     mk_fun(second_type, prod_ty(first_type, second_type)))
+          | ~else: surface_const_type(state, name)
         fun parse_type_cb(type_stx :: Syntax) :: HType:
           type_parser.parse_open_type(type_stx, state.surface.type_constructors)
         fun needs_expected_cb(e :: CoreExpr) :: Boolean:
@@ -874,12 +806,8 @@ meta:
           expr, expected)
         ensure(checked_to_runtime(state, checked))
 
-  // The shapes `check_expr` does not cover (see `runtime_expr`'s own
-  // header comment for exactly why each one doesn't). `CoreRef`'s own
-  // case here is reached only once `check_expr`'s identical
-  // `vars`/`lookup` pair (== `env.get`/`surface_const_type`) has
-  // already failed, so it goes straight to the undeclared-name
-  // diagnostic rather than re-trying either.
+  // Runtime-only fallback for expression shapes not yet represented in
+  // `CheckedExpr`, plus diagnostics that need surface registries.
   fun runtime_expr_fallback(inference :: CheckedInference,
                             state :: SurfaceContext,
                             env :: Map.of(Symbol, HType),
@@ -895,6 +823,13 @@ meta:
               "expression has an unexpected type", runtime_context())
           RuntimeExpr(
             value.stx, checked_resolve(inference, wanted :~ HType))
+    fun unknown_reference(name :: Symbol, at :: Syntax) :: RuntimeExpr:
+      match runtime_restricted_names().get(name, #false)
+      | message :: String: syntax_meta.error(message, at)
+      | #false:
+          syntax_meta.error(
+            "unknown constant " ++ to_string(name),
+            source_id(name, at))
     match expr
     | CoreNumeral(value, at):
         // Reached only for a concrete, resolved, but inadmissible
@@ -909,16 +844,8 @@ meta:
         | wanted:
             runtime_numeral(
               state, value, checked_resolve(inference, wanted :~ HType), at)
-    | CoreRef(name, at):
-        match runtime_restricted_names().get(name, #false)
-        | message :: String: syntax_meta.error(message, at)
-        | #false:
-            // `at` is the encoded core form; the identifier it was
-            // encoded from is what the reader recognises, so the
-            // diagnostic quotes that instead of the encoding.
-            syntax_meta.error(
-              "unknown constant " ++ to_string(name),
-              source_id(name, at))
+    | CoreRef(name, at): unknown_reference(name, at)
+    | CoreGlobalRef(name, at): unknown_reference(name, at)
     | CoreBlockExpr(body, _):
         ensure(runtime_body_expr(
                  inference, state, env, body, expected))
@@ -1018,13 +945,21 @@ meta:
     match checked
     | CheckedOpaque(opaque, ty, _): RuntimeExpr(opaque :~ Syntax, ty)
     | CheckedLocal(name, ty, at): RuntimeExpr(source_id(name, at), ty)
+    | CheckedConstant(name, ty, at) when name == #'true:
+        RuntimeExpr(Syntax.make(#true, at), ty)
+    | CheckedConstant(name, ty, at) when name == #'false:
+        RuntimeExpr(Syntax.make(#false, at), ty)
+    | CheckedConstant(name, ty, at) when name == c_pair:
+        let first = source_id(Symbol.gen("_pair_first"), at)
+        let second = source_id(Symbol.gen("_pair_second"), at)
+        RuntimeExpr(
+          '(fun ($first):
+              fun ($second):
+                Pair($first, $second))',
+          ty)
     | CheckedConstant(name, ty, at):
         RuntimeExpr(runtime_named_apply(state, name, [], at), ty)
     | CheckedNumeral(value, ty, at): runtime_numeral(state, value, ty, at)
-    | CheckedPair(first, second, ty, _):
-        let first_r = checked_to_runtime(state, first)
-        let second_r = checked_to_runtime(state, second)
-        RuntimeExpr('Pair($((first_r.stx)), $((second_r.stx)))', ty)
     | CheckedIf(cond, then_branch, else_branch, ty, at):
         let cond_r = checked_to_runtime(state, cond)
         let then_r = checked_to_runtime(state, then_branch)
@@ -1034,33 +969,6 @@ meta:
            | $((then_r.stx))
            | $((else_r.stx))',
           ty)
-    | CheckedList(elements, tail, ty, at):
-        let rendered:
-          elements.map(fun (e :: CheckedExpr): checked_to_runtime(state, e).stx)
-        let tail_stx:
-          match tail
-          | #false: runtime_named_apply(state, #'nil, [], at)
-          | tail_checked: checked_to_runtime(state, tail_checked :~ CheckedExpr).stx
-        let result:
-          for values(out :~ Syntax = tail_stx) (element in rendered.reverse()):
-            runtime_named_apply(state, #'cons, [element :~ Syntax, out], at)
-        RuntimeExpr(result, ty)
-    | CheckedString(value, _, at):
-        runtime_string_expr(state, value, at)
-    | CheckedSet(elements, ty, at):
-        // `check_expr`'s own build already rejected a function-typed
-        // element directly (via `~error`); a `CheckedSet` reaching
-        // this lowering is already known sound -- no `is_fun` re-check
-        // needed here, just `runtime_set_expr`'s own predicate-lambda
-        // rendering over the already-checked elements.
-        let rendered:
-          elements.map(fun (e :: CheckedExpr): checked_to_runtime(state, e).stx)
-        let variable = source_id(Symbol.gen("_set_element"), at)
-        let predicate:
-          for values(out :~ Syntax = Syntax.make(#false, at)) (
-                element in rendered.reverse()):
-            '(($variable) == ($(element :~ Syntax))) || ($out)'
-        RuntimeExpr('(fun ($variable): $predicate)', ty)
     | CheckedBoolOp(op, args, at):
         let bool_ty = mk_tyapp(#'bool, [])
         let rendered:
@@ -1080,7 +988,10 @@ meta:
               let [operand] = rendered
               '! ($(operand :~ Syntax))'
         RuntimeExpr(stx, bool_ty)
-    | CheckedEq(left, right, at):
+    | CheckedEq(left, right, operand_ty, at):
+        when is_fun(operand_ty)
+        | syntax_meta.error(
+            "function equality has no sound executable interpretation", at)
         let left_stx = checked_to_runtime(state, left).stx
         let right_stx = checked_to_runtime(state, right).stx
         RuntimeExpr(
@@ -1100,6 +1011,17 @@ meta:
           args.map(fun (a :: CheckedExpr): checked_to_runtime(state, a).stx)
         let rendered_call:
           match head
+          | CheckedConstant(name, _, _) when name == c_pair:
+              match args_stx
+              | [first, second]:
+                  'Pair($(first :~ Syntax), $(second :~ Syntax))'
+              | [first]:
+                  let second = source_id(Symbol.gen("_pair_second"), at)
+                  '(fun ($second):
+                      Pair($(first :~ Syntax), $second))'
+              | ~else:
+                  error(~who: #'checked_to_runtime,
+                        "pair constructor has unexpected arity")
           | CheckedConstant(name, _, _):
               runtime_named_apply(state, name, args_stx, at)
           | ~else:

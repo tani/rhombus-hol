@@ -32,10 +32,10 @@
 // propagated through a `CoreIf`/`CoreNumeral`/`CoreRef` node depends only
 // on a name's declared type (a plain lookup, not a Theory), not on the
 // mechanism that eventually turns the checked tree into a kernel `Term` or
-// into runtime syntax. `check_expr` is that shared, Theory-free pass --
-// its own logic never touches a `Theory`, though it runs its unification
-// decisions through the caller's own `unify`/`resolve` (see below), which
-// may be effectful.
+// into runtime syntax. `check_expr` is that shared, Theory-free pass.
+// `CheckedInference` owns the one substitution shared by checked nodes and
+// the still-unmigrated runtime fallback paths, so runtime lowering never
+// forks inference state.
 //
 // Only one lowering exists so far: `module_block.rhm`'s
 // `checked_to_runtime`, reading a `CheckedExpr` into runtime `Syntax`, no
@@ -72,10 +72,15 @@
 
 import:
   rhombus/hol/htype open
+  rhombus/hol/frontend/tyunify open
   rhombus/hol/frontend/surface_core open
   rhombus/hol/datatype/algebra open
 
 export:
+  CheckedInference
+  make_checked_inference
+  checked_resolve
+  checked_unify
   CheckedExpr
   CheckedLocal
   CheckedConstant
@@ -242,14 +247,10 @@ fun core_location(expr :: CoreExpr) :: Syntax:
 // algorithm's "check the head's type, then its arguments" shape can
 // do; it is still un-migrated, deliberately.
 //
-// `unify`/`resolve` are the caller's own unification state -- not a second,
-// competing substitution: `fallback` ultimately runs whatever un-migrated
-// code the caller already has, and that code mutates its own substitution
-// through its own `unify`/`resolve` operations. Routing every unification
-// decision `check_expr` makes through the SAME two callbacks, rather than
-// threading a separate pure substitution map, is what keeps a type
-// variable `fallback` and `check_expr` both touch from resolving two
-// different ways.
+// One explicit inference capability owns the substitution shared by checking
+// and every fallback that has not yet moved into this module. Keeping the box
+// behind this small API prevents consumers from growing a parallel resolver
+// or mutating substitution state directly.
 //
 // `lookup(name)` answers a named constant's declared (schematic) type, or
 // `#false`; `check_expr` freshens it before unifying, the same way a
@@ -260,8 +261,26 @@ fun fresh_instance(ty :: HType) :: HType:
       out ++ {v: mk_tyvar(Symbol.gen(to_string(v))) :~ HType}
   type_subst(renaming, ty)
 
-fun check_expr(~unify: unify :: Function.of_arity(3),
-               ~resolve: resolve :: Function.of_arity(1),
+class CheckedInference(substitution :: Box)
+
+fun make_checked_inference() :: CheckedInference:
+  CheckedInference(Box({}))
+
+fun checked_resolve(inference :: CheckedInference, ty :: HType) :: HType:
+  deep_resolve(inference.substitution.value :~ Map, ty, [])
+
+fun checked_unify(inference :: CheckedInference,
+                  left :: HType, right :: HType) :: Boolean:
+  match type_unify(
+          checked_resolve(inference, left),
+          checked_resolve(inference, right),
+          inference.substitution.value :~ Map)
+  | #false: #false
+  | substitution:
+      inference.substitution.value := substitution
+      #true
+
+fun check_expr(~inference: inference :: CheckedInference,
                ~lookup: lookup :: Function.of_arity(1),
                ~parse_type: parse_type :: Function.of_arity(1),
                ~vars: vars :: Map.of(Symbol, HType),
@@ -272,9 +291,14 @@ fun check_expr(~unify: unify :: Function.of_arity(3),
                expr :: CoreExpr,
                expected :: maybe(HType))
      :: CheckedExpr:
+  fun resolve(ty :: HType) :: HType:
+    checked_resolve(inference, ty)
+  fun unify(left :: HType, right :: HType, at :: Syntax):
+    unless checked_unify(inference, left, right)
+    | error("expression has an unexpected type", at)
   fun check_sub(e :: CoreExpr, exp :: maybe(HType)) :: CheckedExpr:
     check_expr(
-      ~unify: unify, ~resolve: resolve, ~lookup: lookup,
+      ~inference: inference, ~lookup: lookup,
       ~parse_type: parse_type, ~vars: vars, ~fallback: fallback,
       ~needs_expected: needs_expected,
       ~is_overloaded_name: is_overloaded_name, ~error: error, e, exp)

@@ -35,6 +35,8 @@ import:
   rhombus/hol/recursion/family open
   rhombus/hol/recursion/funcases open
   rhombus/hol/recursion/subterm open
+  rhombus/hol/recursion/wellfounded open
+  rhombus/hol/prover/induction/scheme open
   rhombus/hol/logic/ruledb open
   rhombus/hol/logic/drule open
   rhombus/hol/logic/conv open
@@ -47,6 +49,8 @@ import:
   rhombus/hol/number/conv open
   rhombus/hol/frontend/surface_core open
   rhombus/hol/frontend/elab as elab
+  rhombus/hol/function/elab as function_elab
+  rhombus/hol/theorem/elab as theorem_elab
   rhombus/hol/overload/overload open
   rhombus/hol/frontend/type/registry open
   rhombus/hol/frontend/type/parse as type_parser
@@ -120,6 +124,52 @@ fun datatype_rules(thy :: Theory, thms :: DatatypeThms) :: List.of(Thm):
   let flipped = dist.map(fun (th :: Thm): forall_not_eq_sym(thy, th))
   inj ++ dist ++ flipped ++ thms.discriminators
     ++ thms.selectors
+
+// -- induction scheme registration -------------------------------------------
+
+// The field(s) that make two schemes "the same" registration if an
+// installation path revisits one -- e.g. redeclaring a kernel-native
+// datatype, or a family path that installs a combined function's `FunInfo`
+// once but could in principle be asked to register it again. Distinct from
+// any notion of how good a candidate is at a goal, which never lives here
+// or in `scheme.rhm` -- only in tactic code.
+fun scheme_key(s :: InductionScheme) :: List:
+  match s
+  | DatatypeScheme(type_name, _): [#'datatype, type_name]
+  | RuleScheme(_, target, _): [#'rule, target]
+  | WellFoundedScheme(name, _, _): [#'wellfounded, name]
+  | FunctionScheme(name, _, _, _): [#'function, name]
+
+// Append one scheme, unless an equivalent one (by `scheme_key`) is already
+// registered.
+fun register_scheme(schemes :: List.of(InductionScheme),
+                    scheme :: InductionScheme) :: List.of(InductionScheme):
+  let key = scheme_key(scheme)
+  let already:
+    for any (s in schemes): scheme_key(s :~ InductionScheme) == key
+  (if already | schemes | schemes ++ [scheme])
+
+// The structural induction positions a `FunctionScheme` reports -- the same
+// columns `RecursiveInduction` carries, never a search-ranking score.
+fun function_scheme_positions(info :: FunInfo) :: List.of(Int):
+  match info.induction
+  | RecursiveInduction(positions): positions
+  | NonRecursiveInduction(): []
+
+// Register a `FunctionScheme` for `name` from `info`'s own evidence, or
+// leave `schemes` unchanged when `info` carries none -- a definition
+// `install_structural_function` never reached (non-recursive), or a family
+// member `FunInfo` built without the carrier evidence its combined
+// implementation function alone carries.
+fun with_function_scheme(schemes :: List.of(InductionScheme), name :: Symbol,
+                         info :: FunInfo) :: List.of(InductionScheme):
+  match info.induction_relation
+  | #false: schemes
+  | rel:
+      register_scheme(schemes,
+                      FunctionScheme(name, function_scheme_positions(info),
+                                     rel :~ Term,
+                                     info.induction_scheme :~ Thm))
 
 fun install_native_nat(thy0 :: Theory) :: values(Theory, DatatypeThms, Function):
   let (thy1, raw_zero_not_succ, raw_succ_imp, raw_induction) = new_nat_type(thy0)
@@ -374,8 +424,12 @@ fun add_datatype_family(st :: HolState, specs :: List.of(DatatypeSpec),
       let db2 = for values(d :~ RuleDB = state.ctx.db) (
                       th in datatype_rules(thy2, thms)):
                   add_thm(thy2, d, spec.name, th)
+      let schemes = register_scheme(
+                      state.ctx.schemes,
+                      DatatypeScheme(spec.name, thms.induction))
       HolState(context_update(state.ctx, ~thy: thy2, ~db: db2,
-                              ~dts: state.ctx.dts ++ {spec.name: thms}),
+                              ~dts: state.ctx.dts ++ {spec.name: thms},
+                              ~schemes: schemes),
                state.thms, state.operators, type_constructors,
                state.wfrec_def)
   // The equations that read a member's constructor through to the union are
@@ -438,7 +492,7 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
   let specs:
     for List (core in cores):
       let spec :~ FunSpec = try:
-                              elab.elaborate_function_decl(
+                              function_elab.elaborate_function_decl(
                                 scratch, core :~ CoreFunctionSpec,
                                 ~operators: st.operators,
                                 ~type_constructors: st.type_constructors,
@@ -469,16 +523,21 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
   let tagged:
     for values(state :~ HolState = st) (spec in tag_specs):
       let spec :~ DatatypeSpec = spec
-      let (thy2, thms) = try:
-                           build_nonrecursive_datatype_thms(state.ctx.thy,
-                                                            spec)
-                           ~catch e :: Exn.Fail: hol_reraise(e, at)
+      let (thy2, thms0) = try:
+                            build_nonrecursive_datatype_thms(state.ctx.thy,
+                                                             spec)
+                            ~catch e :: Exn.Fail: hol_reraise(e, at)
+      let thms :~ DatatypeThms = thms0
       require_no_new_axioms(#'function, state.ctx.thy, thy2, spec.name, at)
       let db2 = for values(d :~ RuleDB = state.ctx.db) (
                       th in datatype_rules(thy2, thms)):
                   add_thm(thy2, d, spec.name, th)
+      let schemes = register_scheme(
+                      state.ctx.schemes,
+                      DatatypeScheme(spec.name, thms.induction))
       HolState(context_update(state.ctx, ~thy: thy2, ~db: db2,
-                              ~dts: state.ctx.dts ++ {spec.name: thms}),
+                              ~dts: state.ctx.dts ++ {spec.name: thms},
+                              ~schemes: schemes),
                state.thms, state.operators, state.type_constructors,
                state.wfrec_def)
   // -- the combined function ------------------------------------------------
@@ -498,7 +557,10 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
   let impl = mk_const(impl_name, fun_type(combined))
   let with_impl:
     HolState(context_update(tagged.ctx, ~thy: thy3,
-                            ~funs: tagged.ctx.funs ++ {impl_name: impl_info}),
+                            ~funs: tagged.ctx.funs ++ {impl_name: impl_info},
+                            ~schemes: with_function_scheme(
+                                        tagged.ctx.schemes, impl_name,
+                                        impl_info)),
              tagged.thms, tagged.operators, tagged.type_constructors,
              tagged.wfrec_def)
   // -- the members ----------------------------------------------------------
@@ -860,21 +922,26 @@ fun add_datatype(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
   | #false:
       // Non-recursive specs are encoded as sums of products; recursive specs
       // are carved from the shared infinity model. Both are derived.
-      let (thy2, thms) = try:
-                           (cond
-                            | is_nonrecursive_spec(spec):
-                                build_nonrecursive_datatype_thms(
-                                  st.ctx.thy, spec)
-                            | ~else:
-                                build_recursive_datatype_thms(
-                                  st.ctx.thy, spec, infinity_base_ind()))
-                           ~catch e :: Exn.Fail: hol_reraise(e, at)
+      let (thy2, thms0) = try:
+                            (cond
+                             | is_nonrecursive_spec(spec):
+                                 build_nonrecursive_datatype_thms(
+                                   st.ctx.thy, spec)
+                             | ~else:
+                                 build_recursive_datatype_thms(
+                                   st.ctx.thy, spec, infinity_base_ind()))
+                            ~catch e :: Exn.Fail: hol_reraise(e, at)
+      let thms :~ DatatypeThms = thms0
       require_no_new_axioms(#'datatype, st.ctx.thy, thy2, spec.name, at)
       let db2 = for values(d :~ RuleDB = st.ctx.db) (
                       th in datatype_rules(thy2, thms)):
                   add_thm(thy2, d, spec.name, th)
+      let schemes = register_scheme(
+                      st.ctx.schemes,
+                      DatatypeScheme(spec.name, thms.induction))
       let ctx2 = context_update(st.ctx, ~thy: thy2, ~db: db2,
-                                ~dts: st.ctx.dts ++ {spec.name: thms})
+                                ~dts: st.ctx.dts ++ {spec.name: thms},
+                                ~schemes: schemes)
       add_subterm_relation(
         HolState(ctx2, st.thms, st.operators, type_constructors,
                  st.wfrec_def),
@@ -907,8 +974,28 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
       require_no_new_axioms(#'datatype, st.ctx.thy, thy2, fs.name, at)
       require_closed_theorems(#'datatype, thy2, fs.name, info.equations, at)
       let db2 = add_thms(thy2, st.ctx.db, fs.name, info.equations)
+      // Derived independently of `info`: the subterm relation's own
+      // `FunInfo` records no carrier evidence (it is not itself recursive),
+      // so the well-founded scheme for it is built directly from the
+      // datatype's induction axiom, the same way `stepfn.rhm`'s
+      // `install_structural_function` builds one for a recursive function's
+      // own carrier.
+      let rel_term = mk_const(fs.name, fun_type(fs))
+      let wf_thm = prove_wf_t_lt(thy2, spec, info.equations, dt.induction)
+      let scheme_thm:
+        MP(
+          thy2,
+          SPEC(
+            thy2, rel_term,
+            INST_TYPE(
+              thy2, {#'a: self_type(spec)}, prove_wf_induction(thy2))),
+          wf_thm)
+      let schemes = register_scheme(
+                      st.ctx.schemes,
+                      WellFoundedScheme(fs.name, rel_term, scheme_thm))
       let ctx2 = context_update(st.ctx, ~thy: thy2, ~db: db2,
-                                ~funs: st.ctx.funs ++ {fs.name: info})
+                                ~funs: st.ctx.funs ++ {fs.name: info},
+                                ~schemes: schemes)
       HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
 
 // -- function ----------------------------------------------------------------
@@ -934,7 +1021,7 @@ fun add_function(st0 :: HolState, core :: CoreFunctionSpec,
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
   let spec :~ FunSpec = try:
-                          elab.elaborate_function_decl(
+                          function_elab.elaborate_function_decl(
                             st.ctx.thy, core, ~operators: st.operators,
                             ~type_constructors: st.type_constructors,
                             ~datatypes: dt_specs)
@@ -944,7 +1031,9 @@ fun add_function(st0 :: HolState, core :: CoreFunctionSpec,
   require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
   let db2 = add_thms(thy2, st.ctx.db, spec.name, info.equations)
   let ctx2 = context_update(st.ctx, ~thy: thy2, ~db: db2,
-                            ~funs: st.ctx.funs ++ {spec.name: info})
+                            ~funs: st.ctx.funs ++ {spec.name: info},
+                            ~schemes: with_function_scheme(
+                                        st.ctx.schemes, spec.name, info))
   HolState(ctx2, st.thms, st.operators, st.type_constructors, st.wfrec_def)
 
 // A `definition` is one kernel basic definition, not a one-clause `function`.
@@ -1087,8 +1176,12 @@ fun add_inductive(st :: HolState, names :: List.of(Symbol),
                   "a theorem of this name already exists: "
                     ++ to_string(thm_name), at)
       acc ++ {thm_name :~ Symbol: th :~ Thm}
-  HolState(context_update(st.ctx, ~thy: thy2), thms, st.operators,
-           st.type_constructors, st.wfrec_def)
+  let rule_schemes:
+    for values(acc :~ List.of(InductionScheme) = st.ctx.schemes) (
+          name in names, induction in derived.inductions):
+      register_scheme(acc, RuleScheme(names, name :~ Symbol, induction :~ Thm))
+  let ctx2 = context_update(st.ctx, ~thy: thy2, ~schemes: rule_schemes)
+  HolState(ctx2, thms, st.operators, st.type_constructors, st.wfrec_def)
 
 // One predicate's argument types, as written in its head. The encoded step
 // carries them parenthesized so that a mutual declaration's heads survive as
@@ -1257,7 +1350,7 @@ fun add_theorem(st0 :: HolState, name :: Symbol,
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
   let (statement, names) = try:
-                             elab.elaborate_theorem_statement(
+                             theorem_elab.elaborate_theorem_statement(
                                st.ctx.thy, stmt, ~operators: st.operators,
                                ~type_constructors: st.type_constructors,
                                ~datatypes: dt_specs)

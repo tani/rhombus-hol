@@ -15,6 +15,9 @@ import:
   rhombus/hol/kernel open
   rhombus/hol/logic/bool open
   rhombus/hol/frontend/driver open
+  rhombus/hol/prover/proof/node open
+  rhombus/hol/prover/tactic/induct open
+  rhombus/hol/prover/trace open
   "fixtures/inductive_mutual_ok.rhm"!hol_theory as mutual
   "fixtures/inductive_ok.rhm"!hol_theory as m
 
@@ -82,6 +85,56 @@ check:
 
 check st.thms.has_key(#'spine_one) ~is #true
 
+// The registered rule-induction theorem is selected from the membership
+// assumption itself. Each closure rule becomes an ordinary waterfall subgoal,
+// and Step.justify reconstructs the requested property from the kernel theorem.
+def rule_goal = Goal([spine_at(t0)], mk_eq(t0, t0))
+check:
+  let step0 = induction_attempt(
+                st.ctx.thy, st.ctx.funs, st.ctx.dts, st.ctx.schemes,
+                #false, rule_goal)
+  match step0
+  | #false: #false
+  | step :: Step: step.subgoals.length()
+  ~is 2
+check:
+  let step = induction_attempt(
+               st.ctx.thy, st.ctx.funs, st.ctx.dts, st.ctx.schemes,
+               #false, rule_goal) :~ Step
+  let children:
+    for List (subgoal in step.subgoals):
+      let subgoal :~ Goal = subgoal
+      let [left, _] = (match dest_eq(subgoal.concl) | pair: pair)
+      REFL(st.ctx.thy, left)
+  let proved = step.justify(children)
+  [hyps_of(proved).contains(spine_at(t0)), concl_of(proved)]
+  ~is [#true, rule_goal.concl]
+// The selected membership stays among the closure assumptions, but its
+// original variable is no longer the variable in the closure conclusion.
+// It must not reselect the same RuleScheme and loop; ordinary datatype
+// induction remains available for the new closure variable.
+check:
+  let first = induction_attempt(
+                st.ctx.thy, st.ctx.funs, st.ctx.dts, st.ctx.schemes,
+                #false, rule_goal) :~ Step
+  let next = induction_attempt(
+               st.ctx.thy, st.ctx.funs, st.ctx.dts, st.ctx.schemes,
+               #false, first.subgoals[1])
+  match next
+  | step :: Step:
+      match step.events
+      | List.cons(Inducted(_, kind), _): kind
+      | ~else: #false
+  | #false: #false
+  ~is #'leaf
+// A membership assumption cannot justify induction of a property that does
+// not mention any of that membership's arguments.
+check:
+  induction_attempt(
+    st.ctx.thy, st.ctx.funs, st.ctx.dts, st.ctx.schemes,
+    #false, Goal([spine_at(t0)], mk_eq(leaf, leaf)))
+  ~is #false
+
 // -- predicates declared together are one least family -----------------------
 //
 // The rules are shared, so each predicate's induction principle quantifies
@@ -128,6 +181,22 @@ check:
   ~is closure(ev, od,
               mk_forall(x0, mk_imp(mk_comb(odd_depth, x0),
                                    mk_comb(od, x0))))
+// A mutual-family theorem needs simultaneous properties for every member.
+// Automatic selection therefore leaves it registered but falls back to the
+// datatype scheme instead of inventing sibling properties.
+def mutual_rule_goal:
+  Goal([mk_comb(even_depth, t1)], mk_eq(t1, t1))
+check:
+  let step0 = induction_attempt(
+                mst.ctx.thy, mst.ctx.funs, mst.ctx.dts, mst.ctx.schemes,
+                #false, mutual_rule_goal)
+  match step0
+  | step :: Step:
+      match step.events
+      | List.cons(Inducted(_, kind), _): kind
+      | ~else: #false
+  | #false: #false
+  ~is #'leaf
 
 // `odd_depth` has one rule, so its inversion theorem has one disjunct, and it
 // mentions the *other* predicate: the two were inverted as one family.

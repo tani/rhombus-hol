@@ -19,6 +19,7 @@ import:
   rhombus/hol/prover/waterfall open
   rhombus/hol/frontend/driver open
   rhombus/hol/prover/proof/node open
+  rhombus/hol/prover/proof/derivation open
   rhombus/hol/prover/trace open
 
 def st0 = initial_state()
@@ -123,3 +124,81 @@ check:
                              ~scope: RuleScope([], [], Set(#'induct)))
   [th, residues.length(), residues.map(fun (r :: Residue): r.goal.concl)]
   ~is [#false, 1, [mk_eq(jj, kk)]]
+
+// An explicit Derivation realizes the same Step.justify composition as the
+// live waterfall. Weakening is intentional: an irrelevance-style parent may
+// claim more assumptions than its child theorem actually needs.
+def derivation_goal = mk_goal([], mk_eq(kk, kk))
+def derivation_leaf:
+  Derivation(
+    derivation_goal,
+    Step([], fun (_ths :: List.of(Thm)): REFL(thy, kk), []),
+    [])
+def weakened_goal = mk_goal([px], mk_eq(kk, kk))
+def weakened_derivation:
+  Derivation(
+    weakened_goal,
+    Step([derivation_goal],
+         fun (ths :: List.of(Thm)): ths[0],
+         [DroppedIrrelevant(1)]),
+    [derivation_leaf])
+check derivation_valid(weakened_derivation) ~is #true
+check:
+  fold_derivation(
+    weakened_derivation,
+    fun (_goal :: Goal, _step :: Step, _children :: List.of(Derivation),
+         child_sizes :: List):
+      for values(size :~ Int = 1) (child_size in child_sizes):
+        size + (child_size :~ Int))
+  ~is 2
+check:
+  let th = realize_derivation(thy, weakened_derivation)
+  [hyps_of(th), concl_of(th)]
+  ~is [[], weakened_goal.concl]
+// The explicit schedule enforces the same event/subgoal pairing as the live
+// `solve_step` path.
+def missing_event_derivation:
+  Derivation(
+    weakened_goal,
+    Step([derivation_goal],
+         fun (ths :: List.of(Thm)): ths[0],
+         []),
+    [derivation_leaf])
+check derivation_valid(missing_event_derivation) ~is #false
+check:
+  realize_derivation(thy, missing_event_derivation)
+  ~throws "wrong number of trace events"
+// A same-shaped theorem from a sibling theory is not evidence in this one.
+// Checking every realized node prevents a parent justification from hiding a
+// foreign child theorem that it elects not to use.
+def (foreign_theory, foreign_axiom) = new_axiom(thy, mk_eq(jj, kk))
+def local_theory = new_constant(thy, #'local_marker, bool)
+def foreign_goal = mk_goal([], mk_eq(jj, kk))
+def foreign_derivation:
+  Derivation(
+    foreign_goal,
+    Step([], fun (_ths :: List.of(Thm)): foreign_axiom, []),
+    [])
+check:
+  realize_derivation(local_theory, foreign_derivation)
+  ~throws "not proved in this theory"
+
+// Malformed proof trees fail before their justification can be accepted.
+check:
+  realize_derivation(
+    thy,
+    Derivation(
+      derivation_goal,
+      Step([], fun (_ths :: List.of(Thm)): REFL(thy, kk), []),
+      [derivation_leaf]))
+  ~throws "wrong number of children"
+check:
+  let expected = mk_goal([], mk_eq(jj, jj))
+  realize_derivation(
+    thy,
+    Derivation(
+      expected,
+      Step([expected], fun (ths :: List.of(Thm)): ths[0],
+           [DroppedIrrelevant(0)]),
+      [derivation_leaf]))
+  ~throws "does not match its subgoal"

@@ -8,7 +8,6 @@
   '("fixture_load.rhm"
     "htype.rhm"
     "term.rhm"
-    "effect.rhm"
     "tyunify.rhm"
     "order.rhm"
     "conv.rhm"

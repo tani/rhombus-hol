@@ -7,6 +7,16 @@
 import:
   "fixture_load.rhm" open
   "fixtures/funs_ok.rhm" as f
+  "fixtures/funs_ok.rhm"!hol_theory as logical
+  rhombus/hol/htype open
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/recursion/recdef open
+  rhombus/hol/frontend/driver open
+  rhombus/hol/prover/proof/node open
+  rhombus/hol/prover/induction/scheme open
+  rhombus/hol/prover/tactic/induct open
+  rhombus/hol/prover/trace open
 
 fun load(mp :: ModulePath):
   instantiate_hol_fixture(mp)
@@ -86,3 +96,96 @@ check inexhaustive_message.contains("fun_inexhaustive.rhm:12") ~is #true
 check no_result_type_message.contains("a function needs a result type") ~is #true
 // The error names the offending expression, not just the declaration.
 check bad_body_message.contains("unknown constant println") ~is #true
+
+// A recursive unary definition retains the exact well-founded induction
+// theorem used to define it. With no explicit hint, scheme selection recognizes
+// the function call and builds a theorem-backed strong-induction step.
+def logical_state :~ HolState = logical.theory
+def rev_info :~ FunInfo = logical_state.ctx.funs[#'rev]
+def xs = mk_var(#'xs, rev_info.spec.arg_types[0])
+def rev_xs = mk_comb(rev_info.fn, xs)
+def functional_goal = Goal([], mk_eq(rev_xs, rev_xs))
+check:
+  let step0 = induction_attempt(
+                logical_state.ctx.thy, logical_state.ctx.funs,
+                logical_state.ctx.dts, logical_state.ctx.schemes,
+                #false, functional_goal)
+  match step0
+  | #false: #false
+  | step :: Step:
+      match step.events
+      | [Inducted(_, kind)]: [kind, step.subgoals.length()]
+      | ~else: #false
+  ~is [#'function, 1]
+check:
+  let step = induction_attempt(
+               logical_state.ctx.thy, logical_state.ctx.funs,
+               logical_state.ctx.dts, logical_state.ctx.schemes,
+               #false, functional_goal) :~ Step
+  let child = step.subgoals[0] :~ Goal
+  let [left, _] = (dest_eq(child.concl) :~ List)
+  let proved = step.justify([REFL(logical_state.ctx.thy, left :~ Term)])
+  [hyps_of(proved), concl_of(proved)]
+  ~is [[], functional_goal.concl]
+// The registered theorem is polymorphic. A concrete `List.of(Nat)` call
+// specializes both its function head and its well-founded relation before
+// constructing the strong-induction step.
+def nat_ty = mk_tyapp(#'Nat, [])
+def list_nat_ty = mk_tyapp(#'List, [nat_ty])
+def rev_nat_substitution:
+  type_match(rev_info.spec.arg_types[0], list_nat_ty, {}) :~ Map
+def rev_nat = inst_type(rev_nat_substitution, rev_info.fn)
+def nat_xs = mk_var(#'nat_xs, list_nat_ty)
+def concrete_function_goal:
+  Goal([], mk_eq(mk_comb(rev_nat, nat_xs), mk_comb(rev_nat, nat_xs)))
+def concrete_function_step:
+  induction_attempt(
+    logical_state.ctx.thy, logical_state.ctx.funs,
+    logical_state.ctx.dts, logical_state.ctx.schemes,
+    #false, concrete_function_goal) :~ Step
+check:
+  match concrete_function_step.events
+  | [Inducted(_, kind)]: kind
+  | ~else: #false
+  ~is #'function
+// The strong-step child already contains this scheme's relation in its
+// induction hypothesis. It must make structural progress through datatype
+// induction rather than select the same function scheme again.
+check:
+  let next = induction_attempt(
+               logical_state.ctx.thy, logical_state.ctx.funs,
+               logical_state.ctx.dts, logical_state.ctx.schemes,
+               #false, concrete_function_step.subgoals[0])
+  match next
+  | step :: Step:
+      match step.events
+      | List.cons(Inducted(_, kind), _): kind != #'function
+      | ~else: #false
+  | #false: #false
+  ~is #true
+
+// A datatype's derived subterm relation is registered with its closed,
+// kernel-derived well-founded induction theorem. Registration is evidence;
+// automatic selection remains conservative and does not replace datatype
+// induction merely because a goal mentions a value of the same type.
+fun list_well_founded_scheme(
+      schemes :: List.of(InductionScheme)) :: List:
+  recur loop (remaining :~ List = schemes):
+    match remaining
+    | []: error(~who: #'test, "missing well-founded List scheme")
+    | List.cons(scheme, rest):
+        match scheme :~ InductionScheme
+        | WellFoundedScheme(name, relation, theorem):
+            let (domain, _) = dest_fun(type_of(relation))
+            (if domain == xs.ty
+             | [name, relation, theorem]
+             | loop(rest))
+        | ~else: loop(rest)
+def list_wf = list_well_founded_scheme(logical_state.ctx.schemes)
+check:
+  let name = list_wf[0] :~ Symbol
+  let relation = list_wf[1] :~ Term
+  let theorem = list_wf[2] :~ Thm
+  [(logical_state.ctx.funs[name] :~ FunInfo).fn == relation,
+   hyps_of(theorem)]
+  ~is [#true, []]

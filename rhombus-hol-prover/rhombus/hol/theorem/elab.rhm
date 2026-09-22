@@ -1,0 +1,174 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+// Elaborating a `theorem` statement and parsing its adjacent `proof:`
+// block's tactic options.
+//
+// This module only *analyses*: syntax and core propositions in, kernel
+// terms and tactic option maps out. Shared checking, name resolution, and
+// term construction live in `frontend/elab.rhm`; this module assembles them
+// into the declaration-shaped entry points `elaborate_theorem_statement` and
+// `parse_tactic`.
+
+import:
+  rhombus/hol/term open
+  rhombus/hol/kernel open
+  rhombus/hol/datatype/datatype open
+  rhombus/hol/frontend/surface_core open
+  rhombus/hol/overload/overload open
+  rhombus/hol/frontend/type/registry open
+  rhombus/hol/frontend/type/parse open
+  rhombus/hol/frontend/elab open
+
+export:
+  elaborate_theorem_statement
+  parse_tactic
+
+fun required_pattern_name(pat :: CorePattern, who :: Symbol,
+                          message :: String) :: Symbol:
+  match pat
+  | CorePatVar(name, _): name
+  | CorePatTyped(inner, _, _):
+      required_pattern_name(inner, who, message)
+  | ~else: syntax_error(who, message, pattern_at(pat))
+
+fun leading_core_binder_names(expr :: CoreExpr) :: List.of(Symbol):
+  match expr
+  | CoreForall(bs, body, _):
+      bs.map(
+        fun (b :: CoreBinder):
+          required_pattern_name(
+            b.pattern, #'theorem,
+            "a quantified binder needs a name"))
+        ++ leading_core_binder_names(body)
+  | ~else: []
+
+fun elaborate_theorem_statement(
+      thy :: Theory, expr :: CoreExpr,
+      ~operators: operators :: OverloadRegistry = standard_overload_registry(),
+      ~type_constructors: type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry(),
+      ~datatypes: datatypes :: Map.of(Symbol, DatatypeSpec) = {})
+     :: values(Term, List.of(Symbol)):
+  let tyvars = core_type_vars(expr)
+  values(parse_core_prop(thy, tyvars, {}, expr,
+                         ~operators: operators,
+                         ~type_constructors: type_constructors,
+                         ~datatypes: datatypes),
+         leading_core_binder_names(expr))
+
+// ============================================================================
+// Proof options
+// ============================================================================
+//
+// A `proof:` block is a sequence of declarative option groups. The block
+// itself is the boundary: each option configures the one existing waterfall
+// invocation, and none executes as a run-time Rhombus expression. `~use`,
+// `~skip`, `~disable`, `~split`, and `~choose` accumulate in source order,
+// while `~induct` and `~limit` are singletons.
+//
+// `~skip` names waterfall stages to omit for this proof only. The recognised
+// names are `simplify`, `eliminate`, `fertilize`, `generalize`, `irrelevance`
+// and `induct`; see `waterfall.rhm`'s pipeline comment.
+//
+// `~disable` removes rules from this proof only. `~use` enables named theorem
+// rules for this proof only. `~split` splits the goal on Boolean terms before
+// the waterfall; `~choose` supplies existential candidates.
+//
+// Returns a Map with keys `induct`, `use`, `skip`, `disable`, `split`,
+// `choose`, `limit`, and `extensionality`.
+fun parse_tactic(stx :: maybe(Syntax)) :: Map:
+  match stx
+  | #false:
+      {#'induct: #false,
+       #'use: [],
+       #'skip: [],
+       #'disable: [],
+       #'split: [],
+       #'choose: [],
+       #'limit: #false,
+       #'extensionality: #false}
+  | s :~ Syntax:
+      match s
+      | '$group; ...': parse_tactic_groups([group, ...])
+      | ~else: syntax_error(#'proof, "unknown proof option", s)
+
+fun parse_tactic_groups(groups :: List.of(Syntax)) :: Map:
+  recur loop (
+        remaining :~ List = groups,
+        acc :~ Map = {#'induct: #false,
+                      #'use: [],
+                      #'skip: [],
+                      #'disable: [],
+                      #'split: [],
+                      #'choose: [],
+                      #'limit: #false,
+                      #'extensionality: #false}):
+    match remaining
+    | []: acc
+    | List.cons(group, rest):
+        let rest :~ List = rest
+        match group
+        | '~induct: $(n :: Identifier)':
+            match acc[#'induct]
+            | #false:
+                loop(rest, acc ++ {#'induct: Syntax.unwrap(n)})
+            | ~else:
+                syntax_error(#'proof, "duplicate `~induct` option", group)
+        | '~induct: $arg; ...':
+            syntax_error(#'proof, "`~induct` expects one identifier", group)
+        | '~extensionality: $(n :: Identifier)':
+            match acc[#'extensionality]
+            | #false:
+                loop(rest, acc ++ {#'extensionality: Syntax.unwrap(n)})
+            | ~else:
+                syntax_error(
+                  #'proof, "duplicate `~extensionality` option", group)
+        | '~extensionality: $arg; ...':
+            syntax_error(
+              #'proof, "`~extensionality` expects one identifier", group)
+        | '~use: [$(u :: Identifier), ...]':
+            loop(rest,
+                 acc ++ {#'use: (acc[#'use] :~ List) ++ [Syntax.unwrap(u), ...]})
+        | '~use: $rest; ...':
+            syntax_error(#'proof,
+                         "`~use` expects one bracketed list of theorem names",
+                         group)
+        | '~skip: [$(d :: Identifier), ...]':
+            loop(rest,
+                 acc ++ {#'skip: (acc[#'skip] :~ List) ++ [Syntax.unwrap(d), ...]})
+        | '~skip: $rest; ...':
+            syntax_error(#'proof,
+                         "`~skip` expects one bracketed list of stage names",
+                         group)
+        | '~disable: [$(r :: Identifier), ...]':
+            loop(rest,
+                 acc ++ {#'disable: (acc[#'disable] :~ List) ++ [Syntax.unwrap(r), ...]})
+        | '~disable: $rest; ...':
+            syntax_error(#'proof,
+                         "`~disable` expects one bracketed list of rule names",
+                         group)
+        | '~split: $c':
+            loop(rest,
+                 acc ++ {#'split: (acc[#'split] :~ List) ++ [c]})
+        | '~split: $rest; ...':
+            syntax_error(#'proof, "`~split` expects one proposition", group)
+        | '~choose: $w':
+            loop(rest,
+                 acc ++ {#'choose: (acc[#'choose] :~ List) ++ [w]})
+        | '~choose: $rest; ...':
+            syntax_error(#'proof, "`~choose` expects one term", group)
+        | '~limit: $(n :: Int)':
+            let steps = Syntax.unwrap(n)
+            unless steps >= 0
+            | syntax_error(#'proof, "search steps cannot be negative", group)
+            match acc[#'limit]
+            | #false:
+                loop(rest, acc ++ {#'limit: steps})
+            | ~else:
+                syntax_error(#'proof, "duplicate `~limit` option", group)
+        | '~limit: $rest; ...':
+            syntax_error(#'proof,
+                         "`~limit` expects one nonnegative integer",
+                         group)
+        | ~else:
+            syntax_error(#'proof, "unknown proof option", group)

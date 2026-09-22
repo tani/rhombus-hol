@@ -1,0 +1,131 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+// Syntax-level parsing for `function` declarations: splitting a declaration
+// form and its adjacent `proof:` block into their parts, with no
+// elaboration against a theory.
+//
+// The admissible shape is exactly what `recdef.rhm` can install:
+//
+//   function f(p1 :: T1, ..., pn :: Tn) :: T:
+//     match pi
+//     | C(v, ...): <expr>
+//     | ...
+//
+// possibly with nested `match`es on further arguments, or a single-clause body
+// with no `match` at all.
+//
+// The keyword is `function`, not `fun`.  Intercepting `fun` would mean deciding
+// from the shape alone whether an ordinary Rhombus definition was meant to be a
+// logical one -- and getting that wrong silently strips its annotations.  With
+// a separate keyword the intent is explicit, so anything outside the grammar is
+// an error naming the offending expression rather than a silent pass-through.
+
+import:
+  rhombus/hol/frontend/type/parse open
+
+export:
+  function_parts
+  function_proof_measure
+  row_parts
+
+// A declaration split into its parts:
+// `[name, [param, ...], result_type, body, clauses]`. Exactly one of `body`
+// (a plain expression body) and `clauses` (a clausal `| pat: expr` form's
+// rows) is `#false`. The declaration macro calls this once, then both the
+// executable and logical paths consume its encoded `CoreFunctionSpec`.
+// Raises, with the offending syntax, when the declaration is not one this
+// version can admit.
+fun function_parts(stx :: Syntax) :: List:
+  match stx
+  | 'function $(name :: Identifier)($param, ...) $rest ...':
+      let [rty, body, clauses] = split_signature('$rest ...', stx)
+      [name, [param, ...], rty, body, clauses]
+  | 'function $(name :: Identifier)
+     | $c
+     | ...':
+      [name, #false, #false, #false, [c, ...]]
+  | ~else:
+      syntax_error(#'function,
+                   "expected a named function declaration",
+                   stx)
+
+// `:: Type: body`, or the clausal form `:: Type | (pat, ...): body | ...`
+// -- see `clause_rows`. Returns `[result_type, body_or_false,
+// clauses_or_false]`; exactly one of the last two is present.
+fun split_signature(rest :: Syntax, at :: Syntax) :: List:
+  match rest
+  | ':: $ty ... ~measure($m): $body; ...':
+      syntax_error(
+        #'function,
+        "`~measure(...)` must be written in an adjacent `proof:` block as `~measure: expression`",
+        m)
+  | ':: $ty ... ~measure($m)
+     | $c
+     | ...':
+      syntax_error(
+        #'function,
+        "`~measure(...)` must be written in an adjacent `proof:` block as `~measure: expression`",
+        m)
+  | ':: $ty ...: $body; ...': ['$ty ...', '$body; ...', #false]
+  | ':: $ty ...
+     | $c
+     | ...': ['$ty ...', #false, [c, ...]]
+  | ': $body; ...': [#false, '$body; ...', #false]
+  | '| $c | ...': [#false, #false, [c, ...]]
+  | ~else:
+      syntax_error(#'function, "malformed function body", at)
+
+// A function proof currently supplies exactly one termination measure. Keeping
+// this parser separate from theorem tactics makes options context-sensitive:
+// theorem hints cannot silently become function hints or vice versa.
+fun function_proof_measure(groups :: List.of(Syntax), at :: Syntax) :: Syntax:
+  recur loop (remaining :~ List = groups,
+              measure :~ maybe(Syntax) = #false):
+    match remaining
+    | []:
+        match measure
+        | #false:
+            syntax_error(
+              #'proof,
+              "a function proof needs one `~measure: expression` option",
+              at)
+        | value: value :~ Syntax
+    | List.cons(group, rest):
+        let rest :~ List = rest
+        match group
+        | '~measure: $expr':
+            match measure
+            | #false: loop(rest, expr)
+            | ~else:
+                syntax_error(#'proof, "duplicate `~measure` option", group)
+        | '~measure: $more; ...':
+            syntax_error(#'proof, "`~measure` expects one expression", group)
+        | ~else:
+            syntax_error(#'proof, "unknown function proof option", group)
+
+// `(pat, ...): body`, or `pat: body` when there is exactly one argument.
+fun row_parts(c :: Syntax, arity :: Int) :: values(List.of(Syntax), Syntax):
+  match c
+  | '($p, ...): $body; ...':
+      let ps = [p, ...]
+      unless ps.length() == arity
+      | syntax_error(#'function,
+                     "this clause has " ++ to_string(ps.length())
+                       ++ " patterns but the function takes "
+                       ++ to_string(arity),
+                     c)
+      values(ps, '$body; ...')
+  | '$pt ...: $body; ...':
+      let p = '$pt ...'
+      // One argument may drop the parentheses, exactly as a one-argument
+      // `match` clause does.
+      unless arity == 1
+      | syntax_error(#'function,
+                     "this clause has 1 pattern but the function takes "
+                       ++ to_string(arity),
+                     c)
+      values([p], '$body; ...')
+  | ~else:
+      syntax_error(#'function,
+                   "expected `(pattern, ...): body`", c)

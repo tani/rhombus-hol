@@ -11,6 +11,7 @@ import:
   rhombus/hol/datatype/datatype open
   rhombus/hol/recursion/recdef open
   rhombus/hol/logic/ruledb open
+  rhombus/hol/prover/induction/scheme open
 
 export:
   Context
@@ -25,6 +26,12 @@ class Context(thy :: Theory,
               db :: RuleDB,
               dts :: Map.of(Symbol, DatatypeThms),
               funs :: Map.of(Symbol, FunInfo),
+              // Kernel-derived induction-scheme evidence available to proof
+              // search: one `DatatypeScheme` per declared datatype plus
+              // whatever `RuleScheme`/`WellFoundedScheme`/`FunctionScheme`
+              // values declarations have registered. Never a closure and
+              // never a search-ranking score -- those stay in tactic code.
+              schemes :: List.of(InductionScheme) = [],
               // Native equality conversion for compact Nat literals:
               // `(Theory, Term) -> maybe(Thm)`. The closure owns the exact
               // native-extension evidence; consumers receive no broader
@@ -51,26 +58,43 @@ class RuleScope(using :: List.of(RuleBinding) = [],
                 disabled :: List.of(Symbol) = [],
                 skipped_stages :: Set.of(Symbol) = Set())
 
+// A datatype installed with no explicit scheme evidence still gets its own
+// case-based induction registered: exactly the `DatatypeScheme` a direct
+// test context (or the very first datatypes any session installs) needs for
+// induction to keep working without threading scheme evidence through by
+// hand.
+fun default_datatype_schemes(dts :: Map.of(Symbol, DatatypeThms))
+     :: List.of(InductionScheme):
+  for values(acc :~ List = []) ((n, thms) in dts):
+    acc ++ [DatatypeScheme(n, (thms :~ DatatypeThms).induction)]
+
 fun mk_context(thy :: Theory,
                ~rules: db :: RuleDB = empty_db,
                ~datatypes: dts :: Map.of(Symbol, DatatypeThms) = {},
                ~functions: funs :: Map.of(Symbol, FunInfo) = {},
+               ~schemes: schemes :: maybe(List.of(InductionScheme)) = #false,
                ~literal_eq: literal_eq :: maybe(Function) = #false) :: Context:
-  Context(thy, db, dts, funs, literal_eq)
+  let resolved :~ List.of(InductionScheme):
+    match schemes
+    | #false: default_datatype_schemes(dts)
+    | given: given :~ List.of(InductionScheme)
+  Context(thy, db, dts, funs, resolved, literal_eq)
 
 // One reconstruction mechanism for every `Context` update: each keyword
 // defaults to the field it would otherwise leave alone. A generic updater
-// knows nothing about what `dts`/`funs` mean beyond being fields to replace;
-// a caller that is merging one datatype or function into the existing map
-// passes the already-merged map, computed at the call site.
+// knows nothing about what `dts`/`funs`/`schemes` mean beyond being fields to
+// replace; a caller that is merging one datatype, function, or scheme into
+// the existing map/list passes the already-merged value, computed at the
+// call site.
 fun context_update(ctx :: Context,
                    ~thy: thy :: Theory = ctx.thy,
                    ~db: db :: RuleDB = ctx.db,
                    ~dts: dts :: Map.of(Symbol, DatatypeThms) = ctx.dts,
                    ~funs: funs :: Map.of(Symbol, FunInfo) = ctx.funs,
+                   ~schemes: schemes :: List.of(InductionScheme) = ctx.schemes,
                    ~numerals: numerals :: maybe(Function) = ctx.numerals)
      :: Context:
-  Context(thy, db, dts, funs, ctx.literal_eq, numerals)
+  Context(thy, db, dts, funs, schemes, ctx.literal_eq, numerals)
 
 // Build proof-local rule state without changing the durable `Context`, then
 // hand back one plain `ProofEnv` value for the caller to thread through the

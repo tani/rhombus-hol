@@ -15,25 +15,57 @@ definition empty_type_subst :: "hname \<Rightarrow> htype option" where
 lemma empty_type_subst_eq [simp]: "empty_type_subst = (\<lambda>_. None)"
   by (rule ext) (simp add: empty_type_subst_def)
 
-definition check_open_term_uncached :: "htheory \<Rightarrow> hterm \<Rightarrow> htype list \<Rightarrow> bool" where
-  "check_open_term_uncached thy t env \<longleftrightarrow>
-    (case t of
-       FVar _ ty \<Rightarrow> check_type thy ty
-     | BVar i ty \<Rightarrow> i < length env \<and> env ! i = ty \<and> check_type thy ty
-     | Const n ty \<Rightarrow> check_type thy ty \<and>
+section \<open>Single-pass checking with type computation\<close>
+
+text \<open>The specification checks both children of every application and then traverses
+  the same subtree again through @{const type_of}. Fuse validation and type
+  computation for executable code while leaving the trusted specification unchanged.\<close>
+
+fun check_term_type :: "htheory \<Rightarrow> htype list \<Rightarrow> hterm \<Rightarrow> htype option" where
+  "check_term_type thy env (FVar _ ty) =
+     (if check_type thy ty then Some ty else None)"
+| "check_term_type thy env (BVar i ty) =
+     (if i < length env \<and> env ! i = ty \<and> check_type thy ty then Some ty else None)"
+| "check_term_type thy env (Const n ty) =
+     (if check_type thy ty \<and>
          (case const_tab thy n of None \<Rightarrow> False
           | Some generic \<Rightarrow> type_match generic ty empty_type_subst \<noteq> None)
-     | NatLit _ \<Rightarrow> check_type thy nat_aty \<and> check_type thy nat_sty \<and>
+      then Some ty else None)"
+| "check_term_type thy env (NatLit _) =
+     (if check_type thy nat_aty \<and> check_type thy nat_sty \<and>
          const_tab thy nat_zero_name = Some nat_aty \<and>
          const_tab thy nat_succ_name = Some nat_sty
-     | Comb f x \<Rightarrow> check_open_term thy env f \<and> check_open_term thy env x \<and>
-         type_of (Comb f x) \<noteq> None
-     | Abs aty body \<Rightarrow> check_type thy aty \<and> check_open_term thy (aty # env) body)"
+      then Some nat_aty else None)"
+| "check_term_type thy env (Comb f x) =
+     (case (check_term_type thy env f, check_term_type thy env x) of
+        (Some (TyApp NFun [dty, rty]), Some aty) \<Rightarrow>
+          (if dty = aty then Some rty else None)
+      | _ \<Rightarrow> None)"
+| "check_term_type thy env (Abs aty body) =
+     (if check_type thy aty
+      then map_option (mk_fun aty) (check_term_type thy (aty # env) body)
+      else None)"
 
-lemma check_open_term_uncached_eq:
-  "check_open_term_uncached thy t env \<longleftrightarrow> check_open_term thy env t"
-  unfolding check_open_term_uncached_def empty_type_subst_eq
-  by (cases t) simp_all
+lemma check_open_term_type_of:
+  "check_open_term thy env t \<Longrightarrow> type_of t \<noteq> None"
+  by (induction t arbitrary: env) auto
+
+lemma check_term_type_eq:
+  "check_term_type thy env t = (if check_open_term thy env t then type_of t else None)"
+proof (induction t arbitrary: env)
+  case (Comb f x)
+  show ?case
+    using Comb.IH(1)[of env] Comb.IH(2)[of env] check_open_term_type_of
+    by (auto split: option.splits htype.splits list.splits hname.splits)
+next
+  case (Abs aty body)
+  show ?case
+    using Abs.IH[of "aty # env"] by auto
+next
+  case (Const n ty)
+  show ?case
+    by (simp add: empty_type_subst_def split: option.splits)
+qed simp_all
 
 definition type_match_uncached ::
   "htype \<Rightarrow> htype \<Rightarrow> (hname \<Rightarrow> htype option) \<Rightarrow> (hname \<Rightarrow> htype option) option" where
@@ -45,34 +77,26 @@ definition type_match_uncached ::
 lemma type_match_uncached_eq: "type_match_uncached = type_match"
   by (simp add: fun_eq_iff type_match_uncached_def type_match_def)
 
-definition check_term_uncached :: "htheory \<Rightarrow> hterm \<Rightarrow> bool" where
-  "check_term_uncached thy t \<longleftrightarrow> check_open_term thy [] t"
-
-lemma check_term_uncached_eq: "check_term_uncached = check_term"
-  by (simp add: fun_eq_iff check_term_uncached_def check_term_def)
-
 declare [[code drop: check_open_term]]
 declare [[code drop: type_match]]
 declare [[code drop: check_term]]
-
-(* The generated Rhombus target used to route these three through a
-   memoizing wrapper (memoize_binary/memoize_ternary, code-printed to
-   weak-identity-keyed caches). The kernel never revisits the same
-   argument enough for that to matter in practice, and a cache is one
-   more moving part to keep correct; call the executable reformulation
-   directly. *)
+declare [[code drop: check_prop]]
 
 lemma check_open_term_code [code]:
-  "check_open_term thy env t = check_open_term_uncached thy t env"
-  by (simp add: check_open_term_uncached_eq)
+  "check_open_term thy env t \<longleftrightarrow> check_term_type thy env t \<noteq> None"
+  by (auto simp: check_term_type_eq dest: check_open_term_type_of)
 
 lemma type_match_code [code]:
   "type_match pat ty acc = type_match_uncached pat ty acc"
   by (simp add: type_match_uncached_eq)
 
 lemma check_term_code [code]:
-  "check_term thy t = check_term_uncached thy t"
-  by (simp add: check_term_uncached_eq)
+  "check_term thy t \<longleftrightarrow> check_term_type thy [] t \<noteq> None"
+  by (auto simp: check_term_def check_term_type_eq dest: check_open_term_type_of)
+
+lemma check_prop_code [code]:
+  "check_prop thy p \<longleftrightarrow> check_term_type thy [] p = Some bool_ty"
+  by (auto simp: check_prop_def check_term_def is_bool_def check_term_type_eq)
 
 declare [[code drop: type_match_fuel]]
 
@@ -136,9 +160,7 @@ code_identifier
 | type_constructor htheory_ext \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.HTheory"
 | type_constructor code_failure \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.FailureCode"
 | type_constructor code_result \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Result"
-| constant check_open_term_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.check_open_term_uncached"
 | constant type_match_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.type_match_uncached"
-| constant check_term_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.check_term_uncached"
 | constant CodeUndeclaredType \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.UndeclaredType"
 | constant CodeTypeArity \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.TypeArity"
 | constant CodeInvalidType \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.InvalidType"

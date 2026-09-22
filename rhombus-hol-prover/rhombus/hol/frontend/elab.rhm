@@ -934,7 +934,12 @@ fun bind_irrefutable_pattern(env :: ElabEnv, pat :: CorePattern,
         env, type_of(value), annotated, at,
         "a binding pattern annotation does not match its value")
       bind_irrefutable_pattern(env, inner, resolve_term(env, value))
-  | CorePatPair(first, second, at):
+  | CorePatCtor(name, args, at) when name == c_pair:
+      unless args.length() == 2
+      | syntax_error(
+          env.who, "a Pair pattern needs exactly two fields", at)
+      let first = args[0] :~ CorePattern
+      let second = args[1] :~ CorePattern
       let current = resolve_type(env, type_of(value))
       when current is_a TyVar
       | let first_type = mk_tyvar(Symbol.gen("_pair_first"))
@@ -979,9 +984,6 @@ fun bind_irrefutable_pattern(env :: ElabEnv, pat :: CorePattern,
   | CorePatLiteral(_, at):
       syntax_error(
         env.who, "a literal pattern is refutable and cannot bind here", at)
-  | CorePatList(_, _, at):
-      syntax_error(
-        env.who, "a list pattern is refutable and cannot bind here", at)
 
 fun elaborate_binders_effect(binders :: List.of(CoreBinder), body :: CoreExpr,
                              is_forall :: Boolean) :: Computation:
@@ -1237,17 +1239,6 @@ fun core_type_vars(expr :: CoreExpr) :: List.of(Symbol):
         for values(acc :~ List = []) (arg in args):
           append_unique(acc, pattern_vars(arg :~ CorePattern))
     | CorePatLiteral(_, _): []
-    | CorePatList(elements, tail, _):
-        let from_elements:
-          for values(acc :~ List = []) (element in elements):
-            append_unique(acc, pattern_vars(element :~ CorePattern))
-        match tail
-        | #false: from_elements
-        | value:
-            append_unique(from_elements,
-                          pattern_vars(value :~ CorePattern))
-    | CorePatPair(first, second, _):
-        append_unique(pattern_vars(first), pattern_vars(second))
     | CorePatTyped(inner, type_stx, _):
         append_unique(pattern_vars(inner), collect_type_vars(type_stx))
     | ~else: []
@@ -1382,15 +1373,6 @@ fun core_ctor_pattern(env :: ElabEnv, cname :: Symbol,
       mk_const(cname, resolve_type(env, gty)), subpats),
     bindings)
 
-fun core_list_pattern(elements :: List.of(CorePattern),
-                      tail :: maybe(CorePattern),
-                      at :: Syntax) :: CorePattern:
-  let initial:
-    match tail
-    | #false: CorePatCtor(#'nil, [], at)
-    | tail_pattern: tail_pattern :~ CorePattern
-  for values(out :~ CorePattern = initial) (element in elements.reverse()):
-    CorePatCtor(#'cons, [element :~ CorePattern, out], at)
 
 fun core_sub_pattern(env :: ElabEnv, pat :: CorePattern,
                      ty :: HType) :: List:
@@ -1407,12 +1389,11 @@ fun core_sub_pattern(env :: ElabEnv, pat :: CorePattern,
         env, ty, annotated, at,
         "a pattern annotation does not match the expected type")
       core_sub_pattern(env, inner, resolve_type(env, annotated))
-  | CorePatPair(_, _, _):
+  // Products are not declared datatypes, so the decision tree cannot split
+  // their fields. The surface decoder admits only irrefutable components.
+  | CorePatCtor(name, _, _) when name == c_pair:
       let root = fresh_wildcard(resolve_type(env, ty))
       [root :~ Term, bind_irrefutable_pattern(env, pat, root)]
-  | CorePatList(elements, tail, at):
-      core_sub_pattern(
-        env, core_list_pattern(elements, tail, at), ty)
   | CorePatCtor(name, args, at):
       let (term, bindings) = core_ctor_pattern(
                                    env, name, args, ty, at)
@@ -1421,12 +1402,8 @@ fun core_sub_pattern(env :: ElabEnv, pat :: CorePattern,
       let raw = Syntax.unwrap(value_stx)
       let literal_expr:
         cond
-        | raw is_a Boolean:
-            CoreRef((if raw | #'true | #'false), at)
         | raw is_a NonnegInt:
             CoreNumeral(raw, at)
-        | raw is_a String:
-            CoreStringExpr(raw, at)
         | ~else:
             syntax_error(env.who, "unsupported literal pattern", at)
       let literal = run_checked_elaboration(

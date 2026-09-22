@@ -1336,7 +1336,24 @@ meta:
           expected, annotated, at,
           "a pattern annotation does not match the expected type")
         runtime_pattern(state, inner, runtime_resolve_type(annotated))
-    | CorePatPair(first, second, at):
+    | CorePatLiteral(value_stx, at):
+        let raw = Syntax.unwrap(value_stx)
+        cond
+        | raw is_a NonnegInt:
+            let expected = runtime_resolve_type(expected)
+            when expected is_a TyVar
+            | syntax_meta.error(
+                "a numeral pattern needs a type annotation or an unambiguous context",
+                at)
+            values(runtime_numeral_pattern(
+                     state, raw, expected, at),
+                   {})
+        | ~else:
+            syntax_meta.error("unsupported literal pattern", at)
+    | CorePatCtor(name, args, at) when name == c_pair:
+        unless args.length() == 2
+        | syntax_meta.error(
+            "a Pair pattern needs exactly two fields", at)
         let expected = runtime_resolve_type(expected)
         let (first_type, second_type):
           match expected
@@ -1349,78 +1366,23 @@ meta:
               values(first_type, second_type)
           | ~else: runtime_pair_types(expected, at)
         let (first_stx, first_bindings) = runtime_pattern(
-                                                  state, first, first_type)
+                                                  state, args[0] :~ CorePattern,
+                                                  first_type)
         let (second_stx, second_bindings) = runtime_pattern(
-                                                    state, second, second_type)
+                                                    state, args[1] :~ CorePattern,
+                                                    second_type)
         values(
           'Pair($first_stx, $second_stx)',
           merge_runtime_pattern_bindings(
             first_bindings, second_bindings, at))
-    | CorePatList(elements, tail, at):
-        let expected = runtime_resolve_type(expected)
-        let element_type:
-          match expected
-          | TyVar(_,):
-              let element_type = mk_tyvar(Symbol.gen("_list_element"))
-              runtime_unify(
-                expected, mk_tyapp(#'List, [element_type]), at,
-                "a list pattern needs a `List.of(...)` value")
-              element_type
-          | ~else: runtime_list_element_type(expected, at)
-        let parsed:
-          for List (element in elements):
-            let (rendered, bindings) = runtime_pattern(
-                                          state, element :~ CorePattern,
-                                          element_type)
-            [rendered, bindings]
-        let (tail_stx, tail_bindings):
-          match tail
-          | #false:
-              values(runtime_named_apply(state, #'nil, [], at), {})
-          | tail_pattern:
-              runtime_pattern(
-                state, tail_pattern :~ CorePattern, expected)
-        let (rendered, bindings) = runtime_pattern_entries(parsed, at)
-        let result:
-          for values(out :~ Syntax = tail_stx) (element_stx in rendered.reverse()):
-            runtime_named_apply(
-              state, #'cons, [element_stx :~ Syntax, out], at)
-        values(
-          result,
-          merge_runtime_pattern_bindings(bindings, tail_bindings, at))
-    | CorePatLiteral(value_stx, at):
-        let raw = Syntax.unwrap(value_stx)
-        cond
-        | raw is_a Boolean:
-            runtime_unify(
-              expected, mk_tyapp(#'bool, []), at,
-              "a Boolean pattern needs a Boolean value")
-            values(value_stx, {})
-        | raw is_a NonnegInt:
-            let expected = runtime_resolve_type(expected)
-            when expected is_a TyVar
-            | syntax_meta.error(
-                "a numeral pattern needs a type annotation or an unambiguous context",
-                at)
-            values(runtime_numeral_pattern(
-                     state, raw, expected, at),
-                   {})
-        | raw is_a String:
-            runtime_unify(
-              expected, mk_tyapp(#'String, []), at,
-              "a string pattern needs a String value")
-            let codes:
-              for List (character in (raw :~ String).to_list()):
-                runtime_numeral_pattern(
-                  state, character.to_int(), mk_tyapp(#'Nat, []), at)
-            let contents:
-              for values(out :~ Syntax = runtime_named_apply(
-                                              state, #'nil, [], at)) (
-                    code in codes.reverse()):
-                runtime_named_apply(state, #'cons, [code :~ Syntax, out], at)
-            values(runtime_named_apply(state, #'text, [contents], at), {})
-        | ~else:
-            syntax_meta.error("unsupported literal pattern", at)
+    | CorePatCtor(name, args, at) when (name == #'true || name == #'false):
+        unless args.length() == 0
+        | syntax_meta.error(
+            "a Boolean pattern constructor takes no fields", at)
+        runtime_unify(
+          expected, mk_tyapp(#'bool, []), at,
+          "a Boolean pattern needs a Boolean value")
+        values(Syntax.make(name == #'true, runtime_context()), {})
     | CorePatCtor(name, args, at):
         let generic:
           match surface_const_type(state, name)

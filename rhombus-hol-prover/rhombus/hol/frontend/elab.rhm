@@ -28,11 +28,9 @@ import:
   rhombus/hol/logic/bool open
   rhombus/hol/frontend/tyunify open
   rhombus/hol/frontend/checked_core open
-  rhombus/hol/frontend/overload open
+  rhombus/hol/overload/overload open
   rhombus/hol/frontend/type/registry open
   rhombus/hol/frontend/type/parse open
-  rhombus/hol/effect/core open
-  rhombus/hol/effect/syntax open
 
 // `?` is already one shrubbery operator token. A type variable is therefore
 // parsed structurally as that operator followed by one identifier; no string
@@ -281,10 +279,7 @@ export:
   parse_tactic
   ElabEnv
   RefRestriction
-  parse_type_effect
   run_type_elaboration
-  infer_core
-  check_core
   run_elaboration
   run_checked_elaboration
 // `self_name` and `self` are the definition being elaborated, so that a
@@ -307,8 +302,6 @@ class ElabEnv(thy :: Theory,
     | mode == #'definition: #'definition
     | mode == #'prop: #'theorem
     | ~else: #'function
-
-  reader_effect
 
 fun current_substitution(env :: ElabEnv) :: Map.of(Symbol, HType):
   env.inference.substitution.value :~ Map
@@ -578,40 +571,17 @@ fun checked_to_term(env :: ElabEnv, expr :: CheckedExpr) :: Term:
 
 // The shared checker owns every source-level type decision. Logical
 // elaboration only lowers its semantic result into kernel terms.
-fun infer_core(expr :: CoreExpr) :: Computation:
-  effect:
-    let env :: ElabEnv <- ElabEnv.ask()
-    let checked = check_expr(logical_check_env(env), expr, #false)
-    return resolve_term(env, checked_to_term(env, checked))
-
-fun check_core(expr :: CoreExpr, expected :: HType) :: Computation:
-  effect:
-    let env :: ElabEnv <- ElabEnv.ask()
-    let checked = check_expr(logical_check_env(env), expr, expected)
-    return resolve_term(env, checked_to_term(env, checked))
-
 fun run_elaboration(env :: ElabEnv, expr :: CoreExpr) :: Term:
-  match ElabEnv.handle(env, infer_core(expr))
-  | Pure(term): resolve_term(env, term :~ Term)
-  | ~else: error(~who: #'run_elaboration, "internal error: unhandled effect")
+  let checked = check_expr(logical_check_env(env), expr, #false)
+  resolve_term(env, checked_to_term(env, checked))
 
 fun run_checked_elaboration(env :: ElabEnv, expr :: CoreExpr,
                             expected :: HType) :: Term:
-  match ElabEnv.handle(env, check_core(expr, expected))
-  | Pure(term): resolve_term(env, term :~ Term)
-  | ~else:
-      error(~who: #'run_checked_elaboration,
-            "internal error: unhandled effect")
-
-fun parse_type_effect(stx :: Syntax) :: Computation:
-  effect:
-    let env :: ElabEnv <- ElabEnv.ask()
-    return parse_type(stx, env.tyvars, env.type_constructors)
+  let checked = check_expr(logical_check_env(env), expr, expected)
+  resolve_term(env, checked_to_term(env, checked))
 
 fun run_type_elaboration(env :: ElabEnv, stx :: Syntax) :: HType:
-  match ElabEnv.handle(env, parse_type_effect(stx))
-  | Pure(ty): ty :~ HType
-  | ~else: error(~who: #'run_type_elaboration, "internal error: unhandled effect")
+  parse_type(stx, env.tyvars, env.type_constructors)
 
 fun parse_core_prop(
       thy :: Theory, tyvars :: List.of(Symbol),
@@ -776,8 +746,7 @@ class ClauseEnv(thy :: Theory,
                 tyvars :: List.of(Symbol),
                 datatypes :: Map.of(Symbol, DatatypeSpec),
                 restricted_refs :: Map.of(Symbol, RefRestriction),
-                inference :: CheckedInference):
-  reader_effect
+                inference :: CheckedInference)
 fun clause_elab_env(env :: ClauseEnv) :: ElabEnv:
   ElabEnv(env.thy, env.tyvars, env.vars, #'function,
           env.self_name, env.self, env.operators,
@@ -786,112 +755,98 @@ fun clause_elab_env(env :: ClauseEnv) :: ElabEnv:
 
 
 
-fun checked_parse_body(body :: CheckedBody) :: Computation:
-  effect:
-    let env :: ClauseEnv <- ClauseEnv.ask()
-    match body
-    | matrix :: CheckedPatternMatrix:
-        checked_clause_rows(matrix)
-    | CheckedBodyMatch(target, matrix, _, body_at):
-        let name:
-          match target
-          | CheckedLocal(local_name, _, _): local_name
-          | ~else:
-              error(~who: #'checked_parse_body,
-                    "checked clause refinement target is not local")
-        let v = matched_var(env.vars, env.pats, name, body_at)
-        checked_parse_clauses(v, matrix)
-    | CheckedBodyLet(binding_pat, init, tail, _, body_at):
-        effect:
-          let elab_env = clause_elab_env(env)
-          let value = checked_to_term(elab_env, init)
-          let bindings = bind_checked_irrefutable_pattern(
-                           elab_env, binding_pat, value)
-          let vars2 = env.vars ++ bindings
-          fun bind_let(_):
-            ClauseEnv(env.thy, env.self_name, env.self, env.pats,
-                      vars2, env.at, env.result_type, env.operators,
-                      env.type_constructors, env.tyvars, env.datatypes,
-                      env.restricted_refs, env.inference)
-          let clauses :: List <- ClauseEnv.local(
-                                  bind_let, checked_parse_body(tail))
-          return for List (clause in clauses):
-                   let clause :~ DefClause = clause
-                   DefClause(clause.pats, List.cons(value, clause.terms))
-    | CheckedBodyExpr(expr):
-        let value = checked_to_term(clause_elab_env(env), expr)
-        return [DefClause(env.pats, [value])]
-    | ~else:
-        error(~who: #'checked_parse_body, "unknown CheckedBody variant")
+fun checked_parse_body(env :: ClauseEnv, body :: CheckedBody) :: List:
+  match body
+  | matrix :: CheckedPatternMatrix:
+      checked_clause_rows(env, matrix)
+  | CheckedBodyMatch(target, matrix, _, body_at):
+      let name:
+        match target
+        | CheckedLocal(local_name, _, _): local_name
+        | ~else:
+            error(~who: #'checked_parse_body,
+                  "checked clause refinement target is not local")
+      let v = matched_var(env.vars, env.pats, name, body_at)
+      checked_parse_clauses(env, v, matrix)
+  | CheckedBodyLet(binding_pat, init, tail, _, body_at):
+      let elab_env = clause_elab_env(env)
+      let value = checked_to_term(elab_env, init)
+      let bindings = bind_checked_irrefutable_pattern(
+                       elab_env, binding_pat, value)
+      let vars2 = env.vars ++ bindings
+      let env2 = ClauseEnv(env.thy, env.self_name, env.self, env.pats,
+                           vars2, env.at, env.result_type, env.operators,
+                           env.type_constructors, env.tyvars, env.datatypes,
+                           env.restricted_refs, env.inference)
+      let clauses = checked_parse_body(env2, tail)
+      for List (clause in clauses):
+        let clause :~ DefClause = clause
+        DefClause(clause.pats, List.cons(value, clause.terms))
+  | CheckedBodyExpr(expr):
+      let value = checked_to_term(clause_elab_env(env), expr)
+      [DefClause(env.pats, [value])]
+  | ~else:
+      error(~who: #'checked_parse_body, "unknown CheckedBody variant")
 
-fun checked_parse_clauses(v :: FVar,
-                          matrix :: CheckedPatternMatrix) :: Computation:
+fun checked_parse_clauses(env :: ClauseEnv, v :: FVar,
+                          matrix :: CheckedPatternMatrix) :: List:
   recur loop (remaining :~ List = matrix.rows, acc :~ List = []):
     match remaining
-    | []: return acc
+    | []: acc
     | List.cons(row, rest):
-        effect:
-          let parsed :: List <- checked_parse_clause(
-                                  v, row :~ CheckedMatchRow)
-          loop(rest, acc ++ parsed)
+        let parsed = checked_parse_clause(env, v, row :~ CheckedMatchRow)
+        loop(rest, acc ++ parsed)
 
-fun checked_parse_clause(v :: FVar,
-                         row :: CheckedMatchRow) :: Computation:
-  effect:
-    let env :: ClauseEnv <- ClauseEnv.ask()
-    let [source_pat] = row.patterns
-    let [pat, bindings] = checked_sub_pattern(
-                            clause_elab_env(env),
-                            source_pat :~ CheckedPattern)
-    let vars2 = env.vars ++ (bindings :~ Map)
-    fun bind_pattern(_):
-      ClauseEnv(env.thy, env.self_name, env.self,
-                refine_pats(env.pats, v, pat :~ Term),
-                vars2, env.at, env.result_type, env.operators,
-                env.type_constructors, env.tyvars, env.datatypes,
-                env.restricted_refs, env.inference)
-    ClauseEnv.local(bind_pattern, checked_parse_body(row.body))
+fun checked_parse_clause(env :: ClauseEnv, v :: FVar,
+                         row :: CheckedMatchRow) :: List:
+  let [source_pat] = row.patterns
+  let [pat, bindings] = checked_sub_pattern(
+                          clause_elab_env(env),
+                          source_pat :~ CheckedPattern)
+  let vars2 = env.vars ++ (bindings :~ Map)
+  let env2 = ClauseEnv(env.thy, env.self_name, env.self,
+                       refine_pats(env.pats, v, pat :~ Term),
+                       vars2, env.at, env.result_type, env.operators,
+                       env.type_constructors, env.tyvars, env.datatypes,
+                       env.restricted_refs, env.inference)
+  checked_parse_body(env2, row.body)
 
-fun checked_clause_rows(matrix :: CheckedPatternMatrix) :: Computation:
+fun checked_clause_rows(env :: ClauseEnv,
+                        matrix :: CheckedPatternMatrix) :: List:
   recur loop (remaining :~ List = matrix.rows, acc :~ List = []):
     match remaining
-    | []: return acc
+    | []: acc
     | List.cons(row, rest):
-        effect:
-          let parsed :: List <- checked_clause_row(
-                                  row :~ CheckedMatchRow)
-          loop(rest, acc ++ parsed)
+        let parsed = checked_clause_row(env, row :~ CheckedMatchRow)
+        loop(rest, acc ++ parsed)
 
-fun checked_clause_row(row :: CheckedMatchRow) :: Computation:
-  effect:
-    let env :: ClauseEnv <- ClauseEnv.ask()
-    unless row.patterns.length() == env.pats.length()
-    | error(~who: #'checked_clause_row,
-            "checked clause arity differs from its function")
-    let elab_env = clause_elab_env(env)
-    let (pats2, local_bindings):
-      for values(ps :~ List = env.pats, bindings :~ Map = {}) (
-            col in List.iota(row.patterns.length())):
-        let v :~ FVar:
-          match ps[col]
-          | FVar(_, _): ps[col]
-          | ~else:
-              error(~who: #'checked_clause_row,
-                    "checked argument has already been matched")
-        let [pat, bound] = checked_sub_pattern(
-                             elab_env,
-                             row.patterns[col] :~ CheckedPattern)
-        values(
-          refine_pats(ps, v, pat :~ Term),
-          merge_pattern_bindings(
-            #'function, bindings, bound :~ Map, row.at))
-    let vars2 = env.vars ++ local_bindings
-    fun bind_row(_):
-      ClauseEnv(env.thy, env.self_name, env.self, pats2, vars2, env.at,
-                env.result_type, env.operators, env.type_constructors,
-                env.tyvars, env.datatypes, env.restricted_refs,
-                env.inference)
-    ClauseEnv.local(bind_row, checked_parse_body(row.body))
+fun checked_clause_row(env :: ClauseEnv, row :: CheckedMatchRow) :: List:
+  unless row.patterns.length() == env.pats.length()
+  | error(~who: #'checked_clause_row,
+          "checked clause arity differs from its function")
+  let elab_env = clause_elab_env(env)
+  let (pats2, local_bindings):
+    for values(ps :~ List = env.pats, bindings :~ Map = {}) (
+          col in List.iota(row.patterns.length())):
+      let v :~ FVar:
+        match ps[col]
+        | FVar(_, _): ps[col]
+        | ~else:
+            error(~who: #'checked_clause_row,
+                  "checked argument has already been matched")
+      let [pat, bound] = checked_sub_pattern(
+                           elab_env,
+                           row.patterns[col] :~ CheckedPattern)
+      values(
+        refine_pats(ps, v, pat :~ Term),
+        merge_pattern_bindings(
+          #'function, bindings, bound :~ Map, row.at))
+  let vars2 = env.vars ++ local_bindings
+  let env2 = ClauseEnv(env.thy, env.self_name, env.self, pats2, vars2, env.at,
+                       env.result_type, env.operators, env.type_constructors,
+                       env.tyvars, env.datatypes, env.restricted_refs,
+                       env.inference)
+  checked_parse_body(env2, row.body)
 
 
 fun local_pattern_variables(pat :: Term) :: List.of(FVar):
@@ -1009,12 +964,7 @@ fun checked_match_term(env :: ElabEnv,
                      [root :~ Term], env.vars, at, result_type,
                      env.operators, env.type_constructors, env.tyvars,
                      env.datatypes, env.restricted_refs, env.inference)
-  let parsed :~ List:
-    match ClauseEnv.handle(clause_env, checked_clause_rows(matrix))
-    | Pure(value): value :~ List
-    | ~else:
-        error(~who: #'checked_match_term,
-              "internal error: unhandled checked match effect")
+  let parsed = checked_clause_rows(clause_env, matrix)
   check_local_function_clauses(parsed, result_type, at)
   let local_name = Symbol.gen("_match_expression")
   let spec = FunSpec(
@@ -1057,12 +1007,7 @@ fun checked_function_clauses(
                      vars, fn.at, result_type, env.operators,
                      env.type_constructors, env.tyvars, env.datatypes,
                      env.restricted_refs, env.inference)
-  let clauses0 :~ List:
-    match ClauseEnv.handle(clause_env, checked_parse_body(fn.body))
-    | Pure(value): value :~ List
-    | ~else:
-        error(~who: #'checked_function_clauses,
-              "internal error: unhandled checked function effect")
+  let clauses0 = checked_parse_body(clause_env, fn.body)
   let parameter_vars:
     parameter_vars.map(
       fun (variable :: FVar):

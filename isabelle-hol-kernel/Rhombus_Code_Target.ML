@@ -414,7 +414,7 @@ fun serialize ctxt {module_name, reserved_syms, identifiers, includes,
     val generated_header = vertical
       [Pretty.str "// GENERATED FILE - DO NOT EDIT.",
        Pretty.str "// Source: isabelle-hol-kernel/Rhombus_HOL_Code.thy",
-       Pretty.str "// Regenerate: isabelle-hol-kernel/export-kernel.sh",
+       Pretty.str "// Regenerate: isabelle-hol-kernel/tools/export-kernel.sh",
        Pretty.str "// Kernel ABI: 1",
        Pretty.str "// SPDX-FileCopyrightText: 2026 Masaya Taniguchi",
        Pretty.str "// SPDX-FileCopyrightText: 1998 University of Cambridge",

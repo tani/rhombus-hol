@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 theory_dir="$repo_root/isabelle-hol-kernel"
 production="$repo_root/rhombus-hol-kernel/rhombus/hol/kernel_generated.rhm"
 out_dir="$(mktemp -d)"

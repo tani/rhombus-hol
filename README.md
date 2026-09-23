@@ -43,7 +43,7 @@ Isabelle definitions and has a versioned ABI with the handwritten façade.
 Regenerate it, including the Isabelle session build, with:
 
 ```sh
-./isabelle-hol-kernel/export-kernel.sh
+./isabelle-hol-kernel/tools/export-kernel.sh
 ```
 
 CI runs the same entry point with `--check`; that mode fails unless the
@@ -51,8 +51,8 @@ committed artifact exactly matches the Isabelle export.
 
 ## Documentation
 
-[`LANGUAGE_SPEC.md`](LANGUAGE_SPEC.md) is the normative specification for
-the `#lang rhombus/hol` surface language: the language layer, the logical
+[`docs/LANGUAGE_SPEC.md`](docs/LANGUAGE_SPEC.md) is the normative specification
+for the `#lang rhombus/hol` surface language: the language layer, the logical
 effect of declarations, and the required trust and execution boundaries.
 
 The published documentation is built from this branch:

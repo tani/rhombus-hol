@@ -473,7 +473,9 @@ val reserved = [
   "export", "import", "namespace", "interface", "private", "protected",
   "let", "if", "cond", "else", "when", "unless", "for", "while",
   "recur", "values", "error", "Boolean", "Int", "String", "List",
-  "Map", "Set", "Pair", "Void", "Function", "dictionary"
+  "Map", "Set", "Pair", "Void", "Function", "dictionary",
+  "RhombusMemoValue", "rhombus_ternary_memos",
+  "rhombus_memoized_ternary"
 ];
 
 val _ = Theory.setup

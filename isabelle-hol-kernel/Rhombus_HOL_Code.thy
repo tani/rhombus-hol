@@ -77,18 +77,59 @@ definition type_match_uncached ::
 lemma type_match_uncached_eq: "type_match_uncached = type_match"
   by (simp add: fun_eq_iff type_match_uncached_def type_match_def)
 
+definition memoize_ternary ::
+  "('a \<Rightarrow> 'b \<Rightarrow> 'c \<Rightarrow> 'd) \<Rightarrow> 'a \<Rightarrow> 'b \<Rightarrow> 'c \<Rightarrow> 'd" where
+  "memoize_ternary f a b c = f a b c"
+
+text \<open>One memo table on the fused checker lets shared subterms retain the
+  single-pass checker while making every public check a cached projection.
+  Recursive calls deliberately go through the memoized constant.\<close>
+
+definition check_term_type_uncached ::
+  "htheory \<Rightarrow> hterm \<Rightarrow> htype list \<Rightarrow> htype option" where
+  "check_term_type_uncached thy t env =
+    (case t of
+       FVar _ ty \<Rightarrow> (if check_type thy ty then Some ty else None)
+     | BVar i ty \<Rightarrow>
+         (if i < length env \<and> env ! i = ty \<and> check_type thy ty then Some ty else None)
+     | Const n ty \<Rightarrow>
+         (if check_type thy ty \<and>
+             (case const_tab thy n of None \<Rightarrow> False
+              | Some generic \<Rightarrow> type_match generic ty empty_type_subst \<noteq> None)
+          then Some ty else None)
+     | NatLit _ \<Rightarrow>
+         (if check_type thy nat_aty \<and> check_type thy nat_sty \<and>
+             const_tab thy nat_zero_name = Some nat_aty \<and>
+             const_tab thy nat_succ_name = Some nat_sty
+          then Some nat_aty else None)
+     | Comb f x \<Rightarrow>
+         (case (check_term_type thy env f, check_term_type thy env x) of
+            (Some (TyApp NFun [dty, rty]), Some aty) \<Rightarrow>
+              (if dty = aty then Some rty else None)
+          | _ \<Rightarrow> None)
+     | Abs aty body \<Rightarrow>
+         (if check_type thy aty
+          then map_option (mk_fun aty) (check_term_type thy (aty # env) body)
+          else None))"
+
+lemma check_term_type_uncached_eq:
+  "check_term_type_uncached thy t env = check_term_type thy env t"
+  by (cases t) (simp_all add: check_term_type_uncached_def)
+
+declare [[code drop: check_term_type]]
 declare [[code drop: check_open_term]]
 declare [[code drop: type_match]]
 declare [[code drop: check_term]]
 declare [[code drop: check_prop]]
 
+lemma check_term_type_memo_code [code]:
+  "check_term_type thy env t =
+    memoize_ternary check_term_type_uncached thy t env"
+  by (simp add: memoize_ternary_def check_term_type_uncached_eq)
+
 lemma check_open_term_code [code]:
   "check_open_term thy env t \<longleftrightarrow> check_term_type thy env t \<noteq> None"
   by (auto simp: check_term_type_eq dest: check_open_term_type_of)
-
-lemma type_match_code [code]:
-  "type_match pat ty acc = type_match_uncached pat ty acc"
-  by (simp add: type_match_uncached_eq)
 
 lemma check_term_code [code]:
   "check_term thy t \<longleftrightarrow> check_term_type thy [] t \<noteq> None"
@@ -97,6 +138,11 @@ lemma check_term_code [code]:
 lemma check_prop_code [code]:
   "check_prop thy p \<longleftrightarrow> check_term_type thy [] p = Some bool_ty"
   by (auto simp: check_prop_def check_term_def is_bool_def check_term_type_eq)
+
+lemma type_match_memo_code [code]:
+  "type_match pat ty acc =
+    memoize_ternary type_match_uncached pat ty acc"
+  by (simp add: memoize_ternary_def type_match_uncached_eq)
 
 declare [[code drop: type_match_fuel]]
 
@@ -152,6 +198,54 @@ code_printing
 | constant "HOL.equal :: hterm \<Rightarrow> hterm \<Rightarrow> bool" \<rightharpoonup> (Rhombus) "abi.structural'_equal"
 | constant "HOL.equal :: nat \<Rightarrow> nat \<Rightarrow> bool" \<rightharpoonup> (Rhombus) "abi.structural'_equal"
 
+section \<open>Weak memoization for generated checkers\<close>
+
+text \<open>The generated checker revisits immutable theories, terms, types, and small
+  environments across inference results. Weak identity tables partition caches by
+  the live computation roots; the innermost table uses structural keys. Since
+  @{const memoize_ternary} is the identity in HOL, this changes only executable
+  sharing, not logical meaning.\<close>
+
+code_printing
+  code_module Rhombus_Memo \<rightharpoonup> (Rhombus) \<open>
+class RhombusMemoValue(value)
+
+def rhombus_ternary_memos = WeakMutableMap.by(===)()
+
+fun rhombus_memoized_ternary(run):
+  fun (first):
+    fun (second):
+      fun (third):
+        let firsts:
+          match rhombus_ternary_memos.maybe[run]
+          | #false:
+              let table = WeakMutableMap.by(===)()
+              rhombus_ternary_memos[run] := table
+              table
+          | table: table
+        let seconds:
+          match firsts.maybe[first]
+          | #false:
+              let table = WeakMutableMap.by(===)()
+              firsts[first] := table
+              table
+          | table: table
+        let thirds:
+          match seconds.maybe[second]
+          | #false:
+              let table = MutableMap()
+              seconds[second] := table
+              table
+          | table: table
+        match thirds.maybe[third]
+        | #false:
+            let result = (((run)(first))(second))(third)
+            thirds[third] := RhombusMemoValue(result)
+            result
+        | RhombusMemoValue(result): result
+\<close> for constant memoize_ternary
+| constant memoize_ternary \<rightharpoonup> (Rhombus) "rhombus'_memoized'_ternary"
+
 section \<open>Stable Rhombus API names\<close>
 
 code_identifier
@@ -160,6 +254,7 @@ code_identifier
 | type_constructor htheory_ext \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.HTheory"
 | type_constructor code_failure \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.FailureCode"
 | type_constructor code_result \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.Result"
+| constant check_term_type_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.check_term_type_uncached"
 | constant type_match_uncached \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.type_match_uncached"
 | constant CodeUndeclaredType \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.UndeclaredType"
 | constant CodeTypeArity \<rightharpoonup> (Rhombus) "Rhombus_HOL_Generated.TypeArity"

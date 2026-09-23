@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  test:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -58,52 +58,18 @@ jobs:
       - name: Check per-file copyright and licensing
         uses: fsfe/reuse-action@v6
 
-      # Package caches contain Racket-compiled artifacts. `current` changes
-      # independently of this repository, invalidating that cache frequently;
-      # use the released Racket version tested by the Nix development shell.
+      # Use the released Racket version tested by the Nix development shell.
       - uses: Bogdanp/setup-racket@v1.11
         with:
           version: 9.3
           variant: CS
 
-      # Rotate weekly as well as on Racket or dependency changes, so the cache
-      # cannot hide catalog updates indefinitely.
-      - name: Record the Racket cache inputs
-        run: |
-          racket --version > .racket-version
-          date -u +%G-%V > .racket-cache-week
-
-      - name: Cache Racket packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/racket
-            ~/.local/share/racket
-          key: ${{ runner.os }}-${{ runner.arch }}-racket-packages-${{ hashFiles('.racket-version', '.racket-cache-week', 'rhombus-hol-kernel/info.rkt', 'rhombus-hol-quickcheck/info.rkt', 'rhombus-hol-prover/info.rkt', 'rhombus-hol-stdlib/info.rkt', 'rhombus-hol/info.rkt') }}
-
-      # Linked packages compile into this checkout. Racket's .dep files record
-      # source hashes, so a prefix restore reuses unchanged modules while
-      # `raco make` and `raco test` rebuild anything affected by the commit.
-      - name: Cache compiled Racket bytecode
-        uses: actions/cache@v4
-        with:
-          path: |
-            rhombus-hol-kernel/**/compiled
-            rhombus-hol-quickcheck/**/compiled
-            rhombus-hol-prover/**/compiled
-            rhombus-hol-stdlib/**/compiled
-            rhombus-hol/**/compiled
-          key: racket-zo-9.3-${{ hashFiles('**/*.rhm', '**/*.rkt', '**/*.scrbl') }}
-          restore-keys: racket-zo-9.3-
-
-      # One install for all five, so the dependencies among them resolve as
-      # links to this checkout rather than as catalog lookups. `--auto` pulls
-      # in `rhombus-lib`; `--no-docs` leaves the documentation to the step
-      # that exists to check it. A restored cache already contains these
-      # package registrations, so `--skip-installed` makes the hit path cheap.
+      # Install all five together so their dependencies resolve as links to
+      # this checkout. `--auto` pulls in `rhombus-lib`; `--no-docs` leaves
+      # documentation to the independent documentation job.
       - name: Install the packages
         run: |
-          raco pkg install --auto --batch --no-docs --skip-installed \
+          raco pkg install --auto --batch --no-docs \
             rhombus-hol-kernel/ rhombus-hol-quickcheck/ rhombus-hol-prover/ \
             rhombus-hol-stdlib/ rhombus-hol/
 
@@ -115,6 +81,24 @@ jobs:
 
       - name: Run the test suite in parallel
         run: raco test --jobs 4 rhombus-hol/rhombus/hol/tests
+
+  documentation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Bogdanp/setup-racket@v1.11
+        with:
+          version: 9.3
+          variant: CS
+
+      - name: Install the packages
+        run: |
+          raco pkg install --auto --batch --no-docs \
+            rhombus-hol-kernel/ rhombus-hol-quickcheck/ rhombus-hol-prover/ \
+            rhombus-hol-stdlib/ rhombus-hol/
 
       # `raco setup` reports a document it could not build and still exits 0,
       # so the log is what has to be read. Fixtures that are *meant* not to
@@ -139,30 +123,10 @@ jobs:
 
       - uses: cachix/install-nix-action@v30
 
-      - name: Record the formal-kernel Racket cache inputs
-        run: |
-          nix develop --command racket --version > .formal-racket-version
-          date -u +%G-%V > .racket-cache-week
-
-      - name: Cache formal-kernel Racket packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/racket
-            ~/.local/share/racket
-          key: ${{ runner.os }}-${{ runner.arch }}-formal-racket-packages-${{ hashFiles('.formal-racket-version', '.racket-cache-week', 'flake.lock', 'rhombus-hol-kernel/info.rkt') }}
-
-      - name: Cache formal-kernel Racket bytecode
-        uses: actions/cache@v4
-        with:
-          path: rhombus-hol-kernel/**/compiled
-          key: ${{ runner.os }}-${{ runner.arch }}-formal-racket-zo-${{ hashFiles('.formal-racket-version', '.racket-cache-week', 'flake.lock', 'rhombus-hol-kernel/info.rkt') }}-${{ hashFiles('rhombus-hol-kernel/**/*.rhm', 'rhombus-hol-kernel/**/*.rkt') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-formal-racket-zo-${{ hashFiles('.formal-racket-version', '.racket-cache-week', 'flake.lock', 'rhombus-hol-kernel/info.rkt') }}-
-
       - name: Install Rhombus compiler and kernel ABI
         run: >-
           nix develop --command raco pkg install --auto --batch --no-docs
-          --skip-installed rhombus-lib rhombus-hol-kernel/
+          rhombus-lib rhombus-hol-kernel/
 
       - name: Check formal kernel and generated artifact
         run: ./isabelle-hol-kernel/export-kernel.sh --check

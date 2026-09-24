@@ -2,7 +2,7 @@
 (* Original executable API and diagnostic refinement proofs. *)
 
 theory Rhombus_HOL_Code_API
-  imports Rhombus_HOL_Audit NatExt
+  imports "../verification/Rhombus_HOL_Audit" "../extensions/Rhombus_HOL_Nat_Extension"
 begin
 
 section \<open>Finite code-generation façade\<close>

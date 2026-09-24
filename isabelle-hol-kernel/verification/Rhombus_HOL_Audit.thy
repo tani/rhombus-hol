@@ -2,7 +2,7 @@
 (* Original theorem-index audit for the formal kernel development. *)
 
 theory Rhombus_HOL_Audit
-  imports Rhombus_HOL_Adequacy Rhombus_HOL_Countermodels
+  imports "../model/Rhombus_HOL_Adequacy" Rhombus_HOL_Countermodels
 begin
 
 text \<open>Session-level audit: the executable/declarative kernel correspondence,

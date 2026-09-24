@@ -2,7 +2,7 @@
 (* SPDX-FileCopyrightText: 1998 University of Cambridge *)
 (* SPDX-FileCopyrightText: 1998-2007 John Harrison *)
 (* SPDX-License-Identifier: 0BSD AND BSD-2-Clause *)
-(* Adapts the primitive kernel rules in HOL Light fusion.ml; see THIRD_PARTY_NOTICES. *)
+(* Adapts the primitive kernel rules in HOL Light fusion.ml; see ../THIRD_PARTY_NOTICES. *)
 
 theory Rhombus_HOL_Kernel
   imports Rhombus_HOL_Substitution

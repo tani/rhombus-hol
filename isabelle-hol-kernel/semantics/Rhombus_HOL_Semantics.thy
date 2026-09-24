@@ -2,7 +2,7 @@
 (* Original semantic model over the imported Isabelle/HOL-ZF framework. *)
 
 theory Rhombus_HOL_Semantics
-  imports Rhombus_HOL_Kernel
+  imports "../core/Rhombus_HOL_Kernel"
 begin
 
 section \<open>Set-theoretic frames\<close>

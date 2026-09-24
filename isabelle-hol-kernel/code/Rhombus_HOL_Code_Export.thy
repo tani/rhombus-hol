@@ -1,11 +1,11 @@
 (* SPDX-License-Identifier: 0BSD *)
 (* Original code-export equations and Rhombus target configuration. *)
 
-theory Rhombus_HOL_Code
+theory Rhombus_HOL_Code_Export
   imports Rhombus_HOL_Code_API "HOL-Library.Code_Target_Numeral"
 begin
 
-ML_file "Rhombus_Code_Target.ML"
+ML_file "Rhombus_HOL_Code_Target.ML"
 
 section \<open>Executable natural-fuel matcher\<close>
 

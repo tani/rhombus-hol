@@ -2,10 +2,10 @@
 (* SPDX-FileCopyrightText: 1998 University of Cambridge *)
 (* SPDX-FileCopyrightText: 1998-2007 John Harrison *)
 (* SPDX-License-Identifier: 0BSD AND BSD-2-Clause *)
-(* Adapts the theory-extension rules in HOL Light fusion.ml; see THIRD_PARTY_NOTICES. *)
+(* Adapts the theory-extension rules in HOL Light fusion.ml; see ../THIRD_PARTY_NOTICES. *)
 
 theory Rhombus_HOL_Extension_Core
-  imports Rhombus_HOL_Soundness
+  imports "../semantics/Rhombus_HOL_Soundness"
 begin
 
 section \<open>Executable theory extensions\<close>

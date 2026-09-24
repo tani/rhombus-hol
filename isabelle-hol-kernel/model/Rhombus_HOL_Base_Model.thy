@@ -2,7 +2,7 @@
 (* Original model of the selected target-logic axioms. *)
 
 theory Rhombus_HOL_Base_Model
-  imports Rhombus_HOL_Extensions
+  imports "../extensions/Rhombus_HOL_Extensions"
 begin
 
 section \<open>Closed target booleans\<close>

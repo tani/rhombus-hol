@@ -11,7 +11,7 @@ nix develop "$repo_root" --command \
   isabelle build -D "$theory_dir" -o quick_and_dirty=false Rhombus_HOL_Kernel
 nix develop "$repo_root" --command \
   isabelle export -d "$theory_dir" -n -p 2 -O "$out_dir" \
-    -x 'Rhombus_HOL_Kernel.Rhombus_HOL_Code:code/rhombus_hol_kernel.rhm' \
+    -x 'Rhombus_HOL_Kernel.Rhombus_HOL_Code_Export:code/rhombus_hol_kernel.rhm' \
     Rhombus_HOL_Kernel
 
 exported="$out_dir/rhombus_hol_kernel.rhm"

@@ -3,14 +3,14 @@
    SPDX-License-Identifier: 0BSD AND BSD-3-Clause
 
    Adapts Isabelle's code_ml.ML, code_haskell.ML, and code_scala.ML
-   serializers by Florian Haftmann; see THIRD_PARTY_NOTICES. *)
+   serializers by Florian Haftmann; see ../THIRD_PARTY_NOTICES. *)
 
 signature RHOMBUS_CODE_TARGET =
 sig
   val target: string
 end;
 
-structure Rhombus_Code_Target : RHOMBUS_CODE_TARGET =
+structure Rhombus_HOL_Code_Target : RHOMBUS_CODE_TARGET =
 struct
 
 open Basic_Code_Symbol;
@@ -413,7 +413,7 @@ fun serialize ctxt {module_name, reserved_syms, identifiers, includes,
       (Pretty.chunks (map Pretty.str export_names));
     val generated_header = vertical
       [Pretty.str "// GENERATED FILE - DO NOT EDIT.",
-       Pretty.str "// Source: isabelle-hol-kernel/Rhombus_HOL_Code.thy",
+       Pretty.str "// Source: isabelle-hol-kernel/code/Rhombus_HOL_Code_Export.thy",
        Pretty.str "// Regenerate: isabelle-hol-kernel/tools/export-kernel.sh",
        Pretty.str "// Kernel ABI: 1",
        Pretty.str "// SPDX-FileCopyrightText: 2026 Masaya Taniguchi",

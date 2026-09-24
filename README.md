@@ -59,7 +59,7 @@ The published documentation is built from this branch:
 
 - [Rhombus/HOL manual](https://tani.github.io/rhombus-hol/rhombus-hol/index.html)
 - [Isabelle/HOL kernel verification](https://tani.github.io/rhombus-hol/isabelle/Unsorted/Rhombus_HOL_Kernel/index.html)
-- [Verification audit theory](https://tani.github.io/rhombus-hol/isabelle/Unsorted/Rhombus_HOL_Kernel/Rhombus_HOL_Audit.html)
+- [Verification audit theory](https://tani.github.io/rhombus-hol/isabelle/Unsorted/Rhombus_HOL_Kernel/verification/Rhombus_HOL_Audit.html)
 
 GitHub Actions regenerates these pages; the Isabelle presentation contains
 the checked source, definitions, theorem statements, proof text, and links

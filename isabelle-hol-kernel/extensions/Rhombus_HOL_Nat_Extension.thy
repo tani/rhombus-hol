@@ -1,8 +1,8 @@
 (* SPDX-License-Identifier: 0BSD *)
 (* A trusted, natively-computed Nat extension principle. *)
 
-theory NatExt
-  imports Rhombus_HOL_Base_Model
+theory Rhombus_HOL_Nat_Extension
+  imports "../model/Rhombus_HOL_Base_Model"
 begin
 
 section \<open>One reserved Nat, not a name-parameterized family\<close>

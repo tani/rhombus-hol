@@ -550,6 +550,67 @@ Zero-argument overloaded functions may use the expected result type for
 contextual selection, so nested calls such as @tt{map(f, empty())} resolve
 statically.
 
+@section(~tag: "automata"){Executable automata}
+
+The standard automata library has one representation for each kind of
+automaton, and every automaton operation is declared with
+@rhombus(function, ~datum) so that it has both a logical meaning and ordinary
+run-time code.
+
+@tt{DFA.of(?q, ?a)}, constructed by @tt{dfa}, stores one initial state, a
+transition function, and a final-state predicate. @tt{dfa_run} follows the
+transition function over a @tt{List.of(?a)}, and @tt{dfa_accepts} tests the
+resulting state.
+
+The nondeterministic representations make their finite search space explicit:
+
+@itemlist(
+ @item{@tt{NFA.of(?q, ?a)}, constructed by @tt{nfa}, stores an equality
+  decider (@tt{?q -> ?q -> Boolean}), a @tt{FiniteSet.of(?q)} state universe,
+  an initial @tt{FiniteSet.of(?q)}, a transition predicate
+  (@tt{?q -> ?a -> ?q -> Boolean}), and a final-state predicate.}
+ @item{@tt{EpsilonNFA.of(?q, ?a)}, constructed by @tt{epsilon_nfa}, stores the
+  same data and an epsilon-transition predicate
+  (@tt{?q -> ?q -> Boolean}).}
+)
+
+The NFA operations are @tt{nfa_run}, @tt{nfa_accepts}, and
+@tt{nfa_determinize}. The epsilon-NFA operations are
+@tt{epsilon_nfa_closure}, @tt{epsilon_nfa_run},
+@tt{epsilon_nfa_accepts}, @tt{epsilon_nfa_eliminate}, and
+@tt{epsilon_nfa_determinize}. Run and epsilon-closure operations return
+@tt{FiniteSet.of(?q)}. Epsilon elimination returns @tt{NFA.of(?q, ?a)}.
+Determinization returns @tt{DFA.of(FiniteSet.of(?q), ?a)}, whose states are
+finite sets of source states.
+
+Every destination search enumerates only the stored universe and uses the
+stored equality decider for finite-set operations. Epsilon closure is bounded
+structurally by consuming the universe list as fuel, so it terminates even
+when epsilon transitions contain cycles. The universe is therefore part of
+the automaton representation rather than optional metadata.
+
+@tt{nfa_determinize_accepts_iff} states that @tt{nfa_accepts} agrees with
+acceptance by the DFA returned from @tt{nfa_determinize} for every word, and
+@tt{nfa_determinize_language} gives the corresponding extensional language
+equality. These theorems are unconditional: NFA acceptance and the subset
+construction use the same finite-set runner.
+
+Likewise, @tt{epsilon_nfa_determinize_accepts_iff} and
+@tt{epsilon_nfa_determinize_language} are unconditional preservation theorems
+for @tt{epsilon_nfa_accepts} and the DFA returned by
+@tt{epsilon_nfa_determinize}. The epsilon-NFA source and the produced DFA
+share the same bounded closure and subset-construction computation.
+
+Finite-universe epsilon elimination additionally has a representation
+obligation. @tt{epsilon_nfa_well_formed(m)} requires the stored equality
+decider to agree with logical equality, the initial states to belong to the
+explicit universe, and the universe to be closed under epsilon and symbol
+transitions. Under that explicit hypothesis,
+@tt{epsilon_nfa_eliminate_accepts_iff} proves word-acceptance preservation and
+@tt{epsilon_nfa_eliminate_language} proves language preservation. No
+well-formedness premise is required by either determinization theorem, because
+those theorems compare the executable runners directly.
+
 @section{@rhombus(theorem, ~datum) and @rhombus(proof, ~datum)}
 
 @verbatim{

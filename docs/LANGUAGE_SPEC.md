@@ -12,11 +12,12 @@ point this document covers, that is an implementation defect to fix, not a
 specification to relax.
 
 This document specifies the language layer, the logical effect of declarations,
-and the required trust and execution boundaries. It does **not** specify a
-standard library of proved datatypes and functions. Library types such as
-`List.of` and `Integer` appear only as examples of syntax the language must
-support. `String` is the sole exception: section 7.5 fixes its representation
-because string literal syntax depends on it.
+and the required trust and execution boundaries. It does **not** otherwise
+specify the standard library of proved datatypes and functions. Library types
+such as `List.of` and `Integer` appear primarily as examples of syntax the
+language must support. Section 1.1 fixes the standard automata library's
+executable representation, and section 7.5 fixes `String` because string
+literal syntax depends on its representation.
 
 The governing design rule is a largest clean intersection of Rhombus and HOL:
 use normal Rhombus syntax when it has a direct total HOL meaning; lower surface
@@ -53,6 +54,61 @@ particular, `fun` is never a logical definition; the distinct keyword
 Logical declarations are module-body forms. A user declaration macro may expand
 to them, preserving source expansion order, but the resulting declaration must
 ultimately occur in a module body, not in a `block`, `fun`, or method body.
+
+### 1.1 Standard-library executable automata
+
+The standard automata library has one representation for each kind of
+automaton, and every automaton operation is declared with `function` so that
+it has both a logical meaning and ordinary runtime code.
+
+`DFA.of(?q, ?a)`, constructed by `dfa`, stores one initial state, a transition
+function, and a final-state predicate. `dfa_run` follows the transition
+function over a `List.of(?a)`, and `dfa_accepts` tests the resulting state.
+
+The nondeterministic representations make their finite search space explicit:
+
+- `NFA.of(?q, ?a)`, constructed by `nfa`, stores an equality decider of type
+  `?q -> ?q -> Boolean`, a `FiniteSet.of(?q)` state universe, an initial
+  `FiniteSet.of(?q)`, a transition predicate of type
+  `?q -> ?a -> ?q -> Boolean`, and a final-state predicate.
+- `EpsilonNFA.of(?q, ?a)`, constructed by `epsilon_nfa`, stores the same data
+  plus an epsilon-transition predicate of type `?q -> ?q -> Boolean`.
+
+The NFA operations are `nfa_run`, `nfa_accepts`, and `nfa_determinize`. The
+epsilon-NFA operations are `epsilon_nfa_closure`, `epsilon_nfa_run`,
+`epsilon_nfa_accepts`, `epsilon_nfa_eliminate`, and
+`epsilon_nfa_determinize`. Run and epsilon-closure operations return
+`FiniteSet.of(?q)`. Epsilon elimination returns `NFA.of(?q, ?a)`.
+Determinization returns `DFA.of(FiniteSet.of(?q), ?a)`, whose states are finite
+sets of source states.
+
+Every destination search enumerates only the stored universe and uses the
+stored equality decider for finite-set operations. Epsilon closure is bounded
+structurally by consuming the universe list as fuel, so it terminates even
+when epsilon transitions contain cycles. The universe is therefore part of
+the automaton representation rather than optional metadata.
+
+`nfa_determinize_accepts_iff` states that `nfa_accepts` agrees with acceptance
+by the DFA returned from `nfa_determinize` for every word, and
+`nfa_determinize_language` gives the corresponding extensional language
+equality. These theorems are unconditional: NFA acceptance and the subset
+construction use the same finite-set runner.
+
+Likewise, `epsilon_nfa_determinize_accepts_iff` and
+`epsilon_nfa_determinize_language` are unconditional preservation theorems for
+`epsilon_nfa_accepts` and the DFA returned by `epsilon_nfa_determinize`. The
+epsilon-NFA source and the produced DFA share the same bounded closure and
+subset-construction computation.
+
+Finite-universe epsilon elimination additionally has a representation
+obligation. `epsilon_nfa_well_formed(m)` requires the stored equality decider
+to agree with logical equality, the initial states to belong to the explicit
+universe, and the universe to be closed under epsilon and symbol transitions.
+Under that explicit hypothesis, `epsilon_nfa_eliminate_accepts_iff` proves
+word-acceptance preservation and `epsilon_nfa_eliminate_language` proves
+language preservation. No well-formedness premise is required by either
+determinization theorem, because those theorems compare the executable
+runners directly.
 
 ## 2. Theories, imports, and scope
 

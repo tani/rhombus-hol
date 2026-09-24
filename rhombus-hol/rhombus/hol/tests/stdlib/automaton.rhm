@@ -24,20 +24,103 @@ check dfa_run(parity_dfa, two_symbols) ~is #false
 check dfa_accepts(parity_dfa, one_symbol) ~is #true
 check dfa_accepts(parity_dfa, two_symbols) ~is #false
 
-// The preservation interface is usable without reaching into the leaf module.
-theorem public_epsilon_eliminate_accepts:
-  forall (m :: EpsilonNFA.of(?q, ?a), word :: List.of(?a)):
-    epsilon_nfa_accepts(m, word) <=> nfa_accepts(epsilon_eliminate(m), word)
-proof:
-  ~use: [epsilon_eliminate_accepts_iff]
-  ~skip: [induct]
+function boolean_state_equal(x :: Boolean) :: Boolean -> Boolean:
+  function (y :: Boolean) :: Boolean: x == y
 
-theorem public_epsilon_eliminate_language:
-  forall (m :: EpsilonNFA.of(?q, ?a)):
-    epsilon_nfa_accepts(m) === nfa_accepts(epsilon_eliminate(m))
-proof:
-  ~use: [epsilon_eliminate_language]
-  ~skip: [induct]
+def boolean_states:
+  fset_from_list(
+    boolean_state_equal,
+    cons(#false, cons(#true, nil())))
+def false_initial:
+  fset_insert(boolean_state_equal, #false, fset_empty())
+def false_symbol = cons(#false, nil())
+
+function finite_nfa_transition(source :: Boolean) :: Boolean -> Boolean -> Boolean:
+  function (symbol :: Boolean) :: Boolean -> Boolean:
+    function (destination :: Boolean) :: Boolean:
+      match symbol
+      | #false: #false
+      | #true:
+          match source
+          | #false: #true
+          | #true: destination
+
+function true_final(state :: Boolean) :: Boolean:
+  state
+
+def finite_nfa:
+  nfa(
+    boolean_state_equal,
+    boolean_states,
+    false_initial,
+    finite_nfa_transition,
+    true_final)
+
+check nfa_run(finite_nfa, one_symbol) ~is boolean_states
+check fset_is_empty(nfa_run(finite_nfa, false_symbol)) ~is #true
+check nfa_accepts(finite_nfa, one_symbol) ~is #true
+check nfa_accepts(finite_nfa, false_symbol) ~is #false
+
+def finite_nfa_dfa = nfa_determinize(finite_nfa)
+check dfa_run(finite_nfa_dfa, one_symbol) ~is boolean_states
+check dfa_accepts(finite_nfa_dfa, one_symbol) ~is #true
+check dfa_accepts(finite_nfa_dfa, false_symbol) ~is #false
+check dfa_accepts(finite_nfa_dfa, one_symbol) == nfa_accepts(finite_nfa, one_symbol) ~is #true
+check dfa_accepts(finite_nfa_dfa, false_symbol) == nfa_accepts(finite_nfa, false_symbol) ~is #true
+
+function finite_epsilon(source :: Boolean) :: Boolean -> Boolean:
+  function (destination :: Boolean) :: Boolean: !source && destination
+
+function finite_epsilon_transition(source :: Boolean) :: Boolean -> Boolean -> Boolean:
+  function (symbol :: Boolean) :: Boolean -> Boolean:
+    function (destination :: Boolean) :: Boolean:
+      source && symbol && !destination
+
+def finite_epsilon_nfa:
+  epsilon_nfa(
+    boolean_state_equal,
+    boolean_states,
+    false_initial,
+    finite_epsilon,
+    finite_epsilon_transition,
+    true_final)
+
+def initial_epsilon_closure:
+  epsilon_nfa_closure(finite_epsilon_nfa, false_initial)
+check fset_cardinality(initial_epsilon_closure) ~is nat_two()
+check fset_member(boolean_state_equal, #false, initial_epsilon_closure) ~is #true
+check fset_member(boolean_state_equal, #true, initial_epsilon_closure) ~is #true
+
+def epsilon_one_run:
+  epsilon_nfa_run(finite_epsilon_nfa, one_symbol)
+check fset_cardinality(epsilon_one_run) ~is nat_two()
+check fset_member(boolean_state_equal, #false, epsilon_one_run) ~is #true
+check fset_member(boolean_state_equal, #true, epsilon_one_run) ~is #true
+check fset_is_empty(
+        epsilon_nfa_run(finite_epsilon_nfa, false_symbol)) ~is #true
+check epsilon_nfa_accepts(finite_epsilon_nfa, nil()) ~is #true
+check epsilon_nfa_accepts(finite_epsilon_nfa, one_symbol) ~is #true
+check epsilon_nfa_accepts(finite_epsilon_nfa, false_symbol) ~is #false
+
+def finite_epsilon_free:
+  epsilon_nfa_eliminate(finite_epsilon_nfa)
+def finite_epsilon_free_run:
+  nfa_run(finite_epsilon_free, one_symbol)
+check fset_cardinality(finite_epsilon_free_run) ~is nat_two()
+check fset_member(boolean_state_equal, #false, finite_epsilon_free_run) ~is #true
+check fset_member(boolean_state_equal, #true, finite_epsilon_free_run) ~is #true
+check nfa_accepts(finite_epsilon_free, nil()) ~is #true
+check nfa_accepts(finite_epsilon_free, one_symbol) ~is #true
+check nfa_accepts(finite_epsilon_free, false_symbol) ~is #false
+
+def finite_epsilon_dfa:
+  epsilon_nfa_determinize(finite_epsilon_nfa)
+check dfa_accepts(finite_epsilon_dfa, nil()) ~is #true
+check dfa_accepts(finite_epsilon_dfa, one_symbol) ~is #true
+check dfa_accepts(finite_epsilon_dfa, false_symbol) ~is #false
+check dfa_accepts(finite_epsilon_dfa, one_symbol) == epsilon_nfa_accepts(finite_epsilon_nfa, one_symbol) ~is #true
+check dfa_accepts(finite_epsilon_dfa, false_symbol) == epsilon_nfa_accepts(finite_epsilon_nfa, false_symbol) ~is #true
+
 
 theorem public_nfa_determinize_accepts:
   forall (m :: NFA.of(?q, ?a), word :: List.of(?a)):
@@ -53,44 +136,36 @@ proof:
   ~use: [nfa_determinize_language]
   ~skip: [induct]
 
-theorem public_nfa_add_epsilon_accepts:
-  forall (m :: NFA.of(?q, ?a), word :: List.of(?a)):
-    nfa_accepts(m, word) <=> epsilon_nfa_accepts(nfa_add_epsilon(m), word)
-proof:
-  ~use: [nfa_add_epsilon_accepts_iff]
-  ~skip: [induct]
-
-theorem public_nfa_add_epsilon_language:
-  forall (m :: NFA.of(?q, ?a)):
-    nfa_accepts(m) === epsilon_nfa_accepts(nfa_add_epsilon(m))
-proof:
-  ~use: [nfa_add_epsilon_language]
-  ~skip: [induct]
-
-theorem public_dfa_to_nfa_accepts:
-  forall (m :: DFA.of(?q, ?a), word :: List.of(?a)):
-    dfa_accepts(m, word) <=> nfa_accepts(dfa_to_nfa(m), word)
-proof:
-  ~use: [dfa_to_nfa_accepts_iff]
-  ~skip: [induct]
-
-theorem public_dfa_to_nfa_language:
-  forall (m :: DFA.of(?q, ?a)):
-    dfa_accepts(m) === nfa_accepts(dfa_to_nfa(m))
-proof:
-  ~use: [dfa_to_nfa_language]
-  ~skip: [induct]
-
 theorem public_epsilon_nfa_determinize_accepts:
   forall (m :: EpsilonNFA.of(?q, ?a), word :: List.of(?a)):
-    epsilon_nfa_accepts(m, word) <=> dfa_accepts(epsilon_nfa_determinize(m), word)
+    epsilon_nfa_accepts(m, word)
+      <=> dfa_accepts(epsilon_nfa_determinize(m), word)
 proof:
   ~use: [epsilon_nfa_determinize_accepts_iff]
   ~skip: [induct]
 
 theorem public_epsilon_nfa_determinize_language:
   forall (m :: EpsilonNFA.of(?q, ?a)):
-    epsilon_nfa_accepts(m) === dfa_accepts(epsilon_nfa_determinize(m))
+    epsilon_nfa_accepts(m)
+      === dfa_accepts(epsilon_nfa_determinize(m))
 proof:
   ~use: [epsilon_nfa_determinize_language]
+  ~skip: [induct]
+
+theorem public_epsilon_nfa_eliminate_accepts:
+  forall (m :: EpsilonNFA.of(?q, ?a), word :: List.of(?a)):
+    epsilon_nfa_well_formed(m)
+      ==> (epsilon_nfa_accepts(m, word)
+             <=> nfa_accepts(epsilon_nfa_eliminate(m), word))
+proof:
+  ~use: [epsilon_nfa_eliminate_accepts_iff]
+  ~skip: [induct]
+
+theorem public_epsilon_nfa_eliminate_language:
+  forall (m :: EpsilonNFA.of(?q, ?a)):
+    epsilon_nfa_well_formed(m)
+      ==> (epsilon_nfa_accepts(m)
+             === nfa_accepts(epsilon_nfa_eliminate(m)))
+proof:
+  ~use: [epsilon_nfa_eliminate_language]
   ~skip: [induct]

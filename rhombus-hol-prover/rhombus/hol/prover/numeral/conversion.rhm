@@ -1,0 +1,217 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+
+// Proof-producing conversion for the kernel's checked NatLit terms.
+//
+// Closed arithmetic is delegated to native conversions that validate the
+// exact source FunInfo equations retained by `prover/numeral/evidence.rhm`. The only
+// structural fallback exposes one zero/successor layer of one literal, and
+// only when an unconditional rewrite for that exposed application already
+// exists. Every result is therefore a kernel Thm about the exact input term.
+
+import:
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/logic/conversion open
+  rhombus/hol/logic/derived open
+  rhombus/hol/prover/rules open
+  rhombus/hol/prover/match open
+  rhombus/hol/prover/context open
+  rhombus/hol/prover/numeral/evidence open
+  rhombus/hol/logic/nat open
+
+export:
+  numeral_conv
+
+fun literal_equality(ctx :: Context, thy :: Theory,
+                     t :: Term) :: maybe(Thm):
+  match dest_eq(t)
+  | [NatLit(_), NatLit(_)]:
+      match ctx.literal_eq
+      | decide :: Function: decide(thy, t)
+      | ~else: #false
+  | ~else: #false
+// Kernel arithmetic APIs validate specialized Peano equations. Keep the exact
+// FunInfo source theorem in the evidence record, then open it here with fresh
+// Nat variables immediately before the native call.
+fun specialize_evidence(thy :: Theory, source :: Thm) :: Thm:
+  let (vars, _) = strip_forall(concl_of(source))
+  let instances:
+    for List (_ in vars):
+      mk_var(Symbol.gen("_nat_lit_evidence"), nat_type) :~ Term
+  SPECL(thy, instances, source)
+
+fun operation_enabled(db :: RuleDB, fn :: Term) :: Boolean:
+  match fn
+  | Const(name, _): rules_of(db, name).length() != 0
+  | ~else: #false
+
+
+fun closed_arithmetic(ctx :: Context, db :: RuleDB, thy :: Theory,
+                      t :: Term) :: maybe(Thm):
+  match t
+  | Comb(Comb(fn, NatLit(m)), NatLit(n)) when operation_enabled(db, fn :~ Term):
+      match nat_add_evidence(ctx, fn :~ Term)
+      | add :: NatAddEvidence:
+          NAT_LIT_ADD_CONV(thy,
+                           specialize_evidence(thy, add.zero),
+                           specialize_evidence(thy, add.succ),
+                           m, n)
+      | #false:
+          match nat_mul_evidence(ctx, fn :~ Term)
+          | mul :: NatMulEvidence:
+              NAT_LIT_MUL_CONV(
+                thy,
+                specialize_evidence(thy, mul.add.zero),
+                specialize_evidence(thy, mul.add.succ),
+                specialize_evidence(thy, mul.zero),
+                specialize_evidence(thy, mul.succ),
+                m, n)
+          | #false:
+              match nat_le_evidence(ctx, fn :~ Term)
+              | le :: NatLeEvidence:
+                  NAT_LIT_LE_CONV(
+                    thy,
+                    specialize_evidence(thy, le.zero),
+                    specialize_evidence(thy, le.succ_zero),
+                    specialize_evidence(thy, le.succ_succ),
+                    m, n)
+              | #false:
+                  match nat_sub_evidence(ctx, fn :~ Term)
+                  | sub :: NatSubEvidence:
+                      NAT_LIT_SUB_CONV(
+                        thy,
+                        specialize_evidence(thy, sub.zero),
+                        specialize_evidence(thy, sub.succ_zero),
+                        specialize_evidence(thy, sub.succ_succ),
+                        m, n)
+                  | #false:
+                      match nat_pow_evidence(ctx, fn :~ Term)
+                      | pow :: NatPowEvidence:
+                          NAT_LIT_POW_CONV(
+                            thy,
+                            specialize_evidence(thy, pow.mul.add.zero),
+                            specialize_evidence(thy, pow.mul.add.succ),
+                            specialize_evidence(thy, pow.mul.zero),
+                            specialize_evidence(thy, pow.mul.succ),
+                            specialize_evidence(thy, pow.zero),
+                            specialize_evidence(thy, pow.succ),
+                            m, n)
+                      | #false: #false
+  | ~else: #false
+
+// `NAT_LIT_CONV(0)` states `NatLit(0) = zero`; for a successor it states
+// `NatLit(n + 1) = succ(NatLit n)`. Reverse both equations to keep closed
+// constructor values in canonical literal form.
+fun normalize_constructor(thy :: Theory, t :: Term) :: maybe(Thm):
+  match t
+  | _ when t == nat_zero: SYM(thy, NAT_LIT_CONV(thy, 0))
+  | Comb(s, NatLit(n)) when s == nat_succ:
+      SYM(thy, NAT_LIT_CONV(thy, n + 1))
+  | ~else: #false
+
+fun replace_argument(head :: Term, args :: List, i :: NonnegInt,
+                     replacement :: Term) :: Term:
+  for values(acc :~ Term = head) (arg in args,
+                                  j in List.iota(args.length())):
+    mk_comb(acc, (if j == i | replacement | arg :~ Term))
+
+// `|- f(..., a, ...) = f(..., b, ...)` from `|- a = b`.
+fun congruence_at(thy :: Theory, head :: Term, args :: List,
+                  i :: NonnegInt, eq :: Thm) :: Thm:
+  for values(acc :~ Thm = REFL(thy, head)) (
+        arg in args, j in List.iota(args.length())):
+    MK_COMB(acc, (if j == i | eq | REFL(thy, arg :~ Term)))
+
+fun matching_unconditional_rule(db :: RuleDB, name :: Symbol,
+                                t :: Term) :: Boolean:
+  for any (candidate in rules_of(db, name)):
+    let rule :~ RewriteRule = candidate
+    rule.conds == [] && term_match(rule.vars, rule.lhs, t) != #false
+
+fun exposed_literal(thy :: Theory, value :: NonnegInt) :: Term:
+  (if value == 0
+   | nat_zero
+   | mk_comb(nat_succ, mk_nat_lit(thy, value - 1)))
+
+// Normalize every immediate constructor argument before a native arithmetic
+// call. This is required when a surrounding simplifier rule prevents child
+// traversal from reaching an ordinary successor form.
+fun normalize_closed_arithmetic(ctx :: Context, db :: RuleDB,
+                                thy :: Theory, t :: Term) :: maybe(Thm):
+  let (head, args) = strip_comb(t)
+  recur collect(rest :~ List = args,
+                equalities :~ List.of(Thm) = [],
+                changed = #false):
+    match rest
+    | []:
+        cond
+        | !changed: #false
+        | ~else:
+            let call_eq:
+              for values(acc :~ Thm = REFL(thy, head :~ Term)) (
+                    eq in equalities):
+                MK_COMB(acc, eq :~ Thm)
+            match closed_arithmetic(ctx, db, thy, rhs_of(call_eq))
+            | reduced :: Thm: TRANS(call_eq, reduced)
+            | #false: #false
+    | List.cons(arg, more):
+        let arg :~ Term = arg
+        match arg
+        | NatLit(_):
+            collect(more :~ List,
+                    equalities ++ [REFL(thy, arg)], changed)
+        | ~else:
+            match normalize_constructor(thy, arg)
+            | eq :: Thm:
+                collect(more :~ List, equalities ++ [eq], #true)
+            | #false: #false
+
+
+// A native literal is atomic to the rule matcher. Expose at most one argument
+// and one constructor layer, and obtain its theorem only after confirming that
+// the resulting ordinary constant application has a rule that will fire.
+fun expose_for_rule(db :: RuleDB, thy :: Theory,
+                    t :: Term) :: maybe(Thm):
+  let (head, args) = strip_comb(t)
+  match head
+  | Const(name, _):
+      cond
+      | matching_unconditional_rule(db, name, t): #false
+      | ~else:
+          recur scan(i = 0):
+            cond
+            | i >= args.length(): #false
+            | ~else:
+                match args[i]
+                | NatLit(value):
+                    let exposed = exposed_literal(thy, value)
+                    let candidate = replace_argument(
+                                      head :~ Term, args :~ List, i, exposed)
+                    cond
+                    | matching_unconditional_rule(db, name, candidate):
+                        congruence_at(thy, head :~ Term, args :~ List, i,
+                                      NAT_LIT_CONV(thy, value))
+                    | ~else: scan(i + 1)
+                | ~else: scan(i + 1)
+  | ~else: #false
+
+// Direct equality and arithmetic are complete in one theorem; successor
+// normalization keeps literal form canonical; every other term receives at
+// most the single guarded constructor exposure.
+fun numeral_conv(ctx :: Context, db :: RuleDB, thy :: Theory,
+                 t :: Term) :: maybe(Thm):
+  match literal_equality(ctx, thy, t)
+  | th :: Thm: th
+  | #false:
+      match closed_arithmetic(ctx, db, thy, t)
+      | th :: Thm: th
+      | #false:
+          match normalize_constructor(thy, t)
+          | th :: Thm: th
+          | #false:
+              match normalize_closed_arithmetic(ctx, db, thy, t)
+              | th :: Thm: th
+              | #false: expose_for_rule(db, thy, t)

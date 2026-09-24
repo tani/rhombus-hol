@@ -1,0 +1,179 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+// Surface identity, lookup, and printing for HOL type constructors. Surface
+// type names are frontend metadata, not kernel Theory entries: this whole
+// module exists to resolve surface type syntax and print HType values back
+// out, never to duplicate a datatype's real (kernel-checked) metadata.
+
+import:
+  rhombus/hol/kernel/type open
+
+export:
+  TypeConstructor
+  make_type_constructor
+  apply_type_constructor
+  TypeConstructorRegistry
+  empty_type_constructor_registry
+  standard_type_constructor_registry
+  add_type_constructor
+  add_declared_type_constructor
+  lookup_type_constructor
+  lookup_type_constructor_namespace
+  type_constructor_for_kernel
+  merge_type_constructor_registries
+  type_to_surface_string
+
+// -- constructor identity ---------------------------------------------------
+//
+// The surface binding may differ from the kernel name (`List.of` elaborates
+// to `TyApp(#'List, ...)`).
+
+class TypeConstructor(surface_name :: Symbol,
+                      kernel_name :: Symbol,
+                      arity :: NonnegInt)
+
+fun make_type_constructor(kernel_name :: Symbol,
+                          arity :: NonnegInt)
+     :: TypeConstructor:
+  let surface_name = (if arity == 0
+                      | kernel_name
+                      | Symbol.from_string(to_string(kernel_name) ++ ".of"))
+  TypeConstructor(surface_name, kernel_name, arity)
+
+fun apply_type_constructor(constructor :: TypeConstructor,
+                           arguments :: List.of(HType),
+                           at :: Syntax) :: HType:
+  let arity = constructor.arity
+  unless arguments.length() == arity
+  | error(~who: #'type,
+          "type constructor `" ++ to_string(constructor.surface_name)
+            ++ "` expects " ++ to_string(arity)
+            ++ (if arity == 1 | " argument" | " arguments")
+            ++ ", but received " ++ to_string(arguments.length()),
+          error.val(~label: "in", to_string(at)))
+  mk_tyapp(constructor.kernel_name, arguments)
+
+// -- registry -----------------------------------------------------------
+
+class TypeConstructorRegistry(bindings :: Map.of(Symbol, TypeConstructor))
+
+fun empty_type_constructor_registry() :: TypeConstructorRegistry:
+  TypeConstructorRegistry({})
+
+fun same_constructor(left :: TypeConstructor,
+                     right :: TypeConstructor) :: Boolean:
+  left.surface_name == right.surface_name
+    && left.kernel_name == right.kernel_name
+    && left.arity == right.arity
+
+// No separate reverse-lookup table: constructors are few enough (kernel
+// primitives plus one per declared datatype) that a linear scan over
+// `bindings` is the whole cost of a kernel-name lookup, and it keeps a
+// single table as the one place a constructor can go stale.
+fun find_by_kernel_name(registry :: TypeConstructorRegistry,
+                        kernel_name :: Symbol)
+     :: maybe(TypeConstructor):
+  for values(found :~ maybe(TypeConstructor) = #false) (
+        (_, constructor) in registry.bindings):
+    (if found
+     | found
+     | (if (constructor :~ TypeConstructor).kernel_name == kernel_name
+        | constructor
+        | #false))
+
+fun add_type_constructor(registry :: TypeConstructorRegistry,
+                         constructor :: TypeConstructor)
+     :: TypeConstructorRegistry:
+  match registry.bindings.get(constructor.surface_name, #false)
+  | prior :: TypeConstructor:
+      unless same_constructor(prior, constructor)
+      | error(~who: #'type,
+              "duplicate type constructor binding `"
+                ++ to_string(constructor.surface_name) ++ "`")
+      registry
+  | #false:
+      match find_by_kernel_name(registry, constructor.kernel_name)
+      | prior :: TypeConstructor:
+          unless same_constructor(prior, constructor)
+          | error(~who: #'type,
+                  "kernel type constructor `"
+                    ++ to_string(constructor.kernel_name)
+                    ++ "` already has a surface binding")
+          registry
+      | #false:
+          TypeConstructorRegistry(
+            registry.bindings ++ {constructor.surface_name: constructor})
+
+fun add_declared_type_constructor(registry :: TypeConstructorRegistry,
+                                  kernel_name :: Symbol,
+                                  arity :: NonnegInt)
+     :: TypeConstructorRegistry:
+  add_type_constructor(
+    registry, make_type_constructor(kernel_name, arity))
+
+fun lookup_type_constructor(registry :: TypeConstructorRegistry,
+                            surface_name :: Symbol)
+     :: maybe(TypeConstructor):
+  registry.bindings.get(surface_name, #false)
+
+// Only constructors that take at least one type argument register a
+// namespace: a plain filter over the linear scan is the same lookup with
+// no extra table to keep in sync.
+fun lookup_type_constructor_namespace(registry :: TypeConstructorRegistry,
+                                      base_name :: Symbol)
+     :: maybe(TypeConstructor):
+  match find_by_kernel_name(registry, base_name)
+  | constructor :: TypeConstructor when constructor.arity > 0:
+      constructor
+  | ~else: #false
+
+fun type_constructor_for_kernel(registry :: TypeConstructorRegistry,
+                                kernel_name :: Symbol)
+     :: maybe(TypeConstructor):
+  find_by_kernel_name(registry, kernel_name)
+
+fun merge_type_constructor_registries(
+      imported :: TypeConstructorRegistry,
+      current :: TypeConstructorRegistry)
+     :: TypeConstructorRegistry:
+  for values(out :~ TypeConstructorRegistry = imported) (
+        (_, constructor) in current.bindings):
+    add_type_constructor(out, constructor :~ TypeConstructor)
+
+def standard_type_constructor_registry_value:
+  add_type_constructor(
+    add_type_constructor(
+      empty_type_constructor_registry(),
+      TypeConstructor(#'Boolean, #'bool, 0)),
+    TypeConstructor(Symbol.from_string("Pair.of"), #'prod, 2))
+
+fun standard_type_constructor_registry() :: TypeConstructorRegistry:
+  standard_type_constructor_registry_value
+
+// -- printing -----------------------------------------------------------
+//
+// Surface rendering for kernel HType values. Function types are right
+// associative; declared parameterized constructors use their `.of` binding.
+
+fun type_to_surface_string(registry :: TypeConstructorRegistry,
+                           type :: HType) :: String:
+  fun render(type :: HType) :: String:
+    match type
+    | TyVar(name): "?" ++ to_string(name)
+    | TyApp(#'fun, [domain, range]):
+        let domain_text = render(domain)
+        (if is_fun(domain) | "(" ++ domain_text ++ ")" | domain_text)
+          ++ " -> " ++ render(range)
+    | TyApp(kernel_name, arguments):
+        match type_constructor_for_kernel(registry, kernel_name)
+        | constructor :: TypeConstructor when constructor.arity == arguments.length():
+            cond
+            | constructor.arity == 0: to_string(constructor.surface_name)
+            | ~else:
+                to_string(constructor.surface_name)
+                  ++ "("
+                  ++ String.join(arguments.map(render), ", ")
+                  ++ ")"
+        | ~else: type_to_string(type)
+  render(type)

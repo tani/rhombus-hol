@@ -1,0 +1,112 @@
+#lang rhombus/static
+
+// A module's theory crosses to the modules that import it.
+//
+// A module publishes its finished `HolState` as a phase-1 value, and an
+// importer adopts it: the same `Theory`, the same `Thm` objects, the same rule
+// database.  Nothing is re-parsed and nothing is re-asserted, so there is no
+// trust boundary -- a `Thm` is opaque and cannot be built without the kernel,
+// whereas a *description* of a theory is data that any module could write.
+//
+// The cost is that adopting visits the exporting module, which re-runs its
+// proofs once per importing compilation.
+
+import:
+  lib("rhombus/hol/tests/fixture_load.rhm") open
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/surface/driver open
+  lib("rhombus/hol/tests/surface/import/fixtures/theory_user.rhm") as u
+  lib("rhombus/hol/tests/surface/import/fixtures/theory_uses_empty.rhm") as e
+  lib("rhombus/hol/tests/surface/import/fixtures/theory_transitive.rhm") as t
+  lib("rhombus/hol/tests/surface/import/fixtures/theory_mixed_import.rhm") as mx
+  lib("rhombus/hol/tests/surface/import/fixtures/macro_import_ok.rhm") as generated
+
+// -- the logic crossed -------------------------------------------------------
+//
+// `theory_user.rhm` proves `app(app(xs, Nil()), ys) === app(xs, ys)`, which
+// needs the imported `app_nil_r` as a rewrite rule. Successful compilation
+// therefore confirms that the adopted state carried the datatype, function,
+// and theorem before processing its own declarations.
+
+check u.sample ~is u.Cons(1, u.Cons(1, u.Nil()))
+
+// -- the runtime crossed too -------------------------------------------------
+//
+// A plain `import` does both halves: the functions can be called, and the
+// published theory reaches the prover.
+
+check u.twice(u.Nil()) ~is u.Nil()
+check u.app(u.Cons(1, u.Nil()), u.Cons(2, u.Nil())) ~is u.Cons(1, u.Cons(2, u.Nil()))
+check generated.forwarded ~is u.Cons(1, u.Nil())
+
+// -- a module with no declarations still publishes its state -----------------
+
+check e.forwarded ~is "hello"
+
+fun load(mp :: ModulePath):
+  instantiate_hol_fixture(mp)
+fun load_message(mp :: ModulePath) :: String:
+  try:
+    block:
+      load(mp)
+      "fixture compiled"
+    ~catch e :: Exn.Fail: e.message
+
+// -- adoption is transitive --------------------------------------------------
+//
+// `theory_transitive.rhm` names only `theory_mid.rhm`, and proves a theorem
+// that needs `app_nil_r` from `theory_base.rhm`.  A description of a theory
+// lists what its module declared; a state *is* what the module ended up with,
+// so what it imported comes along without being mentioned.
+
+check t.result ~is u.Cons(1, u.Cons(1, u.Nil()))
+
+// -- the lineage stays a chain -----------------------------------------------
+//
+// Adopting is only defined when the incoming theory extends the one in scope.
+// That is what keeps `combine_stamps` happy: a module holding two sibling
+// theories could not use their theorems together.  Both ways of breaking it
+// say so at the offending line.
+
+check:
+  load(ModulePath'lib("rhombus/hol/tests/surface/import/fixtures/theory_out_of_order.rhm")')
+  ~throws "does not extend the one in scope"
+
+check:
+  load(ModulePath'lib("rhombus/hol/tests/surface/import/fixtures/theory_after_decl.rhm")')
+  ~throws "does not extend the one in scope"
+
+// -- a theory cannot be forged -----------------------------------------------
+//
+// `theory_forged.rhm` is a plain `#lang rhombus` module that publishes both
+// the surface metadata and `hol_theory` submodules expected by the importer.
+// What it cannot publish is a logical state: building one means building
+// theorems, and `Thm` is opaque. Anything it can write there is data, and
+// adoption refuses data.
+
+def forged_user_message = load_message(
+  ModulePath'lib("rhombus/hol/tests/surface/import/fixtures/theory_forged_user.rhm")')
+
+check forged_user_message.contains("HolState") ~is #true
+
+// -- an ordinary import is untouched -----------------------------------------
+//
+// A theory is adopted by plain `import`, so the recogniser has to leave every
+// other import exactly as it was.  `theory_mixed_import.rhm` names an ordinary
+// Rhombus module and a theory in one `import` form.
+
+check mx.loud ~is "hello!"
+check mx.twice_over(mx.Nil()) ~is mx.Nil()
+check mx.twice_over(mx.Cons(1, mx.Nil())) ~is mx.Cons(1, mx.Cons(1, mx.Nil()))
+
+// -- an import whose path cannot be read is refused, not ignored -------------
+//
+// The path of `import: meta: "a.rhm"` sits inside a block, where the rule that
+// finds a clause's module path does not reach.  Dropping the theory quietly is
+// the one outcome worth ruling out.
+
+check:
+  load(ModulePath'lib("rhombus/hol/tests/surface/import/fixtures/theory_meta_import.rhm")')
+  ~throws "cannot read"

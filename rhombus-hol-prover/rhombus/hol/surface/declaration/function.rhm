@@ -1,0 +1,223 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+// Elaborating a `function` declaration's `CoreFunctionSpec` into a kernel
+// `FunSpec`.
+//
+// This module only *analyses*: syntax in, kernel-level data out. Shared
+// checking, name resolution, and term construction live in
+// `surface/elaborate.rhm`; this module assembles them into the one
+// declaration-shaped entry point, `elaborate_function_decl`.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/definition/datatype/define open
+  rhombus/hol/definition/function/spec open
+  rhombus/hol/surface/core open
+  rhombus/hol/surface/checked open
+  rhombus/hol/surface/overload open
+  rhombus/hol/surface/type/registry open
+  rhombus/hol/surface/type/parse open
+  rhombus/hol/surface/elaborate open
+
+export:
+  function_parts
+  function_proof_measure
+  row_parts
+  elaborate_function_decl
+
+// A declaration split into its parts:
+// `[name, [param, ...], result_type, body, clauses]`. Exactly one of `body`
+// (a plain expression body) and `clauses` (a clausal `| pat: expr` form's
+// rows) is `#false`.
+fun function_parts(stx :: Syntax) :: List:
+  match stx
+  | 'function $(name :: Identifier)($param, ...) $rest ...':
+      let [rty, body, clauses] = split_signature('$rest ...', stx)
+      [name, [param, ...], rty, body, clauses]
+  | 'function $(name :: Identifier)
+     | $c
+     | ...':
+      [name, #false, #false, #false, [c, ...]]
+  | ~else:
+      syntax_error(#'function,
+                   "expected a named function declaration",
+                   stx)
+
+fun split_signature(rest :: Syntax, at :: Syntax) :: List:
+  match rest
+  | ':: $ty ... ~measure($m): $body; ...':
+      syntax_error(
+        #'function,
+        "`~measure(...)` must be written in an adjacent `proof:` block as `~measure: expression`",
+        m)
+  | ':: $ty ... ~measure($m)
+     | $c
+     | ...':
+      syntax_error(
+        #'function,
+        "`~measure(...)` must be written in an adjacent `proof:` block as `~measure: expression`",
+        m)
+  | ':: $ty ...: $body; ...': ['$ty ...', '$body; ...', #false]
+  | ':: $ty ...
+     | $c
+     | ...': ['$ty ...', #false, [c, ...]]
+  | ': $body; ...': [#false, '$body; ...', #false]
+  | '| $c | ...': [#false, #false, [c, ...]]
+  | ~else:
+      syntax_error(#'function, "malformed function body", at)
+
+fun function_proof_measure(groups :: List.of(Syntax), at :: Syntax) :: Syntax:
+  recur loop (remaining :~ List = groups,
+              measure :~ maybe(Syntax) = #false):
+    match remaining
+    | []:
+        match measure
+        | #false:
+            syntax_error(
+              #'proof,
+              "a function proof needs one `~measure: expression` option",
+              at)
+        | value: value :~ Syntax
+    | List.cons(group, rest):
+        let rest :~ List = rest
+        match group
+        | '~measure: $expr':
+            match measure
+            | #false: loop(rest, expr)
+            | ~else:
+                syntax_error(#'proof, "duplicate `~measure` option", group)
+        | '~measure: $more; ...':
+            syntax_error(#'proof, "`~measure` expects one expression", group)
+        | ~else:
+            syntax_error(#'proof, "unknown function proof option", group)
+
+fun row_parts(c :: Syntax, arity :: Int) :: values(List.of(Syntax), Syntax):
+  match c
+  | '($p, ...): $body; ...':
+      let ps = [p, ...]
+      unless ps.length() == arity
+      | syntax_error(#'function,
+                     "this clause has " ++ to_string(ps.length())
+                       ++ " patterns but the function takes "
+                       ++ to_string(arity),
+                     c)
+      values(ps, '$body; ...')
+  | '$pt ...: $body; ...':
+      let p = '$pt ...'
+      unless arity == 1
+      | syntax_error(#'function,
+                     "this clause has 1 pattern but the function takes "
+                       ++ to_string(arity),
+                     c)
+      values([p], '$body; ...')
+  | ~else:
+      syntax_error(#'function,
+                   "expected `(pattern, ...): body`", c)
+
+fun optional_declared_type(type_stx :: maybe(Syntax),
+                           tyvars :: List.of(Symbol),
+                           registry :: TypeConstructorRegistry,
+                           hint :: String) :: HType:
+  match type_stx
+  | #false: mk_tyvar(Symbol.gen(hint))
+  | stx: parse_type(stx :~ Syntax, tyvars, registry)
+
+fun spec_type_vars(spec :: CoreFunctionSpec) :: List.of(Symbol):
+  fun optional_vars(type_stx :: maybe(Syntax)) :: List.of(Symbol):
+    match type_stx
+    | #false: []
+    | stx: collect_type_vars(stx :~ Syntax)
+  let from_params:
+    for values(acc :~ List = []) (b in spec.params):
+      let binder :~ CoreBinder = b
+      let pattern_types:
+        match binder.pattern
+        | CorePatTyped(_, stx, _): collect_type_vars(stx)
+        | ~else: []
+      append_unique(
+        acc,
+        append_unique(pattern_types, optional_vars(binder.type_stx)))
+  append_unique(from_params, optional_vars(spec.result_type))
+
+fun elaborate_function_decl(
+      thy :: Theory, spec :: CoreFunctionSpec,
+      ~operators: operators :: OverloadRegistry = standard_overload_registry(),
+      ~type_constructors: type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry(),
+      ~datatypes: datatypes :: Map.of(Symbol, DatatypeSpec) = {})
+     :: FunSpec:
+  let tyvars = spec_type_vars(spec)
+  unless spec.result_type
+  | syntax_error(#'function, "a function needs a result type", spec.at)
+  let inference = make_checked_inference()
+  let declared_arg_tys:
+    spec.params.map(
+      fun (binder :: CoreBinder):
+        optional_declared_type(
+          binder.type_stx, tyvars, type_constructors, "_parameter"))
+  let declared_result_ty = optional_declared_type(
+                             spec.result_type, tyvars,
+                             type_constructors, "_result")
+  let declared_function_ty:
+    for values(ty :~ HType = declared_result_ty) (
+          arg_ty in declared_arg_tys.reverse()):
+      mk_fun(arg_ty :~ HType, ty)
+  let self = mk_const(spec.name, declared_function_ty)
+  let binding_env = ElabEnv(
+                      thy, tyvars, {}, #'function, spec.name, self,
+                      operators, type_constructors, datatypes, {}, inference)
+  let checked_value = check_expr(
+                        logical_check_env(binding_env),
+                        CoreFunctionExpr(
+                          spec.params, spec.result_type, spec.body, spec.at),
+                        declared_function_ty)
+  let checked_fn :: CheckedFunction:
+    match checked_value
+    | fn :: CheckedFunction: fn
+    | ~else:
+        error(~who: #'elaborate_function_decl,
+              "shared checker did not return a checked function")
+  let (pvars, result_ty, clauses0) = checked_function_clauses(
+                                           binding_env, checked_fn)
+  let arg_tys = checked_fn.params.map(
+                  fun (binder :: CheckedBinder): binder.ty)
+  let env0:
+    for values(out :~ Map = {}) (binder in checked_fn.params,
+                                 variable in pvars):
+      let binder :~ CheckedBinder = binder
+      merge_pattern_bindings(
+        #'function, out,
+        bind_checked_irrefutable_pattern(
+          binding_env, binder.pat, variable :~ Term),
+        binder.at)
+  let measure:
+    match spec.measure
+    | #false: #false
+    | expr:
+        let value = run_elaboration(
+                      ElabEnv(thy, tyvars, env0, #'function, #false, #false,
+                              operators, type_constructors, datatypes,
+                              {}, inference),
+                      expr :~ CoreExpr)
+        list_mk_abs(pvars, value)
+  let substitution :~ Map = close_substitution(
+                                   inference.substitution.value :~ Map)
+  let arg_tys = arg_tys.map(
+                  fun (ty :: HType): type_subst(substitution, ty))
+  let result_ty = type_subst(substitution, result_ty)
+  let clauses:
+    for List (cl in clauses0):
+      let cl :~ DefClause = cl
+      DefClause(
+        cl.pats.map(
+          fun (pat :: Term): inst_type(substitution, pat)),
+        cl.terms.map(
+          fun (term :: Term):
+            inst_type(substitution, term)))
+  let measure:
+    match measure
+    | #false: #false
+    | term: inst_type(substitution, term :~ Term)
+  FunSpec(spec.name, arg_tys, result_ty, clauses, measure)

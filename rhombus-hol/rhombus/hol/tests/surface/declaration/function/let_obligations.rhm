@@ -1,0 +1,87 @@
+#lang rhombus/static
+
+// A `let` initializer's evaluation is an obligation, even when its value is
+// not used.
+//
+// `let` is substituted rather than bound, so an initializer only reaches the
+// equations where the variable is read.  The compiled Rhombus evaluates it
+// regardless.  Left alone, that lets a function be *proved* about while its
+// compiled form diverges:
+//
+//   function bad(n :: Nat) :: Nat:
+//     let unused = bad(n)
+//     zero()
+//
+// elaborated to `!n. bad(n) = zero`, derived with no axioms, termination
+// method `none` -- and `bad(zero())` never returns.  The theorem is not false
+// in HOL, where functions are total; what it is not is a statement about the
+// program that was compiled.
+//
+// The clause therefore retains initializer evaluation beside its logical
+// right-hand side, and termination checks both. The call is *seen*: `bad` is
+// refused because it does not terminate, while a decreasing initializer is
+// accepted.
+
+import:
+  lib("rhombus/hol/tests/fixture_load.rhm") open
+  rhombus/hol/kernel open
+  rhombus/hol/surface/driver open
+  rhombus/hol/definition/function/spec open
+  lib("rhombus/hol/tests/surface/declaration/function/fixtures/let_recursive_ok.rhm") as ok
+  lib("rhombus/hol/tests/surface/declaration/function/fixtures/let_recursive_ok.rhm")!hol_theory as okm
+  lib("rhombus/hol/tests/surface/declaration/function/fixtures/let_guarded.rhm")!hol_theory as guarded
+
+
+fun load(mp :: ModulePath):
+  instantiate_hol_fixture(mp)
+
+def load_positive = make_hol_fixture_loader()
+
+// -- the dropped call is seen, and judged on its merits ----------------------
+//
+// Refused for non-termination -- naming the call the logical reading does
+// not contain -- rather than for the syntactic shape of the declaration.
+check:
+  load(ModulePath'lib("rhombus/hol/tests/surface/declaration/function/fixtures/let_recursive_bad.rhm")')
+  ~throws "cannot see that the definition terminates"
+
+// -- local named function sugar restricts self- and forward-reference -------
+//
+// A `function name(...): ...` local binding is sugar, not a second
+// recursion-checked definition form (`AGENTS.md` 1.2/4.2): it may call an
+// *earlier* local function, but not itself or a function defined later in
+// the same body. Shared CheckedCore restriction handling keeps the executable
+// and logical paths from accepting different references.
+check:
+  load(ModulePath'lib("rhombus/hol/tests/surface/declaration/function/fixtures/let_local_self_bad.rhm")')
+  ~throws "local recursive functions are not supported"
+check:
+  load(ModulePath'lib("rhombus/hol/tests/surface/declaration/function/fixtures/let_local_forward_bad.rhm")')
+  ~throws "forward local-function reference is not supported"
+check:
+  load_positive(ModulePath'lib("rhombus/hol/tests/surface/declaration/function/fixtures/let_local_earlier_ok.rhm")')
+  ~completes
+
+// -- and a terminating one is accepted ---------------------------------------
+def st :~ HolState = okm.theory
+
+check st.ctx.funs[#'dbl].induction ~matches RecursiveInduction(_)
+check st.ctx.funs[#'dbl].equations.length() ~is 2
+
+// and it runs, which is the half the logic cannot see
+check ok.dbl(ok.succ(ok.zero())) ~is ok.succ(ok.succ(ok.zero()))
+
+// `unread`'s initializer recurses and its body never reads it.  The call
+// descends, so it is fine -- and the equation says nothing about it, which
+// is correct: the equation is about the value.
+check st.ctx.funs[#'unread].induction ~matches RecursiveInduction(_)
+check st.ctx.funs[#'unread].equations.length() ~is 2
+
+check ok.unread(ok.succ(ok.zero())) ~is ok.succ(ok.zero())
+
+// `pick` runs an initializer unconditionally and also reads it under an `if`.
+// Its successful derivation and executable fixture cover the evaluation-aware
+// body without retaining or re-running installation-only call-site analysis.
+check:
+  (guarded.theory :~ HolState).ctx.funs[#'pick].equations.length()
+  ~is 2

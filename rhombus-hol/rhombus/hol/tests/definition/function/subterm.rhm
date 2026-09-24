@@ -1,0 +1,122 @@
+#lang rhombus/static
+
+// The structural subterm relation generated for each datatype: the order a
+// `~measure` decreases in.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/logic/bool open
+  rhombus/hol/kernel open
+  rhombus/hol/definition/datatype/define open
+  lib("rhombus/hol/tests/definition/datatype/datatype_axiom_support.rhm") open
+  rhombus/hol/definition/function/spec open
+  rhombus/hol/definition/function/wfrec open
+  rhombus/hol/definition/function/termination open
+  rhombus/hol/definition/function/subterm open
+
+  rhombus/hol/prover/definition_services open
+def tya = mk_tyvar(#'a)
+
+def nat:
+  DatatypeSpec(#'Nat, [],
+               [Ctor(#'zero, []),
+                Ctor(#'succ, [Field(#'pred, mk_tyapp(#'Nat, []))])])
+def lst:
+  DatatypeSpec(#'List, [#'a],
+               [Ctor(#'Nil, []),
+                Ctor(#'Cons, [Field(#'head, tya),
+                              Field(#'tail, mk_tyapp(#'List, [tya]))])])
+def tree:
+  let t = mk_tyapp(#'Tree, [tya])
+  DatatypeSpec(#'Tree, [#'a],
+               [Ctor(#'Leaf, []),
+                Ctor(#'Node, [Field(#'l, t), Field(#'v, tya), Field(#'r, t)])])
+// No recursive field, so no order to speak of.
+def color:
+  DatatypeSpec(#'Color, [], [Ctor(#'red, []), Ctor(#'blue, [])])
+
+fun prepared_subterm(spec :: DatatypeSpec) :: PreparedFunction:
+  let (thy, _) = datatype_axioms(wfrec_base_theory(), spec)
+  prepare_function(thy, subterm_spec(spec) :~ FunSpec, {spec.name: spec})
+
+fun equations(spec :: DatatypeSpec) :: List.of(Term):
+  let (thy, thms) = datatype_axioms(wfrec_base_theory(), spec)
+  let (_, info) = derive_subterm_relation(
+    thy,
+    spec,
+    thms,
+    definition_logic_rules,
+    definition_rewrite_support)
+  info.equations.map(fun (t :: Thm): concl_of(t))
+
+// `WF(T_lt)`, fully derived from `spec`'s own induction axiom -- no fresh
+// axiom, and no hypotheses left over (checked below alongside the
+// conclusion, since a hypothesis-laden "theorem" would be free to prove
+// anything a caller's own context happened to assume).
+fun wf_t_lt(spec :: DatatypeSpec) :: Thm:
+  let (thy, thms) = datatype_axioms(wfrec_base_theory(), spec)
+  let (thy2, info) = derive_subterm_relation(
+    thy,
+    spec,
+    thms,
+    definition_logic_rules,
+    definition_rewrite_support)
+  prove_wf_t_lt(thy2, spec, info.equations, thms.induction)
+
+// -- a datatype with no recursion has no subterm relation --------------------
+
+check subterm_spec(color) ~is #false
+check subterm_name(nat) ~is #'Nat_lt
+
+// -- `Nat_lt` is `<` ---------------------------------------------------------
+
+check equations(nat).length() ~is 2
+
+// A non-recursive field contributes nothing: `Cons`'s head is not smaller
+// than the list, it is not even the same type.
+
+check equations(lst).length() ~is 2
+
+// Both children of a `Node`, and the relation is generated for a datatype
+// that branches, not just for a linear one.
+
+check equations(tree).length() ~is 2
+
+// -- it descends structurally ------------------------------------------------
+//
+// Preparation sees the same constructor equations that the derived
+// implementation proves, and recognizes descent in the relation's second
+// argument.
+
+check prepared_subterm(nat).recursion ~matches StructuralRecursion([1], [1], _)
+check prepared_subterm(tree).recursion ~matches StructuralRecursion([1], [1], _)
+
+// -- `WF(T_lt)` is a genuine derivation, not a postulate ---------------------
+//
+// The datatype-induction-to-generic-WF
+// bridge.  Every shape below exercises a different part of `prove_q_case`'s
+// case analysis: `nat` (single self-recursive field), `lst` (a recursive
+// field alongside a non-recursive one), and `tree` (two recursive fields
+// either side of a non-recursive one, in one constructor).
+
+check:
+  concl_of(wf_t_lt(nat))
+  ~is mk_wf(mk_const(#'Nat_lt,
+                     mk_fun(mk_tyapp(#'Nat, []),
+                            mk_fun(mk_tyapp(#'Nat, []), bool))))
+check hyps_of(wf_t_lt(nat)) ~is []
+
+check:
+  let list_a = mk_tyapp(#'List, [tya])
+  concl_of(wf_t_lt(lst)) == mk_wf(
+    mk_const(#'List_lt, mk_fun(list_a, mk_fun(list_a, bool))))
+  ~is #true
+check hyps_of(wf_t_lt(lst)) ~is []
+
+check:
+  let tree_a = mk_tyapp(#'Tree, [tya])
+  concl_of(wf_t_lt(tree)) == mk_wf(
+    mk_const(#'Tree_lt, mk_fun(tree_a, mk_fun(tree_a, bool))))
+  ~is #true
+check hyps_of(wf_t_lt(tree)) ~is []

@@ -1,0 +1,165 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+import:
+  "type.rhm" open
+  "term.rhm" open
+  "names.rhm" open
+  "generated.rhm" as generated
+
+export:
+  Stamp
+  Thm
+  Theory
+  fresh_generation
+  raw_thm
+  raw_theory
+  descends
+  combine_stamps
+  later_raw_theory
+  wrap_raw_thm
+  make_initial_theory
+  wrap_new_theory
+  hyps_of
+  concl_of
+  stamp_of
+  stamp_depth
+  type_arity
+  const_type
+  axioms_of
+  definition_of
+  in_theory
+
+// A parent-pointer chain rather than a materialized ancestor set: `descends`
+// walks it, trading an O(1) set lookup for an O(depth) walk in exchange for
+// one fewer piece of state to keep in sync. This is a Rhombus-side-only
+// lineage mirror -- the generated kernel tracks its own stamp internally
+// (`Rhombus_HOL_Syntax.thy`'s `stamp`/`descends`) for its own proofs; this
+// one is never read from or synchronized with that value, so its shape is
+// free to differ.
+class Stamp(id :: Symbol, parent :: maybe(Stamp)):
+  constructor ~none
+  reconstructor ~none
+  internal _Stamp
+
+class Thm(hyps :: List.of(Term),
+          concl :: Term,
+          stamp :: Stamp,
+          private raw,
+          private raw_theory):
+  authentic
+  constructor ~none
+  reconstructor ~none
+  internal _Thm
+  private implements Equatable
+  private override equals(other :: Thm, recur):
+    (recur(concl, other.concl)
+       && hyps.length() == other.hyps.length()
+       && (for all (h in hyps):
+             for any (k in other.hyps): recur(h, k)))
+  private override hash_code(recur):
+    let hs = for values(acc = 0) (h in hyps): acc + recur(h)
+    Equatable.hash_code_combine(recur(concl), hyps.length(), hs)
+
+// The theory's contents are queried straight from the Isabelle-generated
+// value on every call, not cached here. `tyops`/`const_tab`/`def_tab` are
+// ordinary `fun_upd` update chains (a plain closure per declared name).
+// The old code-printed persistent-map target remains removed, so lookup is
+// O(declarations since the chain's base), not O(1). Checker memoization is
+// separate and does not change this representation. A second,
+// hand-synchronized cache here would still be
+// two representations of the same fact, and this lookup is not the
+// checker's bottleneck; accept the simpler generated code.
+class Theory(stamp :: Stamp, private raw):
+  constructor ~none
+  reconstructor ~none
+  internal _Theory
+
+fun raw_thm(th :: Thm): _Thm.raw(th)
+fun raw_thm_theory(th :: Thm): _Thm.raw_theory(th)
+fun raw_theory(thy :: Theory): _Theory.raw(thy)
+
+fun fresh_stamp() :: Stamp:
+  _Stamp(Symbol.uninterned_from_string("thy"), #false)
+
+fun next_stamp(prev :: Stamp) :: Stamp:
+  _Stamp(Symbol.uninterned_from_string("thy"), prev)
+
+def stamp_serial :: Box = Box(0)
+
+fun fresh_generation() :: NonnegInt:
+  let n = stamp_serial.value :~ NonnegInt
+  stamp_serial.value := n + 1
+  n
+
+fun descends(a :: Stamp, b :: Stamp) :: Boolean:
+  recur loop (cur :: maybe(Stamp) = b):
+    match cur
+    | #false: #false
+    | s :: Stamp: s.id == a.id || loop(s.parent)
+
+// The number of extensions between `s` and the theory it descends from --
+// derived by walking the chain rather than stored, since nothing but
+// diagnostics and tests ever reads it.
+fun stamp_depth(s :: Stamp) :: NonnegInt:
+  recur loop (cur :: Stamp = s, n :: NonnegInt = 0):
+    match cur.parent
+    | #false: n
+    | p :: Stamp: loop(p, n + 1)
+
+fun combine_stamps(who :: Symbol, a :: Stamp, b :: Stamp) :: Stamp:
+  cond
+  | descends(a, b): b
+  | descends(b, a): a
+  | ~else:
+      error(~who: who,
+            "theorems come from different theories",
+            error.val(~label: "detail",
+                      "neither theory is an extension of the other, so the "
+                        ++ "two theorems may disagree about what a shared name means"))
+
+fun later_raw_theory(a :: Thm, b :: Thm):
+  (if descends(a.stamp, b.stamp) | raw_thm_theory(b) | raw_thm_theory(a))
+
+fun wrap_raw_thm(raw, stamp :: Stamp, raw_thy) :: Thm:
+  _Thm(generated.hyps(raw), generated.concl(raw), stamp, raw, raw_thy)
+
+fun hyps_of(th :: Thm) :: List.of(Term): th.hyps
+fun concl_of(th :: Thm) :: Term: th.concl
+fun stamp_of(th :: Thm) :: Stamp: th.stamp
+
+fun type_arity(thy :: Theory, n :: Symbol) :: maybe(Int):
+  match (generated.tyops(raw_theory(thy)))(n)
+  | generated.None(): #false
+  | generated.Some(arity): arity
+
+fun const_type(thy :: Theory, n :: Symbol) :: maybe(HType):
+  match (generated.const_tab(raw_theory(thy)))(n)
+  | generated.None(): #false
+  | generated.Some(ty): ty
+
+fun axioms_of(thy :: Theory) :: List.of(Thm):
+  let raw_axioms :~ List = generated.axiom_list(raw_theory(thy))
+  for List (raw_th in raw_axioms):
+    wrap_raw_thm(raw_th, thy.stamp, raw_theory(thy))
+
+fun definition_of(thy :: Theory, n :: Symbol) :: maybe(Thm):
+  match (generated.def_tab(raw_theory(thy)))(n)
+  | generated.None(): #false
+  | generated.Some(raw_th): wrap_raw_thm(raw_th, thy.stamp, raw_theory(thy))
+
+fun make_initial_theory() :: Theory:
+  let raw = generated.initial_theory(fresh_generation())
+  _Theory(fresh_stamp(), raw)
+
+// Every `new_*` kernel primitive hands back a fresh raw theory value; this
+// wraps it with a `Stamp` descending from `thy`'s. Callers that also get a
+// theorem back wrap it separately with `wrap_raw_thm`, using the same new
+// stamp and this same new raw theory as its provenance.
+fun wrap_new_theory(thy :: Theory, raw) :: Theory:
+  _Theory(next_stamp(thy.stamp), raw)
+
+fun in_theory(who :: Symbol, thy :: Theory, th :: Thm) :: Void:
+  unless descends(th.stamp, thy.stamp)
+  | error(~who: who,
+          "theorem was not proved in this theory or an ancestor of it")

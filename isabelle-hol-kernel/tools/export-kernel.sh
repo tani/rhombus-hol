@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 theory_dir="$repo_root/isabelle-hol-kernel"
-production="$repo_root/rhombus-hol-kernel/rhombus/hol/kernel_generated.rhm"
+production="$repo_root/rhombus-hol-kernel/rhombus/hol/kernel/generated.rhm"
 out_dir="$(mktemp -d)"
 trap 'rm -rf "$out_dir"' EXIT
 

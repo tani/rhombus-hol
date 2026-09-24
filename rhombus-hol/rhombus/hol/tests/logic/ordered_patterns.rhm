@@ -1,0 +1,77 @@
+#lang rhombus/static
+
+// Wildcards and ordered clauses.
+//
+// Clauses are ordered -- where several match, the earliest wins, exactly as
+// in the `match` the same source compiles to -- and `_` names a position the
+// clause does not use.  Both are checked here at the surface, plus the two
+// things that are still errors: a clause no argument shape can reach, and a
+// matrix that is not exhaustive.
+
+import:
+  lib("rhombus/hol/tests/fixture_load.rhm") open
+  rhombus/hol/kernel open
+  rhombus/hol/definition/function/spec open
+  rhombus/hol/surface/driver open
+  lib("rhombus/hol/tests/logic/fixtures/ordered_patterns_ok.rhm") as f
+  lib("rhombus/hol/tests/logic/fixtures/ordered_patterns_ok.rhm")!hol_theory as m
+  lib("rhombus/hol/tests/logic/fixtures/ordered_patterns_types.rhm")!hol_theory as types_only
+
+def st :~ HolState = m.theory
+
+// -- the executable half agrees with the logical one -------------------------
+
+check f.is_singleton(f.Nil()) ~is f.zero()
+check f.is_singleton(f.Cons(f.zero(), f.Nil())) ~is f.succ(f.zero())
+check f.is_singleton(f.Cons(f.zero(), f.Cons(f.zero(), f.Nil()))) ~is f.zero()
+check f.nul(f.zero()) ~is f.succ(f.zero())
+check f.nul(f.succ(f.zero())) ~is f.zero()
+check f.first_two(f.Nil()) ~is f.zero()
+check f.first_two(f.Cons(f.zero(), f.Nil())) ~is f.zero()
+check:
+  f.first_two(f.Cons(f.zero(), f.Cons(f.zero(), f.Nil())))
+  ~is f.succ(f.succ(f.zero()))
+
+// -- the logical half ---------------------------------------------------------
+
+// `_` binds nothing: the tail of the two-or-more case never appears on the
+// right, and the equation quantifies over it like any other position.
+check st.ctx.funs[#'is_singleton].equations.length() ~is 3
+
+// The catch-all is *not* postulated as written -- `forall n. nul(n) === zero`
+// beside `nul(zero) === succ(zero)` would prove `zero === succ(zero)`.  It
+// holds exactly where it wins, which is `succ`.
+check st.ctx.funs[#'nul].equations.length() ~is 2
+
+// A catch-all left holding two shapes gets one equation for each.
+//
+// `first_two` is declared at `List.of(Nat)`, a concrete instance of a
+// polymorphic datatype, which the derivation handles like any other
+// (`instantiate_datatype`).  The point of testing it here is the ordering:
+// the clauses have to be resolved per leaf, or the catch-all would
+// contradict the specific clause before it -- `first_two(Cons(x, Nil))
+// === zero` is a consequence of the catch-all only where the earlier
+// clause does not win.
+check st.ctx.funs[#'first_two].equations.length() ~is 3
+
+// And none of the three costs an axiom.  `is_singleton` and `nul` derive
+// through `WFREC`; `first_two` does not recurse at all, so it is *defined*
+// from its decision tree and the three leaf equations above are proved. The
+// module's theory is the two datatypes' axioms and nothing else.
+check:
+  axioms_of(st.ctx.thy).length()
+  ~is axioms_of((types_only.theory :~ HolState).ctx.thy).length()
+
+// -- what is still refused ----------------------------------------------------
+
+fun load(mp :: ModulePath):
+  instantiate_hol_fixture(mp)
+
+// A clause after a catch-all can never fire.
+check:
+  load(ModulePath'lib("rhombus/hol/tests/logic/fixtures/ordered_unreachable.rhm")')
+  ~throws "this clause can never match"
+// Ordering does not excuse a gap: nothing covers `Cons`.
+check:
+  load(ModulePath'lib("rhombus/hol/tests/logic/fixtures/ordered_partial.rhm")')
+  ~throws "not exhaustive"

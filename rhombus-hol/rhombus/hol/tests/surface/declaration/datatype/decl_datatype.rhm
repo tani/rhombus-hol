@@ -1,0 +1,79 @@
+#lang rhombus/static
+
+// `datatype` emits executable Rhombus classes and, from the same parse,
+// registers the datatype with the kernel.
+
+import:
+  lib("rhombus/hol/tests/fixture_load.rhm") open
+  lib("rhombus/hol/tests/surface/declaration/datatype/fixtures/datatypes_ok.rhm") as t
+
+// A `ModulePath` literal cannot be built from a runtime string, so the
+// fixtures are named explicitly.
+fun load(mp :: ModulePath):
+  instantiate_hol_fixture(mp)
+
+fun bad(which :: Symbol):
+  match which
+  | #'empty: load(ModulePath'lib("rhombus/hol/tests/surface/declaration/datatype/fixtures/type_empty.rhm")')
+  | #'negative: load(ModulePath'lib("rhombus/hol/tests/surface/declaration/datatype/fixtures/type_negative.rhm")')
+  | #'bare:
+      load(ModulePath'lib("rhombus/hol/tests/surface/declaration/datatype/fixtures/type_bare_constructor.rhm")')
+  | #'old_application:
+      load(ModulePath'lib("rhombus/hol/tests/surface/declaration/datatype/fixtures/type_old_application.rhm")')
+  | #'old_function:
+      load(ModulePath'lib("rhombus/hol/tests/surface/declaration/datatype/fixtures/type_old_function.rhm")')
+fun bad_message(which :: Symbol) :: String:
+  try:
+    block:
+      bad(which)
+      "fixture compiled"
+    ~catch e :: Exn.Fail: e.message
+
+// -- the executable half -----------------------------------------------------
+
+check t.sample ~is t.Cons(1, t.Cons(2, t.Nil()))
+check t.sample is_a t.List ~is #true
+check t.Nil() is_a t.List ~is #true
+check 5 is_a t.List ~is #false
+check:
+  match t.sample
+  | t.Nil(): "empty"
+  | t.Cons(h, _): "head " ++ to_string(h)
+  ~is "head 1"
+check:
+  // the classes are ordinary Rhombus classes, so nesting and recursion work
+  match t.Cons(1, t.Nil())
+  | t.Cons(_, t.Nil()): "one"
+  | ~else: "other"
+  ~is "one"
+check t.succ(t.succ(t.zero())) ~is t.succ(t.succ(t.zero()))
+
+// A `datatype` with no parameters gets a plain interface, one with parameters gets
+// the same -- the parameter is erased, because Rhombus has no parametric
+// polymorphism to erase it *to*, and the logical side has already checked the
+// types.
+check t.Cons("a string", t.Nil()) is_a t.List ~is #true
+
+// -- the logical half --------------------------------------------------------
+//
+// `sample` uses the emitted constructor after all three logical type
+// declarations, so compiling the fixture exercises the complete sequence.
+
+check t.sample is_a t.List ~is #true
+
+// -- rejections carry the user's source location -----------------------------
+
+def empty_message = bad_message(#'empty)
+def negative_message = bad_message(#'negative)
+def bare_message = bad_message(#'bare)
+def old_application_message = bad_message(#'old_application)
+def old_function_message = bad_message(#'old_function)
+
+check empty_message.contains("the type would be empty") ~is #true
+check empty_message.contains("type_empty.rhm:7") ~is #true
+check negative_message.contains("cannot admit") ~is #true
+check negative_message.contains("type_negative.rhm:13") ~is #true
+check bare_message.contains("`List` is a type constructor of arity 1") ~is #true
+check bare_message.contains("use `List.of(...)`") ~is #true
+check old_application_message.contains("parameterized HOL types use `.of`") ~is #true
+check old_function_message.contains("function types use `->`") ~is #true

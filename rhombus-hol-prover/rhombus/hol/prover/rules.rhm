@@ -1,0 +1,566 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+// ACL2 rule behavior is a design reference; see THIRD_PARTY_NOTICES.
+
+
+// Rewrite rules and the database they live in.
+//
+// A rule is only constructible from a `Thm`, so a rule can never assert more
+// than a theorem does.  Applying one goes back through the kernel -- the rule
+// carries its own justifying theorem and instantiates it -- so a bug here can
+// make rewriting fail or loop, never make it unsound.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/order open
+  rhombus/hol/logic/bool open
+  rhombus/hol/logic/conversion open
+  rhombus/hol/logic/derived open
+  rhombus/hol/prover/match open
+  rhombus/hol/prover/limits open
+
+export:
+  RewriteRule
+  RuleDB
+  empty_db
+  mk_rule
+  spec_all_vars
+  add_rule
+  add_thm
+  add_rewrite_thm
+  add_thms
+  disable
+  enable
+  rules_of
+  rule_names
+  type_facts_of
+  db_conv
+  refl_conv
+  BOUNDED_TOP_DEPTH_CONV
+  simp_conv
+
+class RewriteRule(name :: Symbol,
+                  // the specialised theorem `|- cond1 ==> ... ==> lhs === rhs`;
+                  // its leading implications are the rule's conditions
+                  src :: Thm,
+                  vars :: List.of(FVar),
+                  lhs :: Term,
+                  rhs :: Term,
+                  head :: Symbol,
+                  // lhs and rhs are variants of one another, so the rule can
+                  // only be allowed to fire downhill
+                  permutative :: Boolean):
+  property conds :: List.of(Term):
+    let (conditions, _) = strip_imp(concl_of(src))
+    conditions
+
+// Ordinary rewrite rules share one newest-first list. `rules_of` filters it
+// by head, retaining the same newest-first order within each head. Type
+// facts — Boolean facts about a function's results — share the same shape:
+// one newest-first list, filtered by head at the query. A theorem can be
+// both a rewrite rule and a type fact; the stored name lets `disable`
+// suppress both classifications together.
+class RuleDB(rules :: List.of(RewriteRule),
+             disabled :: Set.of(Symbol),
+             type_facts :: List)
+
+def empty_db :: RuleDB = RuleDB([], Set(), [])
+
+// -- building a rule from a theorem ----------------------------------------
+
+// Constant-headed rules are global. An unquantified free-variable head is
+// also safe for a goal assumption: with no pattern variables it matches only
+// that exact term, never arbitrary expressions.
+fun head_symbol(t :: Term) :: maybe(Symbol):
+  let (h, _) = strip_comb(t)
+  match h
+  | Const(n, _): n
+  | FVar(n, _): n
+  | ~else: #false
+
+// Orient a proved statement into an equation:
+//   `l === r`  ->  as it stands
+//   `not p`    ->  `p <=> false`
+//   `p`        ->  `p <=> true`
+fun orient(thy :: Theory, th :: Thm) :: Thm:
+  let c = concl_of(th)
+  cond
+  | is_eq(c): th
+  | is_neg(c): EQF_INTRO(thy, th)
+  | ~else: EQT_INTRO(thy, th)
+
+// `#false` when the theorem cannot serve as a rewrite rule, with `why`
+// explaining which condition failed.
+// Strip the leading quantifiers, reporting which variables were stripped.
+//
+// Those, and *only* those, are the rule's pattern variables.  Taking
+// `free_vars(lhs)` instead would be a serious bug: an assumption is a fact
+// about particular variables, not a schema, and treating its variables as
+// patterns lets the induction hypothesis `app(y, nil) === y` match
+// `app(cons(x, y), nil)` with `y := cons(x, y)` -- so the goal rewrites to
+// `true` while the justifying theorem quietly carries the *goal itself* as a
+// hypothesis.  The proof then fails much later, at the `GEN` that cannot
+// discharge it.
+fun spec_all_vars(thy :: Theory, th :: Thm) :: values(List.of(FVar), Thm):
+  recur loop (th :~ Thm = th, acc :~ List = []):
+    cond
+    | is_forall(concl_of(th)):
+        let [v0, _] = (match dest_forall(concl_of(th)) | pair: pair)
+        let v = variant(hyps_of(th) ++ [concl_of(th)], v0 :~ FVar)
+        loop(SPEC(thy, v, th), acc ++ [v])
+    | ~else: values(acc, th)
+
+// A theorem `|- cond1 ==> ... ==> condn ==> consequent` becomes a
+// *conditional* rewrite rule: `conds` are carried along, unoriented, and
+// only the final `consequent` is turned into an equation (ACL2's rewrite
+// rules work the same way -- the hypotheses are side conditions to
+// discharge at firing time, not part of what gets rewritten). Peel the
+// antecedents off with `UNDISCH` to expose `consequent` for `orient`, then
+// put them back with `DISCH` in the same nesting order -- this is not
+// postulating anything new, just repackaging `th` through primitive rules.
+fun strip_conditions(thy :: Theory, spec :: Thm) :: values(List.of(Term), Thm):
+  let (conds, consequent) = strip_imp(concl_of(spec))
+  cond
+  | conds.length() == 0: values([], orient(thy, spec))
+  | ~else:
+      let peeled = for values(acc :~ Thm = spec) (c in conds): UNDISCH(thy, acc)
+      let oriented = orient(thy, peeled)
+      let redischarged = for values(acc :~ Thm = oriented) (c in conds.reverse()):
+                           DISCH(thy, c, acc)
+      values(conds, redischarged)
+
+fun mk_rule(thy :: Theory, name :: Symbol, th :: Thm)
+     :: maybe(RewriteRule):
+  let (pvars, spec) = spec_all_vars(thy, th)
+  mk_rule_from_spec(thy, name, pvars, spec)
+
+// `add_thm` may classify the same theorem both as rewrite and
+// type-prescription. It supplies this already-specialized view so quantified
+// variables are instantiated exactly once.
+fun mk_rule_from_spec(thy :: Theory, name :: Symbol,
+                      pvars :: List.of(FVar), spec0 :: Thm)
+     :: maybe(RewriteRule):
+  let (conds, spec) = strip_conditions(thy, spec0)
+  let (_, consequent) = strip_imp(concl_of(spec))
+  match dest_eq(consequent)
+  | #false: #false
+  | [lhs, rhs]:
+      let lfv = free_vars(lhs)
+      let vars = pvars.filter(~keep: fun (v :: FVar): lfv.contains(v))
+      let rvars = pvars.filter(~keep: fun (v :: FVar): vfree_in(v, rhs))
+      // A side condition may mention a pattern variable the left side does
+      // not determine either -- exactly the same hazard `rvars` guards
+      // against on the right side, and for the same reason: matching would
+      // leave it uninstantiated.
+      let cvars = for values(acc :~ List = []) (c in conds):
+                    for values(a :~ List = acc) (v in pvars):
+                      (if vfree_in(v, c) && !a.contains(v) | a ++ [v] | a)
+      cond
+      // A quantified variable left-hand side would match the whole world.
+      // An unquantified assumption variable is an exact-match local rule.
+      | lhs is_a FVar && vars.length() > 0: #false
+      // A pattern variable on the right that the left side does not determine
+      // would be left uninstantiated by matching.
+      | !(for all (v in rvars): vars.contains(v)): #false
+      | !(for all (v in cvars): vars.contains(v)): #false
+      | lhs == rhs: #false
+      | ~else:
+          match head_symbol(lhs)
+          | #false: #false
+          | h:
+              // A type variable only on the right would likewise be
+              // undetermined by the match.
+              let ltv = type_vars_of(lhs)
+              let rtv = type_vars_of(rhs)
+              cond
+              | !(for all (v in rtv): ltv.contains(v)): #false
+              | ~else:
+                  RewriteRule(name, spec, vars, lhs, rhs, h,
+                              is_variant(vars, lhs, rhs))
+fun type_vars_of(t :: Term) :: List.of(Symbol):
+  fun add(ty :: HType, acc :~ List) :~ List:
+    for values(a :~ List = acc) (x in type_vars(ty)):
+      (if a.contains(x) | a | a ++ [x])
+  fun walk(t :: Term, acc :~ List) :~ List:
+    match t
+    | FVar(_, ty): add(ty, acc)
+    | BVar(_, ty): add(ty, acc)
+    | Const(_, ty): add(ty, acc)
+    | NatLit(_): acc
+    | Comb(f, x): walk(x, walk(f, acc))
+    | Abs(aty, b): walk(b, add(aty, acc))
+  walk(t, [])
+
+// Each side matches the other: `x + y === y + x`, `x + (y + z) === y + (x + z)`.
+// Such a rule can always fire again on its own output, so it may only run
+// downhill under `term_order`.
+fun is_variant(vars :: List.of(FVar), lhs :: Term, rhs :: Term) :: Boolean:
+  let rvars = vars.filter(~keep: fun (v :: FVar): vfree_in(v, rhs))
+  term_match(vars, lhs, rhs) != #false && term_match(rvars, rhs, lhs) != #false
+
+// -- the database ----------------------------------------------------------
+
+fun add_rule(db :: RuleDB, r :: RewriteRule) :: RuleDB:
+  // Newest first, as ACL2 does: a later rule shadows an earlier one.
+  RuleDB(List.cons(r, db.rules), db.disabled, db.type_facts)
+
+// The function a type-prescription fact is about, or `#false`.
+//
+// A type-prescription is a plain Boolean fact `|- forall vs. P(f(vs...))`:
+// not an equation (an equation is already a rewrite rule and needs no
+// second classification), with the whole proposition applying some
+// predicate to a *single* argument headed by a declared function `f`. This
+// deliberately does not try to recognise `P(f(vs), other)` or other shapes;
+// widening it is easy later and narrowing a published classification is
+// not.
+fun type_prescription_head(spec :: Thm) :: maybe(Symbol):
+  let c = concl_of(spec)
+  cond
+  | is_eq(c): #false
+  | ~else:
+      match c
+      | Comb(_, arg):
+          let (h, _) = strip_comb(arg)
+          match h
+          | Const(n, _): n
+          | ~else: #false
+      | ~else: #false
+
+// Add a theorem as both applicable rule classes after one quantifier
+// specialization. Assumption contexts use `add_rewrite_thm` below instead,
+// because they never participate in type-prescription search.
+fun add_thm(thy :: Theory, db :: RuleDB, name :: Symbol, th :: Thm) :: RuleDB:
+  let (pvars, spec) = spec_all_vars(thy, th)
+  let db2 :~ RuleDB:
+    match mk_rule_from_spec(thy, name, pvars, spec)
+    | #false: db
+    | rule: add_rule(db, rule)
+  match type_prescription_head(spec)
+  | #false: db2
+  | fname:
+      RuleDB(db2.rules, db2.disabled,
+             List.cons([fname, name, th], db2.type_facts))
+
+// Add only a rewrite rule. Local assumptions are never queried as
+// type-prescription facts, so classifying them there is avoidable work.
+fun add_rewrite_thm(thy :: Theory, db :: RuleDB, name :: Symbol,
+                    th :: Thm) :: RuleDB:
+  match mk_rule(thy, name, th)
+  | #false: db
+  | rule: add_rule(db, rule)
+
+// A definition contributes one rule per clause; they share a name so that
+// `disable` can switch the whole definition off at once.
+fun add_thms(thy :: Theory, db :: RuleDB, name :: Symbol,
+             ths :: List.of(Thm)) :: RuleDB:
+  for values(d :~ RuleDB = db) (th in ths): add_thm(thy, d, name, th)
+
+// `disable` and `enable` change only suppression state, sharing the rules and
+// type facts with their parent.
+fun disable(db :: RuleDB, names :: List.of(Symbol)) :: RuleDB:
+  let disabled2 = for values(s :~ Set = db.disabled) (n in names): s ++ {n}
+  RuleDB(db.rules, disabled2, db.type_facts)
+
+fun enable(db :: RuleDB, names :: List.of(Symbol)) :: RuleDB:
+  let disabled2 = for values(s :~ Set = db.disabled) (n in names): s.remove(n)
+  RuleDB(db.rules, disabled2, db.type_facts)
+
+fun rules_of(db :: RuleDB, head :: Symbol) :: List.of(RewriteRule):
+  db.rules.filter(
+    ~keep: fun (r :: RewriteRule):
+             r.head == head && !(r.name in db.disabled))
+
+fun rule_names(db :: RuleDB) :: List.of(Symbol):
+  db.rules.map(fun (r :: RewriteRule): r.name)
+
+// Every *enabled* type-prescription fact registered about `head`'s results,
+// newest first.
+//
+// Filtered by `disabled` exactly as `rules_of` is.  ACL2's `disable` takes a
+// name and silences every rune wearing it -- `(:rewrite f)` and
+// `(:type-prescription f)` alike -- which is what proof-local `~disable: [f]`
+// asks for. Leaving type facts on would let a generalization keep quietly
+// consuming a fact the proof had just been told to do without, which is the
+// opposite of a disabled rule's purpose.
+fun type_facts_of(db :: RuleDB, head :: Symbol) :: List.of(Thm):
+  for values(acc :~ List = []) (e in db.type_facts):
+    let [h, n, th] = e :~ List
+    (if h :~ Symbol == head && !(n :~ Symbol in db.disabled)
+     | acc ++ [th :~ Thm]
+     | acc)
+
+// -- bounded simplification traversal --------------------------------------
+
+// `TOP_DEPTH_CONV` with a shared step budget and cycle detection.
+//
+// The unbounded version loops forever on a rule that neither terminates nor
+// fails, and simplification runs while a module compiles, so the loop hangs
+// the build instead of failing it. Cycle detection is per position: a term
+// can legitimately be rewritten again at a distinct position.
+//
+// This preserves `TOP_DEPTH_CONV`'s structure with only its repetition step
+// bounded, avoiding a second traversal implementation.
+fun REPEATC_BOUNDED(c, budget :: Budget):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    recur loop (acc :: maybe(Thm) = #false, t = t, seen :~ List = []):
+      spend(budget, #'simplify)
+      when seen.contains(t)
+      | error(~who: #'simplify, "rewrite cycle detected",
+              error.val(~label: "term", show(t)))
+      match c(thy, t)
+      | #false: (if acc | acc | REFL(thy, t))
+      | th :~ Thm:
+          let next = rhs_of(th)
+          let acc2 = (if acc | TRANS(acc :~ Thm, th) | th)
+          (if next == t
+           | acc2
+           | loop(acc2, next, seen ++ [t]))
+
+// Normalize each immediate subterm under the same ambient budget.
+fun bounded_subterms(c, budget :: Budget, thy :: Theory, t :: Term) :: maybe(Thm):
+  match t
+  | Comb(f, x):
+      match bounded_top_depth(c, budget)(thy, f)
+      | #false: #false
+      | fth :~ Thm:
+          match bounded_top_depth(c, budget)(thy, x)
+          | #false: #false
+          | xth :~ Thm: MK_COMB(fth, xth)
+  | Abs(aty, body):
+      let v = genvar(aty)
+      match bounded_top_depth(c, budget)(thy, subst_bvar(v, body))
+      | #false: #false
+      | th :~ Thm:
+          (if (for any (h in hyps_of(th)): vfree_in(v, h))
+           | #false
+           | ABS(thy, v, th))
+  | ~else: REFL(thy, t)
+
+// The bounded analogue of `TOP_DEPTH_CONV`: repeat at the root, normalize
+// children, then revisit the root if a child changed it.
+fun bounded_top_depth(c, budget :: Budget):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match REPEATC_BOUNDED(c, budget)(thy, t)
+    | #false: #false
+    | root :~ Thm:
+        match bounded_subterms(c, budget, thy, rhs_of(root))
+        | #false: root
+        | sub :~ Thm when is_refl_thm(sub): root
+        | sub :~ Thm:
+            match c(thy, rhs_of(sub))
+            | #false: TRANS(root, sub)
+            | revisited :~ Thm:
+                match bounded_top_depth(c, budget)(thy, rhs_of(revisited))
+                | #false: TRANS(root, TRANS(sub, revisited))
+                | rest :~ Thm:
+                    TRANS(root, TRANS(sub, TRANS(revisited, rest)))
+
+// No fresh budget here: callers choose the public simplification boundary and
+// pass their `Budget` in, so nested conditional rewriting shares the same
+// allowance.
+fun BOUNDED_TOP_DEPTH_CONV(c, budget :: Budget):
+  bounded_top_depth(c, budget)
+
+// -- rewriting -------------------------------------------------------------
+
+// Instantiate a rule and, if it has side conditions, try to discharge each
+// one by simplifying it against the *same* database with this rule's own
+// name disabled first.  Excluding the rule from its own conditions' proof is
+// not a shortcut for termination -- discharging can still recurse through
+// every *other* enabled rule, and `simp_conv`'s own termination properties
+// (or lack of them) are unchanged either way -- it exists so
+// that a rule can never be used to prove its own side condition circularly,
+// which would make firing it prove nothing.  A condition that fails to
+// discharge just means the rule does not fire here, exactly like a
+// non-matching left-hand side: never an error, never a wrong rewrite.
+fun apply_rule(r :: RewriteRule, thy :: Theory, db :: RuleDB, budget :: Budget,
+               t :: Term,
+               ~decide: decide :: maybe(Function) = #false)
+     :: maybe(Thm):
+  match term_match(r.vars, r.lhs, t)
+  | #false: #false
+  | m :~ MatchResult:
+      // Instantiate the theorem first, then read the conditions off *it*.
+      //
+      // The conditions used to be instantiated separately, as
+      // `inst_type(m.tyin, inst_fvar(m.theta, c))` -- terms before types,
+      // which is the opposite order from the theorem's own
+      // `INST(theta, INST_TYPE(tyin, src))`.  `m.theta`'s replacements are
+      // already at the instantiated types, so for a polymorphic rule the
+      // separately built condition came out at the wrong type and could
+      // never be discharged: `!x:?a. P x ==> f x = g x` simply never fired
+      // at a concrete type, even with `P(c)` in the database.
+      //
+      // Reading them back from the instantiated theorem leaves that theorem as
+      // the single condition representation, so there is no order left to get
+      // wrong.
+      let inst_th = INST(thy, m.theta, INST_TYPE(thy, m.tyin, r.src))
+      let (inst_conds, _) = strip_imp(concl_of(inst_th))
+      match discharge_all(thy, disable(db, [r.name]), budget, inst_conds,
+                          ~decide: decide)
+      | #false: #false
+      | proofs :~ List:
+          let th = for values(acc :~ Thm = inst_th) (p in proofs):
+                     MP(thy, acc, p :~ Thm)
+          // Stripping implications off the instantiated theorem can in
+          // principle leave something that is not an equation; that is a
+          // rule which does not apply, not an internal error.
+          match dest_eq(concl_of(th))
+          | #false: #false
+          | [l, rr]:
+              cond
+              // The match should have produced exactly this term; if it did
+              // not, the rule would silently rewrite something else.
+              | l != t: #false
+              // A permutative rule fires only when it strictly decreases the
+              // term, so it cannot oscillate.
+              | r.permutative && !term_lt(rr, l): #false
+              | ~else: th
+
+// A proof of each condition in order, or `#false` if any one does not
+// simplify all the way to `true`.
+fun discharge_all(thy :: Theory, db :: RuleDB, budget :: Budget,
+                  conds :: List.of(Term),
+                  ~decide: decide :: maybe(Function) = #false)
+     :: maybe(List.of(Thm)):
+  match conds
+  | []: []
+  | List.cons(c, rest):
+      match simp_conv(db, budget, ~decide: decide)(thy, c)
+      | #false: #false
+      | eq :~ Thm when rhs_of(eq) == tm_true:
+          match discharge_all(thy, db, budget, rest, ~decide: decide)
+          | #false: #false
+          | more: List.cons(EQT_ELIM(thy, eq), more :~ List)
+      | ~else: #false
+
+// Try every enabled rule whose head matches, newest first.
+// Each candidate costs a step, not just each successful rewrite: a large
+// database tried repeatedly is work whether or not anything fires, and
+// discharging a rule's side conditions recurses back through here.
+fun db_conv(db :: RuleDB, budget :: Budget,
+            ~decide: decide :: maybe(Function) = #false):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match head_symbol(t)
+    | #false: #false
+    | h:
+        recur loop (rs :~ List = rules_of(db, h)):
+          match rs
+          | []: #false
+          | List.cons(r, rest):
+              let rule :~ RewriteRule = r
+              match apply_rule(rule, thy, db, budget, t, ~decide: decide)
+              | #false: loop(rest)
+              | th: th
+
+// Close the tiny equality/implication tautologies that arise before the
+// waterfall's induction stage. Keeping these local avoids a general
+// implication-introduction pass, which would consume guarded measure goals
+// before induction can analyze them.
+fun implication_fallback(thy :: Theory, p :: Term, q :: Term) :: maybe(Thm):
+  match dest_disj(q)
+  | [left, right] when right == p:
+      EQT_INTRO(thy, DISCH(thy, p, DISJ2(thy, left, ASSUME(thy, p))))
+  | [left, right] when left == p:
+      EQT_INTRO(thy, DISCH(thy, p, DISJ1(thy, ASSUME(thy, p), right)))
+  | ~else:
+      match [dest_forall(p), dest_eq(q)]
+      | [[x, body1], [f, g]]:
+          match dest_forall(body1)
+          | [y, body]:
+              match dest_eq(body)
+              | [Comb(Comb(f2, x2), y2), Comb(Comb(g2, x3), y3)] when f == f2 && g == g2 && x == x2 && x == x3 && y == y2 && y == y3:
+                  let asm = ASSUME(thy, p)
+                  let pointwise = SPEC(thy, y, SPEC(thy, x, asm))
+                  EQT_INTRO(thy, DISCH(thy, p, EXT(thy, x, EXT(thy, y, pointwise))))
+              | ~else: #false
+          | ~else:
+              match dest_eq(body1)
+              | [Comb(f2, x2), Comb(g2, y2)] when f == f2 && g == g2 && x == x2 && x == y2:
+                  EQT_INTRO(thy, DISCH(thy, p, EXT(thy, x, SPEC(thy, x, ASSUME(thy, p)))))
+              | ~else: #false
+      | ~else:
+          match dest_imp(q)
+          | [p2, q2]:
+              match [dest_eq(p), dest_eq(p2), dest_eq(q2)]
+              | [[a, b], [b2, c], [a2, c2]] when a == a2 && b == b2 && c == c2:
+                  EQT_INTRO(
+                    thy,
+                    DISCH(thy, p,
+                          DISCH(thy, p2, TRANS(ASSUME(thy, p), ASSUME(thy, p2)))))
+              | ~else: #false
+          | ~else: #false
+
+fun refl_conv(thy :: Theory, t :: Term) :: maybe(Thm):
+  match dest_eq(t)
+  | [a, b] when a == b: EQT_INTRO(thy, REFL(thy, a))
+  | ~else:
+      match dest_imp(t)
+      | [p, q] when p == q:
+          EQT_INTRO(thy, DISCH(thy, p, ASSUME(thy, p)))
+      | [p, q]:
+          match [dest_eq(p), dest_eq(q)]
+          | [[a, b], [b2, a2]] when a == a2 && b == b2:
+              EQT_INTRO(thy, DISCH(thy, p, SYM(thy, ASSUME(thy, p))))
+          | [[f, g], [Comb(f2, x), Comb(g2, y)]] when f == f2 && g == g2 && x == y:
+              EQT_INTRO(thy, DISCH(thy, p, MK_COMB(ASSUME(thy, p), REFL(thy, x))))
+          | [[x, y], [Comb(f, x2), Comb(g, y2)]] when f == g && x == x2 && y == y2:
+              EQT_INTRO(thy, DISCH(thy, p, MK_COMB(REFL(thy, f), ASSUME(thy, p))))
+          | ~else:
+              match dest_forall(p)
+              | [v, body]:
+                  match term_match([v :~ FVar], body, q)
+                  | #false: implication_fallback(thy, p, q)
+                  | mr :~ MatchResult:
+                      let witness = mr.theta[v :~ FVar] :~ Term
+                      EQT_INTRO(thy, DISCH(thy, p, SPEC(thy, witness, ASSUME(thy, p))))
+              | #false: implication_fallback(thy, p, q)
+      | ~else: #false
+// One effectful rewrite attempt. Reflexive propositional cleanup is pure, but
+// participates in the same top-down traversal as indexed rewrite rules.
+//
+// Beta reduction deliberately does *not* happen here. A beta redex has no
+// head constant, so `db_conv` can never index a rule for it, and it is
+// tempting to add `BETA_CONV` as a fallback so that the redexes surface sugar
+// produces get reduced. Doing so is sound but wrong: a derived recursive
+// definition's own equations contain a redex whose reduction exposes the raw
+// `WFREC` encoding (`select(fun u: wfrec_rel(...))`) in place of the folded
+// recursive call, so `recdef`'s equations stop being readable and the search
+// stops terminating. Goal-level beta normalization belongs at the proof
+// entry point instead, where only the user's own statement is touched; see
+// `prove_impl` in `prover/waterfall.rhm`.
+//
+// `refl_conv` is tried before the rule database, not after: an injectivity
+// rule for a datatype like `Nat` is indexed under `#'eq` and fires on
+// `succ^N(zero()) === succ^N(zero())`, peeling one `succ` per iteration
+// instead of recognizing the two sides are already identical. Trying
+// `refl_conv` first still reaches the same normal form any rule chain would
+// (`<term> <=> true`), and `#false` still means "nothing fired", so
+// `REPEATC_BOUNDED` stops exactly where it did before.
+//
+// `~decide` is an optional decision procedure -- a
+// `(RuleDB, Theory, Term) -> maybe(Thm)` the caller supplies, used by
+// `prover/waterfall.rhm` for arithmetic on numeral literals. The active database
+// is passed so proof-local rule disabling also governs native decisions. The
+// decision procedure comes first because the questions it answers are exactly
+// the ones an indexed rule would answer one slow constructor at a time; it
+// returns `#false` for everything else.
+fun simp_step(db :: RuleDB, budget :: Budget,
+              ~decide: decide :: maybe(Function) = #false):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match (if decide | decide(db, thy, t) | #false)
+    | th :: Thm: th
+    | ~else:
+        match refl_conv(thy, t)
+        | #false: db_conv(db, budget, ~decide: decide)(thy, t)
+        | th: th
+
+// Rewrite top-down, revisiting after each change, spending from `budget` as
+// it goes. Passing the caller's own `Budget` shares its allowance with a
+// nested conditional rewrite; passing `fresh_budget(default_search_steps)`
+// gives this call a self-contained one.
+fun simp_conv(db :: RuleDB, budget :: Budget,
+              ~decide: decide :: maybe(Function) = #false):
+  BOUNDED_TOP_DEPTH_CONV(simp_step(db, budget, ~decide: decide), budget)

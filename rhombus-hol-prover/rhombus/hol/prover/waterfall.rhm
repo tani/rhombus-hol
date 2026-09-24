@@ -20,21 +20,28 @@
 // confusing the induction heuristics that come after it.
 //
 // Nothing here can produce a theorem on its own.  Each stage hands back a
-// `Step` carrying its own justification, and `node.rhm`'s `solve_step`
+// `Step` carrying its own justification, and `prover/proof/node.rhm`'s `solve_step`
 // composes them; the only theorems that exist are the ones the kernel made.
 
 import:
-  rhombus/hol/htype open
-  rhombus/hol/term open
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
   rhombus/hol/kernel open
   rhombus/hol/logic/bool open
-  rhombus/hol/prover/search/limits open
-  rhombus/hol/logic/conv open
-  rhombus/hol/logic/drule open
+  rhombus/hol/prover/limits open
+  rhombus/hol/logic/conversion open
+  rhombus/hol/logic/derived open
   rhombus/hol/prover/proof/node open
-  rhombus/hol/logic/taut open
+  rhombus/hol/prover/tautology open
   rhombus/hol/prover/context open
-  rhombus/hol/prover/stage open
+  rhombus/hol/prover/rules open
+  rhombus/hol/prover/tactic/simplify open
+  rhombus/hol/prover/tactic/destruct open
+  rhombus/hol/prover/tactic/fertilize open
+  rhombus/hol/prover/tactic/generalize open
+  rhombus/hol/definition/datatype/define open
+  rhombus/hol/prover/tactic/irrelevance open
+  rhombus/hol/prover/tactic/induction open
   rhombus/hol/prover/proof/trace open
 
 export:
@@ -48,6 +55,55 @@ export:
   residue_message
   strip_forall_all
   default_search_steps
+// The native Nat callback decides closed NatLit equality and arithmetic from
+// the exact Peano equations retained in the current Context. Its answers are
+// kernel theorems, not evaluator results.
+fun simplify_apply(budget :: Budget, env :: ProofEnv, goal :: Goal)
+     :: maybe(Step):
+  let numerals = env.base.numerals
+  let decide:
+    match numerals
+    | #false: #false
+    | decider :: Function:
+        fun (db :: RuleDB, thy :: Theory, t :: Term) :: maybe(Thm):
+          decider(env.base, db, thy, t)
+  simplify_goal(env.base.thy, env.db, budget, goal, ~decide: decide)
+
+fun eliminate_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
+  eliminate_goal(env.base.thy, env.base.dts, goal)
+
+fun fertilize_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
+  fertilize_goal(env.base.thy, goal)
+
+fun generalize_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
+  generalize_goal(env.base.thy, env.db, all_ctor_names(env.base.dts), goal)
+
+fun irrelevance_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
+  eliminate_irrelevance_goal(goal)
+
+fun induction_stage(hint :: maybe(FVar)) :: Function:
+  fun apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
+    induction_attempt(env.base.thy, env.base.funs, env.base.dts,
+                      env.base.schemes, hint, goal)
+  apply
+
+fun standard_stages(env :: ProofEnv, budget :: Budget) :: List.of(Function):
+  [[#'simplify, fun (goal :: Goal): simplify_apply(budget, env, goal)],
+   [#'eliminate, fun (goal :: Goal): eliminate_apply(env, goal)],
+   [#'fertilize, fun (goal :: Goal): fertilize_apply(env, goal)],
+   [#'generalize, fun (goal :: Goal): generalize_apply(env, goal)],
+   [#'irrelevance, fun (goal :: Goal): irrelevance_apply(env, goal)]]
+    .filter(~keep: fun (entry :: List): !env.skipped_stages.contains(entry[0] :~ Symbol))
+    .map(fun (entry :: List): entry[1] :~ Function)
+
+fun first_success(stages :: List.of(Function), goal :: Goal) :: maybe(Step):
+  recur loop (remaining :~ List = stages):
+    match remaining
+    | []: #false
+    | List.cons(candidate, rest):
+        match (candidate :~ Function)(goal)
+        | #false: loop(rest)
+        | step: step
 
 
 // How long a chain of nested inductions the driver will follow.
@@ -76,7 +132,7 @@ export:
 def max_induction_path = 6
 
 
-// The recognised `skip` names -- see `elab.rhm`'s `parse_tactic`.
+// The recognised `skip` names -- see `surface/elaborate.rhm`'s `parse_tactic`.
 def stage_names :: Set = {#'simplify, #'eliminate, #'fertilize, #'generalize,
                           #'irrelevance, #'induct}
 
@@ -340,7 +396,7 @@ fun apply_witnesses(env :: ProofEnv, budget :: Budget,
 
 // `~split: p`, applied before the waterfall runs: split the goal on each term
 // in turn, true branch and false branch, so `n` terms give `2^n` subgoals.
-// Justified by `taut.rhm`'s `excluded_middle`, not postulated -- a term that
+// Justified by `prover/tautology.rhm`'s `excluded_middle`, not postulated -- a term that
 // turns out irrelevant to the goal just produces two subgoals that both need
 // the same proof the unsplit goal would have, so a bad choice of case terms
 // costs search effort, never soundness. Every subgoal, however deep the

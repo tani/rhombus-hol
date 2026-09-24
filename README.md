@@ -38,7 +38,7 @@ raco test --jobs 4 rhombus-hol/rhombus/hol/tests
 
 ## Formal kernel generation
 
-`rhombus-hol-kernel/rhombus/hol/kernel_generated.rhm` is generated from the
+`rhombus-hol-kernel/rhombus/hol/kernel/generated.rhm` is generated from the
 Isabelle definitions and has a versioned ABI with the handwritten façade.
 Regenerate it, including the Isabelle session build, with:
 

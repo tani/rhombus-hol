@@ -66,8 +66,8 @@ comparison: none of the three exists in @tt{fusion.ml} either, and none of
 the three is one of the ten rules or a definitional principle --- printing
 lives beside the kernel only because @tt{check_term}'s error messages need it;
 moving it would create a circular import. Type unification was already moved
-out to the elaborator (@tt{rhombus-hol-prover/.../elab.rhm}) before this section
-was written.
+out to the elaborator (@tt{rhombus-hol-prover/rhombus/hol/surface/elaborate.rhm})
+before this section was written.
 
 @section{The axioms}
 
@@ -113,7 +113,7 @@ the transitive closure of a direct-child predicate spelled with the
 datatype's own discriminators and selectors, so neither the closure nor the
 child predicate is a recursive definition and neither needs a recursion
 theorem. The equations then follow from the closure's induction principle
-(@tt{rhombus/hol/recursion/tclosure}).
+(@tt{rhombus/hol/definition/function/transitive_closure}).
 
 @section{What is postulated beyond that}
 
@@ -133,7 +133,8 @@ whether recursive or not. A non-recursive one --- any number of constructors,
 fields and type parameters --- is built as a sum of products of @tt{unit} over
 its field types. A @emph{self-recursive} one is carved out of the labelled
 trees over
-@tt{num} (@tt{rhombus/hol/datatype/treerep}, @tt{rhombus/hol/datatype/datatype_rec}): its
+@tt{num} (@tt{rhombus/hol/definition/datatype/tree},
+@tt{rhombus/hol/definition/datatype/recursion}): its
 representation is the least set of trees closed under its constructors, cut
 out by @tt{new_basic_type_definition}, and its injectivity, distinctness,
 exhaustiveness, induction, discriminators, selectors and destructor
@@ -236,7 +237,7 @@ that is not done.
 @bold{The extraction toolchain is trusted.} Primitive inferences and theory
 extensions are definitions in Isabelle, with machine-checked soundness,
 well-formedness, model existence, and consistency results. Those definitions
-are exported to @tt{kernel_generated.rhm}; the handwritten façade cannot
+are exported to @tt{kernel/generated.rhm}; the handwritten façade cannot
 construct @rhombus(Thm, ~datum) or @rhombus(Theory, ~datum) values and only
 converts public values, failures, extension deltas, and trace events. The
 Isabelle kernel, code generator, Rhombus compiler, and runtime therefore remain

@@ -1,0 +1,859 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+// A family of mutually recursive datatypes.
+//
+// Nothing here is a new construction.  The family is read as *one* ordinary
+// self-recursive datatype -- the union of every member's constructors, with
+// each field at a member type replaced by the union type -- and each member
+// is then carved out of that union as the set of values its own constructors
+// can build.
+//
+//     datatype.together:          becomes    U          the union datatype
+//       datatype Expr | ...                  in_Expr    the least predicates
+//       datatype Stmt | ...                  in_Stmt    closed under the
+//                                                       members' constructors
+//                                            Expr, Stmt carved from U
+//
+// The two pieces this needs already exist and are used unchanged:
+// `definition/datatype/recursion.rhm` builds `U`, and `definition/inductive.rhm` defines the
+// membership predicates as the least family closed under the constructors,
+// handing back exactly the three facts the carving needs -- closure
+// (introduction), minimality (induction) and inversion (cases).  So a
+// mutually recursive family adds no representation, no new definition
+// principle and no new trusted operation; it is a type definition per member
+// over a union that the single-datatype path already knows how to build.
+//
+// Each member ends up with the same `DatatypeThms` an ordinary declaration
+// produces, in the same shapes: injectivity, pairwise distinctness,
+// structural induction, cases, and the observers built from them.  A member's
+// own induction hypothesis mentions only its own recursive fields, because
+// that is what a predicate about one member type can say; the family's joint
+// induction, where a hypothesis may be about any member, is returned
+// separately and retained by name.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel/names open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/definition/capabilities open
+  rhombus/hol/logic/conversion open
+  rhombus/hol/logic/derived open
+  rhombus/hol/definition/datatype/algebra open
+  rhombus/hol/definition/datatype/define open
+  rhombus/hol/definition/datatype/generate open
+  rhombus/hol/definition/datatype/spec open
+  rhombus/hol/definition/datatype/recursion open
+  rhombus/hol/definition/datatype/infinite open
+  rhombus/hol/definition/inductive open
+
+export:
+  DatatypeFamily
+  build_datatype_family
+
+// `union` is the datatype the family was carved out of: it is a declaration
+// in its own right, and the caller installs it like any other so that the
+// family shares one well-founded subterm order.  `rep_equations` read a
+// member's constructor through to the union (`rep_Expr(App(f, x)) =
+// U_App(rep_Expr f, rep_Args x)`), which is what lets a recursion over the
+// family descend in that order.
+class DatatypeFamily(union_spec :: DatatypeSpec,
+                     union_thms :: DatatypeThms,
+                     members :: List.of(DatatypeThms),
+                     induction :: Thm,
+                     rep_equations :: List.of(Thm))
+
+fun fail(message :: String, what :: Symbol):
+  error(~who: #'datatype, message, error.val(~label: "name", what))
+
+fun abstraction_name(n :: Symbol) :: Symbol:
+  Symbol.from_string("abs_" ++ to_string(n))
+
+fun representation_name(n :: Symbol) :: Symbol:
+  Symbol.from_string("rep_" ++ to_string(n))
+
+// `Expr_Stmt_union`: derived from every member's name, so two families in one
+// theory cannot collide unless they declare the same types.
+fun union_type_name(specs :: List.of(DatatypeSpec)) :: Symbol:
+  let text:
+    for values(acc :~ String = "") (spec in specs):
+      acc ++ to_string((spec :~ DatatypeSpec).name) ++ "_"
+  Symbol.from_string(text ++ "union")
+
+fun union_ctor_name(uname :: Symbol, c :: Ctor) :: Symbol:
+  Symbol.from_string(to_string(uname) ++ "_" ++ to_string(c.name))
+
+fun membership_name(uname :: Symbol, spec :: DatatypeSpec) :: Symbol:
+  Symbol.from_string(to_string(uname) ++ "_in_" ++ to_string(spec.name))
+
+// The member a field is at, or `#false` for an ordinary field.
+fun member_of_type(selves :: List.of(HType), ty :: HType) :: maybe(NonnegInt):
+  recur loop (i = 0):
+    cond
+    | i >= selves.length(): #false
+    | selves[i] == ty: i
+    | ~else: loop(i + 1)
+
+fun implication_chain(antecedents :: List.of(Term),
+                      conclusion :: Term) :: Term:
+  for values(acc :~ Term = conclusion) (a in antecedents.reverse()):
+    mk_imp(a :~ Term, acc)
+
+// Right-nested, the shape a single datatype's induction hypothesis already
+// uses, so that a member's induction theorem is indistinguishable from one
+// an ordinary declaration would have produced.
+fun right_conj_term(ts :: List.of(Term)) :: Term:
+  recur loop (k = ts.length() - 1, acc :~ Term = ts[ts.length() - 1]):
+    cond
+    | k <= 0: acc
+    | ~else: loop(k - 1, mk_conj(ts[k - 1], acc))
+
+// Left-nested, the shape an injectivity theorem's right-hand side uses.
+fun left_fold_term(ts :: List.of(Term)) :: Term:
+  match ts
+  | List.cons(t0, rest):
+      for values(acc :~ Term = t0) (t in rest): mk_conj(acc, t :~ Term)
+
+fun right_conj_thm(thy :: Theory, ths :: List.of(Thm)) :: Thm:
+  recur loop (k = ths.length() - 1, acc :~ Thm = ths[ths.length() - 1]):
+    cond
+    | k <= 0: acc
+    | ~else: loop(k - 1, CONJ(thy, ths[k - 1] :~ Thm, acc))
+
+// The `k`-th conjunct of a right-nested conjunction of `n`.
+fun nth_conjunct(thy :: Theory, th :: Thm, k :: Int, n :: Int) :: Thm:
+  recur loop (i = 0, acc :~ Thm = th):
+    cond
+    | i == n - 1: acc
+    | i == k: CONJUNCT1(thy, acc)
+    | ~else: loop(i + 1, CONJUNCT2(thy, acc))
+
+fun beta_at(thy :: Theory, t :: Term) :: Thm:
+  match BETA_CONV(thy, t)
+  | th :: Thm: th
+  | ~else: error(~who: #'datatype, "beta failed", error.val(~label: "term",
+                                                            show(t)))
+
+// -- well-formedness ----------------------------------------------------------
+
+// A family member's field is admissible exactly when it is at one of the
+// family's own types, or mentions none of them.  Everything the
+// single-datatype checker refuses -- negative occurrences, function types
+// over a member, nesting under another type constructor -- is refused here
+// for the same reasons, now against the whole family.
+fun check_family_specs(thy :: Theory, specs :: List.of(DatatypeSpec)) :: Void:
+  when specs.length() == 0
+  | error(~who: #'datatype, "a datatype family needs a member")
+  let params = (specs[0] :~ DatatypeSpec).params
+  let selves = specs.map(self_type)
+  recur dup_member (remaining :~ List = specs, seen :~ List = []):
+    match remaining
+    | []: #void
+    | List.cons(spec, rest):
+        let spec :~ DatatypeSpec = spec
+        when seen.contains(spec.name)
+        | fail("a datatype family declares this type twice", spec.name)
+        when type_arity(thy, spec.name) != #false
+        | fail("type constructor is already declared", spec.name)
+        unless spec.params == params
+        | fail("every member of a datatype family must declare the same "
+                 ++ "type parameters",
+               spec.name)
+        when spec.ctors.length() == 0
+        | fail("a datatype needs at least one constructor", spec.name)
+        dup_member(rest, List.cons(spec.name, seen))
+  recur dup_param (ps :~ List = params, seen :~ List = []):
+    match ps
+    | []: #void
+    | List.cons(p, rest):
+        when seen.contains(p)
+        | fail("duplicate type parameter", p :~ Symbol)
+        dup_param(rest, List.cons(p, seen))
+  // Constructor names are one namespace across the whole family: two members
+  // cannot share one, and neither can shadow an existing constant.
+  recur dup_ctor (remaining :~ List = all_ctors(specs), seen :~ List = []):
+    match remaining
+    | []: #void
+    | List.cons(c, rest):
+        let c :~ Ctor = c
+        when seen.contains(c.name)
+        | fail("duplicate constructor in a datatype family", c.name)
+        when const_type(thy, c.name) != #false
+        | fail("constructor name is already a constant", c.name)
+        recur dup_field (fs :~ List = c.fields, fseen :~ List = []):
+          match fs
+          | []: #void
+          | List.cons(f, frest):
+              let f :~ Field = f
+              when fseen.contains(f.name)
+              | fail("duplicate field", f.name)
+              dup_field(frest, List.cons(f.name, fseen))
+        dup_ctor(rest, List.cons(c.name, seen))
+  let thy_with:
+    for values(t :~ Theory = thy) (spec in specs):
+      new_type(t, (spec :~ DatatypeSpec).name,
+               (spec :~ DatatypeSpec).params.length())
+  for (spec in specs):
+    let spec :~ DatatypeSpec = spec
+    for (c in spec.ctors):
+      let c :~ Ctor = c
+      for (f in c.fields):
+        check_family_field(thy_with, specs, selves, params, spec, c, f :~ Field)
+  check_family_inhabited(specs, selves)
+
+fun all_ctors(specs :: List.of(DatatypeSpec)) :: List.of(Ctor):
+  for values(acc :~ List.of(Ctor) = []) (spec in specs):
+    acc ++ (spec :~ DatatypeSpec).ctors
+
+fun mentions_family(specs :: List.of(DatatypeSpec), ty :: HType) :: Boolean:
+  for any (other in specs):
+    occurs_in_type((other :~ DatatypeSpec).name, ty)
+
+// Can this constructor be built from values at members already known to be
+// inhabited?
+fun ctor_ready(selves :: List.of(HType), known :: List.of(NonnegInt),
+               c :: Ctor) :: Boolean:
+  for all (f in c.fields):
+    match member_of_type(selves, (f :~ Field).ty)
+    | #false: #true
+    | m: known.contains(m :~ NonnegInt)
+
+// The first constructor of `spec` that is, or `#false`.
+fun ready_ctor_index(selves :: List.of(HType), known :: List.of(NonnegInt),
+                     spec :: DatatypeSpec) :: maybe(NonnegInt):
+  recur loop (k = 0):
+    cond
+    | k >= spec.ctors.length(): #false
+    | ctor_ready(selves, known, spec.ctors[k] :~ Ctor): k
+    | ~else: loop(k + 1)
+
+fun check_family_field(thy :: Theory, specs :: List.of(DatatypeSpec),
+                       selves :: List.of(HType), params :: List.of(Symbol),
+                       spec :: DatatypeSpec, c :: Ctor, f :: Field) :: Void:
+  cond
+  | member_of_type(selves, f.ty) != #false: #void
+  | mentions_family(specs, f.ty):
+      error(~who: #'datatype,
+            "constructor field mentions a type of its own family in a "
+              ++ "position this version cannot admit",
+            error.val(~label: "type", spec.name),
+            error.val(~label: "constructor", c.name),
+            error.val(~label: "field", f.name),
+            error.val(~label: "field type", type_to_string(f.ty)),
+            error.val(~label: "admissible",
+                      "either exactly a member of the family, or a type "
+                        ++ "mentioning none of its members"))
+  | ~else:
+      check_type(thy, f.ty)
+      for (v in type_vars(f.ty)):
+        unless params.contains(v)
+        | error(~who: #'datatype,
+                "constructor field mentions an unbound type variable",
+                error.val(~label: "type", spec.name),
+                error.val(~label: "constructor", c.name),
+                error.val(~label: "field", f.name),
+                error.val(~label: "variable", v))
+
+// A member is inhabited once some constructor of it has every family-typed
+// field at an already inhabited member.  HOL types are inhabited by
+// assumption, so a member no value can be built at would be an
+// inconsistency, not merely an empty type -- exactly the check a single
+// recursive datatype makes, taken to the least fixed point over the family.
+fun inhabited_members(specs :: List.of(DatatypeSpec),
+                      selves :: List.of(HType)) :: List.of(NonnegInt):
+  recur grow (known :~ List.of(NonnegInt) = []):
+    let next:
+      for values(acc :~ List.of(NonnegInt) = known) (
+            spec in specs, i in List.iota(specs.length())):
+        cond
+        | acc.contains(i): acc
+        | ready_ctor_index(selves, acc, spec :~ DatatypeSpec) != #false:
+            acc ++ [i]
+        | ~else: acc
+    (if next.length() == known.length() | known | grow(next))
+
+fun check_family_inhabited(specs :: List.of(DatatypeSpec),
+                           selves :: List.of(HType)) :: Void:
+  let known = inhabited_members(specs, selves)
+  for (spec in specs, i in List.iota(specs.length())):
+    unless known.contains(i)
+    | error(~who: #'datatype,
+            "no value of this type can be built, so it would be empty",
+            error.val(~label: "name", (spec :~ DatatypeSpec).name),
+            error.val(~label: "hint",
+                      "give some constructor of the family reachable from "
+                        ++ "it only fields at inhabited types"))
+
+// -- the union datatype -------------------------------------------------------
+
+fun union_spec_of(specs :: List.of(DatatypeSpec),
+                  uname :: Symbol) :: DatatypeSpec:
+  let params = (specs[0] :~ DatatypeSpec).params
+  let uty = mk_tyapp(uname, params.map(fun (p :: Symbol): mk_tyvar(p)))
+  let selves = specs.map(self_type)
+  DatatypeSpec(
+    uname, params,
+    for values(acc :~ List.of(Ctor) = []) (spec in specs):
+      acc ++ (for List (c in (spec :~ DatatypeSpec).ctors):
+                let c :~ Ctor = c
+                Ctor(union_ctor_name(uname, c),
+                     for List (f in c.fields):
+                       let f :~ Field = f
+                       Field(f.name,
+                             (if member_of_type(selves, f.ty) == #false
+                              | f.ty
+                              | uty)))))
+
+// -- the family ---------------------------------------------------------------
+
+fun build_datatype_family(thy0 :: Theory, specs :: List.of(DatatypeSpec),
+                          ind :: IndThms, logic :: LogicRules,
+                          alg :: AlgebraThms = algebra_base_thms())
+     :: values(Theory, DatatypeFamily):
+  check_family_specs(thy0, specs)
+  let member_count = specs.length()
+  let selves = specs.map(self_type)
+  let params = (specs[0] :~ DatatypeSpec).params
+  let uname = union_type_name(specs)
+  let u_spec = union_spec_of(specs, uname)
+  let uty = self_type(u_spec)
+  let (thy1, u_thms) = build_recursive_datatype_thms(thy0, u_spec, ind, logic,
+                                                     alg)
+
+  // Which member each union constructor belongs to, and where a member's
+  // constructors start in the union's constructor list.
+  let owner:
+    for values(acc :~ List.of(NonnegInt) = []) (
+          spec in specs, i in List.iota(member_count)):
+      acc ++ (for List (_ in (spec :~ DatatypeSpec).ctors): i)
+  let offset:
+    for values(acc :~ List.of(NonnegInt) = [0]) (spec in specs):
+      acc ++ [acc[acc.length() - 1] + (spec :~ DatatypeSpec).ctors.length()]
+  fun global_index(i :: Int, k :: Int) :: Int: offset[i] + k
+  let u_ctor_terms:
+    for List (c in u_spec.ctors):
+      mk_const((c :~ Ctor).name, ctor_type(u_spec, c :~ Ctor))
+
+  // Field vars for one union constructor, shared by the rule that defines
+  // membership and by every derivation that has to match that rule.
+  fun union_field_vars(g :: Int) :: List.of(FVar):
+    mk_field_vars((u_spec.ctors[g] :~ Ctor).fields, "f")
+
+  // The member each field of union constructor `g` is at, `#false` for an
+  // ordinary field, in field order.
+  fun field_members(g :: Int) :: List:
+    let c :~ Ctor = (all_ctors(specs))[g]
+    for List (f in c.fields): member_of_type(selves, (f :~ Field).ty)
+
+  // -- membership: the least predicates closed under the constructors -------
+  let pred_names = specs.map(
+                     fun (spec :: DatatypeSpec):
+                       membership_name(uname, spec))
+  let pred_vars:
+    for List (name in pred_names): mk_var(name :~ Symbol, mk_fun(uty, bool))
+  fun rule_term(g :: Int, preds :: List.of(Term)) :: Term:
+    let vs = union_field_vars(g)
+    let premises:
+      for values(acc :~ List.of(Term) = []) (
+            m in field_members(g), v in vs):
+        (if m == #false
+         | acc
+         | acc ++ [mk_comb(preds[m :~ NonnegInt], (v :~ FVar) :~ Term)])
+    mk_forall_list(
+      vs,
+      implication_chain(
+        premises,
+        mk_comb(preds[owner[g]],
+                list_mk_comb(u_ctor_terms[g],
+                             vs.map(fun (v :: FVar): v :~ Term)))))
+  let pred_var_terms = pred_vars.map(fun (v :: FVar): v :~ Term)
+  let rules:
+    for List (g in List.iota(u_spec.ctors.length())):
+      rule_term(g, pred_var_terms)
+  let (thy2, inductive0) = define_inductive(thy1, pred_names, pred_vars, rules)
+  let inductive :~ InductiveThms = inductive0
+  let pred_terms:
+    for List (name in pred_names): mk_const(name :~ Symbol, mk_fun(uty, bool))
+
+  // -- carving each member out of the union ---------------------------------
+  //
+  // The witness is a value the member's own constructors can actually build,
+  // found by the same reachability the well-formedness check ran.
+  let order = inhabitation_order(specs, selves)
+  let witnesses = member_witnesses(thy2, specs, selves, u_ctor_terms,
+                                   inductive, offset, order)
+  let (thy4, carvings):
+    for values(t :~ Theory = thy2, acc :~ List = []) (
+          spec in specs, i in List.iota(member_count)):
+      let spec :~ DatatypeSpec = spec
+      let (t2, abs_rep, rep_pred):
+        new_basic_type_definition(t, spec.name,
+                                  abstraction_name(spec.name),
+                                  representation_name(spec.name),
+                                  witnesses[i] :~ Thm)
+      values(t2, acc ++ [[abs_rep, rep_pred]])
+  let abs_terms:
+    for List (spec in specs, self in selves):
+      mk_const(abstraction_name((spec :~ DatatypeSpec).name),
+               mk_fun(uty, self :~ HType))
+  let rep_terms:
+    for List (spec in specs, self in selves):
+      mk_const(representation_name((spec :~ DatatypeSpec).name),
+               mk_fun(self :~ HType, uty))
+  fun abs_rep_of(i :: Int) :: Thm: (carvings[i] :~ List)[0] :~ Thm
+  fun rep_pred_of(i :: Int) :: Thm: (carvings[i] :~ List)[1] :~ Thm
+
+  // `|- abs_i (rep_i x) = x`
+  fun abs_rep_at(thy :: Theory, i :: Int, x :: Term) :: Thm:
+    INST(thy, {mk_var(v_alpha, selves[i]): x}, abs_rep_of(i))
+  // `|- in_i u <=> rep_i (abs_i u) = u`
+  fun rep_pred_at(thy :: Theory, i :: Int, u :: Term) :: Thm:
+    INST(thy, {mk_var(v_rep, uty): u}, rep_pred_of(i))
+  // `|- rep_i (abs_i u) = u`, given `|- in_i u`
+  fun rep_abs_at(thy :: Theory, i :: Int, u :: Term, member :: Thm) :: Thm:
+    EQ_MP(rep_pred_at(thy, i, u), member)
+  // `|- in_i (rep_i x)`: everything at the member type came from the set.
+  fun in_set(thy :: Theory, i :: Int, x :: Term) :: Thm:
+    let r = mk_comb(rep_terms[i], x)
+    EQ_MP(SYM(thy, rep_pred_at(thy, i, r)),
+          AP_TERM(thy, rep_terms[i], abs_rep_at(thy, i, x)))
+
+  // -- the members' own constructors ----------------------------------------
+  //
+  // `C(f...) = abs_i (U_C(g...))`, where a field at a member is passed
+  // through that member's representation and every other field is passed
+  // along unchanged.
+  fun union_arguments(g :: Int, args :: List.of(Term)) :: List.of(Term):
+    for List (m in field_members(g), a in args):
+      (if m == #false
+       | a :~ Term
+       | mk_comb(rep_terms[m :~ NonnegInt], a :~ Term))
+  let (thy5, ctor_defs):
+    for values(t :~ Theory = thy4, acc :~ List = []) (
+          spec in specs, i in List.iota(member_count)):
+      let spec :~ DatatypeSpec = spec
+      for values(t2 :~ Theory = t, acc2 :~ List = acc) (
+            c in spec.ctors, k in List.iota(spec.ctors.length())):
+        let c :~ Ctor = c
+        let g = global_index(i, k)
+        let vs = mk_field_vars(c.fields, "f")
+        let args = vs.map(fun (v :: FVar): v :~ Term)
+        let body = mk_comb(abs_terms[i],
+                           list_mk_comb(u_ctor_terms[g],
+                                        union_arguments(g, args)))
+        let cty = ctor_type(spec, c)
+        let (t3, d) = new_basic_definition(
+                        t2, mk_eq(mk_var(c.name, cty), list_mk_abs(vs, body)))
+        values(t3, acc2 ++ [d])
+  let ctor_terms:
+    for List (spec in specs):
+      for List (c in (spec :~ DatatypeSpec).ctors):
+        mk_const((c :~ Ctor).name, ctor_type(spec :~ DatatypeSpec, c :~ Ctor))
+  fun ctor_term(i :: Int, k :: Int) :: Term:
+    ((ctor_terms[i] :~ List)[k]) :~ Term
+  fun ctor_def(i :: Int, k :: Int) :: Thm:
+    ctor_defs[global_index(i, k)] :~ Thm
+
+  let thy = thy5
+
+  // `|- in_i (U_C(args))`, from the closure theorem for that constructor and
+  // each family-typed argument's own membership.
+  fun ctor_in_set(g :: Int, uargs :: List.of(Term),
+                  members :: List.of(Thm)) :: Thm:
+    for values(acc :~ Thm = SPECL(thy, uargs, inductive.introductions[g])) (
+          member in members):
+      MP(thy, acc, member :~ Thm)
+
+  // `|- rep_i (C(args)) = U_C(union_arguments(args))`
+  fun rep_ctor_equation(i :: Int, k :: Int) :: Thm:
+    let spec :~ DatatypeSpec = specs[i]
+    let c :~ Ctor = spec.ctors[k]
+    let g = global_index(i, k)
+    let vs = mk_field_vars(c.fields, "x")
+    let args = vs.map(fun (v :: FVar): v :~ Term)
+    let uargs = union_arguments(g, args)
+    let members:
+      for values(acc :~ List.of(Thm) = []) (m in field_members(g), a in args):
+        (if m == #false
+         | acc
+         | acc ++ [in_set(thy, m :~ NonnegInt, a :~ Term)])
+    let built = list_mk_comb(u_ctor_terms[g], uargs)
+    let unfolded = unfold_def(thy, ctor_def(i, k), args)
+    GENL(thy, vs,
+         TRANS(AP_TERM(thy, rep_terms[i], unfolded),
+               rep_abs_at(thy, i, built, ctor_in_set(g, uargs, members))))
+
+  let rep_equations:
+    for values(acc :~ List.of(Thm) = []) (
+          spec in specs, i in List.iota(member_count)):
+      for values(acc2 :~ List.of(Thm) = acc) (
+            _ in (spec :~ DatatypeSpec).ctors,
+            k in List.iota((spec :~ DatatypeSpec).ctors.length())):
+        acc2 ++ [rep_ctor_equation(i, k)]
+
+  // -- injectivity ----------------------------------------------------------
+  //
+  // Two values of a member are equal exactly when their union
+  // representations are, and a field at a member is recovered from its
+  // representation by that member's abstraction.
+  fun member_injectivity(i :: Int, k :: Int) :: Thm:
+    let spec :~ DatatypeSpec = specs[i]
+    let c :~ Ctor = spec.ctors[k]
+    let g = global_index(i, k)
+    let xs = mk_field_vars(c.fields, "x")
+    let ys = mk_field_vars(c.fields, "y")
+    let xt = xs.map(fun (v :: FVar): v :~ Term)
+    let yt = ys.map(fun (v :: FVar): v :~ Term)
+    let ci = ctor_term(i, k)
+    let lhs = mk_eq(list_mk_comb(ci, xt), list_mk_comb(ci, yt))
+    let rep_x = SPECL(thy, xt, rep_ctor_equation(i, k))
+    let rep_y = SPECL(thy, yt, rep_ctor_equation(i, k))
+    let fwd:
+      let union_eq = TRANS(SYM(thy, rep_x),
+                           TRANS(AP_TERM(thy, rep_terms[i],
+                                         ASSUME(thy, lhs)),
+                                 rep_y))
+      let u_inj = u_thms.injectivity[(u_spec.ctors[g] :~ Ctor).name] :~ Thm
+      let parts = EQ_MP(SPECL(thy,
+                              union_arguments(g, xt) ++ union_arguments(g, yt),
+                              u_inj),
+                        union_eq)
+      let pieces = split_left_conj(thy, parts, xt.length())
+      let restored:
+        for List (m in field_members(g), piece in pieces,
+                  x in xt, y in yt):
+          (if m == #false
+           | piece :~ Thm
+           | let j = m :~ NonnegInt
+             TRANS(SYM(thy, abs_rep_at(thy, j, x :~ Term)),
+                   TRANS(AP_TERM(thy, abs_terms[j], piece :~ Thm),
+                         abs_rep_at(thy, j, y :~ Term))))
+      DISCH(thy, lhs, left_fold_conj(thy, restored))
+    let rhs = left_fold_term(for List (x in xt, y in yt):
+                               mk_eq(x :~ Term, y :~ Term))
+    let bwd:
+      let asm = ASSUME(thy, rhs)
+      DISCH(thy, rhs,
+            congruence_chain(thy, ci,
+                             split_left_conj(thy, asm, xt.length())))
+    GENL(thy, xs ++ ys, IMP_ANTISYM_RULE(thy, fwd, bwd))
+
+  // `|- !xs ys. not (C_k(xs) = C_l(ys))`, from the union's own distinctness.
+  fun member_distinctness(i :: Int, k :: Int, l :: Int) :: Thm:
+    let spec :~ DatatypeSpec = specs[i]
+    let ck :~ Ctor = spec.ctors[k]
+    let cl :~ Ctor = spec.ctors[l]
+    let xs = mk_field_vars(ck.fields, "x")
+    let ys = mk_field_vars(cl.fields, "y")
+    let xt = xs.map(fun (v :: FVar): v :~ Term)
+    let yt = ys.map(fun (v :: FVar): v :~ Term)
+    let stmt = mk_eq(list_mk_comb(ctor_term(i, k), xt),
+                     list_mk_comb(ctor_term(i, l), yt))
+    let union_eq:
+      TRANS(SYM(thy, SPECL(thy, xt, rep_ctor_equation(i, k))),
+            TRANS(AP_TERM(thy, rep_terms[i], ASSUME(thy, stmt)),
+                  SPECL(thy, yt, rep_ctor_equation(i, l))))
+    let contra = MP(thy,
+                    NOT_ELIM(thy,
+                             SPECL(thy,
+                                   union_arguments(global_index(i, k), xt)
+                                     ++ union_arguments(global_index(i, l), yt),
+                                   union_distinctness(thy, u_spec, u_thms,
+                                                      global_index(i, k),
+                                                      global_index(i, l)))),
+                    union_eq)
+    GENL(thy, xs ++ ys, NOT_INTRO(thy, DISCH(thy, stmt, contra)))
+
+  // -- induction ------------------------------------------------------------
+  //
+  // One case per constructor of the whole family, in member order; a
+  // hypothesis for every field at a member, curried in field order.
+  fun case_term(preds :: List.of(Term), i :: Int, k :: Int,
+                only :: maybe(NonnegInt)) :: Term:
+    let spec :~ DatatypeSpec = specs[i]
+    let c :~ Ctor = spec.ctors[k]
+    let g = global_index(i, k)
+    let vs = mk_field_vars(c.fields, "v")
+    let args = vs.map(fun (v :: FVar): v :~ Term)
+    let hyps:
+      for values(acc :~ List.of(Term) = []) (m in field_members(g), a in args):
+        cond
+        | m == #false: acc
+        | only != #false && m != only: acc
+        | ~else: acc ++ [mk_comb(preds[m :~ NonnegInt], a :~ Term)]
+    mk_forall_list(vs, implication_chain(hyps, mk_comb(preds[i],
+                                                       list_mk_comb(ctor_term(i, k), args))))
+
+  fun all_case_terms(preds :: List.of(Term)) :: List.of(Term):
+    for values(acc :~ List.of(Term) = []) (
+          spec in specs, i in List.iota(member_count)):
+      acc ++ (for List (k in List.iota((spec :~ DatatypeSpec).ctors.length())):
+                case_term(preds, i, k, #false))
+
+  let big_preds:
+    for List (self in selves, i in List.iota(member_count)):
+      mk_var(Symbol.from_string("P" ++ to_string(i)),
+             mk_fun(self :~ HType, bool))
+  let big_pred_terms = big_preds.map(fun (v :: FVar): v :~ Term)
+
+  // `\u. in_i u and P_i (abs_i u)`: the predicate the union-level induction
+  // runs on.  Carrying the membership conjunct is what makes the hypothesis
+  // strong enough to put a child back at its member type.
+  fun lifted_pred(preds :: List.of(Term), i :: Int) :: Term:
+    let u = mk_var(#'u, uty)
+    mk_abs(u, mk_conj(mk_comb(pred_terms[i], u :~ Term),
+                      mk_comb(preds[i], mk_comb(abs_terms[i], u :~ Term))))
+
+  fun family_induction(preds :: List.of(Term)) :: Thm:
+    let cases = all_case_terms(preds)
+    let hyp_term = right_conj_term(cases)
+    let hyp = ASSUME(thy, hyp_term)
+    let lifted = for List (i in List.iota(member_count)):
+                   lifted_pred(preds, i)
+    // The union-level rule, proved from the family's case for the same
+    // constructor: its membership half is closure, its predicate half is the
+    // case applied to the children read back at their member types.
+    fun lifted_rule(g :: Int) :: Thm:
+      let i = owner[g]
+      let vs = union_field_vars(g)
+      let args = vs.map(fun (v :: FVar): v :~ Term)
+      let ms = field_members(g)
+      let premises:
+        for values(acc :~ List.of(Term) = []) (m in ms, a in args):
+          (if m == #false
+           | acc
+           | acc ++ [mk_comb(lifted[m :~ NonnegInt], a :~ Term)])
+      let reduced:
+        for List (p in premises):
+          EQ_MP(beta_at(thy, p :~ Term), ASSUME(thy, p :~ Term))
+      let member_facts = reduced.map(fun (th :: Thm): CONJUNCT1(thy, th))
+      let value_facts = reduced.map(fun (th :: Thm): CONJUNCT2(thy, th))
+      let built = list_mk_comb(u_ctor_terms[g], args)
+      let closure = ctor_in_set(g, args, member_facts)
+      // the case, at the children read back through `abs`
+      let member_args:
+        for List (m in ms, a in args):
+          (if m == #false
+           | a :~ Term
+           | mk_comb(abs_terms[m :~ NonnegInt], a :~ Term))
+      let applied:
+        for values(acc :~ Thm = SPECL(thy, member_args,
+                                      nth_conjunct(thy, hyp, g, cases.length()))) (
+              fact in value_facts):
+          MP(thy, acc, fact :~ Thm)
+      // `C(member_args) = abs_i(U_C(args))`: the representations the
+      // constructor inserts collapse, because every child is in its set.
+      let round_trip:
+        recur loop (rest_ms :~ List = ms, rest_args :~ List = args,
+                    facts :~ List.of(Thm) = member_facts,
+                    acc :~ List.of(Thm) = []):
+          match rest_ms
+          | []: acc
+          | List.cons(m, more):
+              let a = rest_args[0] :~ Term
+              (if m == #false
+               | loop(more, rest_args.drop(1), facts,
+                      acc ++ [REFL(thy, a)])
+               | loop(more, rest_args.drop(1), facts.drop(1),
+                      acc ++ [rep_abs_at(thy, m :~ NonnegInt, a,
+                                         facts[0] :~ Thm)]))
+      let collapse:
+        (if args.length() == 0
+         | REFL(thy, built)
+         | congruence_chain(thy, u_ctor_terms[g], round_trip))
+      let ctor_eq = TRANS(unfold_def(thy, ctor_def(i, index_in_member(g)),
+                                     member_args),
+                          AP_TERM(thy, abs_terms[i], collapse))
+      let value = EQ_MP(AP_TERM(thy, preds[i], ctor_eq), applied)
+      let both = CONJ(thy, closure, value)
+      let folded = EQ_MP(SYM(thy, beta_at(thy, mk_comb(lifted[i], built))),
+                         both)
+      GENL(thy, vs,
+           for values(acc :~ Thm = folded) (p in premises.reverse()):
+             DISCH(thy, p :~ Term, acc))
+    let per_member:
+      for List (i in List.iota(member_count)):
+        let applied:
+          for values(acc :~ Thm = SPECL(thy, lifted,
+                                        inductive.inductions[i])) (
+                g in List.iota(u_spec.ctors.length())):
+            MP(thy, acc, lifted_rule(g))
+        let x = mk_var(#'x, selves[i])
+        let r = mk_comb(rep_terms[i], x :~ Term)
+        let at = MP(thy, SPEC(thy, r, applied), in_set(thy, i, x :~ Term))
+        let reduced = EQ_MP(beta_at(thy, mk_comb(lifted[i], r)), at)
+        GEN(thy, x,
+            EQ_MP(AP_TERM(thy, preds[i], abs_rep_at(thy, i, x :~ Term)),
+                  CONJUNCT2(thy, reduced)))
+    let conclusion = right_conj_thm(thy, per_member)
+    DISCH(thy, hyp_term, conclusion)
+
+  fun index_in_member(g :: Int) :: Int: g - offset[owner[g]]
+
+  let joint_induction:
+    GENL(thy, big_preds, family_induction(big_pred_terms))
+
+  // A member's own induction: the family's, with every other member's
+  // predicate taken to be trivially true.  That is sound and it is all a
+  // predicate about one member type can say -- and it is the shape every
+  // other part of the system already consumes.
+  fun member_induction(i :: Int) :: Thm:
+    let spec :~ DatatypeSpec = specs[i]
+    let big = mk_var(#'P, mk_fun(selves[i], bool))
+    let preds:
+      for List (self in selves, j in List.iota(member_count)):
+        (if j == i
+         | big :~ Term
+         | mk_abs(mk_var(#'u, self :~ HType), tm_true))
+    let own_cases:
+      for List (k in List.iota(spec.ctors.length())):
+        member_case_term(preds, i, k)
+    let hyp_term = right_conj_term(own_cases)
+    let hyp = ASSUME(thy, hyp_term)
+    let family_cases = all_case_terms(preds)
+    let parts:
+      for List (g in List.iota(u_spec.ctors.length())):
+        let j = owner[g]
+        let k = index_in_member(g)
+        let spec_j :~ DatatypeSpec = specs[j]
+        let c :~ Ctor = spec_j.ctors[k]
+        let vs = mk_field_vars(c.fields, "v")
+        let args = vs.map(fun (v :: FVar): v :~ Term)
+        let ms = field_members(g)
+        let hyps:
+          for values(acc :~ List.of(Term) = []) (m in ms, a in args):
+            (if m == #false
+             | acc
+             | acc ++ [mk_comb(preds[m :~ NonnegInt], a :~ Term)])
+        let built = list_mk_comb(ctor_term(j, k), args)
+        let target = mk_comb(preds[j], built)
+        let proved:
+          cond
+          | j == i:
+              let own:
+                for values(acc :~ Thm = SPECL(thy, args,
+                                              nth_conjunct(thy, hyp, k,
+                                                           own_cases.length()))) (
+                      m in ms, a in args):
+                  (if m == i
+                   | MP(thy, acc, ASSUME(thy, mk_comb(big :~ Term, a :~ Term)))
+                   | acc)
+              own
+          | ~else:
+              EQ_MP(SYM(thy, beta_at(thy, target)), TRUTH(thy))
+        GENL(thy, vs,
+             for values(acc :~ Thm = proved) (h in hyps.reverse()):
+               DISCH(thy, h :~ Term, acc))
+    let instantiated = SPECL(thy, preds, joint_induction)
+    let conclusion = MP(thy, instantiated, right_conj_thm(thy, parts))
+    GEN(thy, big,
+        DISCH(thy, hyp_term,
+              nth_conjunct(thy, conclusion, i, member_count)))
+
+  // A member's case, with hypotheses only about its own recursive fields:
+  // what `restate_induction` produces for an ordinary declaration.
+  fun member_case_term(preds :: List.of(Term), i :: Int, k :: Int) :: Term:
+    case_term(preds, i, k, i)
+
+  let inductions = for List (i in List.iota(member_count)): member_induction(i)
+  let cases_thms:
+    for List (spec in specs, i in List.iota(member_count)):
+      restate_cases(thy, spec :~ DatatypeSpec, ctor_terms[i] :~ List.of(Term),
+                    inductions[i] :~ Thm)
+
+  let (thy_final, member_thms):
+    for values(t :~ Theory = thy, acc :~ List.of(DatatypeThms) = []) (
+          spec in specs, i in List.iota(member_count)):
+      let spec :~ DatatypeSpec = spec
+      let injectivity:
+        for values(m :~ Map = {}) (c in spec.ctors,
+                                   k in List.iota(spec.ctors.length())):
+          cond
+          | (c :~ Ctor).fields.length() == 0: m
+          | ~else: m ++ {(c :~ Ctor).name: member_injectivity(i, k)}
+      let distinctness:
+        for values(out :~ Map = {}) (
+              k in List.iota(spec.ctors.length())):
+          for values(out2 :~ Map = out) (
+                l in List.iota(spec.ctors.length())):
+            (if k < l | out2 ++ {[k, l]: member_distinctness(i, k, l)} | out2)
+      fun ctor_distinct(k :: Int, l :: Int) :: Thm:
+        distinctness[[k, l]] :~ Thm
+      let (t2, discriminators, selectors, elim_rules):
+        build_observers(t, spec, fun (k :: Int): ctor_term(i, k),
+                        injectivity, ctor_distinct, cases_thms[i] :~ Thm)
+      values(t2,
+             acc ++ [DatatypeThms(spec, injectivity, distinctness,
+                                  inductions[i] :~ Thm, cases_thms[i] :~ Thm,
+                                  discriminators, selectors, elim_rules)])
+  values(thy_final,
+         DatatypeFamily(u_spec, u_thms, member_thms, joint_induction,
+                        rep_equations))
+
+fun union_distinctness(thy :: Theory, u_spec :: DatatypeSpec,
+                       u_thms :: DatatypeThms, a :: Int, b :: Int) :: Thm:
+  (if a < b
+   | u_thms.distinctness[[a, b]] :~ Thm
+   | forall_not_eq_sym(thy, u_thms.distinctness[[b, a]] :~ Thm))
+
+// The order to carve the members in, and the constructor each member's
+// witness is built from: a member is ready once every family-typed field of
+// some constructor of it is at a member already carved.
+fun inhabitation_order(specs :: List.of(DatatypeSpec),
+                       selves :: List.of(HType)) :: List:
+  recur grow (done :~ List.of(NonnegInt) = [], acc :~ List = []):
+    cond
+    | done.length() == specs.length(): acc
+    | ~else:
+        let found:
+          recur scan (i = 0):
+            cond
+            | i >= specs.length(): #false
+            | done.contains(i): scan(i + 1)
+            | ~else:
+                match ready_ctor_index(selves, done, specs[i] :~ DatatypeSpec)
+                | #false: scan(i + 1)
+                | k: [i, k]
+        match found
+        | #false:
+            error(~who: #'datatype,
+                  "no value of some member of this family can be built")
+        | entry:
+            grow(done ++ [(entry :~ List)[0] :~ NonnegInt],
+                 acc ++ [entry])
+
+// `|- in_i w` for each member, in member order: a value built from that
+// member's own constructors, which is what the type definition needs.
+fun member_witnesses(thy :: Theory, specs :: List.of(DatatypeSpec),
+                     selves :: List.of(HType),
+                     u_ctor_terms :: List.of(Term),
+                     inductive :: InductiveThms,
+                     offset :: List.of(NonnegInt),
+                     order :: List) :: List.of(Thm):
+  let built:
+    for values(acc :~ Map = {}) (entry in order):
+      let [i, k] = entry :~ List
+      let spec :~ DatatypeSpec = specs[i]
+      let c :~ Ctor = spec.ctors[k]
+      let g = offset[i] + k
+      let args:
+        for List (f in c.fields):
+          match member_of_type(selves, (f :~ Field).ty)
+          | #false:
+              mk_select(mk_var(#'w, (f :~ Field).ty), tm_true)
+          | m: ((acc[m :~ NonnegInt] :~ List)[0]) :~ Term
+      let members:
+        for values(out :~ List.of(Thm) = []) (f in c.fields, a in args):
+          match member_of_type(selves, (f :~ Field).ty)
+          | #false: out
+          | m: out ++ [((acc[m :~ NonnegInt] :~ List)[1]) :~ Thm]
+      let value = list_mk_comb(u_ctor_terms[g], args)
+      let proof:
+        for values(th :~ Thm = SPECL(thy, args, inductive.introductions[g])) (
+              member in members):
+          MP(thy, th, member :~ Thm)
+      acc ++ {i :~ NonnegInt: [value, proof]}
+  for List (i in List.iota(specs.length())):
+    ((built[i] :~ List)[1]) :~ Thm

@@ -1,0 +1,86 @@
+#lang rhombus/static
+
+// The transitive closure and the subterm relation derived from the child
+// relation.
+//
+// A datatype's subterm relation used to arrive as a clausal definition whose
+// two equations per datatype were postulated -- the last `new_axiom` on the
+// `datatype` declaration path. It is now `TC child`, with `child` a
+// non-recursive predicate over the discriminators and selectors, and the
+// equations are proved.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/definition/datatype/define open
+  rhombus/hol/definition/datatype/infinite open
+  rhombus/hol/definition/datatype/recursion open
+  rhombus/hol/definition/function/transitive_closure open
+  rhombus/hol/definition/function/subterm open
+
+  rhombus/hol/prover/definition_services open
+def tcb :~ TCThms = tc_base_thms()
+
+// -- the closure costs nothing -----------------------------------------------
+//
+// It is a definition, so the induction principle is a specialisation rather
+// than something to assume.  If any of these grew a hypothesis or an axiom,
+// the derivations below would be resting on it.
+
+// three: the base logic's, and not infinity -- the closure sits below it
+check axioms_of(tc_base_theory()).length() ~is 3
+
+check hyps_of(tcb.inc) ~is []
+check hyps_of(tcb.trans) ~is []
+
+// The one that does the work: a chain has a last step, and that is what turns
+// `TC child x (C a1 ... ak)` into a statement about the children of `C`.
+check hyps_of(tcb.unfold) ~is []
+
+// -- and neither does a datatype's subterm relation --------------------------
+
+def ind_base = build_ind_base(definition_logic_rules)
+def thy0 = ind_base.thy
+def ind :~ IndThms = ind_base.thms
+def tv = mk_tyvar(#'a)
+
+fun derive(spec :: DatatypeSpec) :~ List:
+  let (thy, dt0) = build_recursive_datatype_thms(
+    thy0,
+    spec,
+    ind,
+    definition_logic_rules)
+  let dt :~ DatatypeThms = dt0
+  let (thy2, info) = derive_subterm_relation(
+    thy,
+    spec,
+    dt,
+    definition_logic_rules,
+    definition_rewrite_support)
+  let wf = prove_wf_t_lt(thy2, spec, info.equations, dt.induction)
+  [axioms_of(thy2).length() - axioms_of(thy).length(),
+   info.equations.length(),
+   for values(hs :~ List = []) (t in info.equations): hs ++ hyps_of(t :~ Thm),
+   hyps_of(wf)]
+
+def lst = DatatypeSpec(#'MyList, [#'a],
+                       [Ctor(#'MyNil, []),
+                        Ctor(#'MyCons, [Field(#'hd, tv),
+                                        Field(#'tl, mk_tyapp(#'MyList, [tv]))])])
+
+// One recursive field: the equations are the ones `subterm_clause` describes.
+check:
+  derive(lst)
+  ~is [0, 2, [], []]
+
+// Two recursive fields in one constructor, and a constructor with none: the
+// disjunction has to cover every child and no others.
+check:
+  derive(DatatypeSpec(#'MyTree, [#'a],
+                      [Ctor(#'MyLeaf, [Field(#'v, tv)]),
+                       Ctor(#'MyNode,
+                            [Field(#'l, mk_tyapp(#'MyTree, [tv])),
+                             Field(#'r, mk_tyapp(#'MyTree, [tv]))])]))
+  ~is [0, 2, [], []]

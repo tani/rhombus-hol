@@ -1,0 +1,83 @@
+#lang rhombus/static
+
+// Differential test: `build_enum_thms`
+// (`datatype_derived.rhm`) derives `DatatypeThms` for a nullary-only
+// (enum) `DatatypeSpec` via `unit`/`sum` composition, with zero
+// `new_axiom` calls. The test-only oracle in
+// `datatype_axiom_support.rhm` constructs the same shape axiomatically. Every
+// field of `DatatypeThms` -- injectivity, distinctness, induction, cases,
+// discriminators, selectors, elim_rules -- must agree between the two, as
+// printed statements, and every theorem the derived side produces must carry
+// zero hypotheses.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/logic/bool open
+  rhombus/hol/definition/datatype/define open
+  lib("rhombus/hol/tests/definition/datatype/datatype_axiom_support.rhm") open
+  lib("rhombus/hol/tests/definition/datatype/datatype_derived_support.rhm") open
+  rhombus/hol/definition/datatype/algebra open
+
+fun concls(ths :: List.of(Thm)) :~ List:
+  ths.map(fun (t :: Thm): concl_of(t))
+
+// Canonical-order concl lists, since the Map fields no longer carry a
+// positional order of their own: `[i,j]`-keyed for distinctness (`i < j`,
+// matching `datatype_axiom_support.rhm`'s enumeration), constructor-name
+// order for `elim_rules` (matching `spec.ctors`).
+fun concls_distinctness(thms :: DatatypeThms) :~ List:
+  let n = thms.spec.ctors.length()
+  for values(acc :~ List = []) (i in List.iota(n)):
+    for values(acc2 :~ List = acc) (j in List.iota(n)):
+      (if i < j | acc2 ++ [concl_of(thms.distinctness[[i, j]] :~ Thm)] | acc2)
+
+fun concls_elim_rules(thms :: DatatypeThms) :~ List:
+  for List (c in thms.spec.ctors):
+    concl_of(thms.elim_rules[(c :~ Ctor).name] :~ Thm)
+
+fun all_zero_hyps(thms :: DatatypeThms) :: Boolean:
+  hyps_of(thms.induction).length() == 0
+    && hyps_of(thms.cases).length() == 0
+    && (for all (t in thms.distinctness.values()): hyps_of(t).length() == 0)
+    && (for all (t in thms.discriminators): hyps_of(t).length() == 0)
+    && (for all (t in thms.selectors): hyps_of(t).length() == 0)
+    && (for all (t in thms.elim_rules.values()): hyps_of(t).length() == 0)
+    && (for all (n in thms.injectivity.keys()): hyps_of(thms.injectivity[n]).length() == 0)
+
+fun check_enum(n :: Int) :: Void:
+  let tyname = Symbol.from_string("Enum" ++ to_string(n))
+  let ctors = for List (i in List.iota(n)): Ctor(Symbol.from_string("K" ++ to_string(i)), [])
+  let spec = DatatypeSpec(tyname, [], ctors)
+  let (_, ax) = datatype_axioms(base_theory(), spec)
+  let (_, dv) = build_enum_thms(algebra_base_theory(), spec)
+  check all_zero_hyps(dv) ~is #true
+  check concl_of(ax.induction) ~is concl_of(dv.induction)
+  check concl_of(ax.cases) ~is concl_of(dv.cases)
+  check concls_distinctness(ax) ~is concls_distinctness(dv)
+  check concls(ax.discriminators) ~is concls(dv.discriminators)
+  check concls_elim_rules(ax) ~is concls_elim_rules(dv)
+  check ax.injectivity.length() ~is dv.injectivity.length()
+  check ax.selectors.length() ~is dv.selectors.length()
+
+// A single nullary constructor, two (the minimum needing `sum` at all),
+// three (the "typical" small enum), and larger ones (four, five) to
+// exercise the recursive encoding beyond one level of `sum` nesting.
+check_enum(1)
+check_enum(2)
+check_enum(3)
+check_enum(4)
+check_enum(5)
+
+// `is_nullary_spec` rejects specs with fields, and `build_enum_thms`
+// refuses them outright rather than silently producing something wrong.
+def field_spec = DatatypeSpec(#'Pair2, [], [Ctor(#'MkPair, [Field(#'fst, bool)])])
+check is_nullary_spec(field_spec) ~is #false
+fun rejects_field_spec() :: Boolean:
+  try:
+    build_enum_thms(algebra_base_theory(), field_spec)
+    #false
+    ~catch _: #true
+
+check rejects_field_spec() ~is #true

@@ -1,0 +1,188 @@
+#lang rhombus/and_meta
+
+import:
+  rhombus/meta open
+  rhombus/hol/surface/space open
+  rhombus/hol/surface/space!meta:
+    expose:
+      hol_expr_meta
+
+export:
+  notation
+
+meta:
+  fun notation_error(message :: String, at :: Syntax):
+    syntax_meta.error(message, at)
+
+  // `[operator, fixity]`. Like Rhombus `operator`, a
+  // two-identifier case is prefix; postfix identifier operators are therefore
+  // intentionally unavailable without an operator token to disambiguate them.
+  fun notation_pattern(head :: Syntax) :: List:
+    match head
+    | '$(left :: Identifier) $(op :: Name) $(right :: Identifier)':
+        [op, #'infix]
+    | '$(op :: Name) $(operand :: Identifier)':
+        [op, #'prefix]
+    | '$(operand :: Identifier) $(op :: Operator)':
+        [op, #'postfix]
+    | ~else:
+        notation_error(
+          "expected a prefix, infix, or postfix notation case with identifier operands",
+          head)
+
+  fun keyword_clause(clause :: Syntax) :: Boolean:
+    match clause
+    | '$(keyword :: Keyword) $_ ...; ...': #true
+    | ~else: #false
+
+  fun validate_notation_option(option :: Syntax):
+    match option
+    | '~associativity: ~left'
+        || '~associativity: ~right'
+        || '~associativity: ~none':
+        #void
+    | '~associativity: $_ ...':
+        notation_error(
+          "`~associativity` must be `~left`, `~right`, or `~none`",
+          option)
+    | ~else: #void
+
+  fun implementation_target(clause :: Syntax) :: Syntax:
+    match clause
+    | '$(target :: Identifier)': target
+    | ~else:
+        notation_error("a notation implementation must be one function name",
+                       clause)
+
+  // `[pattern_info, options, target]`.
+  fun parse_notation_case(head :: Syntax,
+                          shared :: List.of(Syntax),
+                          body :: List.of(Syntax)) :: List:
+    when body.length() == 0
+    | notation_error(
+        "a notation case needs a final function implementation", head)
+    for (option in shared):
+      unless keyword_clause(option)
+      | notation_error(
+          "a shared notation block can contain precedence options only",
+          option)
+      validate_notation_option(option)
+    let options = body.take(body.length() - 1)
+    when keyword_clause(body.last)
+    | when for any (clause in options): !keyword_clause(clause)
+      | notation_error(
+          "a notation implementation must be final", body.last)
+      notation_error(
+        "a notation case needs a final function implementation", head)
+    let target = implementation_target(body.last)
+    for (option in options):
+      unless keyword_clause(option)
+      | notation_error(
+          "only precedence options may precede a notation implementation",
+          option)
+      validate_notation_option(option)
+    [notation_pattern(head), shared ++ options, target]
+
+  fun hol_case(parsed :: List) :: Syntax:
+    let pattern_info :~ List = parsed[0]
+    let options :~ List.of(Syntax) = parsed[1]
+    let target :~ Syntax = parsed[2]
+    let op :~ Syntax = pattern_info[0]
+    let fixity :~ Symbol = pattern_info[1]
+    let target_name = to_string(Syntax.unwrap(target))
+    let [option, ...] = options
+    match fixity
+    | #'infix:
+        '«
+           '$('$')left $op $('$')right':
+             $option
+             ...
+             ~all_stx: stx
+             let function_ref = hol_expr_meta.make_ref(
+                                  Syntax.make_id($target_name, left),
+                                  Syntax.make_id("both", left),
+                                  ~track: [left, right])
+             hol_expr_meta.make_call(
+               function_ref,
+               [left, right],
+               Syntax.make_id("both", left),
+               ~track: [left, right])
+         »'
+    | #'prefix:
+        '«
+           '$op $('$')operand':
+             $option
+             ...
+             ~all_stx: stx
+             let function_ref = hol_expr_meta.make_ref(
+                                  Syntax.make_id($target_name, operand),
+                                  Syntax.make_id("both", operand),
+                                  ~track: operand)
+             hol_expr_meta.make_call(
+               function_ref,
+               [operand],
+               Syntax.make_id("both", operand),
+               ~track: operand)
+         »'
+    | #'postfix:
+        '«
+           '$('$')operand $op':
+             $option
+             ...
+             ~all_stx: stx
+             let function_ref = hol_expr_meta.make_ref(
+                                  Syntax.make_id($target_name, operand),
+                                  Syntax.make_id("both", operand),
+                                  ~track: operand)
+             hol_expr_meta.make_call(
+               function_ref,
+               [operand],
+               Syntax.make_id("both", operand),
+               ~track: operand)
+         »'
+    | ~else: notation_error("internal unknown notation fixity", op)
+
+  fun grouped_hol(cases :: List.of(Syntax)) :: Syntax:
+    let [case, ...] = cases
+    'hol_expr.macro
+     | $case
+     | ...'
+
+  fun expand_notation(shared :: List.of(Syntax),
+                      heads :: List.of(Syntax),
+                      bodies :: List.of(List.of(Syntax)),
+                      declared_name :: maybe(Syntax) = #false) :: Syntax:
+    let parsed:
+      for List (head in heads, body in bodies):
+        let one = parse_notation_case(head, shared, body)
+        match declared_name
+        | #false: one
+        | name:
+            let pattern_info :~ List = one[0]
+            let op :~ Syntax = pattern_info[0]
+            unless to_string(op) == to_string(name :~ Syntax)
+            | notation_error(
+                "every case in a named notation must use the declared operator name",
+                head)
+            one
+    grouped_hol(parsed.map(fun (one): hol_case(one :~ List)))
+
+
+defn.macro
+| 'notation $(name :: Name): $shared; ...
+   | $(head :: Sequence): $body; ...
+   | ...':
+    expand_notation([shared, ...],
+                    [head, ...],
+                    [[body, ...], ...],
+                    name)
+| 'notation
+   | $(head :: Sequence): $body; ...
+   | ...':
+    expand_notation([], [head, ...], [[body, ...], ...])
+| 'notation $(head :: Sequence): $body; ...':
+    expand_notation([], [head], [[body, ...]])
+| 'notation $rest ...':
+    syntax_meta.error(
+      "expected an operator-style `notation` case or `|` cases",
+      '$rest ...')

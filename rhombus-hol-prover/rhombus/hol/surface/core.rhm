@@ -1,0 +1,512 @@
+#lang rhombus/static
+
+// Theory-independent semantic syntax for HOL expressions and logical function
+// bodies. Nodes retain source syntax wherever later elaboration needs it; no
+// node can contain a kernel `Term` or depend on a declaration-order `Theory`.
+
+import:
+  lib("racket/base.rkt") as rb
+
+export:
+  CoreExpr
+  CoreRef
+  CoreGlobalRef
+  CoreCall
+  CoreNumeral
+  CoreIf
+  CoreForall
+  CoreExists
+  CoreFunctionExpr
+  CoreBlockExpr
+  CoreMatchExpr
+  CoreTypedExpr
+  CoreBinder
+  CorePattern
+  CorePatVar
+  CorePatWildcard
+  CorePatCtor
+  CorePatLiteral
+  CorePatTyped
+  CoreFunBody
+  CoreBodyExpr
+  CoreBodyLet
+  CoreBodyMatch
+  CoreMatchRow
+  CorePatternMatrix
+  CoreFunctionSpec
+  CoreTactic
+  decode_expr
+  decode_prop
+  decode_function
+  decode_tactic
+  pattern_at
+
+class CoreExpr():
+  nonfinal
+
+class CoreRef(name :: Symbol, at :: Syntax):
+  extends CoreExpr
+
+// A name introduced by surface normalization, resolved only in the global
+// declaration space so a same-named local cannot capture literal semantics.
+class CoreGlobalRef(name :: Symbol, at :: Syntax):
+  extends CoreExpr
+
+class CoreCall(func :: CoreExpr,
+               args :: List.of(CoreExpr),
+               at :: Syntax):
+  extends CoreExpr
+
+class CoreNumeral(value :: NonnegInt, at :: Syntax):
+  extends CoreExpr
+
+class CoreIf(cond :: CoreExpr,
+             then_expr :: CoreExpr,
+             else_expr :: CoreExpr,
+             at :: Syntax):
+  extends CoreExpr
+
+class CoreTypedExpr(expr :: CoreExpr,
+                    type_stx :: Syntax,
+                    at :: Syntax):
+  extends CoreExpr
+
+class CorePattern():
+  nonfinal
+
+class CorePatVar(name :: Symbol, at :: Syntax):
+  extends CorePattern
+
+class CorePatWildcard(at :: Syntax):
+  extends CorePattern
+
+class CorePatCtor(name :: Symbol,
+                  args :: List.of(CorePattern),
+                  at :: Syntax):
+  extends CorePattern
+
+class CorePatLiteral(value_stx :: Syntax, at :: Syntax):
+  extends CorePattern
+
+
+class CorePatTyped(pattern :: CorePattern,
+                   type_stx :: Syntax,
+                   at :: Syntax):
+  extends CorePattern
+
+fun pattern_at(pat :: CorePattern) :: Syntax:
+  match pat
+  | CorePatVar(_, at): at
+  | CorePatWildcard(at): at
+  | CorePatCtor(_, _, at): at
+  | CorePatLiteral(_, at): at
+  | CorePatTyped(_, _, at): at
+  | ~else: error(~who: #'function, "unknown CorePattern variant")
+
+class CoreBinder(pattern :: CorePattern,
+                 type_stx :: maybe(Syntax),
+                 at :: Syntax)
+
+class CoreForall(binders :: List.of(CoreBinder),
+                 body :: CoreExpr,
+                 at :: Syntax):
+  extends CoreExpr
+
+class CoreExists(binders :: List.of(CoreBinder),
+                 body :: CoreExpr,
+                 at :: Syntax):
+  extends CoreExpr
+
+class CoreFunBody():
+  nonfinal
+
+class CoreBodyExpr(expr :: CoreExpr):
+  extends CoreFunBody
+
+class CoreBodyLet(pattern :: CorePattern,
+                  init :: CoreExpr,
+                  body :: CoreFunBody,
+                  at :: Syntax):
+  extends CoreFunBody
+
+class CoreMatchRow(patterns :: List.of(CorePattern),
+                   body :: CoreFunBody,
+                   at :: Syntax)
+
+class CorePatternMatrix(rows :: List.of(CoreMatchRow)):
+  extends CoreFunBody
+
+class CoreBodyMatch(scrutinee :: Symbol,
+                    matrix :: CorePatternMatrix,
+                    at :: Syntax):
+  extends CoreFunBody
+
+class CoreBlockExpr(body :: CoreFunBody, at :: Syntax):
+  extends CoreExpr
+
+class CoreMatchExpr(scrutinee :: CoreExpr,
+                    matrix :: CorePatternMatrix,
+                    at :: Syntax):
+  extends CoreExpr
+
+
+class CoreFunctionExpr(params :: List.of(CoreBinder),
+                       result_type :: maybe(Syntax),
+                       body :: CoreFunBody,
+                       at :: Syntax):
+  extends CoreExpr
+class CoreFunctionSpec(name :: Symbol,
+                       params :: List.of(CoreBinder),
+                       result_type :: maybe(Syntax),
+                       measure :: maybe(CoreExpr),
+                       body :: CoreFunBody,
+                       at :: Syntax)
+
+class CoreTactic(induct :: maybe(Symbol),
+                 using_names :: List.of(Symbol),
+                 skipped_stage_names :: List.of(Symbol),
+                 disabled_rule_names :: List.of(Symbol),
+                 cases :: List.of(CoreExpr),
+                 witnesses :: List.of(CoreExpr),
+                 search_steps :: maybe(NonnegInt),
+                 extensionality :: maybe(Symbol))
+
+
+fun surface_error(who :: Symbol, message :: String, at :: Syntax):
+  rb.#{raise-syntax-error}(who, message, at)
+
+
+// Macros in `surface/space.rhm` produce a location-preserving syntax encoding.
+// Decoding is structural only: enforestation and precedence have already run.
+fun decoder_who(mode :: Symbol) :: Symbol:
+  cond
+  | mode == #'definition: #'definition
+  | mode == #'prop: #'theorem
+  | ~else: #'function
+
+fun logical_mode(mode :: Symbol) :: Boolean:
+  mode == #'prop || mode == #'definition
+
+
+fun global_ref(name :: Symbol, at :: Syntax) :: CoreExpr:
+  CoreGlobalRef(name, at)
+
+fun named_call(name :: Symbol, args :: List.of(CoreExpr),
+               at :: Syntax) :: CoreExpr:
+  CoreCall(global_ref(name, at), args, at)
+
+fun constructor_list_expr(elements :: List.of(CoreExpr),
+                          tail :: maybe(CoreExpr),
+                          at :: Syntax) :: CoreExpr:
+  let initial:
+    match tail
+    | #false: global_ref(#'nil, at)
+    | present: present :~ CoreExpr
+  for values(out :~ CoreExpr = initial) (element in elements.reverse()):
+    named_call(#'cons, [element :~ CoreExpr, out], at)
+
+fun constructor_string_expr(value :: String, at :: Syntax) :: CoreExpr:
+  let codes:
+    for List (character in value.to_list()):
+      CoreNumeral(character.to_int(), at)
+  named_call(
+    #'text, [constructor_list_expr(codes, #false, at)], at)
+
+fun predicate_set_expr(elements :: List.of(CoreExpr),
+                       at :: Syntax) :: CoreExpr:
+  let parameter_name = Symbol.gen("_set_element")
+  let parameter = CoreRef(parameter_name, at)
+  let predicate:
+    for values(out :~ CoreExpr = global_ref(#'false, at)) (
+          element in elements.reverse()):
+      let equal = named_call(
+                    #'eq, [parameter, element :~ CoreExpr], at)
+      named_call(#'disj, [equal, out], at)
+  CoreFunctionExpr(
+    [CoreBinder(CorePatVar(parameter_name, at), #false, at)],
+    #false,
+    CoreBodyExpr(predicate),
+    at)
+
+fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
+  match stx
+  | '(core_allowed $(policy :: Identifier) $inner)':
+      let p = Syntax.unwrap(policy)
+      let permitted:
+        cond
+        | p == #'both || p == mode: #true
+        | p == #'logical && (mode == #'prop || mode == #'definition): #true
+        | p == #'prop && mode == #'definition: #true
+        | ~else: #false
+      unless permitted
+      | cond
+        | p == #'logical:
+            surface_error(
+              (if mode == #'function | #'function | #'definition),
+              "proposition-only syntax cannot appear in an executable function body",
+              stx)
+        | mode == #'prop || mode == #'definition:
+            surface_error(
+              (if mode == #'prop | #'theorem | #'definition),
+              "a logical term admits variables, named function applications, "
+                ++ "HOL notation, nonnegative numerals, `not`, `and`, `or`, "
+                ++ "`===`, `<=>`, `==>`, `forall`, `exists` and `if`",
+              stx)
+        | ~else:
+            surface_error(
+              #'function,
+              "a logical function body admits only variables, constructors, "
+                ++ "logical function applications, HOL notation, nonnegative "
+                ++ "numerals, `if`, and `cond`",
+              stx)
+      decode_expr(inner, mode)
+  | '(core_ref $(name :: Identifier))':
+      CoreRef(Syntax.unwrap(name), stx)
+  | '(core_call $func [$arg, ...])':
+      CoreCall(decode_expr(func, mode),
+               [decode_expr(arg, mode), ...],
+               stx)
+  | '(core_numeral $(value :: Int))':
+      let n = Syntax.unwrap(value)
+      when n < 0
+      | surface_error(#'operator, "a numeral cannot be negative", stx)
+      CoreNumeral(n, stx)
+  | '(core_if $cond $then_expr $else_expr)':
+      CoreIf(decode_expr(cond, mode),
+             decode_expr(then_expr, mode),
+             decode_expr(else_expr, mode),
+             stx)
+  | '(core_forall [$binder, ...] $body)':
+      CoreForall([decode_binder(binder), ...], decode_expr(body, mode), stx)
+  | '(core_exists [$binder, ...] $body)':
+      CoreExists([decode_binder(binder), ...], decode_expr(body, mode), stx)
+  | '(core_function_expr [$binder, ...] #false $body)':
+      CoreFunctionExpr([decode_binder(binder), ...],
+                       #false,
+                       decode_body_mode(body, mode),
+                       stx)
+  | '(core_function_expr [$binder, ...] ($result_type ...) $body)':
+      CoreFunctionExpr([decode_binder(binder), ...],
+                       '$result_type ...',
+                       decode_body_mode(body, mode),
+                       stx)
+  | '(core_block_expr $body)':
+      CoreBlockExpr(decode_body_mode(body, mode), stx)
+  | '(core_match_expr $scrutinee [$row, ...])':
+      CoreMatchExpr(
+        decode_expr(scrutinee, mode),
+        CorePatternMatrix([decode_match_row_mode(row, mode), ...]),
+        stx)
+  | '(core_typed_expr $expr ($type ...))':
+      CoreTypedExpr(decode_expr(expr, mode), '$type ...', stx)
+  | '(core_list_expr [$element, ...] #false)':
+      constructor_list_expr(
+        [decode_expr(element, mode), ...], #false, stx)
+  | '(core_list_expr [$element, ...] $tail)':
+      constructor_list_expr(
+        [decode_expr(element, mode), ...],
+        decode_expr(tail, mode),
+        stx)
+  | '(core_pair_expr $first $second)':
+      named_call(
+        #'pair,
+        [decode_expr(first, mode), decode_expr(second, mode)],
+        stx)
+  | '(core_string_expr $(value :: String))':
+      constructor_string_expr(Syntax.unwrap(value), stx)
+  | '(core_set_expr [$element, ...])':
+      predicate_set_expr([decode_expr(element, mode), ...], stx)
+  | '(core_rejected $_)':
+      surface_error(
+        decoder_who(mode),
+        (if logical_mode(mode)
+         | "a logical term admits variables, named function applications, HOL "
+             ++ "notation, nonnegative numerals, `not`, `and`, `or`, `===`, "
+             ++ "`<=>`, `==>`, `forall`, `exists` and `if`"
+         | "this version admits only variables, named function applications, "
+             ++ "HOL notation, nonnegative numerals, `if`, `cond`, and the "
+             ++ "Boolean operators `!`, `&&`, `||` and `==` in a function body"),
+        stx)
+  | ~else:
+      surface_error(decoder_who(mode), "malformed parsed HOL expression", stx)
+
+fun decode_prop(stx :: Syntax) :: CoreExpr:
+  decode_expr(stx, #'prop)
+
+fun decode_binder(stx :: Syntax) :: CoreBinder:
+  match stx
+  | '(core_binder $binder_pat #false)':
+      CoreBinder(decode_pattern(binder_pat), #false, stx)
+  | '(core_binder $binder_pat ($ty ...))':
+      CoreBinder(decode_pattern(binder_pat), '$ty ...', stx)
+  | ~else: surface_error(#'function, "malformed function binder", stx)
+
+fun constructor_list_pattern(elements :: List.of(CorePattern),
+                             tail :: maybe(CorePattern),
+                             at :: Syntax) :: CorePattern:
+  let initial:
+    match tail
+    | #false: CorePatCtor(#'nil, [], at)
+    | present: present :~ CorePattern
+  for values(out :~ CorePattern = initial) (element in elements.reverse()):
+    CorePatCtor(#'cons, [element :~ CorePattern, out], at)
+
+fun constructor_string_pattern(value :: String, at :: Syntax)
+    :: CorePattern:
+  let codes:
+    for List (character in value.to_list()):
+      let code = Syntax.make(character.to_int(), at)
+      CorePatLiteral(code, at)
+  CorePatCtor(
+    #'text, [constructor_list_pattern(codes, #false, at)], at)
+
+fun irrefutable_product_pattern(pat :: CorePattern) :: Boolean:
+  match pat
+  | CorePatWildcard(_): #true
+  | CorePatVar(_, _): #true
+  | CorePatTyped(inner, _, _): irrefutable_product_pattern(inner)
+  | CorePatCtor(name, args, _) when name == #'pair:
+      args.length() == 2
+        && for all (arg in args):
+             irrefutable_product_pattern(arg :~ CorePattern)
+  | ~else: #false
+
+fun constructor_pair_pattern(args :: List.of(CorePattern),
+                             at :: Syntax) :: CorePattern:
+  unless args.length() == 2
+         && for all (arg in args):
+              irrefutable_product_pattern(arg :~ CorePattern)
+  | surface_error(
+      #'function,
+      "nested refutable patterns inside `Pair` are not supported",
+      at)
+  CorePatCtor(#'pair, args, at)
+
+fun decode_pattern(stx :: Syntax) :: CorePattern:
+  match stx
+  | '(core_pat_wildcard)': CorePatWildcard(stx)
+  | '(core_pat_var $(name :: Identifier))':
+      CorePatVar(Syntax.unwrap(name), stx)
+  | '(core_pat_ctor $(name :: Identifier) [$arg, ...])':
+      let decoded = [decode_pattern(arg), ...]
+      if Syntax.unwrap(name) == #'pair
+      | constructor_pair_pattern(decoded, stx)
+      | CorePatCtor(Syntax.unwrap(name), decoded, stx)
+  | '(core_pat_literal $value)':
+      let raw = Syntax.unwrap(value)
+      cond
+      | raw == #true || raw == #false:
+          CorePatCtor((if raw | #'true | #'false), [], stx)
+      | raw is_a NonnegInt:
+          CorePatLiteral(value, stx)
+      | raw is_a String:
+          constructor_string_pattern(raw, stx)
+      | ~else:
+          surface_error(#'function, "unsupported literal pattern", stx)
+  | '(core_pat_list [$element, ...] #false)':
+      constructor_list_pattern(
+        [decode_pattern(element), ...], #false, stx)
+  | '(core_pat_list [$element, ...] $tail)':
+      constructor_list_pattern(
+        [decode_pattern(element), ...], decode_pattern(tail), stx)
+  | '(core_pat_pair $first $second)':
+      constructor_pair_pattern(
+        [decode_pattern(first), decode_pattern(second)], stx)
+  | '(core_pat_typed $pat ($type ...))':
+      CorePatTyped(decode_pattern(pat), '$type ...', stx)
+  | ~else: surface_error(#'function, "malformed pattern", stx)
+
+fun decode_body_mode(stx :: Syntax, mode :: Symbol) :: CoreFunBody:
+  match stx
+  | '(core_body_expr $expr)':
+      CoreBodyExpr(decode_expr(expr, mode))
+  | '(core_body_let $let_pat $init $body)':
+      CoreBodyLet(decode_pattern(let_pat),
+                  decode_expr(init, mode),
+                  decode_body_mode(body, mode),
+                  stx)
+  | '(core_body_match $(name :: Identifier) [$row, ...])':
+      CoreBodyMatch(
+        Syntax.unwrap(name),
+        CorePatternMatrix([decode_match_row_mode(row, mode), ...]),
+        stx)
+  | '(core_pattern_matrix [$row, ...])':
+      CorePatternMatrix([decode_match_row_mode(row, mode), ...])
+  | ~else: surface_error(#'function, "malformed parsed function body", stx)
+
+fun decode_match_row_mode(stx :: Syntax, mode :: Symbol) :: CoreMatchRow:
+  match stx
+  | '(core_match_row [$pat, ...] $body)':
+      CoreMatchRow(
+        [decode_pattern(pat), ...], decode_body_mode(body, mode), stx)
+  | ~else: surface_error(#'function, "malformed match row", stx)
+
+fun decode_function(stx :: Syntax) :: CoreFunctionSpec:
+  match stx
+  | '(core_function $(name :: Identifier) [$param, ...] #false #false $body)':
+      CoreFunctionSpec(Syntax.unwrap(name),
+                       [decode_binder(param), ...],
+                       #false,
+                       #false,
+                       decode_body_mode(body, #'function),
+                       stx)
+  | '(core_function $(name :: Identifier) [$param, ...] ($result_type ...) #false $body)':
+      CoreFunctionSpec(Syntax.unwrap(name),
+                       [decode_binder(param), ...],
+                       '$result_type ...',
+                       #false,
+                       decode_body_mode(body, #'function),
+                       stx)
+  | '(core_function $(name :: Identifier) [$param, ...] #false $measure $body)':
+      CoreFunctionSpec(Syntax.unwrap(name),
+                       [decode_binder(param), ...],
+                       #false,
+                       decode_expr(measure, #'function),
+                       decode_body_mode(body, #'function),
+                       stx)
+  | '(core_function $(name :: Identifier) [$param, ...] ($result_type ...) $measure $body)':
+      CoreFunctionSpec(Syntax.unwrap(name),
+                       [decode_binder(param), ...],
+                       '$result_type ...',
+                       decode_expr(measure, #'function),
+                       decode_body_mode(body, #'function),
+                       stx)
+  | ~else: surface_error(#'function, "malformed parsed function declaration", stx)
+
+fun symbol_list(stx :: Syntax) :: List.of(Symbol):
+  match stx
+  | '[$id, ...]':
+      for List (i in [id, ...]):
+        match i
+        | '$(name :: Identifier)': Syntax.unwrap(name)
+        | ~else: surface_error(#'proof, "expected a name", i)
+  | ~else: surface_error(#'proof, "expected a list of names", stx)
+
+fun decode_optional_symbol(stx :: Syntax) :: maybe(Symbol):
+  match stx
+  | '#false': #false
+  | '$(name :: Identifier)': Syntax.unwrap(name)
+  | ~else: surface_error(#'proof, "expected a name", stx)
+
+fun decode_optional_steps(stx :: Syntax) :: maybe(NonnegInt):
+  match stx
+  | '#false': #false
+  | '$(n :: Int)':
+      let v = Syntax.unwrap(n)
+      unless v >= 0
+      | surface_error(#'proof, "search steps cannot be negative", stx)
+      v
+  | ~else: surface_error(#'proof, "expected a search-step count", stx)
+
+fun decode_tactic(stx :: Syntax) :: CoreTactic:
+  match stx
+  | '(core_tactic $induct $using $skipped_stages $disabled_rules [$case, ...] [$witness, ...] $steps $extensionality)':
+      CoreTactic(decode_optional_symbol(induct),
+                 symbol_list(using),
+                 symbol_list(skipped_stages),
+                 symbol_list(disabled_rules),
+                 [decode_expr(case, #'prop), ...],
+                 [decode_expr(witness, #'expr), ...],
+                 decode_optional_steps(steps),
+                 decode_optional_symbol(extensionality))
+  | ~else: surface_error(#'proof, "malformed parsed proof options", stx)

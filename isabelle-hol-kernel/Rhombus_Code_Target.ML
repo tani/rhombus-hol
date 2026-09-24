@@ -422,7 +422,7 @@ fun serialize ctxt {module_name, reserved_syms, identifiers, includes,
        Pretty.str "// SPDX-License-Identifier: 0BSD AND BSD-2-Clause"];
      val abi_import = vertical
        [Pretty.str "import:",
-        Pretty.str "  rhombus/hol/kernel_abi as abi",
+        Pretty.str "  rhombus/hol/kernel/abi as abi",
         Pretty.str "",
         Pretty.str "unless abi.kernel_abi_version == 1",
         Pretty.str "| error(\"generated kernel ABI mismatch\")"];

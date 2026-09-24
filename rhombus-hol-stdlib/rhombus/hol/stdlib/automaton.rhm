@@ -1,0 +1,393 @@
+#lang rhombus/hol
+
+import: "list.rhm" open
+
+import: "relation_set.rhm" open
+
+export:
+  EpsilonNFA
+  epsilon_nfa
+  epsilon_nfa_initial
+  epsilon_nfa_epsilon
+  epsilon_nfa_transition
+  epsilon_nfa_final
+  NFA
+  nfa
+  nfa_initial
+  nfa_transition
+  nfa_final
+  DFA
+  dfa
+  dfa_initial
+  dfa_transition
+  dfa_final
+  dfa_run
+  dfa_accepts
+
+// The three runtime representations contain only executable data.  Initial
+// and final state sets are predicates, and nondeterministic transitions are
+// relations; no enumeration or equality decision is built into a machine.
+datatype EpsilonNFA.of(?q, ?a)
+| epsilon_nfa(epsilon_nfa_initial_predicate :: ?q -> Boolean,
+              epsilon_nfa_epsilon_relation :: ?q -> ?q -> Boolean,
+              epsilon_nfa_transition_relation :: ?q -> ?a -> ?q -> Boolean,
+              epsilon_nfa_final_predicate :: ?q -> Boolean)
+
+datatype NFA.of(?q, ?a)
+| nfa(nfa_initial_predicate :: ?q -> Boolean,
+      nfa_transition_relation :: ?q -> ?a -> ?q -> Boolean,
+      nfa_final_predicate :: ?q -> Boolean)
+
+datatype DFA.of(?q, ?a)
+| dfa(dfa_initial_state :: ?q,
+      dfa_transition_function :: ?q -> ?a -> ?q,
+      dfa_final_predicate :: ?q -> Boolean)
+
+function epsilon_nfa_initial(m :: EpsilonNFA.of(?q, ?a), q :: ?q) :: Boolean:
+  match m
+  | epsilon_nfa(initial, _, _, _): initial(q)
+
+function epsilon_nfa_epsilon(m :: EpsilonNFA.of(?q, ?a), p :: ?q, q :: ?q) :: Boolean:
+  match m
+  | epsilon_nfa(_, epsilon, _, _): epsilon(p)(q)
+
+function epsilon_nfa_transition(m :: EpsilonNFA.of(?q, ?a),
+                                p :: ?q,
+                                a :: ?a,
+                                q :: ?q) :: Boolean:
+  match m
+  | epsilon_nfa(_, _, transition, _): transition(p)(a)(q)
+
+function epsilon_nfa_final(m :: EpsilonNFA.of(?q, ?a), q :: ?q) :: Boolean:
+  match m
+  | epsilon_nfa(_, _, _, final): final(q)
+
+function nfa_initial(m :: NFA.of(?q, ?a), q :: ?q) :: Boolean:
+  match m
+  | nfa(initial, _, _): initial(q)
+
+function nfa_transition(m :: NFA.of(?q, ?a),
+                        p :: ?q,
+                        a :: ?a,
+                        q :: ?q) :: Boolean:
+  match m
+  | nfa(_, transition, _): transition(p)(a)(q)
+
+function nfa_final(m :: NFA.of(?q, ?a), q :: ?q) :: Boolean:
+  match m
+  | nfa(_, _, final): final(q)
+
+function dfa_initial(m :: DFA.of(?q, ?a)) :: ?q:
+  match m
+  | dfa(initial, _, _): initial
+
+function dfa_transition(m :: DFA.of(?q, ?a), q :: ?q, a :: ?a) :: ?q:
+  match m
+  | dfa(_, transition, _): transition(q)(a)
+
+function dfa_final(m :: DFA.of(?q, ?a), q :: ?q) :: Boolean:
+  match m
+  | dfa(_, _, final): final(q)
+
+// Keeping the arbitrary starting state private makes the public runner a
+// conventional left fold while retaining a useful logical induction equation.
+function dfa_run_from(m :: DFA.of(?q, ?a), q :: ?q, word :: List.of(?a)) :: ?q:
+  match m
+  | dfa(_, transition, _): list_fold_left(transition, q, word)
+
+function dfa_run(m :: DFA.of(?q, ?a), word :: List.of(?a)) :: ?q:
+  dfa_run_from(m, dfa_initial(m), word)
+
+function dfa_accepts(m :: DFA.of(?q, ?a), word :: List.of(?a)) :: Boolean:
+  dfa_final(m, dfa_run(m, word))
+
+// Reflexive-transitive closure is kept logical.  Its forward-oriented step
+// rule composes directly with both epsilon-prefix and epsilon-suffix paths.
+inductive relation_star(?q -> ?q -> Boolean, ?q, ?q)
+| relation_star_refl:
+    forall (r :: ?q -> ?q -> Boolean, q :: ?q):
+      relation_star(r, q, q)
+| relation_star_step:
+    forall (r :: ?q -> ?q -> Boolean, p :: ?q, q :: ?q, z :: ?q):
+      r(p)(q) ==> relation_star(r, q, z) ==> relation_star(r, p, z)
+
+// Paths expose their two endpoints.  Epsilon paths are independent of
+// epsilon elimination: the two recursive rules mention the source machine's
+// raw epsilon and symbol transitions directly.
+inductive nfa_path(NFA.of(?q, ?a), ?q, List.of(?a), ?q)
+| nfa_path_nil:
+    forall (m :: NFA.of(?q, ?a), q :: ?q):
+      nfa_path(m, q, nil(), q)
+| nfa_path_cons:
+    forall (m :: NFA.of(?q, ?a), p :: ?q, a :: ?a,
+            q :: ?q, word :: List.of(?a), z :: ?q):
+      nfa_transition(m, p, a, q)
+        ==> nfa_path(m, q, word, z)
+        ==> nfa_path(m, p, cons(a, word), z)
+
+inductive epsilon_nfa_path(EpsilonNFA.of(?q, ?a), ?q, List.of(?a), ?q)
+| epsilon_nfa_path_nil:
+    forall (m :: EpsilonNFA.of(?q, ?a), q :: ?q):
+      epsilon_nfa_path(m, q, nil(), q)
+| epsilon_nfa_path_epsilon:
+    forall (m :: EpsilonNFA.of(?q, ?a), p :: ?q, q :: ?q,
+            word :: List.of(?a), z :: ?q):
+      epsilon_nfa_epsilon(m, p, q)
+        ==> epsilon_nfa_path(m, q, word, z)
+        ==> epsilon_nfa_path(m, p, word, z)
+| epsilon_nfa_path_symbol:
+    forall (m :: EpsilonNFA.of(?q, ?a), p :: ?q, a :: ?a,
+            q :: ?q, word :: List.of(?a), z :: ?q):
+      epsilon_nfa_transition(m, p, a, q)
+        ==> epsilon_nfa_path(m, q, word, z)
+        ==> epsilon_nfa_path(m, p, cons(a, word), z)
+
+// Acceptance is specification-only: witnesses are logical states, never a
+// search performed by an executable function.
+definition nfa_accepts(m :: NFA.of(?q, ?a), word :: List.of(?a)) :: Boolean:
+  exists (p :: ?q, q :: ?q):
+    nfa_initial(m, p) and nfa_path(m, p, word, q) and nfa_final(m, q)
+
+definition epsilon_nfa_accepts(m :: EpsilonNFA.of(?q, ?a),
+                               word :: List.of(?a)) :: Boolean:
+  exists (p :: ?q, q :: ?q):
+    epsilon_nfa_initial(m, p) and epsilon_nfa_path(m, p, word, q) and epsilon_nfa_final(m, q)
+
+// Epsilon elimination closes each symbol transition on both sides.  The final
+// predicate absorbs a suffix containing only epsilon transitions.
+definition epsilon_eliminate_transition(m :: EpsilonNFA.of(?q, ?a),
+                                        p :: ?q,
+                                        a :: ?a,
+                                        q :: ?q) :: Boolean:
+  exists (r :: ?q, s :: ?q):
+    relation_star(epsilon_nfa_epsilon(m), p, r) and epsilon_nfa_transition(m, r, a, s) and relation_star(epsilon_nfa_epsilon(m), s, q)
+
+definition epsilon_eliminate_final(m :: EpsilonNFA.of(?q, ?a), q :: ?q) :: Boolean:
+  exists (z :: ?q):
+    relation_star(epsilon_nfa_epsilon(m), q, z) and epsilon_nfa_final(m, z)
+
+definition epsilon_eliminate(m :: EpsilonNFA.of(?q, ?a)) :: NFA.of(?q, ?a):
+  nfa(epsilon_nfa_initial(m),
+      epsilon_eliminate_transition(m),
+      epsilon_eliminate_final(m))
+
+// An NFA embeds in an epsilon-NFA by giving it the empty epsilon relation.
+definition nfa_add_epsilon(m :: NFA.of(?q, ?a)) :: EpsilonNFA.of(?q, ?a):
+  epsilon_nfa(nfa_initial(m), relation_empty, nfa_transition(m), nfa_final(m))
+
+// Predicate-valued states are the genuine HOL powerset.  The transition and
+// final predicates are logical existential images, not finite enumeration.
+definition nfa_determinize_transition(m :: NFA.of(?q, ?a), states :: ?q -> Boolean, a :: ?a, q :: ?q) :: Boolean:
+  exists (p :: ?q): states(p) and nfa_transition(m, p, a, q)
+
+definition nfa_determinize_final(m :: NFA.of(?q, ?a), states :: ?q -> Boolean) :: Boolean:
+  exists (q :: ?q): states(q) and nfa_final(m, q)
+
+definition nfa_determinize(m :: NFA.of(?q, ?a)) :: DFA.of(?q -> Boolean, ?a):
+  dfa(nfa_initial(m), nfa_determinize_transition(m), nfa_determinize_final(m))
+
+// A DFA embeds in an NFA by turning its initial state into a singleton and its
+// transition result into the graph of the deterministic transition function.
+definition dfa_to_nfa_initial(m :: DFA.of(?q, ?a), q :: ?q) :: Boolean:
+  q === dfa_initial(m)
+
+definition dfa_to_nfa_transition(m :: DFA.of(?q, ?a), p :: ?q, a :: ?a, q :: ?q) :: Boolean:
+  q === dfa_transition(m, p, a)
+
+definition dfa_to_nfa(m :: DFA.of(?q, ?a)) :: NFA.of(?q, ?a):
+  nfa(dfa_to_nfa_initial(m), dfa_to_nfa_transition(m), dfa_final(m))
+
+// The useful composite is named separately rather than hidden in its theorem.
+definition epsilon_nfa_determinize(m :: EpsilonNFA.of(?q, ?a))
+    :: DFA.of(?q -> Boolean, ?a):
+  nfa_determinize(epsilon_eliminate(m))
+
+// Closure and path infrastructure.
+theorem relation_star_transitive:
+  forall (r :: ?q -> ?q -> Boolean, p :: ?q, q :: ?q, z :: ?q):
+    relation_star(r, p, q)
+      ==> relation_star(r, q, z)
+      ==> relation_star(r, p, z)
+proof:
+  ~split: [relation_star(r, p, q), relation_star(r, q, z)]
+  ~use: [relation_star_refl, relation_star_step]
+
+theorem relation_star_empty_iff:
+  forall (p :: ?q, q :: ?q):
+    relation_star(relation_empty, p, q) <=> p === q
+proof:
+  ~split: [relation_star(relation_empty, p, q), p === q]
+  ~use: [relation_star_refl, relation_star_step]
+
+theorem epsilon_nfa_path_from_star:
+  forall (m :: EpsilonNFA.of(?q, ?a), p :: ?q, q :: ?q,
+          word :: List.of(?a), z :: ?q):
+    relation_star(epsilon_nfa_epsilon(m), p, q)
+      ==> epsilon_nfa_path(m, q, word, z)
+      ==> epsilon_nfa_path(m, p, word, z)
+proof:
+  ~split: [relation_star(epsilon_nfa_epsilon(m), p, q), epsilon_nfa_path(m, q, word, z)]
+  ~use: [relation_star_refl,
+         relation_star_step,
+         epsilon_nfa_path_epsilon]
+
+theorem nfa_path_nil_iff:
+  forall (m :: NFA.of(?q, ?a), p :: ?q, q :: ?q):
+    nfa_path(m, p, nil(), q) <=> p === q
+proof:
+  ~split: [nfa_path(m, p, nil(), q), p === q]
+  ~use: [nfa_path_nil, nfa_path_cases]
+
+theorem nfa_path_cons_iff:
+  forall (m :: NFA.of(?q, ?a), p :: ?q, a :: ?a,
+          word :: List.of(?a), z :: ?q):
+    nfa_path(m, p, cons(a, word), z)
+      <=> (exists (q :: ?q): nfa_transition(m, p, a, q) and nfa_path(m, q, word, z))
+proof:
+  ~split: [nfa_path(m, p, cons(a, word), z)]
+  ~use: [nfa_path_cons, nfa_path_cases]
+
+// A direct epsilon path factors into an eliminated path and a final epsilon
+// closure.  The converse expands every closed eliminated edge back into raw
+// epsilon and symbol steps.
+theorem epsilon_eliminate_path_iff:
+  forall (m :: EpsilonNFA.of(?q, ?a), p :: ?q,
+          word :: List.of(?a), z :: ?q):
+    epsilon_nfa_path(m, p, word, z)
+      <=> (exists (q :: ?q): nfa_path(epsilon_eliminate(m), p, word, q) and relation_star(epsilon_nfa_epsilon(m), q, z))
+proof:
+  ~split: [epsilon_nfa_path(m, p, word, z)]
+  ~use: [epsilon_nfa_path_nil,
+         epsilon_nfa_path_epsilon,
+         epsilon_nfa_path_symbol,
+         epsilon_nfa_path_from_star,
+         epsilon_nfa_path_induct,
+         relation_star_refl,
+         relation_star_transitive,
+         nfa_path_nil,
+         nfa_path_cons,
+         nfa_path_induct]
+
+// Empty epsilon transitions do not change the ordinary path relation.
+theorem nfa_add_epsilon_path_iff:
+  forall (m :: NFA.of(?q, ?a), p :: ?q,
+          word :: List.of(?a), q :: ?q):
+    epsilon_nfa_path(nfa_add_epsilon(m), p, word, q)
+      <=> nfa_path(m, p, word, q)
+proof:
+  ~split: [epsilon_nfa_path(nfa_add_epsilon(m), p, word, q), nfa_path(m, p, word, q)]
+  ~use: [epsilon_nfa_path_nil,
+         epsilon_nfa_path_epsilon,
+         epsilon_nfa_path_symbol,
+         epsilon_nfa_path_induct,
+         relation_star_empty_iff,
+         nfa_path_nil,
+         nfa_path_cons,
+         nfa_path_induct]
+
+// Generalizing the starting subset is the invariant needed by the fold.  The
+// public determinization theorem is its initial-subset instance.
+theorem nfa_subset_fold_invariant:
+  forall (m :: NFA.of(?q, ?a), states :: ?q -> Boolean,
+          word :: List.of(?a), q :: ?q):
+    list_fold_left(nfa_determinize_transition(m), states, word)(q)
+      <=> (exists (p :: ?q):
+             (states(p) and nfa_path(m, p, word, q)))
+proof:
+  ~induct: [word]
+  ~use: [fold_left_nil,
+         fold_left_cons,
+         nfa_path_nil_iff,
+         nfa_path_cons_iff]
+
+theorem nfa_determinize_run_iff:
+  forall (m :: NFA.of(?q, ?a), word :: List.of(?a), q :: ?q):
+    dfa_run(nfa_determinize(m), word)(q)
+      <=> (exists (p :: ?q):
+             (nfa_initial(m, p) and nfa_path(m, p, word, q)))
+proof:
+  ~use: [nfa_subset_fold_invariant]
+
+// Deterministic paths are exactly executions from their left endpoint.
+theorem dfa_to_nfa_path_iff:
+  forall (m :: DFA.of(?q, ?a), p :: ?q,
+          word :: List.of(?a), q :: ?q):
+    nfa_path(dfa_to_nfa(m), p, word, q)
+      <=> dfa_run_from(m, p, word) === q
+proof:
+  ~induct: [word]
+  ~use: [nfa_path_nil_iff,
+         nfa_path_cons_iff,
+         fold_left_nil,
+         fold_left_cons]
+
+// Pointwise preservation facts precede their extensional language forms.
+theorem epsilon_eliminate_accepts_iff:
+  forall (m :: EpsilonNFA.of(?q, ?a), word :: List.of(?a)):
+    epsilon_nfa_accepts(m, word)
+      <=> nfa_accepts(epsilon_eliminate(m), word)
+proof:
+  ~use: [epsilon_eliminate_path_iff,
+         relation_star_refl,
+         relation_star_transitive]
+
+theorem epsilon_eliminate_language:
+  forall (m :: EpsilonNFA.of(?q, ?a)):
+    epsilon_nfa_accepts(m) === nfa_accepts(epsilon_eliminate(m))
+proof:
+  ~extensionality: [word]
+  ~use: [epsilon_eliminate_accepts_iff]
+
+theorem nfa_determinize_accepts_iff:
+  forall (m :: NFA.of(?q, ?a), word :: List.of(?a)):
+    nfa_accepts(m, word) <=> dfa_accepts(nfa_determinize(m), word)
+proof:
+  ~use: [nfa_determinize_run_iff]
+
+theorem nfa_determinize_language:
+  forall (m :: NFA.of(?q, ?a)):
+    nfa_accepts(m) === dfa_accepts(nfa_determinize(m))
+proof:
+  ~extensionality: [word]
+  ~use: [nfa_determinize_accepts_iff]
+
+theorem nfa_add_epsilon_accepts_iff:
+  forall (m :: NFA.of(?q, ?a), word :: List.of(?a)):
+    nfa_accepts(m, word) <=> epsilon_nfa_accepts(nfa_add_epsilon(m), word)
+proof:
+  ~use: [nfa_add_epsilon_path_iff]
+
+theorem nfa_add_epsilon_language:
+  forall (m :: NFA.of(?q, ?a)):
+    nfa_accepts(m) === epsilon_nfa_accepts(nfa_add_epsilon(m))
+proof:
+  ~extensionality: [word]
+  ~use: [nfa_add_epsilon_accepts_iff]
+
+theorem dfa_to_nfa_accepts_iff:
+  forall (m :: DFA.of(?q, ?a), word :: List.of(?a)):
+    dfa_accepts(m, word) <=> nfa_accepts(dfa_to_nfa(m), word)
+proof:
+  ~use: [dfa_to_nfa_path_iff]
+
+theorem dfa_to_nfa_language:
+  forall (m :: DFA.of(?q, ?a)):
+    dfa_accepts(m) === nfa_accepts(dfa_to_nfa(m))
+proof:
+  ~extensionality: [word]
+  ~use: [dfa_to_nfa_accepts_iff]
+
+theorem epsilon_nfa_determinize_accepts_iff:
+  forall (m :: EpsilonNFA.of(?q, ?a), word :: List.of(?a)):
+    epsilon_nfa_accepts(m, word)
+      <=> dfa_accepts(epsilon_nfa_determinize(m), word)
+proof:
+  ~use: [epsilon_eliminate_accepts_iff,
+         nfa_determinize_accepts_iff]
+
+theorem epsilon_nfa_determinize_language:
+  forall (m :: EpsilonNFA.of(?q, ?a)):
+    epsilon_nfa_accepts(m) === dfa_accepts(epsilon_nfa_determinize(m))
+proof:
+  ~extensionality: [word]
+  ~use: [epsilon_nfa_determinize_accepts_iff]

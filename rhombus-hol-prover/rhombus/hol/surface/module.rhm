@@ -958,11 +958,6 @@ meta:
     let core:
       '(core_function $name [$param, ...] $result $measure $body_core)'.relocate_span([form])
     values(core, name)
-  fun option_symbol_stx(v) :: Syntax:
-    match v
-    | #false: Syntax.make(#false, id_ctx)
-    | n: symbol_id(n :~ Symbol)
-
   fun option_int_stx(v) :: Syntax:
     match v
     | #false: Syntax.make(#false, id_ctx)
@@ -984,8 +979,7 @@ meta:
     let witness_stxs = parsed[#'choose]
     let search_steps = parsed[#'limit]
     let extensionality = parsed[#'extensionality]
-    let induct_stx = option_symbol_stx(induct)
-    let extensionality_stx = option_symbol_stx(extensionality)
+    let [i, ...] = (induct :~ List).map(fun (n): symbol_id(n :~ Symbol))
     let [u, ...] = (using_names :~ List).map(fun (n): symbol_id(n :~ Symbol))
     let [d, ...] = (skipped_stage_names :~ List).map(
                      fun (n): symbol_id(n :~ Symbol))
@@ -995,8 +989,10 @@ meta:
                       fun (s): parse_core_encoding(s :~ Syntax))
     let [w, ...] = (witness_stxs :~ List).map(
                       fun (s): parse_core_encoding(s :~ Syntax))
+    let [x, ...] = (extensionality :~ List).map(
+                     fun (n): symbol_id(n :~ Symbol))
     let steps_stx = option_int_stx(search_steps)
-    '(core_tactic $induct_stx [$u, ...] [$d, ...] [$r, ...] [$c, ...] [$w, ...] $steps_stx $extensionality_stx)'.relocate_span([at])
+    '(core_tactic [$i, ...] [$u, ...] [$d, ...] [$r, ...] [$c, ...] [$w, ...] $steps_stx [$x, ...])'.relocate_span([at])
 
   // Each non-import step becomes one state-transition function -- a value
   // closing over its own decoded syntax and error span, folded left to
@@ -1120,6 +1116,16 @@ meta:
       mk_fun(surface_optional_type((binder :~ CoreBinder).type_stx,
                                    registry, "_parameter"),
              ty)
+
+  // Parenthesize each layer so an argument type that is itself a function
+  // remains one domain while the declaration's parameters become a curried
+  // type from left to right.
+  fun definition_type_syntax(parameters :: List,
+                             result_type :: Syntax) :: Syntax:
+    for values(type_stx :~ Syntax = result_type) (
+          parameter in parameters.reverse()):
+      let domain = ((parameter :~ List)[2] :~ Syntax)
+      '($((domain :~ Syntax))) -> ($((type_stx :~ Syntax)))'
 
   fun emit_group(kind :: Symbol, decls :: List.of(expand.Decl),
                  runtime_state :: SurfaceState, family :: Boolean)
@@ -1256,10 +1262,21 @@ meta:
                ['(~theorem [$name] [$core] [$tactic_core] [$at])'],
                runtime_state)
     | #'definition:
-        let [name, type_stx, body_groups] = d.parts
+        let [name, parameter_parts, result_type, body_groups] = d.parts
         let at = head_term(d.form)
+        let parameters :~ List = parameter_parts
+        let type_stx = definition_type_syntax(
+                         parameters, result_type :~ Syntax)
         let [g, ...] = (body_groups :~ List)
-        let core = parse_hol_encoding('$g; ...')
+        let core:
+          match parameters
+          | []: parse_hol_encoding('$g; ...')
+          | _:
+              let [binder, ...]:
+                for List (part in parameters):
+                  encode_binder((part :~ List)[0] :~ Syntax)
+              let encoded_body = encode_function_body('$g; ...')
+              '(core_function_expr [$binder, ...] ($result_type) $encoded_body)'.relocate_span([at])
         values([],
                ['(~definition [$name] [$type_stx] [$core] [$at])'],
                runtime_state)

@@ -423,14 +423,14 @@ theorem name:
   proposition
 
 proof:
-  ~induct: variable
-  ~split: proposition
-  ~choose: expression
+  ~induct: [variable, ...]
+  ~split: [proposition, ...]
+  ~choose: [expression, ...]
   ~use: [theorem, ...]
   ~skip: [stage, ...]
   ~disable: [rule, ...]
   ~limit: nonnegative_integer
-  ~extensionality: variable
+  ~extensionality: [variable, ...]
 ```
 
 A theorem is elaborated as a Boolean HOL term and proved during compilation.
@@ -440,19 +440,26 @@ it explicitly with `~use`; adding an unrelated theorem must not silently change
 automation.
 
 The `proof:` block is optional. Its options only control proof search; none can
-admit a false proposition.
+admit a false proposition. Each option keyword may occur at most once.
+Every bracketed list shown above must be nonempty, and its elements retain
+their written order; repeated keywords never concatenate lists.
 
-- `~induct:` chooses the induction variable once.
-- `~split:` adds a Boolean case split; it may repeat.
-- `~choose:` supplies an existential witness; it may repeat.
-- `~use:` enables listed theorem(s) for this proof only; it may repeat in source
-  order.
-- `~disable:` disables selected rewrite rule(s) for this proof only.
-- `~skip:` skips selected named waterfall stages for this proof only.
-- `~limit:` sets the nonnegative proof-step limit once.
-- `~extensionality:` names a fresh variable and reduces an equality of functions
-  (including predicate-encoded sets) to its pointwise equality. It is a
-  compile-time error for any other goal shape.
+- `~induct:` gives strict, ordered induction-variable hints. The first hint is
+  consumed at the first induction on each unresolved branch, and the remaining
+  hints propagate in order to every generated subgoal. If the next named
+  variable cannot be inducted on in any unresolved branch, the proof fails
+  explicitly. The induction heuristic resumes only after all listed hints are
+  exhausted.
+- `~extensionality:` gives fresh names for sequential function-extensionality
+  steps. Every listed name is consumed in order before `~choose:` or `~split:`
+  is applied; each step requires the current goal to be an equality at function
+  type (including predicate-encoded sets).
+- `~split:` performs its Boolean case splits in list order.
+- `~choose:` supplies existential witnesses in list order, before case splits.
+- `~use:` enables the listed theorems for this proof only.
+- `~disable:` disables the listed rewrite rules for this proof only.
+- `~skip:` skips the listed named waterfall stages for this proof only.
+- `~limit:` sets the nonnegative proof-step limit.
 
 ### 4.6 `notation`
 

@@ -82,9 +82,10 @@ fun irrelevance_apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
   eliminate_irrelevance_goal(goal)
 
 fun induction_stage(hint :: maybe(FVar)) :: Function:
-  fun apply(env :: ProofEnv, goal :: Goal) :: maybe(Step):
-    induction_attempt(env.base.thy, env.base.funs, env.base.dts,
-                      env.base.schemes, hint, goal)
+  fun apply(env :: ProofEnv, goal :: Goal) :: maybe(InductionAttempt):
+    induction_attempt_with_remap(
+      env.base.thy, env.base.funs, env.base.dts,
+      env.base.schemes, hint, goal)
   apply
 
 fun standard_stages(env :: ProofEnv, budget :: Budget) :: List.of(Function):
@@ -144,16 +145,17 @@ fun check_skipped_stages(skipped :: Set.of(Symbol)) :: Void:
             error.val(~label: "understood", to_string(stage_names)))
 
 
-// `hint` forces the first induction variable; deeper inductions always choose
-// for themselves. This public boundary builds the proof environment and the
-// search budget once; every recursive call below threads them explicitly.
+// Explicit induction hints are strict and ordered. A hint survives ordinary
+// stages, is consumed only when an induction is performed, and its remaining
+// tail is propagated unchanged to every generated subgoal. Once the list is
+// exhausted, the ordinary induction heuristic takes over.
 fun prove_goal(ctx :: Context, g :: Goal,
-               ~induct: hint :: maybe(FVar) = #false,
+               ~induct: hints :: List.of(FVar) = [],
                ~skipped_stages: skipped :: Set.of(Symbol) = Set(),
                ~limits: steps :: NonnegInt = default_search_steps)
      :: values(maybe(Thm), List.of(Residue)):
   let env = run_proof_scope(ctx, RuleScope([], [], skipped))
-  prove_goal_impl(env, g, fresh_budget(steps), [], ~induct: hint)
+  prove_goal_impl(env, g, fresh_budget(steps), [], ~induct: hints)
 
 // `path` is the trace scoped to this goal so far, most recent event first;
 // `open_goal` reverses it into root-to-leaf order only when a residue is
@@ -162,13 +164,13 @@ fun prove_goal(ctx :: Context, g :: Goal,
 // so a goal that reaches here through that preprocessing keeps its history.
 fun prove_goal_impl(env :: ProofEnv, g :: Goal, budget :: Budget,
                     path :: List.of(TraceEvent),
-                    ~induct: hint :: maybe(FVar) = #false)
+                    ~induct: hints :: List.of(FVar) = [])
      :: values(maybe(Thm), List.of(Residue)):
   fun open_goal(g :: Goal, path :: List.of(TraceEvent))
        :: values(maybe(Thm), List.of(Residue)):
     values(#false, [Residue(g, path.reverse())])
 
-  fun go(g :: Goal, inducted :: List, hint :: maybe(FVar),
+  fun go(g :: Goal, inducted :: List, hints :: List.of(FVar),
          path :: List.of(TraceEvent)) :: values(maybe(Thm), List.of(Residue)):
     // One step per waterfall visit, on the same budget the simplifier spends
     // from. Each individual simplification can terminate while the stages
@@ -182,88 +184,127 @@ fun prove_goal_impl(env :: ProofEnv, g :: Goal, budget :: Budget,
         | inducted.contains(key): open_goal(g, path)
         | env.skipped_stages.contains(#'induct): open_goal(g, path)
         | ~else:
-            match induction_stage(hint)(env, g)
-            | #false: open_goal(g, path)
-            | induction :~ Step:
-                descend(induction, inducted ++ [key], #false, path)
-    | step :~ Step: descend(step, inducted, hint, path)
+            match hints
+            | List.cons(hint, rest):
+                match induction_stage(hint :~ FVar)(env, g)
+                | #false:
+                    error(
+                      ~who: #'proof,
+                      "`~induct` cannot apply the next variable in this branch",
+                      error.val(~label: "variable", (hint :~ FVar).name),
+                      error.val(~label: "goal", show(g.concl)))
+                | induction :~ InductionAttempt:
+                    descend_induction(
+                      induction, inducted ++ [key], rest :~ List, path)
+            | []:
+                match induction_stage(#false)(env, g)
+                | #false: open_goal(g, path)
+                | induction :~ InductionAttempt:
+                    descend_induction(induction, inducted ++ [key], [], path)
+    | step :~ Step: descend(step, inducted, hints, path)
 
-  // `hint` is the user's `~induct` variable, and it survives a step that is
-  // not an induction: a goal that simplifies once before the induction stage
-  // is reached would otherwise lose it and fall back to the heuristic, which
-  // is not what the option says. An induction consumes it; deeper ones choose
-  // for themselves.
-  fun descend(step :: Step, inducted :: List, hint :: maybe(FVar),
+  fun descend(step :: Step, inducted :: List, hints :: List.of(FVar),
               path :: List.of(TraceEvent)) :: values(maybe(Thm), List.of(Residue)):
     solve_step(step, path,
                fun (subgoal :: Goal, subpath :: List.of(TraceEvent)):
-                 // Only where the variable is still there to induct on.
-                 let carried = (cond
-                                | !hint: #false
-                                | free_vars(subgoal.concl).contains(hint :~ Term):
-                                    hint
-                                | ~else: #false)
-                 go(subgoal, inducted, carried, subpath))
+                 go(subgoal, inducted, hints, subpath))
+
+  fun remap_hints(hints :: List.of(FVar), remap :: Map) :: List.of(FVar):
+    for List (hint in hints):
+      match remap.get(hint, #false)
+      | #false: hint
+      | reopened: reopened :~ FVar
+
+  fun descend_induction(
+        induction :: InductionAttempt, inducted :: List,
+        hints :: List.of(FVar), path :: List.of(TraceEvent))
+       :: values(maybe(Thm), List.of(Residue)):
+    let step = induction.step
+    unless step.subgoals.length() == step.events.length()
+             && step.subgoals.length() == induction.remaps.length()
+    | error(~who: #'proof,
+            "induction step has unpaired subgoals, events, or remappings")
+    recur loop (remaining_goals :~ List = step.subgoals,
+                remaining_events :~ List = step.events,
+                remaining_remaps :~ List = induction.remaps,
+                thms_rev :~ List = [],
+                residues :~ List = []):
+      match [remaining_goals, remaining_events, remaining_remaps]
+      | [[], [], []]:
+          (if residues.length() == 0
+           | values(step.justify(thms_rev.reverse()), [])
+           | values(#false, residues))
+      | [List.cons(subgoal, goal_rest),
+         List.cons(event, event_rest),
+         List.cons(remap, remap_rest)]:
+          let (thm, sub_residues):
+            go(subgoal :~ Goal, inducted,
+               remap_hints(hints, remap :~ Map),
+               List.cons(event :~ TraceEvent, path))
+          loop(goal_rest, event_rest, remap_rest,
+               List.cons(thm, thms_rev), residues ++ sub_residues)
 
   check_skipped_stages(env.skipped_stages)
-  go(g, [], hint, path)
+  go(g, [], hints, path)
 
 // Prove a closed proposition.  Leading universal quantifiers are stripped
 // first -- the prover works on the matrix and puts the quantifiers back --
 // and the result is checked against what was asked for before it is returned.
 //
-// `names` supplies the names to give those quantified variables.  Terms are
+// `names` supplies the names to give those quantified variables. Terms are
 // locally nameless, so a binder's name is not part of the statement: it lives
-// in the source the statement was written from.  Anything that refers to a
-// bound variable by name -- a `~induct: xs` option, and the variable names
-// a residue message shows the user -- therefore has to be told
-// what the source called them.  Without `names` the prover invents its own,
+// in the source the statement was written from. Anything that refers to a
+// bound variable by name -- the variables in a `~induct: [...]` option, and
+// the variable names a residue message shows the user -- therefore has to be
+// told what the source called them. Without `names` the prover invents its own,
 // which is fine for a machine-generated goal and unhelpful for a human one.
 // The public entry point builds the proof environment and the shared search
 // budget once; `prove_impl` and everything beneath it only receive the
 // capabilities they were handed -- nested work cannot reset the allowance.
 fun prove(ctx :: Context, statement :: Term,
           ~names: names :: List.of(Symbol) = [],
-          ~induct: hint :: maybe(Symbol) = #false,
+          ~induct: hints :: List.of(Symbol) = [],
           ~scope: scope :: RuleScope = RuleScope(),
           ~cases: cases :: List.of(Term) = [],
           ~witnesses: witnesses :: List.of(Term) = [],
           ~limits: steps :: NonnegInt = default_search_steps,
-          ~extensionality: extensionality :: maybe(Symbol) = #false)
+          ~extensionality: extensionality :: List.of(Symbol) = [])
      :: values(maybe(Thm), List.of(Residue)):
   let env = run_proof_scope(ctx, scope)
   prove_impl(env, statement, fresh_budget(steps), ~names: names,
-             ~induct: hint, ~cases: cases, ~witnesses: witnesses,
+             ~induct: hints, ~cases: cases, ~witnesses: witnesses,
              ~extensionality: extensionality)
 
 fun prove_impl(env :: ProofEnv, statement :: Term, budget :: Budget,
                ~names: names :: List.of(Symbol) = [],
-               ~induct: hint :: maybe(Symbol) = #false,
+               ~induct: hints :: List.of(Symbol) = [],
                ~cases: cases :: List.of(Term) = [],
                ~witnesses: witnesses :: List.of(Term) = [],
-               ~extensionality: extensionality :: maybe(Symbol) = #false)
+               ~extensionality: extensionality :: List.of(Symbol) = [])
      :: values(maybe(Thm), List.of(Residue)):
   let thy = env.base.thy
   let (vars, matrix) = strip_forall_all(statement, names)
-  let hint_var = (cond
-                  | hint:
-                      recur loop (vs :~ List = vars):
-                        match vs
-                        | []:
-                            error(~who: #'prove,
-                                  "no such variable to induct on",
-                                  error.val(~label: "variable", hint),
-                                  error.val(~label: "quantified variables",
-                                            to_string(vars.map(
-                                              fun (u :: FVar): u.name))),
-                                  error.val(~label: "hint",
-                                            "pass the source names with "
-                                              ++ "`~names:`; a locally "
-                                              ++ "nameless term does not "
-                                              ++ "carry them"))
-                        | List.cons(v, rest):
-                            (if (v :~ FVar).name == hint | v | loop(rest))
-                  | ~else: #false)
+  fun resolve_hint(hint :: Symbol) :: FVar:
+    let matches = vars.filter(
+                    ~keep: fun (v :: FVar): v.name == hint)
+    match matches
+    | []:
+        error(~who: #'prove,
+              "no such variable to induct on",
+              error.val(~label: "variable", hint),
+              error.val(~label: "quantified variables",
+                        to_string(vars.map(fun (u :: FVar): u.name))),
+              error.val(~label: "hint",
+                        "pass the source names with `~names:`; a locally "
+                          ++ "nameless term does not carry them"))
+    | List.cons(v, []): v :~ FVar
+    | ~else:
+        error(~who: #'prove,
+              "ambiguous variable name in `~induct`",
+              error.val(~label: "variable", hint))
+  let hint_vars:
+    for List (hint in hints):
+      resolve_hint(hint)
   // Beta-normalize the goal before the waterfall sees it. The surface
   // desugarings -- an anonymous or local `function`, a `let` in expression
   // position, `exists1`/`select`/`Set`-comprehension -- all elaborate to a
@@ -276,7 +317,7 @@ fun prove_impl(env :: ProofEnv, statement :: Term, budget :: Budget,
   let reduced = (if beta | rhs_of(beta :~ Thm) | matrix)
   let (thm, residues) = apply_explicit_extensionality(
                            env, budget, extensionality, witnesses, cases,
-                           mk_goal([], reduced), hint_var, [])
+                           mk_goal([], reduced), hint_vars, [])
   match thm
   | #false: values(#false, residues)
   | th :~ Thm:
@@ -295,17 +336,18 @@ fun prove_impl(env :: ProofEnv, statement :: Term, budget :: Budget,
                 error.val(~label: "got", show(concl_of(closed))))
       | ~else: values(closed, [])
 
-// An explicit extensionality request is one derived `EXT` step before the
-// ordinary proof controls. It is accepted only for equality at function type;
+// Explicit extensionality names are consumed in source order before the other
+// proof controls. Every requested step must see an equality at function type;
 // set equality is the same case because sets are predicates.
 fun apply_explicit_extensionality(
-      env :: ProofEnv, budget :: Budget, requested :: maybe(Symbol),
+      env :: ProofEnv, budget :: Budget, requested :: List.of(Symbol),
       witnesses :: List.of(Term), cases :: List.of(Term),
-      g :: Goal, hint :: maybe(FVar), path :: List.of(TraceEvent))
+      g :: Goal, hints :: List.of(FVar), path :: List.of(TraceEvent))
      :: values(maybe(Thm), List.of(Residue)):
   match requested
-  | #false: apply_witnesses(env, budget, witnesses, cases, g, hint, path)
-  | name:
+  | []: apply_witnesses(env, budget, witnesses, cases, g, hints, path)
+  | List.cons(name, rest):
+      let rest :~ List = rest
       match dest_imp(g.concl)
       | [antecedent, consequent]:
           let subgoal = Goal(g.asms ++ [antecedent], consequent)
@@ -317,7 +359,7 @@ fun apply_explicit_extensionality(
                      fun (sg :: Goal, subpath :: List.of(TraceEvent)):
                        apply_explicit_extensionality(
                          env, budget, requested, witnesses, cases, sg,
-                         hint, subpath))
+                         hints, subpath))
       | #false:
           match dest_eq(g.concl)
           | [left, right]:
@@ -341,8 +383,9 @@ fun apply_explicit_extensionality(
               let step = Step([subgoal], justify, [event])
               solve_step(step, path,
                          fun (sg :: Goal, subpath :: List.of(TraceEvent)):
-                           apply_witnesses(env, budget, witnesses, cases,
-                                           sg, hint, subpath))
+                           apply_explicit_extensionality(
+                             env, budget, rest, witnesses, cases, sg,
+                             hints, subpath))
           | #false:
               error(
                 ~who: #'proof,
@@ -354,11 +397,11 @@ fun apply_explicit_extensionality(
 // rather than being ignored.
 fun apply_witnesses(env :: ProofEnv, budget :: Budget,
                     witnesses :: List.of(Term), cases :: List.of(Term),
-                    g :: Goal, hint :: maybe(FVar),
+                    g :: Goal, hints :: List.of(FVar),
                     path :: List.of(TraceEvent))
      :: values(maybe(Thm), List.of(Residue)):
   match witnesses
-  | []: apply_cases(env, budget, cases, g, hint, path)
+  | []: apply_cases(env, budget, cases, g, hints, path)
   | List.cons(witness, rest):
       match dest_imp(g.concl)
       | [antecedent, consequent]:
@@ -370,7 +413,7 @@ fun apply_witnesses(env :: ProofEnv, budget :: Budget,
           solve_step(step, path,
                      fun (sg :: Goal, subpath :: List.of(TraceEvent)):
                        apply_witnesses(env, budget, witnesses, cases, sg,
-                                       hint, subpath))
+                                       hints, subpath))
       | ~else:
           match dest_exists(g.concl)
           | #false:
@@ -392,10 +435,10 @@ fun apply_witnesses(env :: ProofEnv, budget :: Budget,
               solve_step(step, path,
                          fun (sg :: Goal, subpath :: List.of(TraceEvent)):
                            apply_witnesses(env, budget, rest :~ List, cases,
-                                           sg, hint, subpath))
+                                           sg, hints, subpath))
 
-// `~split: p`, applied before the waterfall runs: split the goal on each term
-// in turn, true branch and false branch, so `n` terms give `2^n` subgoals.
+// `~split: [p, ...]`, applied before the waterfall runs: split the goal on
+// each term in turn, true branch and false branch, so `n` terms give `2^n` subgoals.
 // Justified by `prover/tautology.rhm`'s `excluded_middle`, not postulated -- a term that
 // turns out irrelevant to the goal just produces two subgoals that both need
 // the same proof the unsplit goal would have, so a bad choice of case terms
@@ -405,10 +448,11 @@ fun apply_witnesses(env :: ProofEnv, budget :: Budget,
 // Both branches are always searched, even once one is known stuck, so a
 // genuinely double-stuck case split reports both residues, not just one.
 fun apply_cases(env :: ProofEnv, budget :: Budget, cases :: List.of(Term),
-                g :: Goal, hint :: maybe(FVar), path :: List.of(TraceEvent))
+                g :: Goal, hints :: List.of(FVar),
+                path :: List.of(TraceEvent))
      :: values(maybe(Thm), List.of(Residue)):
   match cases
-  | []: prove_goal_impl(env, g, budget, path, ~induct: hint)
+  | []: prove_goal_impl(env, g, budget, path, ~induct: hints)
   | List.cons(c, rest):
       let rest :~ List = rest
       let sub_true = Goal(g.asms ++ [c], g.concl)
@@ -422,7 +466,7 @@ fun apply_cases(env :: ProofEnv, budget :: Budget, cases :: List.of(Term),
                       [true_event, false_event])
       solve_step(step, path,
                  fun (sg :: Goal, subpath :: List.of(TraceEvent)):
-                   apply_cases(env, budget, rest, sg, hint, subpath))
+                   apply_cases(env, budget, rest, sg, hints, subpath))
 
 fun strip_forall_all(t :: Term, names :: List.of(Symbol))
      :: values(List.of(FVar), Term):

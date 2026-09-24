@@ -14,7 +14,13 @@ import:
   rhombus/hol/surface/overload open
   rhombus/hol/surface/type/registry open
   rhombus/hol/surface/core open
+  rhombus/hol/surface/driver open
+  rhombus/hol/definition/function/spec open
+  rhombus/hol/prover/proof/node open
+  rhombus/hol/prover/tactic/induction open
+  rhombus/hol/prover/waterfall open
   lib("rhombus/hol/tests/surface/declaration/theorem/fixtures/theorem_ok.rhm") as t
+  lib("rhombus/hol/tests/surface/declaration/theorem/fixtures/theorem_ok.rhm")!hol_theory as logical_t
 
 fun load(mp :: ModulePath):
   instantiate_hol_fixture(mp)
@@ -172,75 +178,154 @@ check:
 // the proof-option parser
 // ==========================================================================
 
-def default_tactic_options = {#'induct: #false,
+def default_tactic_options = {#'induct: [],
                               #'use: [],
                               #'skip: [],
                               #'disable: [],
                               #'split: [],
                               #'choose: [],
                               #'limit: #false,
-                              #'extensionality: #false}
+                              #'extensionality: []}
 check parse_tactic(#false) ~is default_tactic_options
-check:
-  parse_tactic('~induct: xs')
-  ~is default_tactic_options ++ {#'induct: #'xs}
 check:
   parse_tactic(
     '«
-       ~induct: xs
+       ~induct: [xs, ys]
+       ~extensionality: [x, y]
        ~use: [a, b]
+       ~skip: [fertilize, generalize]
+       ~disable: [foo, bar]
      »')
-  ~is default_tactic_options ++ {#'induct: #'xs, #'use: [#'a, #'b]}
+  ~is default_tactic_options
+        ++ {#'induct: [#'xs, #'ys],
+            #'extensionality: [#'x, #'y],
+            #'use: [#'a, #'b],
+            #'skip: [#'fertilize, #'generalize],
+            #'disable: [#'foo, #'bar]}
+check:
+  let parsed = parse_tactic('~split: [p(x), q(y, z)]')
+  let cases = parsed[#'split] :~ List
+  let first:
+    match cases[0] :~ Syntax
+    | 'p(x)': #'first
+    | ~else: #'other
+  let second:
+    match cases[1] :~ Syntax
+    | 'q(y, z)': #'second
+    | ~else: #'other
+  [first, second]
+  ~is [#'first, #'second]
+check:
+  let parsed = parse_tactic('~choose: [x, f(y)]')
+  let witnesses = parsed[#'choose] :~ List
+  let second:
+    match witnesses[1] :~ Syntax
+    | 'f(y)': #'application
+    | ~else: #'other
+  [Syntax.unwrap(witnesses[0] :~ Syntax), second]
+  ~is [#'x, #'application]
+
+// A second occurrence is always an error; lists never accumulate across
+// option groups.
+check:
+  parse_tactic(
+    '«
+       ~induct: [xs]
+       ~induct: [ys]
+     »')
+  ~throws "duplicate `~induct` option"
+check:
+  parse_tactic(
+    '«
+       ~extensionality: [x]
+       ~extensionality: [y]
+     »')
+  ~throws "duplicate `~extensionality` option"
 check:
   parse_tactic(
     '«
        ~use: [a]
-       ~use: [b, c]
+       ~use: [b]
      »')
-  ~is default_tactic_options ++ {#'use: [#'a, #'b, #'c]}
+  ~throws "duplicate `~use` option"
 check:
   parse_tactic(
     '«
        ~skip: [fertilize]
        ~skip: [generalize]
      »')
-  ~is default_tactic_options ++ {#'skip: [#'fertilize, #'generalize]}
+  ~throws "duplicate `~skip` option"
 check:
   parse_tactic(
     '«
        ~disable: [foo]
        ~disable: [bar]
      »')
-  ~is default_tactic_options ++ {#'disable: [#'foo, #'bar]}
-check:
-  let parsed = parse_tactic(
-                 '«
-                    ~split: p(x)
-                    ~split: q(y, z)
-                  »')
-  let cs = parsed[#'split]
-  (cs :~ List).length()
-  ~is 2
-check:
-  let parsed = parse_tactic(
-                 '«
-                    ~choose: x
-                    ~choose: f(y)
-                  »')
-  let ws = parsed[#'choose]
-  (ws :~ List).length()
-  ~is 2
-// A proof may raise its own ceiling; `#false` above is "take the default".
-check:
-  parse_tactic('~limit: 500000')
-  ~is default_tactic_options ++ {#'limit: 500000}
+  ~throws "duplicate `~disable` option"
 check:
   parse_tactic(
     '«
-       ~induct: xs
-       ~induct: ys
+       ~split: [p]
+       ~split: [q]
      »')
-  ~throws "duplicate `~induct` option"
+  ~throws "duplicate `~split` option"
+check:
+  parse_tactic(
+    '«
+       ~choose: [x]
+       ~choose: [y]
+     »')
+  ~throws "duplicate `~choose` option"
+
+// Every list-valued option rejects both scalar and empty-list spellings with
+// its own diagnostic.
+check:
+  parse_tactic('~induct: xs')
+  ~throws "`~induct` expects one nonempty bracketed list of identifiers"
+check:
+  parse_tactic('~extensionality: x')
+  ~throws "`~extensionality` expects one nonempty bracketed list of identifiers"
+check:
+  parse_tactic('~use: a')
+  ~throws "`~use` expects one nonempty bracketed list of theorem names"
+check:
+  parse_tactic('~skip: simplify')
+  ~throws "`~skip` expects one nonempty bracketed list of stage names"
+check:
+  parse_tactic('~disable: foo')
+  ~throws "`~disable` expects one nonempty bracketed list of rule names"
+check:
+  parse_tactic('~split: p(x)')
+  ~throws "`~split` expects one nonempty bracketed list of propositions"
+check:
+  parse_tactic('~choose: x')
+  ~throws "`~choose` expects one nonempty bracketed list of expressions"
+check:
+  parse_tactic('~induct: []')
+  ~throws "`~induct` expects one nonempty bracketed list of identifiers"
+check:
+  parse_tactic('~extensionality: []')
+  ~throws "`~extensionality` expects one nonempty bracketed list of identifiers"
+check:
+  parse_tactic('~use: []')
+  ~throws "`~use` expects one nonempty bracketed list of theorem names"
+check:
+  parse_tactic('~skip: []')
+  ~throws "`~skip` expects one nonempty bracketed list of stage names"
+check:
+  parse_tactic('~disable: []')
+  ~throws "`~disable` expects one nonempty bracketed list of rule names"
+check:
+  parse_tactic('~split: []')
+  ~throws "`~split` expects one nonempty bracketed list of propositions"
+check:
+  parse_tactic('~choose: []')
+  ~throws "`~choose` expects one nonempty bracketed list of expressions"
+
+// `~limit` remains the only scalar option and retains its singleton checks.
+check:
+  parse_tactic('~limit: 500000')
+  ~is default_tactic_options ++ {#'limit: 500000}
 check:
   parse_tactic(
     '«
@@ -248,11 +333,66 @@ check:
        ~limit: 2
      »')
   ~throws "duplicate `~limit` option"
-check parse_tactic('~induct: xs ys') ~throws "`~induct` expects one identifier"
 check parse_tactic('~limit: -1') ~throws "search steps cannot be negative"
 check parse_tactic('induct(xs)') ~throws "unknown proof option"
 check parse_tactic('qed') ~throws "unknown proof option"
 check parse_tactic('auto') ~throws "unknown proof option"
+
+// Ordered nested hints survive the strengthening that generalizes a recursive
+// companion. The first induction's logical subgoals are unchanged, while each
+// branch records the freshly reopened variable that the second hint must use.
+def nested_state :~ HolState = logical_t.theory
+def nested_app_info :~ FunInfo = nested_state.ctx.funs[#'app]
+def nested_list_type = nested_app_info.spec.arg_types[0]
+def nested_xs = mk_var(#'xs, nested_list_type)
+def nested_ys = mk_var(#'ys, nested_list_type)
+def nested_app_xy = mk_comb(
+                      mk_comb(nested_app_info.fn, nested_xs),
+                      nested_ys)
+def nested_goal = Goal([], mk_eq(nested_app_xy, nested_app_xy))
+def ordinary_first = induction_attempt(
+                       nested_state.ctx.thy, nested_state.ctx.funs,
+                       nested_state.ctx.dts, nested_state.ctx.schemes,
+                       nested_xs, nested_goal) :~ Step
+def ordered_first = induction_attempt_with_remap(
+                      nested_state.ctx.thy, nested_state.ctx.funs,
+                      nested_state.ctx.dts, nested_state.ctx.schemes,
+                      nested_xs, nested_goal) :~ InductionAttempt
+check:
+  ordinary_first.subgoals.map(fun (g :: Goal): g.concl)
+  ~is ordered_first.step.subgoals.map(fun (g :: Goal): g.concl)
+check:
+  for any (subgoal in ordered_first.step.subgoals,
+           remap in ordered_first.remaps):
+    match (remap :~ Map).get(nested_ys, #false)
+    | #false: #true
+    | reopened:
+        induction_attempt(
+          nested_state.ctx.thy, nested_state.ctx.funs,
+          nested_state.ctx.dts, nested_state.ctx.schemes,
+          reopened :~ FVar, subgoal :~ Goal) == #false
+  ~is #false
+
+// Every explicit extensionality name is consumed before ordinary proof search.
+// An overlong list therefore fails at the first non-function equality instead
+// of silently ignoring its tail.
+def nested_function = mk_var(
+                        #'f, mk_fun(bool, mk_fun(bool, bool)))
+def nested_function_equality = mk_forall(
+                                 nested_function,
+                                 mk_eq(nested_function, nested_function))
+check:
+  let (proved, _) = prove(
+                      nested_state.ctx, nested_function_equality,
+                      ~names: [#'f],
+                      ~extensionality: [#'x, #'y])
+  proved != #false
+  ~is #true
+check:
+  prove(nested_state.ctx, nested_function_equality,
+        ~names: [#'f],
+        ~extensionality: [#'x, #'y, #'z])
+  ~throws "`~extensionality` requires an equality between functions"
 
 // ==========================================================================
 // a failed proof is a compile error with the residue and a location

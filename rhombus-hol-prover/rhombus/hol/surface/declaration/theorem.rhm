@@ -75,9 +75,9 @@ fun elaborate_theorem_statement(
 //
 // A `proof:` block is a sequence of declarative option groups. The block
 // itself is the boundary: each option configures the one existing waterfall
-// invocation, and none executes as a run-time Rhombus expression. `~use`,
-// `~skip`, `~disable`, `~split`, and `~choose` accumulate in source order,
-// while `~induct` and `~limit` are singletons.
+// invocation, and none executes as a run-time Rhombus expression. Every option
+// occurs at most once. All options except `~limit` contain one nonempty list
+// whose source order is preserved.
 //
 // `~skip` names waterfall stages to omit for this proof only. The recognised
 // names are `simplify`, `eliminate`, `fertilize`, `generalize`, `irrelevance`
@@ -92,14 +92,14 @@ fun elaborate_theorem_statement(
 fun parse_tactic(stx :: maybe(Syntax)) :: Map:
   match stx
   | #false:
-      {#'induct: #false,
+      {#'induct: [],
        #'use: [],
        #'skip: [],
        #'disable: [],
        #'split: [],
        #'choose: [],
        #'limit: #false,
-       #'extensionality: #false}
+       #'extensionality: []}
   | s :~ Syntax:
       match s
       | '$group; ...': parse_tactic_groups([group, ...])
@@ -108,78 +108,165 @@ fun parse_tactic(stx :: maybe(Syntax)) :: Map:
 fun parse_tactic_groups(groups :: List.of(Syntax)) :: Map:
   recur loop (
         remaining :~ List = groups,
-        acc :~ Map = {#'induct: #false,
+        acc :~ Map = {#'induct: [],
                       #'use: [],
                       #'skip: [],
                       #'disable: [],
                       #'split: [],
                       #'choose: [],
                       #'limit: #false,
-                      #'extensionality: #false}):
+                      #'extensionality: []},
+        seen :~ List = []):
     match remaining
     | []: acc
     | List.cons(group, rest):
         let rest :~ List = rest
         match group
-        | '~induct: $(n :: Identifier)':
-            match acc[#'induct]
-            | #false:
-                loop(rest, acc ++ {#'induct: Syntax.unwrap(n)})
-            | ~else:
-                syntax_error(#'proof, "duplicate `~induct` option", group)
+        | '~induct: [$(n :: Identifier), ...]':
+            when seen.contains(#'induct)
+            | syntax_error(#'proof, "duplicate `~induct` option", group)
+            let names = [Syntax.unwrap(n), ...]
+            when names.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~induct` expects one nonempty bracketed list of identifiers",
+                group)
+            loop(rest,
+                 acc ++ {#'induct: names},
+                 List.cons(#'induct, seen))
         | '~induct: $arg; ...':
-            syntax_error(#'proof, "`~induct` expects one identifier", group)
-        | '~extensionality: $(n :: Identifier)':
-            match acc[#'extensionality]
-            | #false:
-                loop(rest, acc ++ {#'extensionality: Syntax.unwrap(n)})
-            | ~else:
-                syntax_error(
-                  #'proof, "duplicate `~extensionality` option", group)
-        | '~extensionality: $arg; ...':
+            when seen.contains(#'induct)
+            | syntax_error(#'proof, "duplicate `~induct` option", group)
             syntax_error(
-              #'proof, "`~extensionality` expects one identifier", group)
+              #'proof,
+              "`~induct` expects one nonempty bracketed list of identifiers",
+              group)
+        | '~extensionality: [$(n :: Identifier), ...]':
+            when seen.contains(#'extensionality)
+            | syntax_error(
+                #'proof, "duplicate `~extensionality` option", group)
+            let names = [Syntax.unwrap(n), ...]
+            when names.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~extensionality` expects one nonempty bracketed list of identifiers",
+                group)
+            loop(rest,
+                 acc ++ {#'extensionality: names},
+                 List.cons(#'extensionality, seen))
+        | '~extensionality: $arg; ...':
+            when seen.contains(#'extensionality)
+            | syntax_error(
+                #'proof, "duplicate `~extensionality` option", group)
+            syntax_error(
+              #'proof,
+              "`~extensionality` expects one nonempty bracketed list of identifiers",
+              group)
         | '~use: [$(u :: Identifier), ...]':
+            when seen.contains(#'use)
+            | syntax_error(#'proof, "duplicate `~use` option", group)
+            let names = [Syntax.unwrap(u), ...]
+            when names.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~use` expects one nonempty bracketed list of theorem names",
+                group)
             loop(rest,
-                 acc ++ {#'use: (acc[#'use] :~ List) ++ [Syntax.unwrap(u), ...]})
-        | '~use: $rest; ...':
-            syntax_error(#'proof,
-                         "`~use` expects one bracketed list of theorem names",
-                         group)
+                 acc ++ {#'use: names},
+                 List.cons(#'use, seen))
+        | '~use: $arg; ...':
+            when seen.contains(#'use)
+            | syntax_error(#'proof, "duplicate `~use` option", group)
+            syntax_error(
+              #'proof,
+              "`~use` expects one nonempty bracketed list of theorem names",
+              group)
         | '~skip: [$(d :: Identifier), ...]':
+            when seen.contains(#'skip)
+            | syntax_error(#'proof, "duplicate `~skip` option", group)
+            let names = [Syntax.unwrap(d), ...]
+            when names.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~skip` expects one nonempty bracketed list of stage names",
+                group)
             loop(rest,
-                 acc ++ {#'skip: (acc[#'skip] :~ List) ++ [Syntax.unwrap(d), ...]})
-        | '~skip: $rest; ...':
-            syntax_error(#'proof,
-                         "`~skip` expects one bracketed list of stage names",
-                         group)
+                 acc ++ {#'skip: names},
+                 List.cons(#'skip, seen))
+        | '~skip: $arg; ...':
+            when seen.contains(#'skip)
+            | syntax_error(#'proof, "duplicate `~skip` option", group)
+            syntax_error(
+              #'proof,
+              "`~skip` expects one nonempty bracketed list of stage names",
+              group)
         | '~disable: [$(r :: Identifier), ...]':
+            when seen.contains(#'disable)
+            | syntax_error(#'proof, "duplicate `~disable` option", group)
+            let names = [Syntax.unwrap(r), ...]
+            when names.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~disable` expects one nonempty bracketed list of rule names",
+                group)
             loop(rest,
-                 acc ++ {#'disable: (acc[#'disable] :~ List) ++ [Syntax.unwrap(r), ...]})
-        | '~disable: $rest; ...':
-            syntax_error(#'proof,
-                         "`~disable` expects one bracketed list of rule names",
-                         group)
-        | '~split: $c':
+                 acc ++ {#'disable: names},
+                 List.cons(#'disable, seen))
+        | '~disable: $arg; ...':
+            when seen.contains(#'disable)
+            | syntax_error(#'proof, "duplicate `~disable` option", group)
+            syntax_error(
+              #'proof,
+              "`~disable` expects one nonempty bracketed list of rule names",
+              group)
+        | '~split: [$c, ...]':
+            when seen.contains(#'split)
+            | syntax_error(#'proof, "duplicate `~split` option", group)
+            let cases = [c, ...]
+            when cases.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~split` expects one nonempty bracketed list of propositions",
+                group)
             loop(rest,
-                 acc ++ {#'split: (acc[#'split] :~ List) ++ [c]})
-        | '~split: $rest; ...':
-            syntax_error(#'proof, "`~split` expects one proposition", group)
-        | '~choose: $w':
+                 acc ++ {#'split: cases},
+                 List.cons(#'split, seen))
+        | '~split: $arg; ...':
+            when seen.contains(#'split)
+            | syntax_error(#'proof, "duplicate `~split` option", group)
+            syntax_error(
+              #'proof,
+              "`~split` expects one nonempty bracketed list of propositions",
+              group)
+        | '~choose: [$w, ...]':
+            when seen.contains(#'choose)
+            | syntax_error(#'proof, "duplicate `~choose` option", group)
+            let witnesses = [w, ...]
+            when witnesses.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~choose` expects one nonempty bracketed list of expressions",
+                group)
             loop(rest,
-                 acc ++ {#'choose: (acc[#'choose] :~ List) ++ [w]})
-        | '~choose: $rest; ...':
-            syntax_error(#'proof, "`~choose` expects one term", group)
+                 acc ++ {#'choose: witnesses},
+                 List.cons(#'choose, seen))
+        | '~choose: $arg; ...':
+            when seen.contains(#'choose)
+            | syntax_error(#'proof, "duplicate `~choose` option", group)
+            syntax_error(
+              #'proof,
+              "`~choose` expects one nonempty bracketed list of expressions",
+              group)
         | '~limit: $(n :: Int)':
             let steps = Syntax.unwrap(n)
             unless steps >= 0
             | syntax_error(#'proof, "search steps cannot be negative", group)
             match acc[#'limit]
             | #false:
-                loop(rest, acc ++ {#'limit: steps})
+                loop(rest, acc ++ {#'limit: steps}, seen)
             | ~else:
                 syntax_error(#'proof, "duplicate `~limit` option", group)
-        | '~limit: $rest; ...':
+        | '~limit: $arg; ...':
             syntax_error(#'proof,
                          "`~limit` expects one nonnegative integer",
                          group)

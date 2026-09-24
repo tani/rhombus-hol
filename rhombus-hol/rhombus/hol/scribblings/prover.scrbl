@@ -103,10 +103,14 @@ is the parent goal's proof too.
 A variable of a declared datatype is chosen and the goal is split into one case
 per constructor, with an induction hypothesis for each recursive field.
 
-The variable is chosen by the argument positions the functions in the goal
-actually recurse on --- the same information the termination checker produced,
-so the prover inducts the way the definitions recurse. The
-@rhombus(~induct: variable) option overrides the choice.
+The heuristic chooses a variable from the argument positions the functions in
+the goal actually recurse on --- the same information the termination checker
+produced, so the prover inducts the way the definitions recurse. A nonempty
+@rhombus(~induct: [first, next, ...]) list overrides that choice with strict,
+ordered nested hints. Each induction consumes one name on every unresolved
+branch and propagates the remaining names to all generated subgoals; a branch
+where its next hint cannot apply fails explicitly. The heuristic resumes after
+the list is exhausted.
 
 Nested induction is bounded at depth six. That constant is not a tuning budget;
 it is what makes the driver a function rather than a search. Induction
@@ -142,13 +146,13 @@ instance of associativity, say --- the fix is to prove that statement as its
 own theorem and select it explicitly with @rhombus(~use: [associativity]).
 
 The things to reach for, in order: prove the missing theorem and select it with
-@rhombus(~use); give @rhombus(~induct: variable) when the prover picked the
-wrong variable; give @rhombus(~use: [lemma]) when an existing theorem is
-needed here; give
+@rhombus(~use); give @rhombus(~induct: [variable]) when the prover picked the
+wrong variable (or list several variables for strict nested induction); give
+@rhombus(~use: [lemma]) when an existing theorem is needed here; give
 @rhombus(~disable: [rule]) --- ACL2's @tt{:in-theory (disable ...)} ---
 to turn off a named rewrite rule for this proof when an enabled rule is firing
 where it should not; give
-@rhombus(~split: proposition) --- ACL2's @tt{:cases} --- when the goal
+@rhombus(~split: [proposition]) --- ACL2's @tt{:cases} --- when the goal
 turns on a Boolean term (typically an application of an uninterpreted or
 externally-supplied predicate) that no other stage can resolve, to split on it
 up front and let each branch reach its own conclusion with that term's truth
@@ -156,8 +160,10 @@ value as a hypothesis; give @rhombus(~skip: [stage]) --- ACL2's
 @tt{:do-not} --- to turn off one of @tt{simplify}, @tt{eliminate},
 @tt{fertilize}, @tt{generalize}, @tt{irrelevance} or @tt{induct} for this
 proof only, on the rare occasion a stage's heuristic is actively getting in
-the way. None of these can turn a false conjecture true or a wrong proof into a
-right one: a bad choice of any of them just changes what the residue looks like.
+the way. Each proof-option keyword occurs at most once, and every list is
+nonempty and retains source order. None of these can turn a false conjecture
+true or a wrong proof into a right one: a bad choice of any of them just
+changes what the residue looks like.
 
 @section{Justification}
 

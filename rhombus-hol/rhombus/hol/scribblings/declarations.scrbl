@@ -560,14 +560,14 @@ proof:
   proof_option
   ...
 
-proof_option = ~induct: Id
-             | ~split: proposition
-             | ~choose: term
+proof_option = ~induct: [Id, ...]
+             | ~split: [proposition, ...]
+             | ~choose: [term, ...]
              | ~use: [Id, ...]
              | ~skip: [Id, ...]
              | ~disable: [Id, ...]
              | ~limit: nonnegative_integer
-             | ~extensionality: Id
+             | ~extensionality: [Id, ...]
 }
 
 States a proposition and proves it while the module compiles. The proposition
@@ -585,41 +585,46 @@ must follow its theorem immediately and contain one or more option groups.
     forall (xs :: List.of(?a), ys :: List.of(?a), zs :: List.of(?a)):
       app(app(xs, ys), zs) === app(xs, app(ys, zs))
   proof:
-    ~induct: xs
+    ~induct: [xs]
 )
 
 Every theorem is retained by name but is not added to the global rule database.
 Use a theorem explicitly in a proof with the @rhombus(~use) option.
 Adding an unrelated theorem therefore cannot change later automation.
 
-The @rhombus(~induct) option names a variable to induct on; it may appear
-once. @rhombus(~split) adds a Boolean case split; repeat it for each
-proposition. @rhombus(~choose) supplies one existential candidate and may
-repeat. @rhombus(~use) names theorems to enable for this proof only, which is
-useful when a lemma is too aggressive to leave in the rewriter permanently.
+Every proof-option keyword may appear at most once. Every bracketed option list
+must be nonempty, retains its written order, and cannot be continued by
+repeating the keyword.
+
+The @rhombus(~induct) list gives strict nested induction hints. The first name
+is consumed when an unresolved branch reaches induction; the remaining names
+are propagated in order to every generated subgoal. A branch where its next
+named variable cannot be inducted on is an explicit proof failure. Once all
+listed names are consumed, the ordinary induction heuristic resumes.
+@rhombus(~split) performs its Boolean case splits in list order.
+@rhombus(~choose) supplies existential candidates in list order, before the
+case splits. @rhombus(~use) names theorems to enable for this proof only, which
+is useful when a lemma is too aggressive to leave in the rewriter permanently.
 @rhombus(~disable) names rules to disable for this proof only.
 @rhombus(~skip) names waterfall stages --- @tt{simplify}, @tt{eliminate},
 @tt{fertilize}, @tt{generalize}, @tt{irrelevance}, @tt{induct} --- to skip
 for this proof only; see @secref("prover"). @rhombus(~limit) sets this
-proof's nonnegative search-step ceiling and may appear once. The list options
-may repeat and append their values in source order. None of the options
-change what the prover is allowed to conclude, only what it tries.
+proof's nonnegative search-step ceiling. None of the options change what the
+prover is allowed to conclude, only what it tries.
 
-@rhombus(~extensionality) names a fresh variable and reduces a goal
-equating two functions (or two @tt{Set} values, which are functions to
-@rhombus(Boolean)) to the pointwise goal at that variable, justified by
-the kernel's derived @tt{EXT} rule --- no new axiom. It applies only when
-the goal is an equality between functions; requesting it against any
-other equality is a compile-time error, not a silent no-op. It may
-appear once and is applied before the ordinary waterfall runs, so the
-remaining options (@rhombus(~induct) in particular) operate on the
-pointwise goal it produces:
+The @rhombus(~extensionality) list names fresh variables for sequential
+function-extensionality steps. All names are consumed in order before
+@rhombus(~choose), @rhombus(~split), or the ordinary waterfall runs. Each step
+reduces an equality of functions (including @tt{Set} values, which are
+functions to @rhombus(Boolean)) to pointwise equality using the kernel's
+derived @tt{EXT} rule, with no new axiom. A non-function equality at any
+requested step is a compile-time error, not a silent no-op:
 
 @rhombusblock(
   theorem funs_equal:
     double === add_self
   proof:
-    ~extensionality: x
+    ~extensionality: [x]
 )
 
 @section(~tag: "importing"){Importing a theory}
@@ -697,7 +702,7 @@ After it passes, change the declaration head and add a proof:
   theorem rev_involutive:
     forall (xs :: List.of(Nat)): rev(rev(xs)) === xs
   proof:
-    ~induct: xs
+    ~induct: [xs]
 )
 
 Input types must be concrete because every input needs a run-time generator.

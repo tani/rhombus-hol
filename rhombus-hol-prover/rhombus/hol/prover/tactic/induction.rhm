@@ -59,6 +59,8 @@ import:
 export:
   induction_step
   induction_attempt
+  InductionAttempt
+  induction_attempt_with_remap
   candidate_vars
   inductive_type_name
 
@@ -86,6 +88,11 @@ fun split_cases(t :: Term, n :: Int) :: List.of(Term):
                 error.val(~label: "term", show(t)))
 
 
+// Each map is parallel to one induction subgoal and records which freshly
+// reopened companion replaces an original generalized variable.
+class InductionAttempt(step :: Step, remaps :: List.of(Map))
+
+
 // The public entry point preserves the original datatype-only API. The
 // waterfall adapter below supplies the registered DatatypeScheme theorem
 // instead, so the same case construction consumes the shared scheme interface.
@@ -97,6 +104,12 @@ fun induction_step(thy :: Theory, funs :: Map.of(Symbol, FunInfo),
 fun datatype_induction_step(thy :: Theory, funs :: Map.of(Symbol, FunInfo),
                             dtms :: DatatypeThms, theorem :: Thm,
                             v :: FVar, g :: Goal) :: Step:
+  datatype_induction_attempt(thy, funs, dtms, theorem, v, g).step
+
+fun datatype_induction_attempt(thy :: Theory,
+                               funs :: Map.of(Symbol, FunInfo),
+                               dtms :: DatatypeThms, theorem :: Thm,
+                               v :: FVar, g :: Goal) :: InductionAttempt:
   let spec = dtms.spec
   let self = mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol): mk_tyvar(p)))
   let tyin = (match type_match(self, v.ty, {})
@@ -142,20 +155,31 @@ fun datatype_induction_step(thy :: Theory, funs :: Map.of(Symbol, FunInfo),
 
   // Turn each case into a goal. The scheme's predicate quantifies recursive
   // companion variables, so open those quantifiers here and remember how to
-  // close them. This keeps specialization local to the induction step while
-  // still letting the ordinary waterfall simplify each opened case before it
-  // considers another induction.
+  // close them. In a base case, the companion quantifiers are part of the
+  // leading `case_vars`; in a recursive case, implications separate them and
+  // they are opened from `body1`. The remapping view combines both placements
+  // without changing the lists used to reconstruct the proof.
   let avoid0 = g.asms ++ [g.concl]
   let prepared = for List (ct in case_terms, c in spec.ctors):
                    let (case_vars, body0) = open_foralls(ct, avoid0)
                    let (ihs, body1) = strip_imp(body0)
                    let (companion_vars, body):
                      open_foralls(body1, avoid0 ++ case_vars ++ ihs)
+                   let leading_count:
+                     others.length() - companion_vars.length()
+                   unless leading_count >= 0
+                            && leading_count <= case_vars.length()
+                   | error(~who: #'induct,
+                           "malformed generalized induction companion")
+                   let leading_companions:
+                     case_vars.drop(case_vars.length() - leading_count)
+                   let reopened_companions:
+                     leading_companions ++ companion_vars
                    [case_vars, ihs, companion_vars, body,
-                    (c :~ Ctor).name]
-  let subgoals = for List ([_, ihs, _, body, _] in prepared):
+                    (c :~ Ctor).name, reopened_companions]
+  let subgoals = for List ([_, ihs, _, body, _, _] in prepared):
                    Goal(g.asms ++ (ihs :~ List), body)
-  let events = for List ([_, _, _, _, cname] in prepared):
+  let events = for List ([_, _, _, _, cname, _] in prepared):
                  Inducted(v.name, cname :~ Symbol)
 
   fun close_case(th :: Thm, case_vars :~ List, ihs :~ List,
@@ -171,7 +195,13 @@ fun datatype_induction_step(thy :: Theory, funs :: Map.of(Symbol, FunInfo),
                                  (pr :~ List)[2])
     SPECL(thy, others.map(fun (u :: FVar): u :~ Term),
           SPEC(thy, v, MP(thy, sp, LIST_CONJ(thy, case_thms))))
-  Step(subgoals, rebuild_induction, events)
+  let remaps:
+    for List ([_, _, _, _, _, reopened_companions] in prepared):
+      for values(mapping :~ Map = {}) (
+            original in others,
+            reopened in (reopened_companions :~ List)):
+        mapping ++ {original :~ FVar: reopened :~ FVar}
+  InductionAttempt(Step(subgoals, rebuild_induction, events), remaps)
 
 
 // -- rule induction -----------------------------------------------------------
@@ -468,6 +498,22 @@ fun datatype_step_for(thy :: Theory, funs :: Map.of(Symbol, FunInfo),
             datatype_scheme_theorem(schemes, type_name, dtms.induction),
             v, g)
 
+fun datatype_attempt_for(thy :: Theory, funs :: Map.of(Symbol, FunInfo),
+                         dts :: Map.of(Symbol, DatatypeThms),
+                         schemes :: List.of(InductionScheme), v :: FVar,
+                         g :: Goal) :: maybe(InductionAttempt):
+  match inductive_type_name(v)
+  | #false: #false
+  | type_name:
+      match dts.get(type_name, #false)
+      | #false: #false
+      | datatype_thms:
+          let dtms :~ DatatypeThms = datatype_thms
+          datatype_induction_attempt(
+            thy, funs, dtms,
+            datatype_scheme_theorem(schemes, type_name, dtms.induction),
+            v, g)
+
 // One variable's step: an applicable function scheme when one exists, the
 // datatype scheme otherwise. Raw well-founded schemes remain registered
 // evidence but are not guessed from a relation occurrence: doing so changes
@@ -602,6 +648,26 @@ fun induction_attempt(thy :: Theory, funs :: Map.of(Symbol, FunInfo),
           match gather_candidates(thy, funs, dts, schemes, g)
           | []: #false
           | List.cons(top, _): (top :~ Candidate).step
+
+// The ordinary API remains a `Step`; the waterfall uses this detailed form to
+// carry pending explicit hints across generalized companion binders. Automatic
+// rule and well-founded induction are reached only after explicit hints are
+// exhausted, so their per-subgoal remapping is the identity.
+fun induction_attempt_with_remap(
+      thy :: Theory, funs :: Map.of(Symbol, FunInfo),
+      dts :: Map.of(Symbol, DatatypeThms),
+      schemes :: List.of(InductionScheme),
+      hint :: maybe(FVar), g :: Goal) :: maybe(InductionAttempt):
+  match hint
+  | v :: FVar: datatype_attempt_for(thy, funs, dts, schemes, v, g)
+  | ~else:
+      match induction_attempt(thy, funs, dts, schemes, #false, g)
+      | #false: #false
+      | step :: Step:
+          InductionAttempt(
+            step,
+            for List (_ in step.subgoals):
+              {} :~ Map)
 
 // Does `v` appear as an argument of a constructor application in `t`?
 fun under_ctor(ctors :: Set, t :: Term, v :: FVar) :: Boolean:

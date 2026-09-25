@@ -593,36 +593,16 @@ meta:
         syntax_meta.error(message, at))
 
   // The executable reading of a Nat literal is its host nonnegative integer.
-  // Integer retains its nominal wrapper around a compact Nat payload.
-  // `check_expr`/`check_pattern` already rejected any other type before a
-  // `CheckedNumeral`/`CheckedPatLiteral` could exist, so the `~else` branch
-  // below is unreachable.
-  fun checked_numeral_stx(value :: Int, ty :: HType, at :: Syntax) :: Syntax:
-    let nat_ty = mk_tyapp(#'Nat, [])
-    let int_ty = mk_tyapp(#'Integer, [])
-    cond
-    | ty == nat_ty:
-        when value < 0
-        | error(~who: #'checked_to_runtime,
-                "a negative integer literal cannot have type Nat")
-        Syntax.make(value, runtime_context())
-    | ty == int_ty:
-        if value >= 0
-        | let literal = Syntax.make(value, runtime_context())
-          runtime_call_syntax(#'int_from_nat, [literal], at)
-        | let predecessor = Syntax.make(-value - 1, runtime_context())
-          runtime_call_syntax(#'int_negative, [predecessor], at)
-    | ~else:
-        error(~who: #'checked_to_runtime,
-              "a numeral has no representation at type " ++ to_string(ty))
+  fun checked_numeral_stx(value :: NonnegInt) :: Syntax:
+    Syntax.make(value, runtime_context())
 
   // Rhombus's guarded binding keeps executable literal patterns constant
   // size: bind the matched Nat, then compare it with the ordinary executable
   // reading of the literal. This is numeric structural equality, not a
   // string-specific or host-string comparison.
-  fun checked_numeral_pattern(value :: NonnegInt, ty :: HType, at :: Syntax) :: Syntax:
+  fun checked_numeral_pattern(value :: NonnegInt, at :: Syntax) :: Syntax:
     let matched = source_id(Symbol.gen("_hol_literal"), at)
-    let literal = checked_numeral_stx(value, ty, at)
+    let literal = checked_numeral_stx(value)
     '($matched when $matched == $literal)'
 
   // Reads a `CheckedPattern` back into `Syntax` -- purely structural, since
@@ -634,7 +614,7 @@ meta:
     match pat
     | CheckedPatWildcard(_, at): source_id(#'_, at)
     | CheckedPatVar(name, _, at): source_id(name, at)
-    | CheckedPatLiteral(value, ty, at): checked_numeral_pattern(value, ty, at)
+    | CheckedPatLiteral(value, _, at): checked_numeral_pattern(value, at)
     | CheckedPatCtor(name, args, _, _, at) when name == c_pair:
         let [first, second] = args.map(
                                  fun (a :: CheckedPattern):
@@ -773,9 +753,8 @@ meta:
         RuntimeExpr(
           runtime_named_apply(state, name, [], at),
           checked_resolve(inference, ty))
-    | CheckedNumeral(value, ty, at):
-        let ty = checked_resolve(inference, ty)
-        RuntimeExpr(checked_numeral_stx(value, ty, at), ty)
+    | CheckedNumeral(value, _):
+        RuntimeExpr(checked_numeral_stx(value), mk_tyapp(#'Nat, []))
     | CheckedIf(cond, then_branch, else_branch, ty, at):
         let cond_r = checked_to_runtime(inference, state, cond)
         let then_r = checked_to_runtime(inference, state, then_branch)

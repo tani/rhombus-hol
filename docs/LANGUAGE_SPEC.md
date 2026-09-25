@@ -880,18 +880,25 @@ constructor/API.
 
 The normalized frontend forms are
 `CoreNatLit(value :: NonnegInt, at)` and `CoreIntLit(value :: Int, at)`.
-Both become one checked form, `CheckedNumeral(value :: Int, ty, at)`, after
-the Core form fixes `ty` to `Nat` or `Integer`.
+They remain distinct through Core elaboration. At the checked boundary,
+`CoreNatLit(n)` becomes the Nat-only form
+`CheckedNumeral(n :: NonnegInt, at)`. A `CoreIntLit(z)` instead normalizes to
+an ordinary checked application: for `z >= 0`, `int_from_nat` is applied to
+`CheckedNumeral(z, at)`; for `z < 0`, `int_negative` is applied to
+`CheckedNumeral(abs(z) - 1, at)`. The generated application follows the same
+checked constant-resolution and type-checking path as other object-language
+applications. Its resulting `Integer` type is then unified with the expected
+type.
 
 At the exact reserved object-language declaration
-`datatype Nat | zero() | succ(pred :: Nat)`, a `CoreNatLit` has two compact
-readings: logical elaboration produces the kernel term `NatLit(n)`, while
-executable emission produces the host `Nat`/`NonnegInt` integer `n`.
-An integer `z >= 0` logically lowers to `int_from_nat(NatLit(z))`; an integer
-`z < 0` lowers to `int_negative(NatLit(abs(z) - 1))`, matching the existing
-`Integer` datatype representation. Executable emission uses the same
-constructors around the compact runtime `Nat`; `Integer` does not acquire a
-new host-integer representation.
+`datatype Nat | zero() | succ(pred :: Nat)`, a `CheckedNumeral` has two compact
+readings: logical elaboration produces `mk_nat_lit(theory, n)`, whose kernel
+term is `NatLit(n)`, while executable emission produces the host
+`Nat`/`NonnegInt` integer `n`. The backends therefore handle only Nat
+numerals. Integer literals reach them as ordinary checked `int_from_nat` or
+`int_negative` applications around that Nat literal, so neither backend
+branches on a signed numeral. `Integer` does not acquire a new host-integer
+representation.
 
 For this reserved declaration only, executable `zero()` returns `0` and
 executable `succ(n)` returns `n + 1`. A `zero()` runtime pattern tests that the

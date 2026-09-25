@@ -218,40 +218,6 @@ fun specialize_call_args(fty :: HType, args :: List.of(Term)) :: List.of(Term):
 
 
 
-// The kernel stores a checked natural literal compactly. Its conversion API
-// exposes `zero`/`succ` only when a proof needs one step, so elaboration never
-// constructs an arithmetic-depth term.
-fun nat_numeral(env :: ElabEnv, value :: NonnegInt, _at :: Syntax) :: Term:
-  mk_nat_lit(env.thy, value)
-
-fun elaborate_numeral(env :: ElabEnv, value :: Int,
-                      expected :: HType, at :: Syntax) :: Term:
-  let nat_ty = mk_tyapp(#'Nat, [])
-  let int_ty = mk_tyapp(#'Integer, [])
-  cond
-  | expected == nat_ty:
-      when value < 0
-      | syntax_error(
-          env.who, "a negative integer literal cannot have type Nat", at)
-      nat_numeral(env, value :~ NonnegInt, at)
-  | expected == int_ty:
-      let (constructor, magnitude):
-        if value >= 0
-        | values(#'int_from_nat, value :~ NonnegInt)
-        | values(#'int_negative, (-value - 1) :~ NonnegInt)
-      mk_comb(
-        mk_const(constructor, mk_fun(nat_ty, int_ty)),
-        nat_numeral(env, magnitude, at))
-  | ~else:
-      syntax_error(
-        env.who,
-        "a numeral has no representation at type "
-          ++ type_to_surface_string(env.type_constructors, expected),
-        at)
-
-
-
-
 fun merge_pattern_bindings(who :: Symbol,
                            left :: Map.of(Symbol, Term),
                            right :: Map.of(Symbol, Term),
@@ -376,8 +342,8 @@ fun checked_to_term(env :: ElabEnv, expr :: CheckedExpr) :: Term:
   | CheckedLocal(name, _, at): checked_local_term(env, name, at)
   | CheckedConstant(name, ty, _):
       mk_const(name, resolve_type(env, ty))
-  | CheckedNumeral(value, ty, at):
-      elaborate_numeral(env, value, resolve_type(env, ty), at)
+  | CheckedNumeral(value, _):
+      mk_nat_lit(env.thy, value)
   | CheckedIf(condition, then_branch, else_branch, _, _):
       mk_cond(checked_to_term(env, condition),
               checked_to_term(env, then_branch),
@@ -539,8 +505,8 @@ fun checked_sub_pattern(env :: ElabEnv,
       [list_mk_comb(
          mk_const(name, resolve_type(env, constructor_ty)), subpats),
        bindings]
-  | CheckedPatLiteral(value, ty, at):
-      [elaborate_numeral(env, value, resolve_type(env, ty), at), {}]
+  | CheckedPatLiteral(value, _, _):
+      [mk_nat_lit(env.thy, value), {}]
 
 
 class ClauseEnv(thy :: Theory,

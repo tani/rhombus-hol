@@ -147,17 +147,25 @@ overloadable @tt{negate} operator.
 
 The normalized frontend forms are
 @tt{CoreNatLit(value :: NonnegInt, at)} and
-@tt{CoreIntLit(value :: Int, at)}. Both become
-@tt{CheckedNumeral(value :: Int, ty, at)}, with the Core form fixing
-@tt{ty} to @tt{Nat} or @tt{Integer}. For the exact reserved declaration
-@tt{datatype Nat | zero() | succ(pred :: Nat)}, logical elaboration of
-@tt{CoreNatLit} produces the kernel term @tt{NatLit(n)}, while executable
-emission produces the host @tt{Nat}/@tt{NonnegInt} integer @tt{n}. A
-nonnegative @tt{CoreIntLit} lowers through @tt{int_from_nat(NatLit(n))}; a
-negative value @tt{z} lowers through
-@tt{int_negative(NatLit(abs(z) - 1))}. Executable emission uses the same
-constructors around compact runtime @tt{Nat} values, so @tt{Integer} does not
-acquire a host-integer representation.
+@tt{CoreIntLit(value :: Int, at)}. They remain distinct through Core
+elaboration. At the checked boundary, @tt{CoreNatLit(n)} becomes the Nat-only
+@tt{CheckedNumeral(n :: NonnegInt, at)}. A @tt{CoreIntLit(z)} instead
+normalizes to an ordinary checked application: a nonnegative value applies
+@tt{int_from_nat} to @tt{CheckedNumeral(z, at)}, while a negative value applies
+@tt{int_negative} to @tt{CheckedNumeral(abs(z) - 1, at)}. The generated
+application follows the same checked constant-resolution and type-checking
+path as other object-language applications. Its resulting @tt{Integer} type
+is unified with the expected type.
+
+For the exact reserved declaration
+@tt{datatype Nat | zero() | succ(pred :: Nat)}, a @tt{CheckedNumeral} has two
+compact readings: logical elaboration calls @tt{mk_nat_lit} to produce the
+kernel term @tt{NatLit(n)}, while executable emission produces the host
+@tt{Nat}/@tt{NonnegInt} integer @tt{n}. The backends therefore handle only Nat
+numerals. Integer literals reach them as ordinary checked @tt{int_from_nat} or
+@tt{int_negative} applications around the Nat literal, so neither backend
+branches on a signed numeral and @tt{Integer} does not acquire a host-integer
+representation.
 
 For this reserved @tt{Nat} only, executable @tt{zero()} is @tt{0}, and
 executable @tt{succ(n)} is @tt{n + 1}. A runtime @tt{zero()} pattern tests for

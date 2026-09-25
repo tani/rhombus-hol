@@ -204,10 +204,11 @@ never enters the prover as an unproved result: a wrong conversion cannot
 manufacture a theorem.
 
 Surface @tt{+n} and @tt{-n} integer literals do not add an integer term form
-to the kernel. They lower through the existing @tt{int_from_nat} or
-@tt{int_negative} object-language constructor around a checked @tt{NatLit},
-so natural and integer literals share the same checked kernel boundary.
-@tt{Rational} has no literal form and uses explicit construction.
+to the kernel or a signed checked-numeral form. At the checked boundary they
+normalize to ordinary object-language applications of @tt{int_from_nat} or
+@tt{int_negative} around a Nat-only @tt{CheckedNumeral}. Only that Nat numeral
+becomes a checked @tt{NatLit}. @tt{Rational} has no literal form and uses
+explicit construction.
 
 @section{Theories}
 

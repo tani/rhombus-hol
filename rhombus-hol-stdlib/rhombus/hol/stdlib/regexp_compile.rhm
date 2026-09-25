@@ -1,0 +1,252 @@
+#lang rhombus/hol
+
+import:
+  "data.rhm" open
+  "nat.rhm" open
+  "list.rhm" open
+  "algorithm.rhm" open
+  "regexp.rhm" open
+
+export:
+  regexp_compile
+
+// The operator stack makes concatenation explicit. Sequence operators are
+// reduced before alternation operators, while group markers stop reduction.
+datatype RegexpCompileOperator
+| regexp_compile_alternate_operator()
+| regexp_compile_sequence_operator()
+| regexp_compile_group_operator()
+
+datatype RegexpCompileStacks
+| regexp_compile_stacks(regexp_compile_values :: List.of(Regexp.of(Nat)),
+                        regexp_compile_operators :: List.of(RegexpCompileOperator))
+
+datatype RegexpCompileState
+| regexp_compile_state(regexp_compile_state_values :: List.of(Regexp.of(Nat)),
+                       regexp_compile_state_operators :: List.of(RegexpCompileOperator),
+                       regexp_compile_expects_atom :: Boolean,
+                       regexp_compile_allows_star :: Boolean)
+
+function regexp_compile_code_equal(expected :: Nat) :: Nat -> Boolean:
+  function (actual :: Nat) :: Boolean: expected == actual
+
+function regexp_compile_wildcard(_code :: Nat) :: Boolean:
+  #true
+
+function regexp_compile_apply_operator(current_operator :: RegexpCompileOperator,
+                                       stack_values :: List.of(Regexp.of(Nat))) :: Option.of(List.of(Regexp.of(Nat))):
+  match stack_values
+  | nil(): none()
+  | cons(right_operand, remaining):
+      match remaining
+      | nil(): none()
+      | cons(left_operand, rest):
+          match current_operator
+          | regexp_compile_alternate_operator():
+              some(cons(regexp_alternate(left_operand, right_operand), rest))
+          | regexp_compile_sequence_operator():
+              some(cons(regexp_sequence(left_operand, right_operand), rest))
+          | regexp_compile_group_operator(): none()
+
+function regexp_compile_push_sequence(stack_values :: List.of(Regexp.of(Nat)),
+                                      operators :: List.of(RegexpCompileOperator)) :: Option.of(RegexpCompileStacks):
+  match operators
+  | nil():
+      some(regexp_compile_stacks(
+             stack_values,
+             cons(regexp_compile_sequence_operator(), nil())))
+  | cons(current_operator, rest):
+      match current_operator
+      | regexp_compile_alternate_operator():
+          some(regexp_compile_stacks(
+                 stack_values,
+                 cons(regexp_compile_sequence_operator(), operators)))
+      | regexp_compile_group_operator():
+          some(regexp_compile_stacks(
+                 stack_values,
+                 cons(regexp_compile_sequence_operator(), operators)))
+      | regexp_compile_sequence_operator():
+          match regexp_compile_apply_operator(current_operator, stack_values)
+          | none(): none()
+          | some(reduced): regexp_compile_push_sequence(reduced, rest)
+
+function regexp_compile_push_alternate(stack_values :: List.of(Regexp.of(Nat)),
+                                       operators :: List.of(RegexpCompileOperator)) :: Option.of(RegexpCompileStacks):
+  match operators
+  | nil():
+      some(regexp_compile_stacks(
+             stack_values,
+             cons(regexp_compile_alternate_operator(), nil())))
+  | cons(current_operator, rest):
+      match current_operator
+      | regexp_compile_group_operator():
+          some(regexp_compile_stacks(
+                 stack_values,
+                 cons(regexp_compile_alternate_operator(), operators)))
+      | regexp_compile_alternate_operator():
+          match regexp_compile_apply_operator(current_operator, stack_values)
+          | none(): none()
+          | some(reduced): regexp_compile_push_alternate(reduced, rest)
+      | regexp_compile_sequence_operator():
+          match regexp_compile_apply_operator(current_operator, stack_values)
+          | none(): none()
+          | some(reduced): regexp_compile_push_alternate(reduced, rest)
+
+function regexp_compile_close_group(stack_values :: List.of(Regexp.of(Nat)),
+                                    operators :: List.of(RegexpCompileOperator)) :: Option.of(RegexpCompileStacks):
+  match operators
+  | nil(): none()
+  | cons(current_operator, rest):
+      match current_operator
+      | regexp_compile_group_operator():
+          some(regexp_compile_stacks(stack_values, rest))
+      | regexp_compile_alternate_operator():
+          match regexp_compile_apply_operator(current_operator, stack_values)
+          | none(): none()
+          | some(reduced): regexp_compile_close_group(reduced, rest)
+      | regexp_compile_sequence_operator():
+          match regexp_compile_apply_operator(current_operator, stack_values)
+          | none(): none()
+          | some(reduced): regexp_compile_close_group(reduced, rest)
+
+function regexp_compile_finish(stack_values :: List.of(Regexp.of(Nat)),
+                               operators :: List.of(RegexpCompileOperator)) :: Option.of(Regexp.of(Nat)):
+  match operators
+  | nil():
+      match stack_values
+      | nil(): none()
+      | cons(value, nil()): some(value)
+      | cons(_, cons(_, _)): none()
+  | cons(current_operator, rest):
+      match current_operator
+      | regexp_compile_group_operator(): none()
+      | regexp_compile_alternate_operator():
+          match regexp_compile_apply_operator(current_operator, stack_values)
+          | none(): none()
+          | some(reduced): regexp_compile_finish(reduced, rest)
+      | regexp_compile_sequence_operator():
+          match regexp_compile_apply_operator(current_operator, stack_values)
+          | none(): none()
+          | some(reduced): regexp_compile_finish(reduced, rest)
+
+function regexp_compile_insert_atom(atom :: Regexp.of(Nat),
+                                    state :: RegexpCompileState) :: Option.of(RegexpCompileState):
+  match state
+  | regexp_compile_state(stack_values, operators, expects_atom, _):
+      if expects_atom
+      | some(regexp_compile_state(cons(atom, stack_values), operators, #false, #true))
+      | match regexp_compile_push_sequence(stack_values, operators)
+        | none(): none()
+        | some(regexp_compile_stacks(next_values, next_operators)):
+            some(regexp_compile_state(
+                   cons(atom, next_values), next_operators, #false, #true))
+
+function regexp_compile_open_group(state :: RegexpCompileState) :: Option.of(RegexpCompileState):
+  match state
+  | regexp_compile_state(stack_values, operators, expects_atom, _):
+      if expects_atom
+      | some(regexp_compile_state(
+               stack_values,
+               cons(regexp_compile_group_operator(), operators),
+               #true,
+               #false))
+      | match regexp_compile_push_sequence(stack_values, operators)
+        | none(): none()
+        | some(regexp_compile_stacks(next_values, next_operators)):
+            some(regexp_compile_state(
+                   next_values,
+                   cons(regexp_compile_group_operator(), next_operators),
+                   #true,
+                   #false))
+
+function regexp_compile_insert_alternate(state :: RegexpCompileState) :: Option.of(RegexpCompileState):
+  match state
+  | regexp_compile_state(stack_values, operators, expects_atom, _):
+      if expects_atom
+      | none()
+      | match regexp_compile_push_alternate(stack_values, operators)
+        | none(): none()
+        | some(regexp_compile_stacks(next_values, next_operators)):
+            some(regexp_compile_state(
+                   next_values, next_operators, #true, #false))
+
+function regexp_compile_insert_close(state :: RegexpCompileState) :: Option.of(RegexpCompileState):
+  match state
+  | regexp_compile_state(stack_values, operators, expects_atom, _):
+      if expects_atom
+      | none()
+      | match regexp_compile_close_group(stack_values, operators)
+        | none(): none()
+        | some(regexp_compile_stacks(next_values, next_operators)):
+            some(regexp_compile_state(
+                   next_values, next_operators, #false, #true))
+
+function regexp_compile_insert_star(state :: RegexpCompileState) :: Option.of(RegexpCompileState):
+  match state
+  | regexp_compile_state(stack_values, operators, expects_atom, allows_star):
+      if expects_atom || !allows_star
+      | none()
+      | match stack_values
+        | nil(): none()
+        | cons(value, rest):
+            some(regexp_compile_state(
+                   cons(regexp_star(value), rest), operators, #false, #false))
+
+function regexp_compile_parse(codes :: List.of(Nat),
+                              state :: RegexpCompileState) :: Option.of(RegexpCompileState):
+  match codes
+  | nil(): some(state)
+  | cons(code, rest):
+      if code == 92
+      | match rest
+        | nil(): none()
+        | cons(escaped, remaining):
+            match regexp_compile_insert_atom(
+                    regexp_literal(regexp_compile_code_equal, escaped), state)
+            | none(): none()
+            | some(next_state): regexp_compile_parse(remaining, next_state)
+      | if code == 124
+        | match regexp_compile_insert_alternate(state)
+          | none(): none()
+          | some(next_state): regexp_compile_parse(rest, next_state)
+        | if code == 42
+          | match regexp_compile_insert_star(state)
+            | none(): none()
+            | some(next_state): regexp_compile_parse(rest, next_state)
+          | if code == 40
+            | match regexp_compile_open_group(state)
+              | none(): none()
+              | some(next_state): regexp_compile_parse(rest, next_state)
+            | if code == 41
+              | match regexp_compile_insert_close(state)
+                | none(): none()
+                | some(next_state): regexp_compile_parse(rest, next_state)
+              | if code == 46
+                | match regexp_compile_insert_atom(
+                        regexp_atom(regexp_compile_wildcard), state)
+                  | none(): none()
+                  | some(next_state): regexp_compile_parse(rest, next_state)
+                | match regexp_compile_insert_atom(
+                        regexp_literal(regexp_compile_code_equal, code), state)
+                  | none(): none()
+                  | some(next_state): regexp_compile_parse(rest, next_state)
+
+function regexp_compile(source :: String) :: Option.of(Regexp.of(Nat)):
+  let codes = string_to_codes(source)
+  match codes
+  | nil(): some(regexp_epsilon())
+  | cons(_, _):
+      match regexp_compile_parse(
+              codes,
+              regexp_compile_state(nil(), nil(), #true, #false))
+      | none(): none()
+      | some(regexp_compile_state(stack_values, operators, expects_atom, _)):
+          if expects_atom | none() | regexp_compile_finish(stack_values, operators)
+
+// The empty-pattern case is the one intentional exception to the grammar's
+// ban on empty expressions.
+theorem regexp_compile_empty:
+  regexp_compile(string_empty()) === some(regexp_epsilon())
+
+theorem regexp_compile_dangling_escape:
+  regexp_compile(string_singleton(92)) === none()

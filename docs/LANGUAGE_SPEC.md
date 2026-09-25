@@ -133,6 +133,34 @@ atoms their accepted singleton words, alternation either branch, sequencing
 the concatenation of two accepted words, and star zero or more accepted body
 words.
 
+`regexp_compile(pattern :: String) :: Option.of(Regexp.of(Nat))` parses the
+standard-library `String` codepoint list into an executable regular-expression
+AST. Its grammar is:
+
+```text
+pattern       ::= ε | alternation
+alternation   ::= concatenation ("|" concatenation)*
+concatenation ::= repetition+
+repetition    ::= atom ("*")?
+atom          ::= literal | "." | "\" codepoint | "(" alternation ")"
+literal       ::= any Unicode codepoint other than |, *, (, ), ., or \
+```
+
+Here `ε` denotes empty input in the start rule, not a pattern codepoint. The
+operators are recognized by their ASCII codepoints: `|` is 124, `*` is 42,
+`(` is 40, `)` is 41, `.` is 46, and backslash is 92. Alternation has the
+lowest precedence, implicit concatenation the next, and postfix `*` the
+highest; parentheses group an alternation. Each unescaped literal denotes an
+atom using executable `Nat` equality with that Unicode codepoint. `.` denotes
+an atom whose predicate accepts every codepoint. A backslash makes exactly the
+next codepoint a literal, including any operator codepoint.
+
+The empty entire pattern compiles to `some(regexp_epsilon())`. Every other
+successful parse consumes the complete input and returns `some(result)`, where
+`result` is the resulting `Regexp.of(Nat)`. Dangling escapes, unmatched
+parentheses, leading or trailing `|`, empty alternatives or groups, leading or
+repeated `*`, and any leftover malformed input are rejected with `none()`.
+
 Compilation follows the conventional Thompson pipeline:
 
 ```text

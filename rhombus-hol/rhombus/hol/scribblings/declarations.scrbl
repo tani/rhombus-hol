@@ -611,6 +611,75 @@ transitions. Under that explicit hypothesis,
 well-formedness premise is required by either determinization theorem, because
 those theorems compare the executable runners directly.
 
+@subsection{Generic regular expressions}
+
+Importing @tt{rhombus/hol/stdlib} with @rhombus(open) exposes the generic
+regular-expression library. @tt{Regexp.of(?a)} is an AST over an arbitrary
+symbol type @tt{?a} with exactly six constructors:
+
+@itemlist(
+ @item{@tt{regexp_none()} accepts no words and @tt{regexp_epsilon()} accepts
+  only the empty word.}
+ @item{@tt{regexp_atom(predicate)} accepts a one-symbol word when its
+  executable @tt{?a -> Boolean} predicate accepts that symbol, so compiled
+  matching remains ordinary run-time code.}
+ @item{@tt{regexp_alternate(left, right)},
+  @tt{regexp_sequence(left, right)}, and @tt{regexp_star(body)} denote union,
+  concatenation, and Kleene closure.}
+)
+
+@tt{regexp_literal(decide_equal, value)} is a convenience function that
+constructs an atom from an executable equality decider; it is not a seventh
+AST constructor. The inductively defined relation
+@tt{regexp_accepts(r, word)} gives the language semantics independently of
+every automaton representation and runner. Its rules give epsilon the empty
+word, atoms their accepted singleton words, alternation either branch,
+sequencing the concatenation of two accepted words, and star zero or more
+accepted body words.
+
+Compilation follows the conventional Thompson pipeline
+@tt{Regexp -> EpsilonNFA -> NFA -> DFA}. @tt{regexp_to_epsilon_nfa} performs
+Thompson construction, @tt{regexp_to_nfa} eliminates epsilon transitions, and
+@tt{regexp_to_dfa} determinizes the resulting NFA.
+@tt{regexp_matches(r, word)} executes the DFA and tests the whole word; it is
+not a substring search.
+
+The principal compiler theorems are
+@tt{regexp_to_epsilon_nfa_well_formed} and
+@tt{regexp_to_epsilon_nfa_accepts_iff} for the Thompson result;
+@tt{regexp_to_nfa_accepts_iff} and @tt{regexp_to_nfa_language} for epsilon
+elimination; and @tt{regexp_to_dfa_accepts_iff} and
+@tt{regexp_to_dfa_language} for determinization. The direct semantic
+correspondences are @tt{regexp_to_nfa_semantics_iff} and
+@tt{regexp_to_dfa_semantics_iff}. The executable matcher is related to each
+stage by @tt{regexp_matches_epsilon_nfa_iff},
+@tt{regexp_matches_nfa_iff}, and @tt{regexp_matches_dfa_iff}, while
+@tt{regexp_matches_iff} is the end-to-end correctness theorem
+@tt{regexp_matches(r, word) <=> regexp_accepts(r, word)}.
+
+@tt{regexp_find(r, input)} returns an @tt{Option.of(RegexpMatch)}.
+@tt{regexp_match(start, end)} constructs a result, and
+@tt{regexp_match_start} and @tt{regexp_match_end} select its @tt{Nat} offsets.
+Search is leftmost-longest: it chooses the earliest start having a match, then
+the greatest accepted end at that start. Ranges are half-open
+@tt{[start, end)}, measured in input-list elements; @tt{start === end} is a
+valid zero-width match.
+
+@tt{regexp_replace_first(r, replacement, input)} replaces only that
+leftmost-longest range. @tt{regexp_replace_all(r, replacement, input)} repeats
+the same search over the unconsumed original input; replacement symbols are
+never searched. A nonempty match consumes its range. After a zero-width match
+before EOF, replace-all emits the replacement, copies exactly one original
+symbol at the match position unchanged, and resumes after that symbol. At a
+zero-width match at EOF, it emits the replacement once and stops.
+
+The four String adapters are @tt{string_regexp_matches},
+@tt{string_regexp_find}, @tt{string_regexp_replace_first}, and
+@tt{string_regexp_replace_all}. They accept @tt{Regexp.of(Nat)} and convert
+strings to and from codepoint lists. Consequently String search offsets count
+codepoints, not encoded bytes, and replacement follows exactly the generic
+list behavior above.
+
 @section{@rhombus(theorem, ~datum) and @rhombus(proof, ~datum)}
 
 @verbatim{

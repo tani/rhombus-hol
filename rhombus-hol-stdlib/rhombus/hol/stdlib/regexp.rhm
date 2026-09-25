@@ -1,0 +1,663 @@
+#lang rhombus/hol
+
+import:
+  "list.rhm" open
+  "finite.rhm" open
+  "automaton.rhm" open
+
+export:
+  Regexp
+  regexp_none
+  regexp_epsilon
+  regexp_atom
+  regexp_alternate
+  regexp_sequence
+  regexp_star
+  regexp_literal
+  RegexpState
+  regexp_to_epsilon_nfa
+  regexp_to_nfa
+  regexp_to_dfa
+  regexp_matches
+
+// Atoms carry executable predicates.  Occurrences, rather than expression
+// values, identify compiler states, so equal repeated subexpressions are never
+// merged.
+datatype Regexp.of(?a)
+| regexp_none()
+| regexp_epsilon()
+| regexp_atom(regexp_atom_predicate :: ?a -> Boolean)
+| regexp_alternate(regexp_alternate_left :: Regexp.of(?a),
+                   regexp_alternate_right :: Regexp.of(?a))
+| regexp_sequence(regexp_sequence_left :: Regexp.of(?a),
+                  regexp_sequence_right :: Regexp.of(?a))
+| regexp_star(regexp_star_body :: Regexp.of(?a))
+
+function regexp_literal(decide_equal :: ?a -> ?a -> Boolean,
+                        value :: ?a) :: Regexp.of(?a):
+  regexp_atom(decide_equal(value))
+
+// A state is a node endpoint addressed by its complete path from the root.
+// Left/right wrappers belong to binary nodes and child wrappers to stars.
+datatype RegexpState
+| regexp_entry_state()
+| regexp_exit_state()
+| regexp_left_state(regexp_left_nested_state :: RegexpState)
+| regexp_right_state(regexp_right_nested_state :: RegexpState)
+| regexp_child_state(regexp_child_nested_state :: RegexpState)
+
+function regexp_state_equal(p :: RegexpState,
+                            q :: RegexpState) :: Boolean:
+  match p
+  | regexp_entry_state():
+      match q
+      | regexp_entry_state(): #true
+      | regexp_exit_state(): #false
+      | regexp_left_state(_): #false
+      | regexp_right_state(_): #false
+      | regexp_child_state(_): #false
+  | regexp_exit_state():
+      match q
+      | regexp_entry_state(): #false
+      | regexp_exit_state(): #true
+      | regexp_left_state(_): #false
+      | regexp_right_state(_): #false
+      | regexp_child_state(_): #false
+  | regexp_left_state(p_nested):
+      match q
+      | regexp_entry_state(): #false
+      | regexp_exit_state(): #false
+      | regexp_left_state(q_nested): regexp_state_equal(p_nested, q_nested)
+      | regexp_right_state(_): #false
+      | regexp_child_state(_): #false
+  | regexp_right_state(p_nested):
+      match q
+      | regexp_entry_state(): #false
+      | regexp_exit_state(): #false
+      | regexp_left_state(_): #false
+      | regexp_right_state(q_nested): regexp_state_equal(p_nested, q_nested)
+      | regexp_child_state(_): #false
+  | regexp_child_state(p_nested):
+      match q
+      | regexp_entry_state(): #false
+      | regexp_exit_state(): #false
+      | regexp_left_state(_): #false
+      | regexp_right_state(_): #false
+      | regexp_child_state(q_nested): regexp_state_equal(p_nested, q_nested)
+
+function regexp_root_states() :: List.of(RegexpState):
+  cons(regexp_entry_state(), cons(regexp_exit_state(), nil()))
+
+function regexp_state_list(r :: Regexp.of(?a)) :: List.of(RegexpState):
+  match r
+  | regexp_none(): regexp_root_states()
+  | regexp_epsilon(): regexp_root_states()
+  | regexp_atom(_): regexp_root_states()
+  | regexp_alternate(left, right):
+      list_append(
+        regexp_root_states(),
+        list_append(
+          list_map(regexp_left_state, regexp_state_list(left)),
+          list_map(regexp_right_state, regexp_state_list(right))))
+  | regexp_sequence(left, right):
+      list_append(
+        regexp_root_states(),
+        list_append(
+          list_map(regexp_left_state, regexp_state_list(left)),
+          list_map(regexp_right_state, regexp_state_list(right))))
+  | regexp_star(body):
+      list_append(
+        regexp_root_states(),
+        list_map(regexp_child_state, regexp_state_list(body)))
+
+function regexp_state_occurs(r :: Regexp.of(?a),
+                             q :: RegexpState) :: Boolean:
+  match q
+  | regexp_entry_state(): #true
+  | regexp_exit_state(): #true
+  | regexp_left_state(nested):
+      match r
+      | regexp_alternate(left, _): regexp_state_occurs(left, nested)
+      | regexp_sequence(left, _): regexp_state_occurs(left, nested)
+      | regexp_none(): #false
+      | regexp_epsilon(): #false
+      | regexp_atom(_): #false
+      | regexp_star(_): #false
+  | regexp_right_state(nested):
+      match r
+      | regexp_alternate(_, right): regexp_state_occurs(right, nested)
+      | regexp_sequence(_, right): regexp_state_occurs(right, nested)
+      | regexp_none(): #false
+      | regexp_epsilon(): #false
+      | regexp_atom(_): #false
+      | regexp_star(_): #false
+  | regexp_child_state(nested):
+      match r
+      | regexp_star(body): regexp_state_occurs(body, nested)
+      | regexp_none(): #false
+      | regexp_epsilon(): #false
+      | regexp_atom(_): #false
+      | regexp_alternate(_, _): #false
+      | regexp_sequence(_, _): #false
+
+// Thompson epsilon edges.  Delegated edges retain their complete occurrence
+// path by requiring the same wrapper at both endpoints.
+function regexp_epsilon_relation(r :: Regexp.of(?a),
+                                 source :: RegexpState,
+                                 destination :: RegexpState) :: Boolean:
+  match r
+  | regexp_none(): #false
+  | regexp_epsilon():
+      match source
+      | regexp_entry_state():
+          match destination
+          | regexp_exit_state(): #true
+          | regexp_entry_state(): #false
+          | regexp_left_state(_): #false
+          | regexp_right_state(_): #false
+          | regexp_child_state(_): #false
+      | regexp_exit_state(): #false
+      | regexp_left_state(_): #false
+      | regexp_right_state(_): #false
+      | regexp_child_state(_): #false
+  | regexp_atom(_): #false
+  | regexp_alternate(left, right):
+      match source
+      | regexp_entry_state():
+          match destination
+          | regexp_left_state(regexp_entry_state()): #true
+          | regexp_right_state(regexp_entry_state()): #true
+          | regexp_entry_state(): #false
+          | regexp_exit_state(): #false
+          | regexp_left_state(regexp_exit_state()): #false
+          | regexp_left_state(regexp_left_state(_)): #false
+          | regexp_left_state(regexp_right_state(_)): #false
+          | regexp_left_state(regexp_child_state(_)): #false
+          | regexp_right_state(regexp_exit_state()): #false
+          | regexp_right_state(regexp_left_state(_)): #false
+          | regexp_right_state(regexp_right_state(_)): #false
+          | regexp_right_state(regexp_child_state(_)): #false
+          | regexp_child_state(_): #false
+      | regexp_left_state(left_source):
+          match destination
+          | regexp_left_state(left_destination):
+              regexp_epsilon_relation(left, left_source, left_destination)
+          | regexp_exit_state():
+              match left_source
+              | regexp_exit_state(): #true
+              | regexp_entry_state(): #false
+              | regexp_left_state(_): #false
+              | regexp_right_state(_): #false
+              | regexp_child_state(_): #false
+          | regexp_entry_state(): #false
+          | regexp_right_state(_): #false
+          | regexp_child_state(_): #false
+      | regexp_right_state(right_source):
+          match destination
+          | regexp_right_state(right_destination):
+              regexp_epsilon_relation(right, right_source, right_destination)
+          | regexp_exit_state():
+              match right_source
+              | regexp_exit_state(): #true
+              | regexp_entry_state(): #false
+              | regexp_left_state(_): #false
+              | regexp_right_state(_): #false
+              | regexp_child_state(_): #false
+          | regexp_entry_state(): #false
+          | regexp_left_state(_): #false
+          | regexp_child_state(_): #false
+      | regexp_exit_state(): #false
+      | regexp_child_state(_): #false
+  | regexp_sequence(left, right):
+      match source
+      | regexp_entry_state():
+          match destination
+          | regexp_left_state(regexp_entry_state()): #true
+          | regexp_entry_state(): #false
+          | regexp_exit_state(): #false
+          | regexp_left_state(regexp_exit_state()): #false
+          | regexp_left_state(regexp_left_state(_)): #false
+          | regexp_left_state(regexp_right_state(_)): #false
+          | regexp_left_state(regexp_child_state(_)): #false
+          | regexp_right_state(_): #false
+          | regexp_child_state(_): #false
+      | regexp_left_state(left_source):
+          match destination
+          | regexp_left_state(left_destination):
+              regexp_epsilon_relation(left, left_source, left_destination)
+          | regexp_right_state(regexp_entry_state()):
+              match left_source
+              | regexp_exit_state(): #true
+              | regexp_entry_state(): #false
+              | regexp_left_state(_): #false
+              | regexp_right_state(_): #false
+              | regexp_child_state(_): #false
+          | regexp_entry_state(): #false
+          | regexp_exit_state(): #false
+          | regexp_right_state(regexp_exit_state()): #false
+          | regexp_right_state(regexp_left_state(_)): #false
+          | regexp_right_state(regexp_right_state(_)): #false
+          | regexp_right_state(regexp_child_state(_)): #false
+          | regexp_child_state(_): #false
+      | regexp_right_state(right_source):
+          match destination
+          | regexp_right_state(right_destination):
+              regexp_epsilon_relation(right, right_source, right_destination)
+          | regexp_exit_state():
+              match right_source
+              | regexp_exit_state(): #true
+              | regexp_entry_state(): #false
+              | regexp_left_state(_): #false
+              | regexp_right_state(_): #false
+              | regexp_child_state(_): #false
+          | regexp_entry_state(): #false
+          | regexp_left_state(_): #false
+          | regexp_child_state(_): #false
+      | regexp_exit_state(): #false
+      | regexp_child_state(_): #false
+  | regexp_star(body):
+      match source
+      | regexp_entry_state():
+          match destination
+          | regexp_exit_state(): #true
+          | regexp_child_state(regexp_entry_state()): #true
+          | regexp_entry_state(): #false
+          | regexp_left_state(_): #false
+          | regexp_right_state(_): #false
+          | regexp_child_state(regexp_exit_state()): #false
+          | regexp_child_state(regexp_left_state(_)): #false
+          | regexp_child_state(regexp_right_state(_)): #false
+          | regexp_child_state(regexp_child_state(_)): #false
+      | regexp_child_state(child_source):
+          match destination
+          | regexp_child_state(child_destination):
+              regexp_epsilon_relation(body, child_source, child_destination) || (regexp_state_equal(child_source, regexp_exit_state()) && regexp_state_equal(child_destination, regexp_entry_state()))
+          | regexp_exit_state():
+              regexp_state_equal(child_source, regexp_exit_state())
+          | regexp_entry_state(): #false
+          | regexp_left_state(_): #false
+          | regexp_right_state(_): #false
+      | regexp_exit_state(): #false
+      | regexp_left_state(_): #false
+      | regexp_right_state(_): #false
+
+function regexp_transition_relation(r :: Regexp.of(?a),
+                                    source :: RegexpState,
+                                    symbol :: ?a,
+                                    destination :: RegexpState) :: Boolean:
+  match r
+  | regexp_none(): #false
+  | regexp_epsilon(): #false
+  | regexp_atom(predicate):
+      match source
+      | regexp_entry_state():
+          match destination
+          | regexp_exit_state(): predicate(symbol)
+          | regexp_entry_state(): #false
+          | regexp_left_state(_): #false
+          | regexp_right_state(_): #false
+          | regexp_child_state(_): #false
+      | regexp_exit_state(): #false
+      | regexp_left_state(_): #false
+      | regexp_right_state(_): #false
+      | regexp_child_state(_): #false
+  | regexp_alternate(left, right):
+      match source
+      | regexp_left_state(left_source):
+          match destination
+          | regexp_left_state(left_destination):
+              regexp_transition_relation(left, left_source, symbol, left_destination)
+          | regexp_entry_state(): #false
+          | regexp_exit_state(): #false
+          | regexp_right_state(_): #false
+          | regexp_child_state(_): #false
+      | regexp_right_state(right_source):
+          match destination
+          | regexp_right_state(right_destination):
+              regexp_transition_relation(right, right_source, symbol, right_destination)
+          | regexp_entry_state(): #false
+          | regexp_exit_state(): #false
+          | regexp_left_state(_): #false
+          | regexp_child_state(_): #false
+      | regexp_entry_state(): #false
+      | regexp_exit_state(): #false
+      | regexp_child_state(_): #false
+  | regexp_sequence(left, right):
+      match source
+      | regexp_left_state(left_source):
+          match destination
+          | regexp_left_state(left_destination):
+              regexp_transition_relation(left, left_source, symbol, left_destination)
+          | regexp_entry_state(): #false
+          | regexp_exit_state(): #false
+          | regexp_right_state(_): #false
+          | regexp_child_state(_): #false
+      | regexp_right_state(right_source):
+          match destination
+          | regexp_right_state(right_destination):
+              regexp_transition_relation(right, right_source, symbol, right_destination)
+          | regexp_entry_state(): #false
+          | regexp_exit_state(): #false
+          | regexp_left_state(_): #false
+          | regexp_child_state(_): #false
+      | regexp_entry_state(): #false
+      | regexp_exit_state(): #false
+      | regexp_child_state(_): #false
+  | regexp_star(body):
+      match source
+      | regexp_child_state(child_source):
+          match destination
+          | regexp_child_state(child_destination):
+              regexp_transition_relation(body, child_source, symbol, child_destination)
+          | regexp_entry_state(): #false
+          | regexp_exit_state(): #false
+          | regexp_left_state(_): #false
+          | regexp_right_state(_): #false
+      | regexp_entry_state(): #false
+      | regexp_exit_state(): #false
+      | regexp_left_state(_): #false
+      | regexp_right_state(_): #false
+
+function regexp_final_state(q :: RegexpState) :: Boolean:
+  regexp_state_equal(q, regexp_exit_state())
+
+function regexp_to_epsilon_nfa(r :: Regexp.of(?a))
+    :: EpsilonNFA.of(RegexpState, ?a):
+  epsilon_nfa(
+    regexp_state_equal,
+    finite_set(regexp_state_list(r)),
+    finite_set(cons(regexp_entry_state(), nil())),
+    regexp_epsilon_relation(r),
+    regexp_transition_relation(r),
+    regexp_final_state)
+
+function regexp_to_nfa(r :: Regexp.of(?a)) :: NFA.of(RegexpState, ?a):
+  epsilon_nfa_eliminate(regexp_to_epsilon_nfa(r))
+
+function regexp_to_dfa(r :: Regexp.of(?a))
+    :: DFA.of(FiniteSet.of(RegexpState), ?a):
+  nfa_determinize(regexp_to_nfa(r))
+
+function regexp_matches(r :: Regexp.of(?a),
+                        word :: List.of(?a)) :: Boolean:
+  dfa_accepts(regexp_to_dfa(r), word)
+
+// Independent, conventional language semantics.  It does not mention any
+// automaton representation or runner.
+inductive regexp_accepts(Regexp.of(?a), List.of(?a))
+| regexp_accepts_epsilon:
+    regexp_accepts(regexp_epsilon(), nil())
+| regexp_accepts_atom:
+    forall (predicate :: ?a -> Boolean, symbol :: ?a):
+      predicate(symbol)
+        ==> regexp_accepts(regexp_atom(predicate), cons(symbol, nil()))
+| regexp_accepts_alternate_left:
+    forall (left :: Regexp.of(?a), right :: Regexp.of(?a), word :: List.of(?a)):
+      regexp_accepts(left, word)
+        ==> regexp_accepts(regexp_alternate(left, right), word)
+| regexp_accepts_alternate_right:
+    forall (left :: Regexp.of(?a), right :: Regexp.of(?a), word :: List.of(?a)):
+      regexp_accepts(right, word)
+        ==> regexp_accepts(regexp_alternate(left, right), word)
+| regexp_accepts_sequence:
+    forall (left :: Regexp.of(?a), right :: Regexp.of(?a),
+            left_word :: List.of(?a), right_word :: List.of(?a)):
+      regexp_accepts(left, left_word)
+        ==> regexp_accepts(right, right_word)
+        ==> regexp_accepts(
+              regexp_sequence(left, right),
+              list_append(left_word, right_word))
+| regexp_accepts_star_nil:
+    forall (body :: Regexp.of(?a)):
+      regexp_accepts(regexp_star(body), nil())
+| regexp_accepts_star_append:
+    forall (body :: Regexp.of(?a),
+            first :: List.of(?a), rest :: List.of(?a)):
+      regexp_accepts(body, first)
+        ==> regexp_accepts(regexp_star(body), rest)
+        ==> regexp_accepts(regexp_star(body), list_append(first, rest))
+
+theorem regexp_accepts_none_iff:
+  forall (word :: List.of(?a)):
+    not regexp_accepts(regexp_none(), word)
+proof:
+  ~use: [regexp_accepts_cases]
+
+theorem regexp_accepts_epsilon_iff:
+  forall (word :: List.of(?a)):
+    regexp_accepts(regexp_epsilon(), word) <=> word === nil()
+proof:
+  ~use: [regexp_accepts_epsilon, regexp_accepts_cases]
+
+theorem regexp_accepts_atom_iff:
+  forall (predicate :: ?a -> Boolean, word :: List.of(?a)):
+    regexp_accepts(regexp_atom(predicate), word)
+      <=> (exists (symbol :: ?a):
+             predicate(symbol) and word === cons(symbol, nil()))
+proof:
+  ~use: [regexp_accepts_atom, regexp_accepts_cases]
+
+theorem regexp_accepts_alternate_iff:
+  forall (left :: Regexp.of(?a), right :: Regexp.of(?a),
+          word :: List.of(?a)):
+    regexp_accepts(regexp_alternate(left, right), word)
+      <=> regexp_accepts(left, word) or regexp_accepts(right, word)
+proof:
+  ~use: [regexp_accepts_alternate_left,
+         regexp_accepts_alternate_right,
+         regexp_accepts_cases]
+
+theorem regexp_accepts_sequence_iff:
+  forall (left :: Regexp.of(?a), right :: Regexp.of(?a),
+          word :: List.of(?a)):
+    regexp_accepts(regexp_sequence(left, right), word)
+      <=> (exists (left_word :: List.of(?a),
+                   right_word :: List.of(?a)):
+             regexp_accepts(left, left_word) and regexp_accepts(right, right_word) and word === list_append(left_word, right_word))
+proof:
+  ~use: [regexp_accepts_sequence, regexp_accepts_cases]
+
+theorem regexp_accepts_star_iff:
+  forall (body :: Regexp.of(?a), word :: List.of(?a)):
+    regexp_accepts(regexp_star(body), word) <=> word === nil() or (exists (first :: List.of(?a), rest :: List.of(?a)): regexp_accepts(body, first) and regexp_accepts(regexp_star(body), rest) and word === list_append(first, rest))
+proof:
+  ~use: [regexp_accepts_star_nil,
+         regexp_accepts_star_append,
+         regexp_accepts_cases]
+
+// Structural equality and complete state enumeration.
+theorem regexp_state_equal_iff:
+  forall (p :: RegexpState, q :: RegexpState):
+    regexp_state_equal(p, q) <=> p === q
+proof:
+  ~induct: [p, q]
+
+theorem regexp_left_state_member_iff:
+  forall (q :: RegexpState, states :: List.of(RegexpState)):
+    list_member(
+      regexp_state_equal,
+      q,
+      list_map(regexp_left_state, states))
+      <=> (exists (nested :: RegexpState): q === regexp_left_state(nested) and list_member(regexp_state_equal, nested, states))
+proof:
+  ~induct: [states]
+  ~use: [regexp_state_equal_iff, member_nil, member_cons]
+
+theorem regexp_right_state_member_iff:
+  forall (q :: RegexpState, states :: List.of(RegexpState)):
+    list_member(
+      regexp_state_equal,
+      q,
+      list_map(regexp_right_state, states))
+      <=> (exists (nested :: RegexpState): q === regexp_right_state(nested) and list_member(regexp_state_equal, nested, states))
+proof:
+  ~induct: [states]
+  ~use: [regexp_state_equal_iff, member_nil, member_cons]
+
+theorem regexp_child_state_member_iff:
+  forall (q :: RegexpState, states :: List.of(RegexpState)):
+    list_member(
+      regexp_state_equal,
+      q,
+      list_map(regexp_child_state, states))
+      <=> (exists (nested :: RegexpState): q === regexp_child_state(nested) and list_member(regexp_state_equal, nested, states))
+proof:
+  ~induct: [states]
+  ~use: [regexp_state_equal_iff, member_nil, member_cons]
+
+theorem regexp_state_list_member_iff:
+  forall (r :: Regexp.of(?a), q :: RegexpState):
+    list_member(regexp_state_equal, q, regexp_state_list(r))
+      <=> regexp_state_occurs(r, q)
+proof:
+  ~induct: [r, q]
+  ~use: [regexp_state_equal_iff,
+         regexp_left_state_member_iff,
+         regexp_right_state_member_iff,
+         regexp_child_state_member_iff,
+         member_nil,
+         member_cons,
+         member_append]
+
+theorem regexp_state_universe_member_iff:
+  forall (r :: Regexp.of(?a), q :: RegexpState):
+    fset_member(
+      regexp_state_equal,
+      q,
+      finite_set(regexp_state_list(r)))
+      <=> regexp_state_occurs(r, q)
+proof:
+  ~use: [fset_member_constructor, regexp_state_list_member_iff]
+
+theorem regexp_epsilon_preserves_occurrence:
+  forall (r :: Regexp.of(?a), p :: RegexpState, q :: RegexpState):
+    regexp_state_occurs(r, p)
+      ==> regexp_epsilon_relation(r, p, q)
+      ==> regexp_state_occurs(r, q)
+proof:
+  ~induct: [r, p, q]
+  ~use: [regexp_state_equal_iff]
+
+theorem regexp_transition_preserves_occurrence:
+  forall (r :: Regexp.of(?a), p :: RegexpState,
+          symbol :: ?a, q :: RegexpState):
+    regexp_state_occurs(r, p)
+      ==> regexp_transition_relation(r, p, symbol, q)
+      ==> regexp_state_occurs(r, q)
+proof:
+  ~induct: [r, p, q]
+
+// The explicit finite universe contains every initial and transition target.
+theorem regexp_to_epsilon_nfa_well_formed:
+  forall (r :: Regexp.of(?a)):
+    epsilon_nfa_well_formed(regexp_to_epsilon_nfa(r))
+proof:
+  ~use: [regexp_state_equal_iff,
+         regexp_state_universe_member_iff,
+         regexp_epsilon_preserves_occurrence,
+         regexp_transition_preserves_occurrence,
+         fset_member_constructor,
+         member_nil,
+         member_cons]
+
+// Correctness of Thompson compilation against the independent language rules.
+theorem regexp_to_epsilon_nfa_accepts_iff:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    regexp_accepts(r, word)
+      <=> epsilon_nfa_accepts(regexp_to_epsilon_nfa(r), word)
+proof:
+  ~induct: [r, word]
+  ~use: [regexp_accepts_none_iff,
+         regexp_accepts_epsilon_iff,
+         regexp_accepts_atom_iff,
+         regexp_accepts_alternate_iff,
+         regexp_accepts_sequence_iff,
+         regexp_accepts_star_iff,
+         regexp_state_equal_iff,
+         regexp_state_universe_member_iff,
+         finite_relational_image_member_iff,
+         finite_accepting_set_iff,
+         fset_member_insert_iff,
+         member_nil,
+         member_cons,
+         member_append,
+         append_nil_left,
+         append_nil_right,
+         append_associative]
+
+// Preservation through the deliberately explicit epsilon-NFA -> NFA -> DFA
+// compilation pipeline.
+theorem regexp_to_nfa_accepts_iff:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    epsilon_nfa_accepts(regexp_to_epsilon_nfa(r), word)
+      <=> nfa_accepts(regexp_to_nfa(r), word)
+proof:
+  ~use: [epsilon_nfa_eliminate_accepts_iff,
+         regexp_to_epsilon_nfa_well_formed]
+
+theorem regexp_to_nfa_language:
+  forall (r :: Regexp.of(?a)):
+    epsilon_nfa_accepts(regexp_to_epsilon_nfa(r))
+      === nfa_accepts(regexp_to_nfa(r))
+proof:
+  ~extensionality: [word]
+  ~use: [regexp_to_nfa_accepts_iff]
+
+theorem regexp_to_dfa_accepts_iff:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    epsilon_nfa_accepts(regexp_to_epsilon_nfa(r), word)
+      <=> dfa_accepts(regexp_to_dfa(r), word)
+proof:
+  ~use: [regexp_to_nfa_accepts_iff,
+         nfa_determinize_accepts_iff]
+
+theorem regexp_to_dfa_language:
+  forall (r :: Regexp.of(?a)):
+    epsilon_nfa_accepts(regexp_to_epsilon_nfa(r))
+      === dfa_accepts(regexp_to_dfa(r))
+proof:
+  ~extensionality: [word]
+  ~use: [regexp_to_dfa_accepts_iff]
+
+theorem regexp_to_nfa_semantics_iff:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    regexp_accepts(r, word)
+      <=> nfa_accepts(regexp_to_nfa(r), word)
+proof:
+  ~use: [regexp_to_epsilon_nfa_accepts_iff,
+         regexp_to_nfa_accepts_iff]
+
+theorem regexp_to_dfa_semantics_iff:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    regexp_accepts(r, word)
+      <=> dfa_accepts(regexp_to_dfa(r), word)
+proof:
+  ~use: [regexp_to_epsilon_nfa_accepts_iff,
+         regexp_to_dfa_accepts_iff]
+
+theorem regexp_matches_dfa_iff:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    regexp_matches(r, word)
+      <=> dfa_accepts(regexp_to_dfa(r), word)
+proof:
+  ~split: [dfa_accepts(regexp_to_dfa(r), word)]
+
+theorem regexp_matches_epsilon_nfa_iff:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    regexp_matches(r, word)
+      <=> epsilon_nfa_accepts(regexp_to_epsilon_nfa(r), word)
+proof:
+  ~use: [regexp_to_dfa_accepts_iff]
+
+theorem regexp_matches_nfa_iff:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    regexp_matches(r, word)
+      <=> nfa_accepts(regexp_to_nfa(r), word)
+proof:
+  ~use: [nfa_determinize_accepts_iff]
+
+theorem regexp_matches_iff:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    regexp_matches(r, word) <=> regexp_accepts(r, word)
+proof:
+  ~use: [regexp_to_dfa_semantics_iff]

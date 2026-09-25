@@ -110,6 +110,75 @@ language preservation. No well-formedness premise is required by either
 determinization theorem, because those theorems compare the executable
 runners directly.
 
+#### Generic regular expressions
+
+Importing `rhombus/hol/stdlib open` exposes the generic regular-expression
+library. `Regexp.of(?a)` is an AST over an arbitrary symbol type `?a` with
+exactly six constructors:
+
+- `regexp_none()` accepts no words and `regexp_epsilon()` accepts only the
+  empty word.
+- `regexp_atom(predicate)` accepts a one-symbol word when the
+  `?a -> Boolean` predicate accepts that symbol. The predicate is executable,
+  so compiled matching remains ordinary runtime code.
+- `regexp_alternate(left, right)`, `regexp_sequence(left, right)`, and
+  `regexp_star(body)` denote union, concatenation, and Kleene closure.
+
+`regexp_literal(decide_equal, value)` is a convenience function that constructs
+an atom from an executable equality decider; it is not a seventh AST
+constructor. The inductively defined relation
+`regexp_accepts(r, word)` gives the language semantics independently of every
+automaton representation and runner. Its rules give epsilon the empty word,
+atoms their accepted singleton words, alternation either branch, sequencing
+the concatenation of two accepted words, and star zero or more accepted body
+words.
+
+Compilation follows the conventional Thompson pipeline:
+
+```text
+Regexp -> EpsilonNFA -> NFA -> DFA
+```
+
+`regexp_to_epsilon_nfa` performs Thompson construction,
+`regexp_to_nfa` eliminates epsilon transitions, and `regexp_to_dfa`
+determinizes the resulting NFA. `regexp_matches(r, word)` executes the DFA and
+tests the whole word; it is not a substring search.
+
+The principal compiler theorems are
+`regexp_to_epsilon_nfa_well_formed` and
+`regexp_to_epsilon_nfa_accepts_iff` for the Thompson result;
+`regexp_to_nfa_accepts_iff` and `regexp_to_nfa_language` for epsilon
+elimination; and `regexp_to_dfa_accepts_iff` and
+`regexp_to_dfa_language` for determinization. The direct semantic
+correspondences are `regexp_to_nfa_semantics_iff` and
+`regexp_to_dfa_semantics_iff`. The executable matcher is related to each stage
+by `regexp_matches_epsilon_nfa_iff`, `regexp_matches_nfa_iff`, and
+`regexp_matches_dfa_iff`, while `regexp_matches_iff` is the end-to-end
+correctness theorem
+`regexp_matches(r, word) <=> regexp_accepts(r, word)`.
+
+`regexp_find(r, input)` returns an `Option.of(RegexpMatch)`.
+`regexp_match(start, end)` constructs a result, and
+`regexp_match_start` and `regexp_match_end` select its `Nat` offsets. Search is
+leftmost-longest: it chooses the earliest start having a match, then the
+greatest accepted end at that start. Ranges are half-open `[start, end)`,
+measured in input-list elements; `start === end` is a valid zero-width match.
+
+`regexp_replace_first(r, replacement, input)` replaces only that
+leftmost-longest range. `regexp_replace_all(r, replacement, input)` repeats the
+same search over the unconsumed original input; replacement symbols are never
+searched. A nonempty match consumes its range. After a zero-width match before
+EOF, replace-all emits the replacement, copies exactly one original symbol at
+the match position unchanged, and resumes after that symbol. At a zero-width
+match at EOF, it emits the replacement once and stops.
+
+The four String adapters are `string_regexp_matches`,
+`string_regexp_find`, `string_regexp_replace_first`, and
+`string_regexp_replace_all`. They accept `Regexp.of(Nat)` and convert strings
+to and from codepoint lists. Consequently String search offsets count
+codepoints, not encoded bytes, and replacement follows exactly the generic
+list behavior above.
+
 ## 2. Theories, imports, and scope
 
 A theory is an immutable value with a lineage stamp. A theorem belongs to the

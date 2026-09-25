@@ -1,0 +1,279 @@
+#lang rhombus/hol
+
+import:
+  "regexp.rhm" open
+  "automaton.rhm" open
+  "algorithm.rhm" open
+  "list.rhm" open
+  "data.rhm" open
+  "nat.rhm" open
+
+export:
+  RegexpMatch
+  regexp_match
+  regexp_match_start
+  regexp_match_end
+  regexp_find
+  regexp_replace_first
+  regexp_replace_all
+  string_regexp_matches
+  string_regexp_find
+  string_regexp_replace_first
+  string_regexp_replace_all
+
+// Match ranges are half-open: `start` is included and `end` is excluded.
+datatype RegexpMatch
+| regexp_match(regexp_match_start_value :: Nat,
+               regexp_match_end_value :: Nat)
+
+function regexp_match_start(m :: RegexpMatch) :: Nat:
+  match m
+  | regexp_match(start, _): start
+
+function regexp_match_end(m :: RegexpMatch) :: Nat:
+  match m
+  | regexp_match(_, end): end
+
+// Search a DFA from a supplied state. Recursing to the end before considering
+// the current final state makes a later accepted prefix win, hence longest.
+function dfa_longest_accepted_prefix_from(m :: DFA.of(?q, ?a),
+                                          q :: ?q,
+                                          input :: List.of(?a)) :: Option.of(Nat):
+  match input
+  | nil():
+      if dfa_final(m, q) | some(zero()) | none()
+  | cons(x, rest):
+      match dfa_longest_accepted_prefix_from(m, dfa_transition(m, q, x), rest)
+      | none():
+          if dfa_final(m, q) | some(zero()) | none()
+      | some(n): some(succ(n))
+
+function dfa_longest_accepted_prefix(m :: DFA.of(?q, ?a),
+                                     input :: List.of(?a)) :: Option.of(Nat):
+  dfa_longest_accepted_prefix_from(m, dfa_initial(m), input)
+
+function regexp_match_shift(m :: RegexpMatch) :: RegexpMatch:
+  match m
+  | regexp_match(start, end): regexp_match(succ(start), succ(end))
+
+// Suffixes are tried from left to right. The first suffix with an accepted
+// prefix is therefore leftmost, while the helper above chooses its longest end.
+function dfa_find(m :: DFA.of(?q, ?a),
+                  input :: List.of(?a)) :: Option.of(RegexpMatch):
+  match dfa_longest_accepted_prefix(m, input)
+  | some(end): some(regexp_match(zero(), end))
+  | none():
+      match input
+      | nil(): none()
+      | cons(_, rest): option_map(regexp_match_shift, dfa_find(m, rest))
+
+function regexp_find(r :: Regexp.of(?a),
+                     input :: List.of(?a)) :: Option.of(RegexpMatch):
+  dfa_find(regexp_to_dfa(r), input)
+
+function regexp_replace_range(input :: List.of(?a),
+                              replacement :: List.of(?a),
+                              range :: RegexpMatch) :: List.of(?a):
+  match range
+  | regexp_match(start, end):
+      list_append(
+        list_take(start, input),
+        list_append(replacement, list_drop(end, input)))
+
+function regexp_replace_first(r :: Regexp.of(?a),
+                              replacement :: List.of(?a),
+                              input :: List.of(?a)) :: List.of(?a):
+  match regexp_find(r, input)
+  | none(): input
+  | some(range): regexp_replace_range(input, replacement, range)
+
+// Fuel is one greater than the original input length. Every recursive call
+// spends one unit. A nonempty match consumes original input; an empty match
+// copies one original symbol before continuing, or inserts once and stops at
+// EOF. Replacement symbols are only appended and are never searched.
+function dfa_replace_all_with_fuel(m :: DFA.of(?q, ?a),
+                                   replacement :: List.of(?a),
+                                   input :: List.of(?a),
+                                   fuel :: Nat) :: List.of(?a):
+  match fuel
+  | zero(): input
+  | succ(rest_fuel):
+      match dfa_find(m, input)
+      | none(): input
+      | some(regexp_match(start, end)):
+          let prefix = list_take(start, input)
+          let unmatched = list_drop(start, input)
+          match nat_sub(end, start)
+          | zero():
+              match unmatched
+              | nil(): list_append(prefix, replacement)
+              | cons(x, rest):
+                  list_append(
+                    prefix,
+                    list_append(
+                      replacement,
+                      cons(x,
+                           dfa_replace_all_with_fuel(
+                             m, replacement, rest, rest_fuel))))
+          | succ(_):
+              list_append(
+                prefix,
+                list_append(
+                  replacement,
+                  dfa_replace_all_with_fuel(
+                    m, replacement, list_drop(end, input), rest_fuel)))
+
+function regexp_replace_all(r :: Regexp.of(?a),
+                            replacement :: List.of(?a),
+                            input :: List.of(?a)) :: List.of(?a):
+  dfa_replace_all_with_fuel(
+    regexp_to_dfa(r), replacement, input, succ(list_length(input)))
+
+// String operations are thin codepoint-list adapters; all matching and
+// replacement behavior remains in the generic list implementation.
+function string_regexp_matches(r :: Regexp.of(Nat), input :: String) :: Boolean:
+  regexp_matches(r, string_to_codes(input))
+
+function string_regexp_find(r :: Regexp.of(Nat),
+                            input :: String) :: Option.of(RegexpMatch):
+  regexp_find(r, string_to_codes(input))
+
+function string_regexp_replace_first(r :: Regexp.of(Nat),
+                                     replacement :: String,
+                                     input :: String) :: String:
+  string_from_codes(
+    regexp_replace_first(
+      r, string_to_codes(replacement), string_to_codes(input)))
+
+function string_regexp_replace_all(r :: Regexp.of(Nat),
+                                   replacement :: String,
+                                   input :: String) :: String:
+  string_from_codes(
+    regexp_replace_all(
+      r, string_to_codes(replacement), string_to_codes(input)))
+
+// Range constructor equations.
+theorem regexp_match_start_constructor:
+  forall (start :: Nat, end :: Nat):
+    regexp_match_start(regexp_match(start, end)) === start
+
+theorem regexp_match_end_constructor:
+  forall (start :: Nat, end :: Nat):
+    regexp_match_end(regexp_match(start, end)) === end
+
+theorem regexp_match_shift_constructor:
+  forall (start :: Nat, end :: Nat):
+    regexp_match_shift(regexp_match(start, end))
+      === regexp_match(succ(start), succ(end))
+
+// Longest-prefix constructor and decision equations.
+theorem dfa_longest_accepted_prefix_from_nil:
+  forall (m :: DFA.of(?q, ?a), q :: ?q):
+    dfa_longest_accepted_prefix_from(m, q, nil())
+      === (if dfa_final(m, q) | some(zero()) | none())
+
+theorem dfa_longest_accepted_prefix_nil:
+  forall (m :: DFA.of(?q, ?a)):
+    dfa_longest_accepted_prefix(m, nil())
+      === (if dfa_final(m, dfa_initial(m)) | some(zero()) | none())
+
+theorem dfa_longest_accepted_prefix_from_cons_some:
+  forall (m :: DFA.of(?q, ?a),
+          q :: ?q,
+          x :: ?a,
+          xs :: List.of(?a),
+          n :: Nat):
+    dfa_longest_accepted_prefix_from(m, dfa_transition(m, q, x), xs) === some(n)
+      ==> dfa_longest_accepted_prefix_from(m, q, cons(x, xs)) === some(succ(n))
+
+theorem dfa_longest_accepted_prefix_from_cons_none_final:
+  forall (m :: DFA.of(?q, ?a),
+          q :: ?q,
+          x :: ?a,
+          xs :: List.of(?a)):
+    dfa_longest_accepted_prefix_from(m, dfa_transition(m, q, x), xs) === none()
+      ==> dfa_final(m, q)
+      ==> dfa_longest_accepted_prefix_from(m, q, cons(x, xs)) === some(zero())
+
+theorem dfa_longest_accepted_prefix_from_cons_none_nonfinal:
+  forall (m :: DFA.of(?q, ?a),
+          q :: ?q,
+          x :: ?a,
+          xs :: List.of(?a)):
+    dfa_longest_accepted_prefix_from(m, dfa_transition(m, q, x), xs) === none()
+      ==> not dfa_final(m, q)
+      ==> dfa_longest_accepted_prefix_from(m, q, cons(x, xs)) === none()
+
+// Find equations expose the leftmost scan and the longest result at a suffix.
+theorem dfa_find_nil:
+  forall (m :: DFA.of(?q, ?a)):
+    dfa_find(m, nil())
+      === (if dfa_final(m, dfa_initial(m))
+           | some(regexp_match(zero(), zero()))
+           | none())
+
+theorem dfa_find_here:
+  forall (m :: DFA.of(?q, ?a), input :: List.of(?a), end :: Nat):
+    dfa_longest_accepted_prefix(m, input) === some(end)
+      ==> dfa_find(m, input) === some(regexp_match(zero(), end))
+
+theorem dfa_find_nil_none:
+  forall (m :: DFA.of(?q, ?a)):
+    dfa_longest_accepted_prefix(m, nil()) === none()
+      ==> dfa_find(m, nil()) === none()
+
+theorem dfa_find_cons_later:
+  forall (m :: DFA.of(?q, ?a), x :: ?a, xs :: List.of(?a)):
+    dfa_longest_accepted_prefix(m, cons(x, xs)) === none() ==> dfa_find(m, cons(x, xs)) === option_map(regexp_match_shift, dfa_find(m, xs))
+
+theorem regexp_find_nil:
+  forall (r :: Regexp.of(?a)):
+    regexp_find(r, nil())
+      === (if dfa_final(regexp_to_dfa(r), dfa_initial(regexp_to_dfa(r)))
+           | some(regexp_match(zero(), zero()))
+           | none())
+
+theorem regexp_find_here:
+  forall (r :: Regexp.of(?a), input :: List.of(?a), end :: Nat):
+    dfa_longest_accepted_prefix(regexp_to_dfa(r), input) === some(end)
+      ==> regexp_find(r, input) === some(regexp_match(zero(), end))
+
+theorem regexp_find_cons_later:
+  forall (r :: Regexp.of(?a), x :: ?a, xs :: List.of(?a)):
+    dfa_longest_accepted_prefix(regexp_to_dfa(r), cons(x, xs)) === none() ==> regexp_find(r, cons(x, xs)) === option_map(regexp_match_shift, regexp_find(r, xs))
+
+// Replacement equations state absence, exact found-range decomposition, and
+// the progress rule that makes global replacement total for nullable regexps.
+theorem regexp_replace_first_none:
+  forall (r :: Regexp.of(?a),
+          replacement :: List.of(?a),
+          input :: List.of(?a)):
+    regexp_find(r, input) === none()
+      ==> regexp_replace_first(r, replacement, input) === input
+
+theorem regexp_replace_first_found:
+  forall (r :: Regexp.of(?a),
+          replacement :: List.of(?a),
+          input :: List.of(?a),
+          start :: Nat,
+          end :: Nat):
+    regexp_find(r, input) === some(regexp_match(start, end)) ==> regexp_replace_first(r, replacement, input) === list_append(list_take(start, input), list_append(replacement, list_drop(end, input)))
+
+theorem regexp_replace_all_none:
+  forall (r :: Regexp.of(?a),
+          replacement :: List.of(?a),
+          input :: List.of(?a)):
+    regexp_find(r, input) === none()
+      ==> regexp_replace_all(r, replacement, input) === input
+
+theorem regexp_replace_all_empty_cons_progress:
+  forall (r :: Regexp.of(?a),
+          replacement :: List.of(?a),
+          x :: ?a,
+          xs :: List.of(?a)):
+    regexp_find(r, cons(x, xs)) === some(regexp_match(zero(), zero())) ==> regexp_replace_all(r, replacement, cons(x, xs)) === list_append(replacement, cons(x, regexp_replace_all(r, replacement, xs)))
+
+theorem regexp_replace_all_empty_nil:
+  forall (r :: Regexp.of(?a), replacement :: List.of(?a)):
+    regexp_find(r, nil()) === some(regexp_match(zero(), zero()))
+      ==> regexp_replace_all(r, replacement, nil()) === replacement

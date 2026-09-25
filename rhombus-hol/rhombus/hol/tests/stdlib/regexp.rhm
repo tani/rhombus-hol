@@ -1,0 +1,198 @@
+#lang rhombus/hol
+
+// Exercise regular expressions exclusively through the public standard-library
+// boundary. The checks cover executable matching, compilation, search, and
+// replacement; the consumer theorems cover the independent logical semantics.
+import rhombus/hol/stdlib open
+
+function boolean_equal(x :: Boolean) :: Boolean -> Boolean:
+  function (y :: Boolean) :: Boolean: x == y
+
+function is_true(x :: Boolean) :: Boolean:
+  x
+
+
+function nat_code_equal(x :: Nat) :: Nat -> Boolean:
+  function (y :: Nat) :: Boolean: x == y
+
+
+def true_word = cons(#true, nil())
+def false_word = cons(#false, nil())
+def true_false_word = cons(#true, false_word)
+def two_true_word = cons(#true, true_word)
+def three_true_word = cons(#true, two_true_word)
+def five_true_word = cons(#true, cons(#true, three_true_word))
+def three = succ(nat_two())
+
+def none_regexp = regexp_none()
+def epsilon_regexp = regexp_epsilon()
+def atom_regexp = regexp_atom(is_true)
+def true_regexp = regexp_literal(boolean_equal, #true)
+def false_regexp = regexp_literal(boolean_equal, #false)
+def alternate_regexp = regexp_alternate(true_regexp, false_regexp)
+def sequence_regexp = regexp_sequence(true_regexp, false_regexp)
+def star_regexp = regexp_star(true_regexp)
+
+// Every Regexp constructor has observable whole-word behavior.
+check regexp_matches(none_regexp, nil()) ~is #false
+check regexp_matches(none_regexp, true_word) ~is #false
+check regexp_matches(epsilon_regexp, nil()) ~is #true
+check regexp_matches(epsilon_regexp, true_word) ~is #false
+check regexp_matches(atom_regexp, true_word) ~is #true
+check regexp_matches(atom_regexp, false_word) ~is #false
+check regexp_matches(alternate_regexp, true_word) ~is #true
+check regexp_matches(alternate_regexp, false_word) ~is #true
+check regexp_matches(sequence_regexp, true_false_word) ~is #true
+check regexp_matches(sequence_regexp, true_word) ~is #false
+check regexp_matches(star_regexp, nil()) ~is #true
+check regexp_matches(star_regexp, two_true_word) ~is #true
+check regexp_matches(star_regexp, true_false_word) ~is #false
+check regexp_matches(true_regexp, true_word) ~is #true
+check regexp_matches(true_regexp, false_word) ~is #false
+
+// The explicit compiler stages agree with the public whole-word matcher.
+def pipeline_regexp:
+  regexp_sequence(
+    regexp_star(alternate_regexp),
+    sequence_regexp)
+def pipeline_word = cons(#true, cons(#false, true_false_word))
+def pipeline_reject = cons(#true, cons(#false, true_word))
+def pipeline_enfa = regexp_to_epsilon_nfa(pipeline_regexp)
+def pipeline_nfa = regexp_to_nfa(pipeline_regexp)
+def pipeline_dfa = regexp_to_dfa(pipeline_regexp)
+
+check epsilon_nfa_accepts(pipeline_enfa, pipeline_word) ~is #true
+check nfa_accepts(pipeline_nfa, pipeline_word) ~is #true
+check dfa_accepts(pipeline_dfa, pipeline_word) ~is #true
+check regexp_matches(pipeline_regexp, pipeline_word) ~is #true
+check epsilon_nfa_accepts(pipeline_enfa, pipeline_reject) ~is #false
+check nfa_accepts(pipeline_nfa, pipeline_reject) ~is #false
+check dfa_accepts(pipeline_dfa, pipeline_reject) ~is #false
+check regexp_matches(pipeline_regexp, pipeline_reject) ~is #false
+
+// RegexpMatch is public, and its offsets are half-open.
+def explicit_range = regexp_match(nat_one(), nat_two())
+check regexp_match_start(explicit_range) ~is nat_one()
+check regexp_match_end(explicit_range) ~is nat_two()
+
+// At the first possible start, the longer alternative wins: [1, 3).
+def one_or_two_true:
+  regexp_alternate(true_regexp,
+                   regexp_sequence(true_regexp, true_regexp))
+def surrounded_two_true:
+  cons(#false, cons(#true, cons(#true, false_word)))
+check:
+  regexp_find(one_or_two_true, surrounded_two_true)
+  ~is some(regexp_match(nat_one(), three))
+
+// A nullable alternative still takes a longer match at the same start. At EOF,
+// epsilon is emitted as the single empty half-open range [0, 0).
+def nullable_true = regexp_alternate(epsilon_regexp, true_regexp)
+check:
+  regexp_find(nullable_true, true_word)
+  ~is some(regexp_match(zero(), nat_one()))
+check:
+  regexp_find(epsilon_regexp, true_word)
+  ~is some(regexp_match(zero(), zero()))
+check:
+  regexp_find(epsilon_regexp, nil())
+  ~is some(regexp_match(zero(), zero()))
+
+// First replacement changes exactly the found half-open range.
+def two_true_regexp = regexp_sequence(true_regexp, true_regexp)
+def surrounded_pair = cons(#false, cons(#true, cons(#true, false_word)))
+check:
+  regexp_replace_first(two_true_regexp, false_word, surrounded_pair)
+  ~is cons(#false, cons(#false, false_word))
+
+// Global replacement is non-overlapping: two pairs are replaced and the fifth
+// original symbol remains.
+check:
+  regexp_replace_all(two_true_regexp, false_word, five_true_word)
+  ~is cons(#false, cons(#false, true_word))
+
+// Replacement text is appended, not searched again.
+check:
+  regexp_replace_all(true_regexp, two_true_word, true_word)
+  ~is two_true_word
+
+// A nullable regexp may consume a nonempty match and then match once at EOF.
+check:
+  regexp_replace_all(star_regexp, false_word, true_word)
+  ~is cons(#false, false_word)
+
+// Empty matches make progress over the original input and are emitted once at
+// EOF, so this exact result also proves termination behavior at the boundary.
+check:
+  regexp_replace_all(epsilon_regexp, false_word, two_true_word)
+  ~is cons(#false,
+           cons(#true,
+                cons(#false,
+                     cons(#true,
+                          false_word))))
+check:
+  regexp_replace_all(epsilon_regexp, false_word, nil())
+  ~is false_word
+
+// String wrappers operate on Unicode scalar-value lists. The two-byte UTF-8
+// character e-acute occupies the single half-open codepoint range [1, 2).
+def e_acute_code = 233
+def lambda_code = 955
+def e_acute_string = string_from_codes(cons(e_acute_code, nil()))
+def ascii_e_string = string_from_codes(cons(101, nil()))
+def unicode_input:
+  string_from_codes(
+    cons(97, cons(e_acute_code, cons(98, cons(e_acute_code, nil())))))
+def lambda_string = string_from_codes(cons(lambda_code, nil()))
+def first_unicode_replacement:
+  string_from_codes(
+    cons(97, cons(lambda_code, cons(98, cons(e_acute_code, nil())))))
+def all_unicode_replacements:
+  string_from_codes(
+    cons(97, cons(lambda_code, cons(98, cons(lambda_code, nil())))))
+def e_acute_regexp = regexp_literal(nat_code_equal, e_acute_code)
+check string_regexp_matches(e_acute_regexp, e_acute_string) ~is #true
+check string_regexp_matches(e_acute_regexp, ascii_e_string) ~is #false
+check:
+  string_regexp_find(e_acute_regexp, unicode_input)
+  ~is some(regexp_match(nat_one(), nat_two()))
+check:
+  string_regexp_replace_first(e_acute_regexp, lambda_string, unicode_input)
+  ~is first_unicode_replacement
+check:
+  string_regexp_replace_all(e_acute_regexp, lambda_string, unicode_input)
+  ~is all_unicode_replacements
+
+
+// Logical semantics and each compiler-preservation result are reachable from
+// the same aggregator-only consumer boundary.
+theorem public_regexp_matches_semantics:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    regexp_matches(r, word) <=> regexp_accepts(r, word)
+proof:
+  ~use: [regexp_matches_iff]
+  ~skip: [induct]
+
+theorem public_regexp_to_epsilon_nfa_accepts:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    regexp_accepts(r, word)
+      <=> epsilon_nfa_accepts(regexp_to_epsilon_nfa(r), word)
+proof:
+  ~use: [regexp_to_epsilon_nfa_accepts_iff]
+  ~skip: [induct]
+
+theorem public_regexp_to_nfa_preserves_acceptance:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    epsilon_nfa_accepts(regexp_to_epsilon_nfa(r), word)
+      <=> nfa_accepts(regexp_to_nfa(r), word)
+proof:
+  ~use: [regexp_to_nfa_accepts_iff]
+  ~skip: [induct]
+
+theorem public_regexp_to_dfa_preserves_acceptance:
+  forall (r :: Regexp.of(?a), word :: List.of(?a)):
+    epsilon_nfa_accepts(regexp_to_epsilon_nfa(r), word)
+      <=> dfa_accepts(regexp_to_dfa(r), word)
+proof:
+  ~use: [regexp_to_dfa_accepts_iff]
+  ~skip: [induct]

@@ -158,7 +158,7 @@ class CheckedLocal(name :: Symbol, ty :: HType, at :: Syntax):
   extends CheckedExpr
 class CheckedConstant(name :: Symbol, ty :: HType, at :: Syntax):
   extends CheckedExpr
-class CheckedNumeral(value :: NonnegInt, ty :: HType, at :: Syntax):
+class CheckedNumeral(value :: Int, ty :: HType, at :: Syntax):
   extends CheckedExpr
 class CheckedIf(cond :: CheckedExpr,
                 then_branch :: CheckedExpr,
@@ -233,7 +233,8 @@ fun requires_expected_type(expr :: CoreExpr,
     | _ :: CorePatternMatrix: #true
     | ~else: #false
   match expr
-  | CoreNumeral(_, _): #true
+  | CoreNatLit(_, _): #false
+  | CoreIntLit(_, _): #false
   | CoreTypedExpr(_, _, _): #false
   | CoreGlobalRef(_, _): #false
   | CoreCall(CoreRef(name, _), args, _) when overload_arity(operators, name) != #false:
@@ -720,22 +721,14 @@ fun check_expr(env :: CheckEnv, expr :: CoreExpr,
       let instance = fresh_instance(global_constant_type(env, name, at))
       unify_with(instance, at)
       CheckedConstant(name, resolve(env, instance), at)
-  | CoreNumeral(value, at):
-      match expected
-      | #false: fail(env, "a numeral needs an expected numeric type", at)
-      | wanted:
-          let ty = resolve(env, wanted :~ HType)
-          when ty is_a TyVar
-          | fail(env,
-                 "a numeral needs a type ascription or an unambiguous numeric context",
-                 at)
-          unless ty == mk_tyapp(#'Nat, [])
-                   || ty == mk_tyapp(#'Integer, [])
-                   || ty == mk_tyapp(#'Rational, [])
-          | fail(env,
-                 "a numeral has no representation at type " ++ env.show_type(ty),
-                 at)
-          CheckedNumeral(value, ty, at)
+  | CoreNatLit(value, at):
+      let ty = mk_tyapp(#'Nat, [])
+      unify_with(ty, at)
+      CheckedNumeral(value, ty, at)
+  | CoreIntLit(value, at):
+      let ty = mk_tyapp(#'Integer, [])
+      unify_with(ty, at)
+      CheckedNumeral(value, ty, at)
   | CoreTypedExpr(inner, type_stx, at):
       let annotated = env.parse_type(type_stx)
       let checked = check_expr(env, inner, annotated)
@@ -772,8 +765,8 @@ fun check_expr(env :: CheckEnv, expr :: CoreExpr,
                 values(check_expr(env, left_core, checked_ty(right)), right)
             | #false:
                 // Neither side supplies a concrete type. Check against one
-                // shared metavariable so genuinely ambiguous literals retain
-                // the type-ascription diagnostic instead of losing context.
+                // shared metavariable so context-dependent expressions retain
+                // their useful ambiguity diagnostic.
                 let common = mk_tyvar(Symbol.gen("_equality"))
                 let left = check_expr(env, left_core, common)
                 values(left, check_expr(env, right_core, checked_ty(left)))

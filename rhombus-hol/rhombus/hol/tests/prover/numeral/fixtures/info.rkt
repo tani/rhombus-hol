@@ -8,10 +8,12 @@
 ;; Negative fixtures must remain uncompiled so their diagnostics reach the harness.
 (define compile-omit-paths
   '(
-    "numeral_ambiguous_bad.rhm"
-    "numeral_concrete_mismatch_bad.rhm"
     "numeral_disable_arithmetic_bad.rhm"
     "numeral_disable_exposure_bad.rhm"
-    "numeral_pattern_integer_bad.rhm"
+    "numeral_int_as_nat_bad.rhm"
+    "numeral_nat_as_integer_bad.rhm"
+    "numeral_nat_to_integer_bad.rhm"
+    "numeral_negative_pattern_bad.rhm"
     "numeral_pattern_partial.rhm"
+    "numeral_positive_pattern_bad.rhm"
     ))

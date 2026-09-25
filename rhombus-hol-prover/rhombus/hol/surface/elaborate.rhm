@@ -224,22 +224,24 @@ fun specialize_call_args(fty :: HType, args :: List.of(Term)) :: List.of(Term):
 fun nat_numeral(env :: ElabEnv, value :: NonnegInt, _at :: Syntax) :: Term:
   mk_nat_lit(env.thy, value)
 
-fun elaborate_numeral(env :: ElabEnv, value :: NonnegInt,
+fun elaborate_numeral(env :: ElabEnv, value :: Int,
                       expected :: HType, at :: Syntax) :: Term:
   let nat_ty = mk_tyapp(#'Nat, [])
   let int_ty = mk_tyapp(#'Integer, [])
-  let rational_ty = mk_tyapp(#'Rational, [])
-  let natural = nat_numeral(env, value, at)
-  fun integer() :: Term:
-    mk_comb(mk_const(#'int_from_nat, mk_fun(nat_ty, int_ty)), natural)
   cond
-  | expected == nat_ty: natural
-  | expected == int_ty: integer()
-  | expected == rational_ty:
+  | expected == nat_ty:
+      when value < 0
+      | syntax_error(
+          env.who, "a negative integer literal cannot have type Nat", at)
+      nat_numeral(env, value :~ NonnegInt, at)
+  | expected == int_ty:
+      let (constructor, magnitude):
+        if value >= 0
+        | values(#'int_from_nat, value :~ NonnegInt)
+        | values(#'int_negative, (-value - 1) :~ NonnegInt)
       mk_comb(
-        mk_const(
-          #'rational_from_integer, mk_fun(int_ty, rational_ty)),
-        integer())
+        mk_const(constructor, mk_fun(nat_ty, int_ty)),
+        nat_numeral(env, magnitude, at))
   | ~else:
       syntax_error(
         env.who,
@@ -496,7 +498,8 @@ fun core_type_vars(expr :: CoreExpr) :: List.of(Symbol):
                     append_unique(core_type_vars(t), core_type_vars(e)))
   | CoreForall(bs, body, _):
       append_unique(binders_vars(bs), core_type_vars(body))
-  | CoreNumeral(_, _): []
+  | CoreNatLit(_, _): []
+  | CoreIntLit(_, _): []
   | CoreExists(bs, body, _):
       append_unique(binders_vars(bs), core_type_vars(body))
   | CoreFunctionExpr(bs, result_type, body, _):

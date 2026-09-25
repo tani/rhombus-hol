@@ -203,6 +203,12 @@ provenance, and stamps before exposing a @tt{Thm}. Host arithmetic therefore
 never enters the prover as an unproved result: a wrong conversion cannot
 manufacture a theorem.
 
+Surface @tt{+n} and @tt{-n} integer literals do not add an integer term form
+to the kernel. They lower through the existing @tt{int_from_nat} or
+@tt{int_negative} object-language constructor around a checked @tt{NatLit},
+so natural and integer literals share the same checked kernel boundary.
+@tt{Rational} has no literal form and uses explicit construction.
+
 @section{Theories}
 
 A theorem carries a stamp identifying the theory it was proved in, and a theory
@@ -286,14 +292,15 @@ Beyond the termination restrictions in @secref("termination"):
   module initialization with a shrunk counterexample.}
 
  @item{The function body grammar has named applications, @rhombus(if),
-  @rhombus(cond), local @rhombus(let), matching, Booleans, type-directed
-  nonnegative numerals, HOL notation, @tt{block:}, an expected-type
-  ascription, and anonymous or named-local @rhombus(function) (an
-  ordinary, non-recursive lambda; @secref("local-function")). Overloaded
-  function calls are resolved before kernel terms or executable code are
-  produced; neither layer contains a runtime overload mechanism. The
-  grammar has no effects, implicit numeric coercions, general runtime-only
-  Rhombus expressions, or --- inside a local or anonymous
+  @rhombus(cond), local @rhombus(let), matching, Booleans, self-typed
+  @tt{Nat} and @tt{Integer} literals, HOL notation, @tt{block:}, an
+  expected-type ascription, and anonymous or named-local
+  @rhombus(function) (an ordinary, non-recursive lambda;
+  @secref("local-function")). @tt{Rational} values require explicit
+  construction. Overloaded function calls are resolved before kernel terms or
+  executable code are produced; neither layer contains a runtime overload
+  mechanism. The grammar has no effects, implicit numeric coercions, general
+  runtime-only Rhombus expressions, or --- inside a local or anonymous
   @rhombus(function) --- any recursive binding: self-recursion, forward
   reference to a later local function, and a call back into the
   currently-being-defined enclosing @rhombus(function, ~datum) are all

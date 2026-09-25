@@ -48,13 +48,15 @@ body = expr                        the value of the body
 
 expr = Id                          a parameter, pattern variable or local
      | Id(expr, ...)               a constructor, function or named primitive
-     | NonnegativeInteger          an expected Nat, Integer, or Rational
+     | NonnegativeInteger          a self-typed Nat literal
+     | +NonnegativeInteger | -NonnegativeInteger
+                                       a self-typed Integer literal
      | #true | #false | true | false
      | !expr
      | expr && expr
      | expr || expr
      | expr == expr
-     | -expr
+     | -expr                       overloadable negate for a nonliteral operand
      | expr ** expr
      | expr * expr
      | expr + expr | expr - expr
@@ -137,15 +139,25 @@ executable meanings; see "Matching" below.
 
 @subsection(~tag: "numerals"){Numerals}
 
-At the surface, a numeral is written @tt{n}. The normalized frontend form may
-be called @tt{CoreNumeral(n)} when that implementation detail is useful. For
-the exact reserved declaration
-@tt{datatype Nat | zero() | succ(pred :: Nat)}, logical elaboration produces
-the kernel term @tt{NatLit(n)}, while executable emission produces the host
-@tt{Nat}/@tt{NonnegInt} integer @tt{n}. At @tt{Integer} and @tt{Rational},
-executable emission continues to call the existing conversion function around
-that compact @tt{Nat}; those types do not acquire a host-integer
-representation.
+At the surface, a bare nonnegative decimal @tt{n} is a @tt{Nat} literal.
+The forms @tt{+n} and @tt{-n} are @tt{Integer} literals; @tt{+0} and
+@tt{-0} both denote integer zero. Prefix @tt{+} exists only on a bare decimal
+literal. Unary @tt{-} applied to a nonliteral expression remains the ordinary
+overloadable @tt{negate} operator.
+
+The normalized frontend forms are
+@tt{CoreNatLit(value :: NonnegInt, at)} and
+@tt{CoreIntLit(value :: Int, at)}. Both become
+@tt{CheckedNumeral(value :: Int, ty, at)}, with the Core form fixing
+@tt{ty} to @tt{Nat} or @tt{Integer}. For the exact reserved declaration
+@tt{datatype Nat | zero() | succ(pred :: Nat)}, logical elaboration of
+@tt{CoreNatLit} produces the kernel term @tt{NatLit(n)}, while executable
+emission produces the host @tt{Nat}/@tt{NonnegInt} integer @tt{n}. A
+nonnegative @tt{CoreIntLit} lowers through @tt{int_from_nat(NatLit(n))}; a
+negative value @tt{z} lowers through
+@tt{int_negative(NatLit(abs(z) - 1))}. Executable emission uses the same
+constructors around compact runtime @tt{Nat} values, so @tt{Integer} does not
+acquire a host-integer representation.
 
 For this reserved @tt{Nat} only, executable @tt{zero()} is @tt{0}, and
 executable @tt{succ(n)} is @tt{n + 1}. A runtime @tt{zero()} pattern tests for
@@ -177,15 +189,17 @@ use checked conversions instead of first constructing a successor chain.
 Every conversion returns a theorem checked by the kernel; no theorem is
 accepted merely because host arithmetic produced the same numeric result.
 
-A surface @tt{Nat} literal pattern has the same split. Its logical reading is
-an atomic @tt{NatLit} discrimination, while its executable reading compares
-the host nonnegative integer with @tt{n}; neither expands to
-@tt{succ(...succ(zero())...)}. @tt{Integer} and @tt{Rational} numerals are
-conversion expressions, not literal patterns. A bare numeral is rejected when
-its type cannot be determined from a function domain, checked result, or type
-ascription.
-The lexical form @tt{-1} remains the @tt{negate} call applied to the
-nonnegative numeral @tt{1}.
+A bare surface @tt{Nat} literal pattern has the same split. Its logical
+reading is an atomic @tt{NatLit} discrimination, while its executable reading
+compares the host nonnegative integer with @tt{n}; neither expands to
+@tt{succ(...succ(zero())...)}. Signed integer literals are not patterns.
+
+An expected type checks, but cannot select or convert, a literal's fixed type.
+Thus @tt{10 :: Integer}, @tt{+10 :: Nat}, and passing @tt{10} to an
+@tt{Integer} parameter are errors. There are no implicit numeric coercions.
+@tt{Rational} has no literal form or fraction syntax; a whole rational is
+written explicitly as @tt{rational_from_integer(+n)} or with the appropriate
+constructor/API.
 
 @subsection{Local definitions}
 

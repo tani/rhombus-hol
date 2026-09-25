@@ -189,7 +189,8 @@ space.enforest hol_expr:
       wrap_allowed
       make_ref
       make_call
-      make_numeral
+      make_nat_lit
+      make_int_lit
 
     private parsed_packer do_pack
     private parsed_unpacker do_unpack
@@ -202,8 +203,9 @@ space.enforest hol_expr:
     // decode step that pattern-matches back down to `node` still reports
     // the literal template text in this file instead of the user's source.
     // Relocating `node` itself before wrapping fixes every node this meta
-    // API builds -- `make_ref`, `make_call`, `make_numeral`, and every
-    // `hol_expr.macro` production below that calls `wrap_allowed` directly.
+    // API builds -- `make_ref`, `make_call`, the literal constructors, and
+    // every `hol_expr.macro` production below that calls `wrap_allowed`
+    // directly.
     fun relocate_to(stx :: Syntax, track) :: Syntax:
       cond
       | track is_a List && track.length() == 0: stx
@@ -232,8 +234,11 @@ space.enforest hol_expr:
       wrap_allowed(policy, '(core_call $f [$a, ...])', ~track: track)
 
 
-    fun make_numeral(value :: Syntax, ~track: track = value) :: Syntax:
-      wrap_allowed('both', '(core_numeral $value)', ~track: track)
+    fun make_nat_lit(value :: Syntax, ~track: track = value) :: Syntax:
+      wrap_allowed('both', '(core_nat_lit $value)', ~track: track)
+
+    fun make_int_lit(value :: Syntax, ~track: track = value) :: Syntax:
+      wrap_allowed('both', '(core_int_lit $value)', ~track: track)
     identifier_parser:
       fun (id): make_ref(id, 'both', ~track: id)
 
@@ -369,12 +374,20 @@ meta:
         '(core_pat_ctor $name [$a, ...])'.relocate_span([pat])
     | '$(name :: Identifier)':
         '(core_pat_var $name)'.relocate(pat)
+    | '+ $(value :: Term)':
+        syntax_meta.error("signed integer patterns are not supported", pat)
     | '$(value :: Term)':
         let raw = Syntax.unwrap(value)
+        let spelling = value.to_source_string()
         cond
+        | raw is_a Int
+            && (spelling.starts_with("+") || spelling.starts_with("-")):
+            syntax_meta.error("signed integer patterns are not supported", pat)
         | raw == #true || raw == #false
             || raw is_a NonnegInt || raw is_a String:
             '(core_pat_literal $value)'.relocate(pat)
+        | raw is_a Int:
+            syntax_meta.error("signed integer patterns are not supported", pat)
         | ~else: syntax_meta.error("unsupported literal pattern", pat)
     | ~else: syntax_meta.error("malformed pattern", pat)
 
@@ -490,12 +503,13 @@ hol_expr.macro '#%literal $(value :: Term)':
   match Syntax.unwrap(value)
   | #true: hol_expr_meta.make_ref('true', 'both', ~track: value)
   | #false: hol_expr_meta.make_ref('false', 'both', ~track: value)
-  | n :: Int when n >= 0: hol_expr_meta.make_numeral(value)
   | n :: Int:
-      let magnitude = Syntax.make(-n, value)
-      unary('negate',
-            hol_expr_meta.make_numeral(magnitude, ~track: value),
-            'both')
+      let spelling = value.to_source_string()
+      if n >= 0
+           && !spelling.starts_with("+")
+           && !spelling.starts_with("-")
+      | hol_expr_meta.make_nat_lit(value)
+      | hol_expr_meta.make_int_lit(value)
   | _ :: String:
       hol_expr_meta.wrap_allowed(
         'both', '(core_string_expr $value)', ~track: value)
@@ -605,10 +619,25 @@ hol_expr.macro '! $right':
   ~order: hol_negation
   ~all_stx: stx
   unary('neg', right, 'function')
-hol_expr.macro '$left + $right':
-  ~order: hol_addition
-  ~all_stx: stx
-  binary('add', left, right, 'both')
+hol_expr.macro
+| '$left + $right':
+    ~order: hol_addition
+    ~all_stx: stx
+    binary('add', left, right, 'both')
+| '+ $right':
+    ~order: hol_prefix_arithmetic
+    ~all_stx: stx
+    match stx
+    | '+ $(value :: Term)':
+        match Syntax.unwrap(value)
+        | _ :: NonnegInt:
+            hol_expr_meta.make_int_lit(value, ~track: stx)
+        | ~else:
+            syntax_meta.error(
+              "prefix `+` requires a bare nonnegative decimal literal", stx)
+    | ~else:
+        syntax_meta.error(
+          "prefix `+` requires a bare nonnegative decimal literal", stx)
 
 hol_expr.macro
 | '$left - $right':

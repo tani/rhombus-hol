@@ -593,21 +593,25 @@ meta:
         syntax_meta.error(message, at))
 
   // The executable reading of a Nat literal is its host nonnegative integer.
-  // Integer and Rational retain their nominal wrappers around that compact
-  // Nat value. `check_expr`/`check_pattern` already rejected any other type
-  // before a `CheckedNumeral`/`CheckedPatLiteral` could exist, so the `~else`
-  // branch below is unreachable.
-  fun checked_numeral_stx(value :: NonnegInt, ty :: HType, at :: Syntax) :: Syntax:
+  // Integer retains its nominal wrapper around a compact Nat payload.
+  // `check_expr`/`check_pattern` already rejected any other type before a
+  // `CheckedNumeral`/`CheckedPatLiteral` could exist, so the `~else` branch
+  // below is unreachable.
+  fun checked_numeral_stx(value :: Int, ty :: HType, at :: Syntax) :: Syntax:
     let nat_ty = mk_tyapp(#'Nat, [])
     let int_ty = mk_tyapp(#'Integer, [])
-    let rational_ty = mk_tyapp(#'Rational, [])
-    let literal = Syntax.make(value, runtime_context())
     cond
-    | ty == nat_ty: literal
-    | ty == int_ty: runtime_call_syntax(#'int_from_nat, [literal], at)
-    | ty == rational_ty:
-        let integer = runtime_call_syntax(#'int_from_nat, [literal], at)
-        runtime_call_syntax(#'rational_from_integer, [integer], at)
+    | ty == nat_ty:
+        when value < 0
+        | error(~who: #'checked_to_runtime,
+                "a negative integer literal cannot have type Nat")
+        Syntax.make(value, runtime_context())
+    | ty == int_ty:
+        if value >= 0
+        | let literal = Syntax.make(value, runtime_context())
+          runtime_call_syntax(#'int_from_nat, [literal], at)
+        | let predecessor = Syntax.make(-value - 1, runtime_context())
+          runtime_call_syntax(#'int_negative, [predecessor], at)
     | ~else:
         error(~who: #'checked_to_runtime,
               "a numeral has no representation at type " ++ to_string(ty))

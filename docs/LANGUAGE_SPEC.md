@@ -781,11 +781,11 @@ Boolean, pair, list, and numeral patterns refine a pattern matrix. Rows are
 ordered, but totality is mandatory: every constructor shape must be covered and
 every written row must be reachable.
 
-In the logical reading, a numeral pattern uses the kernel's atomic compact
-`Nat` numeral discriminator described in section 7.4 and therefore requires a
-`Nat` scrutinee. Its executable reading uses that section's host-integer
-discrimination. `Integer` and `Rational` numerals elaborate as conversion
-expressions and are not patterns.
+In the logical reading, a bare nonnegative numeral pattern uses the kernel's
+atomic compact `Nat` numeral discriminator described in section 7.4 and
+therefore requires a `Nat` scrutinee. Its executable reading uses that
+section's host-integer discrimination. Signed `Integer` literals are not
+patterns, and `Rational` has no literal form.
 
 List expression and pattern syntax desugars through constructors supplied by a
 list datatype:
@@ -865,19 +865,33 @@ equality are non-associative: `a < b < c` and `a === b === c` are errors.
 
 ### 7.4 Native numerals
 
-A nonnegative numeral is accepted only when its type is determined by context.
-A lexical negative numeral is `negate(nonnegative-numeral)` and therefore
-requires a selected `negate` overload. There are no implicit numeric coercions.
+A bare nonnegative decimal `n` is self-typed as `Nat`. The explicitly positive
+form `+n` and lexically negative form `-n` are self-typed as `Integer`; `+0`
+and `-0` both normalize to integer zero. Prefix `+` is available only on a bare
+decimal literal. Unary `-` on any nonliteral expression remains the ordinary
+overloadable `negate` operator.
 
-The source form is simply the numeral `n`. The normalized frontend node may be
-described as `CoreNumeral(n)` when that implementation detail matters. At the
-exact reserved object-language declaration
-`datatype Nat | zero() | succ(pred :: Nat)`, its two readings then diverge in
-representation: logical elaboration produces the kernel term `NatLit(n)`, while
-executable emission produces the host `Nat`/`NonnegInt` integer `n`. At
-`Integer` or `Rational`, executable emission still applies that type's existing
-conversion function to the compact executable `Nat`; it does not give those
-logical types a new host-integer representation.
+An expected type checks a literal's fixed type; it never selects or converts
+that type. In particular, `10 :: Integer`, `+10 :: Nat`, and passing `10` to
+an `Integer` parameter are errors. There are no implicit numeric coercions.
+`Rational` has no literal form, including no fraction syntax: construct a
+whole value explicitly with `rational_from_integer(+n)` or use the appropriate
+constructor/API.
+
+The normalized frontend forms are
+`CoreNatLit(value :: NonnegInt, at)` and `CoreIntLit(value :: Int, at)`.
+Both become one checked form, `CheckedNumeral(value :: Int, ty, at)`, after
+the Core form fixes `ty` to `Nat` or `Integer`.
+
+At the exact reserved object-language declaration
+`datatype Nat | zero() | succ(pred :: Nat)`, a `CoreNatLit` has two compact
+readings: logical elaboration produces the kernel term `NatLit(n)`, while
+executable emission produces the host `Nat`/`NonnegInt` integer `n`.
+An integer `z >= 0` logically lowers to `int_from_nat(NatLit(z))`; an integer
+`z < 0` lowers to `int_negative(NatLit(abs(z) - 1))`, matching the existing
+`Integer` datatype representation. Executable emission uses the same
+constructors around the compact runtime `Nat`; `Integer` does not acquire a
+new host-integer representation.
 
 For this reserved declaration only, executable `zero()` returns `0` and
 executable `succ(n)` returns `n + 1`. A `zero()` runtime pattern tests that the
@@ -894,10 +908,11 @@ distinctness, injectivity, cases, and induction theorems. Kernel arithmetic,
 equality, ordering, and zero/successor case conversions remain checked,
 theorem-producing conversions.
 
-A surface `Nat` literal pattern is likewise split: its logical reading is an
-atomic numeric discrimination over `NatLit(n)`, and its executable reading
+A bare surface `Nat` literal pattern is likewise split: its logical reading is
+an atomic numeric discrimination over `NatLit(n)`, and its executable reading
 tests the host nonnegative integer against `n`. Neither reading expands the
-literal to `succ(...succ(zero())...)`.
+literal to `succ(...succ(zero())...)`. Explicitly signed integer patterns are
+rejected.
 
 #### Kernel literal representation
 

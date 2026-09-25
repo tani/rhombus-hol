@@ -362,37 +362,63 @@ emits no Rhombus binding.
 @section(~tag: "notation"){HOL notation}
 
 @verbatim{
-notation left op right:
+notation operator-name :: ResultType:
   operator-option
   ...
-  FunctionName
+| (left-pattern operator-name right-pattern) :: ResultType:
+    HOLBody
+| ...
 }
 
 @rhombus(notation, ~datum) adds an operator spelling to the HOL expression
-space. It follows Rhombus @rhombus(operator, ~datum) case syntax: operands and
-the operator appear directly in the declaration head, and prefix, infix,
-postfix, immediate @tt{|} cases, and named groups of cases are accepted.
-Operands must be identifiers. Precedence options precede exactly one final
-function name.
+space. Its canonical parenthesized prefix, infix, and postfix heads follow
+Rhombus @rhombus(operator, ~datum) case layout; legacy unparenthesized heads,
+immediate @tt{|} cases, and named groups of cases are also accepted. Prefix
+may be combined with infix or postfix, but infix and postfix cannot be
+combined.
 
-Each notation use lowers to a normal call of that function, with operands in
-source order:
+Each operand is one pattern from the closed HOL pattern grammar: variables,
+@rhombus(_), static type annotations, supported literals and collection forms,
+and declared datatype constructors. A compound operand pattern that occupies
+more than one shrubbery term must be parenthesized inside the operator head,
+just as for @rhombus(operator, ~datum).
+
+Cases of each fixity are tried in source order. Unlike a general Rhombus
+operator, however, the matrix must be exhaustive, every row must be reachable,
+and each operand column has one HOL type. Thus notation cannot use dynamic
+patterns to dispatch between unrelated runtime types.
+
+At each use, arbitrary operand expressions are evaluated once, from left to
+right, before the selected fixity's cases match their values. A shared or
+case-local @rhombus(::, ~bind) annotation is a static HOL result type, not a
+Rhombus predicate check or converter:
 
 @rhombusblock(
-  notation left <&> right:
+  notation <&> :: Boolean:
     ~order: hol_conjunction
-    conj
+    ~associativity: ~none
+  | (#false <&> _):
+      #false
+  | (#true <&> right):
+      right
 
   theorem conjunction_example:
-    true <&> true
+    false <&> true
 )
 
-The notation itself has no ordinary Rhombus binding. It can nevertheless
-appear in a @rhombus(function) body when its target function has an executable
-reading: the logical and executable halves lower the same Core call. Outside a
-logical declaration, use the target function directly. If ordinary Rhombus
-code also needs the operator spelling, declare a separate ordinary
-@rhombus(operator, ~datum); the two expression spaces remain explicit.
+The implementation of every case is a HOL body, including sequential
+@rhombus(let), @rhombus(match), and local @rhombus(function) forms. Notation
+normalizes to an immediately applied anonymous Core function and the same
+ordered pattern matrix feeds logical elaboration and executable lowering.
+Actual operand types and pattern constraints are available while overloaded
+calls in a body are resolved.
+
+The notation itself has no ordinary Rhombus binding or repetition binding and
+adds no logical constant. @rhombus(:~, ~bind), @rhombus(~unsafe),
+@rhombus(~name), @rhombus(~who), partial no-match behavior, effects, and
+multiple values are deliberately unsupported. Outside a logical declaration,
+use the body's ordinary Rhombus operations directly or declare a separate
+ordinary @rhombus(operator, ~datum); the two expression spaces remain explicit.
 
 The precedence options are the ones accepted by Rhombus
 @rhombus(operator, ~datum), including @rhombus(~order),
@@ -400,7 +426,10 @@ The precedence options are the ones accepted by Rhombus
 @rhombus(~same_as), @rhombus(~same_on_left_as),
 @rhombus(~same_on_right_as), and @rhombus(~associativity).
 A named order supplies its associativity; an explicit associativity is checked
-against that order. The available HOL orders, strongest to weakest, are
+against that order. Without a shared named block, only the first case of each
+fixity may declare options. Shared and case-local options cannot repeat the
+same kind, and @rhombus(~associativity) applies only to an infix fixity.
+The available HOL orders, strongest to weakest, are
 @rhombus(hol_application), @rhombus(hol_power),
 @rhombus(hol_prefix_arithmetic), @rhombus(hol_multiplication),
 @rhombus(hol_addition), @rhombus(hol_append),
@@ -416,22 +445,22 @@ Multiple fixities of one operator can share options:
 @rhombusblock(
   notation <~>:
     ~order: hol_conjunction
-  | <~> value:
-      neg
-  | left <~> right:
-      conj
+  | (<~> value):
+      neg(value)
+  | (left <~> right):
+      conj(left, right)
 )
 
 Different spellings use separate, symmetric declarations:
 
 @rhombusblock(
-  notation left <+> right:
+  notation (left <+> right):
     ~order: hol_addition
-    custom_add
+    custom_add(left, right)
 
-  notation a <++> b:
+  notation (a <++> b):
     ~order: hol_addition
-    custom_add
+    custom_add(a, b)
 )
 
 Notation definitions take effect before the following declaration is
@@ -450,24 +479,24 @@ following @rhombus(function) and @rhombus(theorem) declarations.
 
 @rhombus(overload, ~datum) adds an overload clause to a callable function
 name. No separate registration form or operator-specific overload form is
-needed. A direct call and notation targeting the same name are resolved
-identically.
+needed. Direct calls and calls in notation implementation expressions use the
+same resolver.
 
 @verbatim{
 overload add(Nat, Nat) = nat_add
 overload add(Integer, Integer) = int_add
 
-notation left <+> right:
+notation (left <+> right):
   ~order: hol_addition
-  add
+  add(left, right)
 }
 
-Here @tt{x + y} lowers to the same named call as @tt{add(x, y)}. The ordinary
-elaborator sees the call, checks whether @tt{add} has overload clauses, and
-selects a clause from the argument types and, when available, the expected
-result type. A successful call becomes a direct call to the selected
-implementation constant. Kernel terms contain no overload node, and generated
-executable code performs no runtime type test.
+Here @tt{x <+> y} binds @tt{left} and @tt{right} before checking
+@tt{add(left, right)}. The ordinary elaborator sees the call, checks whether
+@tt{add} has overload clauses, and selects a clause from the argument types and,
+when available, the expected result type. A successful call becomes a direct
+call to the selected implementation constant. Kernel terms contain no overload
+node, and generated executable code performs no runtime type test.
 
 The notation-facing overloaded names are @tt{add}, @tt{subtract},
 @tt{negate}, @tt{multiply}, @tt{power}, @tt{less}, @tt{less_equal},
@@ -538,9 +567,9 @@ its parameter order differs, name the signature arguments and write a call
 template:
 
 @verbatim{
-notation element in collection:
+notation (element in collection):
   ~order: hol_relation
-  member
+  member(element, collection)
 
 overload member(
   element :: ?a,

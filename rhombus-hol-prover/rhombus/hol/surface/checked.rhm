@@ -632,6 +632,52 @@ fun check_arguments(env :: CheckEnv,
               "operand type does not match function domain")
         fill(rest, replace(out, index, value))
 
+fun check_immediate_function_call(
+      env :: CheckEnv,
+      params :: List.of(CoreBinder),
+      result_type_stx :: maybe(Syntax),
+      body :: CoreFunBody,
+      function_at :: Syntax,
+      args :: List.of(CoreExpr),
+      at :: Syntax,
+      expected :: maybe(HType)) :: CheckedApply:
+  let domains :~ List.of(HType):
+    for List (_ in args):
+      mk_tyvar(Symbol.gen("_domain"))
+  let result :~ HType:
+    match expected
+    | #false: mk_tyvar(Symbol.gen("_result"))
+    | wanted: wanted :~ HType
+  let known:
+    for List (arg in args, domain in domains):
+      cond
+      | requires_expected_type(arg :~ CoreExpr, env.operators): #false
+      | ~else:
+          let value = check_expr(env, arg :~ CoreExpr, #false)
+          unify(env, domain :~ HType, checked_ty(value), at,
+                "operand type does not match function domain")
+          value
+  let function_type:
+    for values(ty :~ HType = result) (domain in domains.reverse()):
+      mk_fun(domain :~ HType, ty)
+  let head = check_function(
+               env, params, result_type_stx, body, function_at, function_type)
+  let checked_args:
+    for List (arg in args, domain in domains, prior in known):
+      let wanted = resolve(env, domain :~ HType)
+      match prior
+      | #false:
+          let value = check_expr(env, arg :~ CoreExpr, wanted)
+          unify(env, wanted, checked_ty(value), at,
+                "operand type does not match function domain")
+          value
+      | value:
+          let value = value :~ CheckedExpr
+          unify(env, wanted, checked_ty(value), at,
+                "operand type does not match function domain")
+          value
+  CheckedApply(head, checked_args, resolve(env, result), at)
+
 fun check_overload(env :: CheckEnv, name :: Symbol,
                    args :: List.of(CoreExpr), at :: Syntax,
                    expected :: maybe(HType)) :: CheckedExpr:
@@ -791,6 +837,10 @@ fun check_expr(env :: CheckEnv, expr :: CoreExpr,
                                                 && ordinary_constant_type(env, name, at) == #false
                                                 && overload_arity(env.operators, name) != #false:
       check_overload(env, name, args, at, expected)
+  | CoreCall(CoreFunctionExpr(params, result_type, body, function_at),
+             args, at) when params.length() == args.length():
+      check_immediate_function_call(
+        env, params, result_type, body, function_at, args, at, expected)
   | CoreCall(func, args, at):
       let head = check_expr(env, func, #false)
       let (domains, result) = peel_type(

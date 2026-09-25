@@ -119,11 +119,12 @@ type switch and no implicit numeric coercion: the complete argument tuple and,
 when available, the expected result type must select one non-overlapping
 clause.
 
-@rhombus(notation, ~datum) adds a spelling to the HOL expression space. Each
-use lowers to a normal call of the declaration's final function name. It can
-therefore occur in a logical @rhombus(function) when that function has an
-executable reading, even though the notation itself is not bound in ordinary
-Rhombus code.
+@rhombus(notation, ~datum) adds a spelling to the HOL expression space.
+Operator-style cases accept the closed HOL pattern grammar and are tried in
+source order within each fixity. Arbitrary operands are evaluated once before
+dispatch; the resulting matrix must be exhaustive, every row reachable, and
+each operand column statically homogeneous. Shared or case-local result
+annotations are HOL type constraints, not dynamic checks or converters.
 
 @rhombus(&&) and @rhombus(||) short-circuit when the module runs, while the
 logical @tt{and} and @tt{or} are strict. Nothing can tell the difference,

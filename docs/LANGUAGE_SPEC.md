@@ -624,21 +624,47 @@ their written order; repeated keywords never concatenate lists.
 ### 4.6 `notation`
 
 ```rhombus
-notation left operator right:
-  ~order: hol_addition
-  target_function
+notation <&> :: Boolean:
+  ~order: hol_conjunction
+  ~associativity: ~none
+| (#false <&> _):
+    #false
+| (#true <&> right):
+    right
 ```
 
-`notation` adds a spelling only to the HOL expression space. Prefix, infix,
-postfix, immediate cases, and grouped cases follow Rhombus `operator` syntax;
-operands must be identifiers. Every use lowers to a call of the final target
-function with operands in source order. The target may itself be overloaded.
+`notation` adds a spelling only to the HOL expression space. Its canonical
+parenthesized prefix, infix, and postfix case heads, legacy unparenthesized
+heads, immediate cases, and named groups follow Rhombus `operator` layout.
+Prefix may be combined with infix or postfix; infix and postfix may not be
+combined.
 
-Notation adds no constant or theorem and creates no ordinary Rhombus operator.
-If executable code needs the same spelling outside a logical declaration, it
-must declare an ordinary Rhombus `operator` separately. Notation is visible to
-the declarations that follow it and is exported explicitly with
-`only_space hol_expr`.
+Operands use the closed HOL pattern grammar from section 6, including
+variables, `_`, static type annotations, literals, lists, products, and
+declared datatype constructors. As with Rhombus `operator`, an operand pattern
+that occupies more than one shrubbery term must be parenthesized inside the
+operator head, for example `((some(value)) <op> right)`.
+
+Cases of each fixity are tried in source order, but must be exhaustive and every
+row must be reachable. Each operand position has one HOL type, so patterns
+cannot dispatch between unrelated runtime types.
+At a use, arbitrary operand expressions are evaluated once from left to right
+before value-pattern dispatch.
+
+A shared or case-local `:: HOLType` is a static result constraint. It is not a
+Rhombus predicate check or converter. `:~`, `~unsafe`, `~name`, `~who`,
+repetition lifting, partial no-match failure, effects, and multiple values are
+not part of HOL notation. Precedence options precede the HOL body; the body may
+use the complete admitted body grammar, and calls in it—including overloaded
+calls—see types inferred from both the operand expressions and patterns.
+
+Notation normalizes to an immediately applied anonymous Core function with one
+shared pattern matrix. The existing checker and decision-tree compiler therefore
+define both its logical and executable readings. Notation adds no constant or
+theorem, creates no ordinary Rhombus or repetition operator, and remains visible
+only to following HOL declarations. Export it explicitly with
+`only_space hol_expr`; importing that binding carries the same HOL notation
+table across the module boundary.
 
 The available named precedence levels, strongest first, are:
 
@@ -663,6 +689,9 @@ hol_equivalence
 The usual Rhombus precedence and associativity options (`~order`,
 `~stronger_than`, `~weaker_than`, `~same_as`, `~same_on_left_as`,
 `~same_on_right_as`, and `~associativity`) apply.
+Without a shared named block, only the first case of each fixity may declare
+options. Shared and case-local options may not repeat the same kind.
+`~associativity` applies only to an infix fixity.
 
 ### 4.7 `overload`
 
@@ -672,8 +701,8 @@ overload public_name(ArgumentType, ...) :: ResultType = implementation
 overload public_name(arg :: ArgumentType, ...) = implementation(arg, ...)
 ```
 
-An overload declaration adds a typed clause for one callable name. A direct
-call and notation targeting that name share exactly one resolver.
+An overload declaration adds a typed clause for one callable name. Direct calls
+and calls in notation implementation expressions share exactly one resolver.
 
 The resolver uses first-order unification of the complete argument tuple and,
 when known, the expected result type. It selects one implementation constant

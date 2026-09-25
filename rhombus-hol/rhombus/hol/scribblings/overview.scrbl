@@ -25,17 +25,19 @@ own spellings wherever a construct exists on both sides ---
 @rhombus(#true), @rhombus(!), @rhombus(&&), @rhombus(||), @rhombus(==) and
 @rhombus(if) --- while logic-only constructs use spellings such as
 @rhombus(===, ~datum), @rhombus(and, ~datum) and @rhombus(forall, ~datum).
-User-defined @rhombus(notation, ~datum) follows Rhombus operator case syntax
-and binds a spelling only in the HOL expression space. Each use lowers to a
-normal call of the declaration's final function name. An ordinary
-@rhombus(operator, ~datum) remains an ordinary Rhombus declaration and is
-independent of HOL notation.
+User-defined @rhombus(notation, ~datum) follows the pure, total subset of
+Rhombus operator case syntax and binds a spelling only in the HOL expression
+space. Its ordered cases use the same closed patterns, type checker, and
+decision tree as HOL functions; each fixity must be exhaustive. An ordinary
+@rhombus(operator, ~datum) remains independent and may additionally use
+Rhombus-only dynamic bindings, failure, repetition, and unsafe execution.
 
 Function overloading is resolved during elaboration, not by the logic.
 @rhombus(overload, ~datum) adds a typed clause to a callable name; direct calls
-and notation targeting that name use the same resolver. A successful call
-lowers directly to the selected constant. The resulting kernel term contains
-no overload node, and generated executable code performs no runtime type test.
+and calls in notation implementation expressions use the same resolver. A
+successful call lowers directly to the selected constant. The resulting kernel
+term contains no overload node, and generated executable code performs no
+runtime type test.
 
 @section{When things happen}
 

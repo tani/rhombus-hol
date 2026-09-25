@@ -879,15 +879,15 @@ whole value explicitly with `rational_from_integer(+n)` or use the appropriate
 constructor/API.
 
 The normalized frontend retains only
-`CoreNatLit(value :: NonnegInt, at)` as a numeric literal node. During Core
-decoding, `+n` becomes
-`CoreCall(CoreGlobalRef(int_nonnegative), [CoreNatLit(n)])`; `-n` becomes the same
+`CoreNatLit(value :: NonnegInt, at)` as a numeric literal node. Surface
+normalization directly encodes `+n` as
+`CoreCall(CoreGlobalRef(int_nonnegative), [CoreNatLit(n)])`; `-n` uses the same
 ordinary call shape with `int_negative` and magnitude `n - 1`. Thus
 `CoreNatLit(n)` becomes the Nat-only checked form
 `CheckedNumeral(n :: NonnegInt, at)`, while an integer literal follows the
 same checked constant-resolution and type-checking path as other
 object-language applications. Its resulting `Integer` type is unified with
-the expected type. Both `+0` and `-0` decode through `int_nonnegative(0)`.
+the expected type. Both `+0` and `-0` normalize through `int_nonnegative(0)`.
 
 At the exact reserved object-language declaration
 `datatype Nat | zero() | succ(pred :: Nat)`, a `CheckedNumeral` has two compact

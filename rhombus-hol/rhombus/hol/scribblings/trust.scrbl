@@ -205,7 +205,7 @@ manufacture a theorem.
 
 Surface @tt{+n} and @tt{-n} integer literals do not add an integer term form
 to the kernel, an integer Core literal node, or a signed checked-numeral form.
-During Core decoding they normalize to ordinary object-language constructor
+During surface normalization they become ordinary object-language constructor
 applications of @tt{int_nonnegative} or @tt{int_negative} around a Nat-only
 @tt{CoreNatLit}. Only that Nat numeral becomes a checked @tt{NatLit}.
 @tt{Rational} has no literal form and uses explicit construction.

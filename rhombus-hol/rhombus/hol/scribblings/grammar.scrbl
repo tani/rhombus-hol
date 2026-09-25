@@ -146,15 +146,15 @@ literal. Unary @tt{-} applied to a nonliteral expression remains the ordinary
 overloadable @tt{negate} operator.
 
 The normalized frontend retains only
-@tt{CoreNatLit(value :: NonnegInt, at)} as a numeric literal node. During Core
-decoding, @tt{+n} becomes
-@tt{CoreCall(CoreGlobalRef(int_nonnegative), [CoreNatLit(n)])}; @tt{-n} becomes
+@tt{CoreNatLit(value :: NonnegInt, at)} as a numeric literal node. Surface
+normalization directly encodes @tt{+n} as
+@tt{CoreCall(CoreGlobalRef(int_nonnegative), [CoreNatLit(n)])}; @tt{-n} uses
 the same ordinary call shape with @tt{int_negative} and magnitude @tt{n - 1}.
 Thus @tt{CoreNatLit(n)} becomes the Nat-only checked form
 @tt{CheckedNumeral(n :: NonnegInt, at)}, while an integer literal follows the
 same checked constant-resolution and type-checking path as other
 object-language applications. Its resulting @tt{Integer} type is unified with
-the expected type. Both @tt{+0} and @tt{-0} decode through
+the expected type. Both @tt{+0} and @tt{-0} normalize through
 @tt{int_nonnegative(0)}.
 
 For the exact reserved declaration

@@ -878,25 +878,24 @@ an `Integer` parameter are errors. There are no implicit numeric coercions.
 whole value explicitly with `rational_from_integer(+n)` or use the appropriate
 constructor/API.
 
-The normalized frontend forms are
-`CoreNatLit(value :: NonnegInt, at)` and `CoreIntLit(value :: Int, at)`.
-They remain distinct through Core elaboration. At the checked boundary,
-`CoreNatLit(n)` becomes the Nat-only form
-`CheckedNumeral(n :: NonnegInt, at)`. A `CoreIntLit(z)` instead normalizes to
-an ordinary checked application: for `z >= 0`, `int_from_nat` is applied to
-`CheckedNumeral(z, at)`; for `z < 0`, `int_negative` is applied to
-`CheckedNumeral(abs(z) - 1, at)`. The generated application follows the same
-checked constant-resolution and type-checking path as other object-language
-applications. Its resulting `Integer` type is then unified with the expected
-type.
+The normalized frontend retains only
+`CoreNatLit(value :: NonnegInt, at)` as a numeric literal node. During Core
+decoding, `+n` becomes
+`CoreCall(CoreGlobalRef(int_nonnegative), [CoreNatLit(n)])`; `-n` becomes the same
+ordinary call shape with `int_negative` and magnitude `n - 1`. Thus
+`CoreNatLit(n)` becomes the Nat-only checked form
+`CheckedNumeral(n :: NonnegInt, at)`, while an integer literal follows the
+same checked constant-resolution and type-checking path as other
+object-language applications. Its resulting `Integer` type is unified with
+the expected type. Both `+0` and `-0` decode through `int_nonnegative(0)`.
 
 At the exact reserved object-language declaration
 `datatype Nat | zero() | succ(pred :: Nat)`, a `CheckedNumeral` has two compact
 readings: logical elaboration produces `mk_nat_lit(theory, n)`, whose kernel
 term is `NatLit(n)`, while executable emission produces the host
 `Nat`/`NonnegInt` integer `n`. The backends therefore handle only Nat
-numerals. Integer literals reach them as ordinary checked `int_from_nat` or
-`int_negative` applications around that Nat literal, so neither backend
+numerals. Integer literals reach them as ordinary checked `int_nonnegative` or
+`int_negative` constructor applications around that Nat literal, so neither backend
 branches on a signed numeral. `Integer` does not acquire a new host-integer
 representation.
 

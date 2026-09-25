@@ -145,25 +145,25 @@ The forms @tt{+n} and @tt{-n} are @tt{Integer} literals; @tt{+0} and
 literal. Unary @tt{-} applied to a nonliteral expression remains the ordinary
 overloadable @tt{negate} operator.
 
-The normalized frontend forms are
-@tt{CoreNatLit(value :: NonnegInt, at)} and
-@tt{CoreIntLit(value :: Int, at)}. They remain distinct through Core
-elaboration. At the checked boundary, @tt{CoreNatLit(n)} becomes the Nat-only
-@tt{CheckedNumeral(n :: NonnegInt, at)}. A @tt{CoreIntLit(z)} instead
-normalizes to an ordinary checked application: a nonnegative value applies
-@tt{int_from_nat} to @tt{CheckedNumeral(z, at)}, while a negative value applies
-@tt{int_negative} to @tt{CheckedNumeral(abs(z) - 1, at)}. The generated
-application follows the same checked constant-resolution and type-checking
-path as other object-language applications. Its resulting @tt{Integer} type
-is unified with the expected type.
+The normalized frontend retains only
+@tt{CoreNatLit(value :: NonnegInt, at)} as a numeric literal node. During Core
+decoding, @tt{+n} becomes
+@tt{CoreCall(CoreGlobalRef(int_nonnegative), [CoreNatLit(n)])}; @tt{-n} becomes
+the same ordinary call shape with @tt{int_negative} and magnitude @tt{n - 1}.
+Thus @tt{CoreNatLit(n)} becomes the Nat-only checked form
+@tt{CheckedNumeral(n :: NonnegInt, at)}, while an integer literal follows the
+same checked constant-resolution and type-checking path as other
+object-language applications. Its resulting @tt{Integer} type is unified with
+the expected type. Both @tt{+0} and @tt{-0} decode through
+@tt{int_nonnegative(0)}.
 
 For the exact reserved declaration
 @tt{datatype Nat | zero() | succ(pred :: Nat)}, a @tt{CheckedNumeral} has two
 compact readings: logical elaboration calls @tt{mk_nat_lit} to produce the
 kernel term @tt{NatLit(n)}, while executable emission produces the host
 @tt{Nat}/@tt{NonnegInt} integer @tt{n}. The backends therefore handle only Nat
-numerals. Integer literals reach them as ordinary checked @tt{int_from_nat} or
-@tt{int_negative} applications around the Nat literal, so neither backend
+numerals. Integer literals reach them as ordinary checked @tt{int_nonnegative}
+or @tt{int_negative} constructor applications around the Nat literal, so neither backend
 branches on a signed numeral and @tt{Integer} does not acquire a host-integer
 representation.
 

@@ -18,23 +18,23 @@ datatype RegexpCompileOperator
 | regexp_compile_group_operator()
 
 datatype RegexpCompileStacks
-| regexp_compile_stacks(regexp_compile_values :: List.of(Regexp.of(Nat)),
-                        regexp_compile_operators :: List.of(RegexpCompileOperator))
+| regexp_compile_stacks(
+    regexp_compile_values :: List.of(Regexp.of(Codepoint)),
+    regexp_compile_operators :: List.of(RegexpCompileOperator))
 
 datatype RegexpCompileState
-| regexp_compile_state(regexp_compile_state_values :: List.of(Regexp.of(Nat)),
-                       regexp_compile_state_operators :: List.of(RegexpCompileOperator),
-                       regexp_compile_expects_atom :: Boolean,
-                       regexp_compile_allows_star :: Boolean)
+| regexp_compile_state(
+    regexp_compile_state_values :: List.of(Regexp.of(Codepoint)),
+    regexp_compile_state_operators :: List.of(RegexpCompileOperator),
+    regexp_compile_expects_atom :: Boolean,
+    regexp_compile_allows_star :: Boolean)
 
-function regexp_compile_code_equal(expected :: Nat) :: Nat -> Boolean:
-  function (actual :: Nat) :: Boolean: expected == actual
-
-function regexp_compile_wildcard(_code :: Nat) :: Boolean:
+function regexp_compile_wildcard(_codepoint :: Codepoint) :: Boolean:
   #true
 
-function regexp_compile_apply_operator(current_operator :: RegexpCompileOperator,
-                                       stack_values :: List.of(Regexp.of(Nat))) :: Option.of(List.of(Regexp.of(Nat))):
+function regexp_compile_apply_operator(
+    current_operator :: RegexpCompileOperator,
+    stack_values :: List.of(Regexp.of(Codepoint))) :: Option.of(List.of(Regexp.of(Codepoint))):
   match stack_values
   | nil(): none()
   | cons(right_operand, remaining):
@@ -48,8 +48,9 @@ function regexp_compile_apply_operator(current_operator :: RegexpCompileOperator
               some(cons(regexp_sequence(left_operand, right_operand), rest))
           | regexp_compile_group_operator(): none()
 
-function regexp_compile_push_sequence(stack_values :: List.of(Regexp.of(Nat)),
-                                      operators :: List.of(RegexpCompileOperator)) :: Option.of(RegexpCompileStacks):
+function regexp_compile_push_sequence(
+    stack_values :: List.of(Regexp.of(Codepoint)),
+    operators :: List.of(RegexpCompileOperator)) :: Option.of(RegexpCompileStacks):
   match operators
   | nil():
       some(regexp_compile_stacks(
@@ -70,8 +71,9 @@ function regexp_compile_push_sequence(stack_values :: List.of(Regexp.of(Nat)),
           | none(): none()
           | some(reduced): regexp_compile_push_sequence(reduced, rest)
 
-function regexp_compile_push_alternate(stack_values :: List.of(Regexp.of(Nat)),
-                                       operators :: List.of(RegexpCompileOperator)) :: Option.of(RegexpCompileStacks):
+function regexp_compile_push_alternate(
+    stack_values :: List.of(Regexp.of(Codepoint)),
+    operators :: List.of(RegexpCompileOperator)) :: Option.of(RegexpCompileStacks):
   match operators
   | nil():
       some(regexp_compile_stacks(
@@ -92,8 +94,9 @@ function regexp_compile_push_alternate(stack_values :: List.of(Regexp.of(Nat)),
           | none(): none()
           | some(reduced): regexp_compile_push_alternate(reduced, rest)
 
-function regexp_compile_close_group(stack_values :: List.of(Regexp.of(Nat)),
-                                    operators :: List.of(RegexpCompileOperator)) :: Option.of(RegexpCompileStacks):
+function regexp_compile_close_group(
+    stack_values :: List.of(Regexp.of(Codepoint)),
+    operators :: List.of(RegexpCompileOperator)) :: Option.of(RegexpCompileStacks):
   match operators
   | nil(): none()
   | cons(current_operator, rest):
@@ -109,8 +112,9 @@ function regexp_compile_close_group(stack_values :: List.of(Regexp.of(Nat)),
           | none(): none()
           | some(reduced): regexp_compile_close_group(reduced, rest)
 
-function regexp_compile_finish(stack_values :: List.of(Regexp.of(Nat)),
-                               operators :: List.of(RegexpCompileOperator)) :: Option.of(Regexp.of(Nat)):
+function regexp_compile_finish(
+    stack_values :: List.of(Regexp.of(Codepoint)),
+    operators :: List.of(RegexpCompileOperator)) :: Option.of(Regexp.of(Codepoint)):
   match operators
   | nil():
       match stack_values
@@ -129,8 +133,9 @@ function regexp_compile_finish(stack_values :: List.of(Regexp.of(Nat)),
           | none(): none()
           | some(reduced): regexp_compile_finish(reduced, rest)
 
-function regexp_compile_insert_atom(atom :: Regexp.of(Nat),
-                                    state :: RegexpCompileState) :: Option.of(RegexpCompileState):
+function regexp_compile_insert_atom(
+    atom :: Regexp.of(Codepoint),
+    state :: RegexpCompileState) :: Option.of(RegexpCompileState):
   match state
   | regexp_compile_state(stack_values, operators, expects_atom, _):
       if expects_atom
@@ -192,17 +197,19 @@ function regexp_compile_insert_star(state :: RegexpCompileState) :: Option.of(Re
             some(regexp_compile_state(
                    cons(regexp_star(value), rest), operators, #false, #false))
 
-function regexp_compile_parse(codes :: List.of(Nat),
-                              state :: RegexpCompileState) :: Option.of(RegexpCompileState):
-  match codes
+function regexp_compile_parse(
+    codepoints :: List.of(Codepoint),
+    state :: RegexpCompileState) :: Option.of(RegexpCompileState):
+  match codepoints
   | nil(): some(state)
-  | cons(code, rest):
+  | cons(current_codepoint, rest):
+      let code = codepoint_to_nat(current_codepoint)
       if code == 92
       | match rest
         | nil(): none()
         | cons(escaped, remaining):
             match regexp_compile_insert_atom(
-                    regexp_literal(regexp_compile_code_equal, escaped), state)
+                    regexp_literal(codepoint_equal, escaped), state)
             | none(): none()
             | some(next_state): regexp_compile_parse(remaining, next_state)
       | if code == 124
@@ -227,17 +234,18 @@ function regexp_compile_parse(codes :: List.of(Nat),
                   | none(): none()
                   | some(next_state): regexp_compile_parse(rest, next_state)
                 | match regexp_compile_insert_atom(
-                        regexp_literal(regexp_compile_code_equal, code), state)
+                        regexp_literal(codepoint_equal, current_codepoint),
+                        state)
                   | none(): none()
                   | some(next_state): regexp_compile_parse(rest, next_state)
 
-function regexp_compile(source :: String) :: Option.of(Regexp.of(Nat)):
-  let codes = string_to_codes(source)
-  match codes
+function regexp_compile(source :: String) :: Option.of(Regexp.of(Codepoint)):
+  let codepoints = string_to_codepoints(source)
+  match codepoints
   | nil(): some(regexp_epsilon())
   | cons(_, _):
       match regexp_compile_parse(
-              codes,
+              codepoints,
               regexp_compile_state(nil(), nil(), #true, #false))
       | none(): none()
       | some(regexp_compile_state(stack_values, operators, expects_atom, _)):
@@ -249,4 +257,4 @@ theorem regexp_compile_empty:
   regexp_compile(string_empty()) === some(regexp_epsilon())
 
 theorem regexp_compile_dangling_escape:
-  regexp_compile(string_singleton(92)) === none()
+  regexp_compile(string_singleton(codepoint(92))) === none()

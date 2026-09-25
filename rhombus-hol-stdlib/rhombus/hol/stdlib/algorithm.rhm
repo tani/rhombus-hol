@@ -20,6 +20,10 @@ export:
   list_permutations
   choose
   factorial
+  Codepoint
+  codepoint
+  codepoint_to_nat
+  codepoint_equal
   String
   text
   string_empty
@@ -27,8 +31,8 @@ export:
   string_append
   string_length
   string_reverse
-  string_to_codes
-  string_from_codes
+  string_to_codepoints
+  string_from_codepoints
   string_map
   string_prefix
   string_suffix
@@ -114,16 +118,28 @@ function choose(n :: Nat, k :: Nat) :: Nat:
       | zero(): succ(zero())
       | succ(k1): nat_add(choose(n1, k1), choose(n1, succ(k1)))
 
-// Strings are immutable sequences of Nat codepoints. Literal syntax supplies
-// Unicode scalar values; manually constructed strings may contain any Nat.
+// Codepoint is nominally distinct from Nat but deliberately admits every Nat.
+// Literal syntax supplies Unicode scalar values; manually constructed
+// codepoints have no scalar-value invariant.
+datatype Codepoint
+| codepoint(codepoint_value :: Nat)
+
+function codepoint_to_nat(c :: Codepoint) :: Nat:
+  match c
+  | codepoint(n): n
+
+function codepoint_equal(expected :: Codepoint) :: Codepoint -> Boolean:
+  function (actual :: Codepoint) :: Boolean: expected == actual
+
+// Strings are immutable sequences of nominal codepoints.
 datatype String
-| text(string_codes :: List.of(Nat))
+| text(string_codepoints :: List.of(Codepoint))
 
 function string_empty() :: String:
   text(nil())
 
-function string_singleton(code :: Nat) :: String:
-  text(cons(code, nil()))
+function string_singleton(c :: Codepoint) :: String:
+  text(cons(c, nil()))
 
 function string_append(x :: String, y :: String) :: String:
   match x
@@ -139,42 +155,47 @@ function string_reverse(s :: String) :: String:
   match s
   | text(xs): text(list_reverse(xs))
 
-function string_to_codes(s :: String) :: List.of(Nat):
+function string_to_codepoints(s :: String) :: List.of(Codepoint):
   match s
   | text(xs): xs
 
-function string_from_codes(xs :: List.of(Nat)) :: String:
+function string_from_codepoints(xs :: List.of(Codepoint)) :: String:
   text(xs)
 
-function string_map(f :: Nat -> Nat, s :: String) :: String:
+function string_map(f :: Codepoint -> Codepoint, s :: String) :: String:
   match s
   | text(xs): text(list_map(f, xs))
 
-function codes_prefix(decide_code :: Nat -> Nat -> Boolean,
-                      prefix :: List.of(Nat),
-                      whole :: List.of(Nat)) :: Boolean:
+function codepoints_prefix(decide_codepoint :: Codepoint -> Codepoint -> Boolean,
+                           prefix :: List.of(Codepoint),
+                           whole :: List.of(Codepoint)) :: Boolean:
   match prefix
   | nil(): #true
   | cons(x, rest):
       match whole
       | nil(): #false
-      | cons(y, tail): decide_code(x)(y) && codes_prefix(decide_code, rest, tail)
+      | cons(y, tail):
+          decide_codepoint(x)(y)
+            && codepoints_prefix(decide_codepoint, rest, tail)
 
-function string_prefix(decide_code :: Nat -> Nat -> Boolean,
+function string_prefix(decide_codepoint :: Codepoint -> Codepoint -> Boolean,
                        prefix :: String,
                        whole :: String) :: Boolean:
   match prefix
-  | text(prefix_codes):
+  | text(prefix_codepoints):
       match whole
-      | text(whole_codes): codes_prefix(decide_code, prefix_codes, whole_codes)
+      | text(whole_codepoints):
+          codepoints_prefix(
+            decide_codepoint, prefix_codepoints, whole_codepoints)
 
-function string_suffix(decide_code :: Nat -> Nat -> Boolean,
+function string_suffix(decide_codepoint :: Codepoint -> Codepoint -> Boolean,
                        suffix :: String,
                        whole :: String) :: Boolean:
-  string_prefix(decide_code, string_reverse(suffix), string_reverse(whole))
+  string_prefix(
+    decide_codepoint, string_reverse(suffix), string_reverse(whole))
 
 overload append(String, String) = string_append
-overload map(Nat -> Nat, String) = string_map
+overload map(Codepoint -> Codepoint, String) = string_map
 overload empty() = string_empty
 overload size(String) = string_length
 overload reverse(String) = string_reverse
@@ -210,11 +231,13 @@ theorem string_append_empty_right:
 proof:
   ~induct: [s]
 
-theorem string_codes_roundtrip:
-  forall (xs :: List.of(Nat)): string_to_codes(string_from_codes(xs)) === xs
+theorem string_codepoints_roundtrip:
+  forall (xs :: List.of(Codepoint)):
+    string_to_codepoints(string_from_codepoints(xs)) === xs
 
-theorem string_from_codes_roundtrip:
-  forall (s :: String): string_from_codes(string_to_codes(s)) === s
+theorem string_from_codepoints_roundtrip:
+  forall (s :: String):
+    string_from_codepoints(string_to_codepoints(s)) === s
 proof:
   ~induct: [s]
 
@@ -359,20 +382,22 @@ theorem merge_sorted_count:
 proof:
   ~induct: [xs]
 
-theorem string_empty_codes:
-  string_to_codes(string_empty()) === nil()
+theorem string_empty_codepoints:
+  string_to_codepoints(string_empty()) === nil()
 
 theorem string_length_empty:
   string_length(string_empty()) === zero()
 
 theorem string_length_singleton:
-  forall (n :: Nat): string_length(string_singleton(n)) === nat_one()
+  forall (c :: Codepoint):
+    string_length(string_singleton(c)) === nat_one()
 
 theorem string_reverse_empty:
   string_reverse(string_empty()) === string_empty()
 
 theorem string_reverse_singleton:
-  forall (n :: Nat): string_reverse(string_singleton(n)) === string_singleton(n)
+  forall (c :: Codepoint):
+    string_reverse(string_singleton(c)) === string_singleton(c)
 
 theorem string_length_append:
   forall (x :: String,

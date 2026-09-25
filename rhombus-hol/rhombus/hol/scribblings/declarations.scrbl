@@ -63,9 +63,18 @@ which is what makes @rhombus(match)-defined functions compute during a proof.
 A recursive datatype also gets its @tech{subterm relation}; see
 @secref("termination").
 
-Executably it emits one Rhombus class per constructor, related by an interface
-so that a value can be matched against any of them. The classes are ordinary:
-they compare structurally with @rhombus(==) and print readably.
+Except for the exact reserved declaration
+@tt{datatype Nat | zero() | succ(pred :: Nat)}, executable datatypes emit one
+Rhombus class per constructor, related by an interface so that a value can be
+matched against any of them. The classes are ordinary: they compare
+structurally with @rhombus(==) and print readably.
+
+The reserved @tt{Nat} is the intentional runtime-representation exception.
+Its executable values are host nonnegative integers: @tt{zero()} produces
+@tt{0}, @tt{succ(n)} produces @tt{n + 1}, @tt{zero()} patterns test for zero,
+and @tt{succ(p)} patterns accept positive integers and bind the predecessor.
+Its logical datatype, constructor equations, and derived theorems are
+unchanged, and no other datatype is represented this way.
 
 A declaration is rejected unless every recursive occurrence of the type is
 @deftech{strictly positive} --- informally, the type being declared may not
@@ -637,8 +646,17 @@ word, atoms their accepted singleton words, alternation either branch,
 sequencing the concatenation of two accepted words, and star zero or more
 accepted body words.
 
-@tt{regexp_compile(pattern :: String) :: Option.of(Regexp.of(Nat))} parses the
-standard-library @tt{String} codepoint list into an executable
+The standard library defines @tt{Codepoint} as a nominal wrapper
+@tt{codepoint(Nat)} and @tt{String} as @tt{text(List.of(Codepoint))}. The public
+@tt{codepoint_to_nat} operation unwraps it, and curried @tt{codepoint_equal}
+provides executable equality. The wrapper deliberately accepts every
+@tt{Nat}; it carries no Unicode scalar-value invariant. Thus @tt{Codepoint} is
+not interchangeable with @tt{Nat}, and @tt{String} is not interchangeable
+with @tt{List.of(Codepoint)}, without treating either nominal boundary as
+validation.
+
+@tt{regexp_compile(pattern :: String) :: Option.of(Regexp.of(Codepoint))}
+parses the standard-library @tt{String} codepoint list into an executable
 regular-expression AST. Its grammar is:
 
 @verbatim{
@@ -651,20 +669,20 @@ literal       ::= any Unicode codepoint other than |, *, (, ), ., or \
 }
 
 Here @tt{ε} denotes empty input in the start rule, not a pattern codepoint. The
-operators are recognized by their ASCII codepoints: @tt{|} is 124, @tt{*} is
-42, @tt{(} is 40, @tt{)} is 41, @tt{.} is 46, and backslash is 92.
-Alternation has the lowest precedence, implicit concatenation the next, and
-postfix @tt{*} the highest; parentheses group an alternation. Each unescaped
-literal denotes an atom using executable @tt{Nat} equality with that Unicode
-codepoint. @tt{.} denotes an atom whose predicate accepts every codepoint. A
-backslash makes exactly the next codepoint a literal, including any operator
-codepoint.
+compiler unwraps each @tt{Codepoint} with @tt{codepoint_to_nat} to recognize
+the operators by their ASCII values: @tt{|} is 124, @tt{*} is 42, @tt{(} is
+40, @tt{)} is 41, @tt{.} is 46, and backslash is 92. Alternation has the
+lowest precedence, implicit concatenation the next, and postfix @tt{*} the
+highest; parentheses group an alternation. Each unescaped literal denotes an
+atom using executable @tt{codepoint_equal}. @tt{.} denotes an atom whose
+predicate accepts every codepoint. A backslash makes exactly the next
+codepoint a literal, including any operator codepoint.
 
 The empty entire pattern compiles to @tt{some(regexp_epsilon())}. Every other
 successful parse consumes the complete input and returns @tt{some(result)},
-where @tt{result} is the resulting @tt{Regexp.of(Nat)}. Dangling escapes,
-unmatched parentheses, leading or trailing @tt{|}, empty alternatives or
-groups, leading or repeated @tt{*}, and any leftover malformed input are
+where @tt{result} is the resulting @tt{Regexp.of(Codepoint)}. Dangling
+escapes, unmatched parentheses, leading or trailing @tt{|}, empty alternatives
+or groups, leading or repeated @tt{*}, and any leftover malformed input are
 rejected with @tt{none()}.
 
 Compilation follows the conventional Thompson pipeline
@@ -705,8 +723,9 @@ zero-width match at EOF, it emits the replacement once and stops.
 
 The four String adapters are @tt{string_regexp_matches},
 @tt{string_regexp_find}, @tt{string_regexp_replace_first}, and
-@tt{string_regexp_replace_all}. They accept @tt{Regexp.of(Nat)} and convert
-strings to and from codepoint lists. Consequently String search offsets count
+@tt{string_regexp_replace_all}. They accept @tt{Regexp.of(Codepoint)} and
+convert strings with @tt{string_to_codepoints} and
+@tt{string_from_codepoints}. Consequently String search offsets count
 codepoints, not encoded bytes, and replacement follows exactly the generic
 list behavior above.
 

@@ -340,6 +340,31 @@ meta:
     'class $cname($f, ...):
        implements $iface'
 
+  // The kernel already reserves one datatype exactly: the ordinary Peano
+  // declaration below names its native Nat type and constructors. Its
+  // executable reading is the host's compact nonnegative integer, while every
+  // other datatype keeps the class representation emitted above.
+  fun compact_nat_spec(spec :: DatatypeSpec) :: Boolean:
+    let nat_ty = mk_tyapp(#'Nat, [])
+    spec == DatatypeSpec(
+              #'Nat, [],
+              [Ctor(#'zero, []),
+               Ctor(#'succ, [Field(#'pred, nat_ty)])])
+
+  fun emit_compact_nat(name :: Syntax, ctors :: List) :: List.of(Syntax):
+    let zero = ((ctors[0] :~ List)[0] :~ Syntax)
+    let succ = ((ctors[1] :~ List)[0] :~ Syntax)
+    let argument = source_id(Symbol.gen("_hol_nat"), name)
+    let predecessor = source_id(Symbol.gen("_hol_pred"), name)
+    let matched = source_id(Symbol.gen("_hol_nat"), name)
+    ['annot $name = NonnegInt',
+     'fun $zero(): 0',
+     'fun $succ($argument): $argument + 1',
+     '«bind.macro '$zero()': '0'»',
+     '«bind.macro '$succ($('$')$predecessor)':
+          '$('$')$predecessor
+            :: converting(fun ($matched when $matched > 0): $matched - 1)'»']
+
   // -- generators and shrinkers ----------------------------------------------
   //
   // Emitted alongside a datatype, from the same declaration, so that
@@ -567,35 +592,21 @@ meta:
       fun (message :: String, at :: Syntax):
         syntax_meta.error(message, at))
 
-  // The executable reading of a literal is the value `succ` applied that
-  // many times to `zero()`, but the *code* for it need not be that deep:
-  // the expander walks generated syntax, so a nested chain made compiling
-  // `function f() :: Nat: 800` quadratic long before anything ran. A
-  // counted loop builds the same value from syntax of constant size.
-  // `check_expr`/`check_pattern` already rejected any type but Nat,
-  // Integer, or Rational before a `CheckedNumeral`/`CheckedPatLiteral`
-  // could exist, so the `~else` branch below is unreachable.
+  // The executable reading of a Nat literal is its host nonnegative integer.
+  // Integer and Rational retain their nominal wrappers around that compact
+  // Nat value. `check_expr`/`check_pattern` already rejected any other type
+  // before a `CheckedNumeral`/`CheckedPatLiteral` could exist, so the `~else`
+  // branch below is unreachable.
   fun checked_numeral_stx(value :: NonnegInt, ty :: HType, at :: Syntax) :: Syntax:
     let nat_ty = mk_tyapp(#'Nat, [])
     let int_ty = mk_tyapp(#'Integer, [])
     let rational_ty = mk_tyapp(#'Rational, [])
-    fun nat_syntax() :: Syntax:
-      let go = source_id(Symbol.gen("_hol_numeral"), at)
-      let count = source_id(Symbol.gen("_hol_count"), at)
-      let zero_case = runtime_call_syntax(#'zero, [], at)
-      let succ_case = runtime_call_syntax(#'succ, ['$go($count - 1)'], at)
-      let literal = Syntax.make(value, runtime_context())
-      '(block:
-          fun $go($count):
-            if $count == 0
-            | $zero_case
-            | $succ_case
-          $go($literal))'
+    let literal = Syntax.make(value, runtime_context())
     cond
-    | ty == nat_ty: nat_syntax()
-    | ty == int_ty: runtime_call_syntax(#'int_from_nat, [nat_syntax()], at)
+    | ty == nat_ty: literal
+    | ty == int_ty: runtime_call_syntax(#'int_from_nat, [literal], at)
     | ty == rational_ty:
-        let integer = runtime_call_syntax(#'int_from_nat, [nat_syntax()], at)
+        let integer = runtime_call_syntax(#'int_from_nat, [literal], at)
         runtime_call_syntax(#'rational_from_integer, [integer], at)
     | ~else:
         error(~who: #'checked_to_runtime,
@@ -1156,10 +1167,14 @@ meta:
                               fun (field :: Field): field.ty)
                 [(ctor :~ List)[0], types,
                  for any (type in types): selves.contains(type)]
-            acc ++ [emit_type(name :~ Syntax, cs),
-                    emit_generator(name :~ Syntax,
-                                   (spec :~ DatatypeSpec).params, gen),
-                    emit_shrinker(name :~ Syntax, gen)]
+            let emitted_type:
+              (if compact_nat_spec(spec :~ DatatypeSpec)
+               | emit_compact_nat(name :~ Syntax, cs)
+               | [emit_type(name :~ Syntax, cs)])
+            acc ++ emitted_type
+              ++ [emit_generator(name :~ Syntax,
+                                 (spec :~ DatatypeSpec).params, gen),
+                  emit_shrinker(name :~ Syntax, gen)]
         let next_runtime:
           for values(state :~ SurfaceState = ready) (spec in specs):
             surface_add_datatype(state, spec :~ DatatypeSpec)

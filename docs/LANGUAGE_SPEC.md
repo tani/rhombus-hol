@@ -34,8 +34,10 @@ in two ways:
 - **Logical reading.** It extends an immutable HOL theory with derived
   constants, definitions, datatype theorems, or a checked theorem.
 - **Executable reading.** Where defined, it emits ordinary Rhombus code. A
-  datatype emits classes; a `function` emits a Rhombus function. Types and
-  proof-only constructs are erased.
+  datatype normally emits classes; the exact reserved `Nat` declaration is the
+  runtime-representation exception described in sections 4.1 and 7.4. A
+  `function` emits a Rhombus function. Types and proof-only constructs are
+  erased.
 
 Both readings consume the same normalized Core representation. A construct must
 not be parsed once for logic and reconstructed independently for runtime.
@@ -133,9 +135,9 @@ atoms their accepted singleton words, alternation either branch, sequencing
 the concatenation of two accepted words, and star zero or more accepted body
 words.
 
-`regexp_compile(pattern :: String) :: Option.of(Regexp.of(Nat))` parses the
-standard-library `String` codepoint list into an executable regular-expression
-AST. Its grammar is:
+`regexp_compile(pattern :: String) :: Option.of(Regexp.of(Codepoint))` parses
+the standard-library `String` codepoint list into an executable
+regular-expression AST. Its grammar is:
 
 ```text
 pattern       ::= ε | alternation
@@ -147,17 +149,18 @@ literal       ::= any Unicode codepoint other than |, *, (, ), ., or \
 ```
 
 Here `ε` denotes empty input in the start rule, not a pattern codepoint. The
-operators are recognized by their ASCII codepoints: `|` is 124, `*` is 42,
-`(` is 40, `)` is 41, `.` is 46, and backslash is 92. Alternation has the
-lowest precedence, implicit concatenation the next, and postfix `*` the
-highest; parentheses group an alternation. Each unescaped literal denotes an
-atom using executable `Nat` equality with that Unicode codepoint. `.` denotes
-an atom whose predicate accepts every codepoint. A backslash makes exactly the
-next codepoint a literal, including any operator codepoint.
+compiler unwraps each `Codepoint` with `codepoint_to_nat` to recognize the
+operators by their ASCII values: `|` is 124, `*` is 42, `(` is 40, `)` is 41,
+`.` is 46, and backslash is 92. Alternation has the lowest precedence,
+implicit concatenation the next, and postfix `*` the highest; parentheses
+group an alternation. Each unescaped literal denotes an atom using executable
+`codepoint_equal`; `.` denotes an atom whose predicate accepts every
+codepoint. A backslash makes exactly the next codepoint a literal, including
+any operator codepoint.
 
 The empty entire pattern compiles to `some(regexp_epsilon())`. Every other
 successful parse consumes the complete input and returns `some(result)`, where
-`result` is the resulting `Regexp.of(Nat)`. Dangling escapes, unmatched
+`result` is the resulting `Regexp.of(Codepoint)`. Dangling escapes, unmatched
 parentheses, leading or trailing `|`, empty alternatives or groups, leading or
 repeated `*`, and any leftover malformed input are rejected with `none()`.
 
@@ -202,8 +205,8 @@ match at EOF, it emits the replacement once and stops.
 
 The four String adapters are `string_regexp_matches`,
 `string_regexp_find`, `string_regexp_replace_first`, and
-`string_regexp_replace_all`. They accept `Regexp.of(Nat)` and convert strings
-to and from codepoint lists. Consequently String search offsets count
+`string_regexp_replace_all`. They accept `Regexp.of(Codepoint)` and convert
+strings to and from codepoint lists. Consequently String search offsets count
 codepoints, not encoded bytes, and replacement follows exactly the generic
 list behavior above.
 
@@ -308,10 +311,14 @@ Its logical reading derives, without a per-declaration axiom:
 The derived equations enter the rewrite database. They make constructor tests,
 selector applications, and pattern-defined functions reduce during proofs.
 
-The executable reading emits one ordinary Rhombus class per constructor, with a
-shared interface for matching, structural equality, readable printing, fields,
-and constructor calls. It does not introduce a distinct runtime representation
-unrelated to the logical declaration.
+Except for the exact reserved declaration
+`datatype Nat | zero() | succ(pred :: Nat)`, the executable reading emits one
+ordinary Rhombus class per constructor, with a shared interface for matching,
+structural equality, readable printing, fields, and constructor calls. The
+reserved `Nat` is the intentional runtime-representation exception: its
+executable values are host nonnegative integers as specified in section 7.4.
+This exception does not change its logical datatype, constructor constants, or
+derived theorems, and no other datatype is mapped to integers.
 
 #### Mutually recursive datatypes
 
@@ -774,9 +781,11 @@ Boolean, pair, list, and numeral patterns refine a pattern matrix. Rows are
 ordered, but totality is mandatory: every constructor shape must be covered and
 every written row must be reachable.
 
-A numeral pattern is the kernel's atomic `NatLit` discriminator and therefore
-requires a `Nat` scrutinee. `Integer` and `Rational` numerals elaborate as
-conversion expressions and are not patterns.
+In the logical reading, a numeral pattern uses the kernel's atomic compact
+`Nat` numeral discriminator described in section 7.4 and therefore requires a
+`Nat` scrutinee. Its executable reading uses that section's host-integer
+discrimination. `Integer` and `Rational` numerals elaborate as conversion
+expressions and are not patterns.
 
 List expression and pattern syntax desugars through constructors supplied by a
 list datatype:
@@ -860,27 +869,42 @@ A nonnegative numeral is accepted only when its type is determined by context.
 A lexical negative numeral is `negate(nonnegative-numeral)` and therefore
 requires a selected `negate` overload. There are no implicit numeric coercions.
 
-The standard language-supported natural type is the kernel-reserved `Nat` with
-`zero` and `succ`. The accelerated numeric backend is part of the language
-contract: a `Nat` literal is a compact canonical value, and construction,
-closed equality, ordering, and arithmetic are performed by checked native
-numeric conversions rather than a number-of-successors term walk. Native code
-may select a conversion step, but the result must be a kernel theorem; it cannot
-assert arithmetic on the host runtime's authority.
+The source form is simply the numeral `n`. The normalized frontend node may be
+described as `CoreNumeral(n)` when that implementation detail matters. At the
+exact reserved object-language declaration
+`datatype Nat | zero() | succ(pred :: Nat)`, its two readings then diverge in
+representation: logical elaboration produces the kernel term `NatLit(n)`, while
+executable emission produces the host `Nat`/`NonnegInt` integer `n`. At
+`Integer` or `Rational`, executable emission still applies that type's existing
+conversion function to the compact executable `Nat`; it does not give those
+logical types a new host-integer representation.
 
-The same compact representation is required in patterns. A `Nat` literal
-pattern is an atomic numeric discrimination, justified by the native numeric
-equality conversion; it must not expand to `succ(...succ(zero())...)`. User
-functions still observe the ordinary `zero`/`succ` equations when they match
-those constructors. The frontend may expose a compact value to such a function
-only by applying the kernel-checked conversion appropriate to that equation.
+For this reserved declaration only, executable `zero()` returns `0` and
+executable `succ(n)` returns `n + 1`. A `zero()` runtime pattern tests that the
+value is zero. A `succ(p)` runtime pattern accepts only a positive integer and
+binds `p` to its predecessor. Thus generic generators, shrinkers, and functions
+written with `zero` and `succ` continue to use the same expression and pattern
+interface without allocating Peano constructor chains. Every other datatype
+retains the class-per-constructor executable representation.
+
+This host arithmetic is only the executable reading; it does not prove a HOL
+equation or authorize a kernel result. Logically, `Nat`, `zero`, and `succ`
+remain the ordinary reserved datatype with its constructor equations,
+distinctness, injectivity, cases, and induction theorems. Kernel arithmetic,
+equality, ordering, and zero/successor case conversions remain checked,
+theorem-producing conversions.
+
+A surface `Nat` literal pattern is likewise split: its logical reading is an
+atomic numeric discrimination over `NatLit(n)`, and its executable reading
+tests the host nonnegative integer against `n`. Neither reading expands the
+literal to `succ(...succ(zero())...)`.
 
 #### Kernel literal representation
 
-The compact value is a kernel-internal canonical term form `NatLit(n)`, where
-`n` is a host nonnegative integer payload. It is not a new HOL constant, an
-axiom, or user-written syntax. It is a compact representation of the existing
-Peano value:
+In the logical reading, the compact value is a kernel-internal canonical term
+form `NatLit(n)`, where `n` is a host nonnegative integer payload. It is not a
+new HOL constant, an axiom, user-written syntax, or the executable value. It is
+a compact representation of the existing Peano value:
 
 ```text
 NatLit(0)     = zero()
@@ -904,57 +928,75 @@ literal and a literal-pattern constant size.
 
 ### 7.5 String data
 
-`String` is an immutable finite sequence of natural-number codepoints:
+`Codepoint` is a nominal wrapper around `Nat`, and `String` is an immutable
+finite sequence of those wrappers:
 
 ```rhombus
+datatype Codepoint
+| codepoint(codepoint_value :: Nat)
+
 datatype String
-| text(codepoints :: List.of(Nat))
+| text(codepoints :: List.of(Codepoint))
 ```
 
-This is intentionally the complete logical representation. There is no `Char`
-datatype, no 21-Boolean-field record, and no second numeric encoding. A string
-literal maps every source Unicode scalar value to its corresponding native
-`Nat` value. Equality, matching, and recursion operate on the resulting
-codepoint sequence. They are not byte equality, UTF-8 equality, host-language
-string identity, Unicode-normalized equality, or grapheme-cluster equality.
-Consequently, canonically distinct source scalar sequences remain distinct:
-`"e\u0301"` and `"\u00e9"` are not equal unless a user-defined normalization
-function proves them equal.
+The public API exports `Codepoint`, `codepoint`, `codepoint_to_nat`, and the
+curried executable decider `codepoint_equal`; the generated
+`codepoint_value` field selector is not exported. The wrapper is nominal only:
+`codepoint` accepts every `Nat`, including values that are not Unicode scalar
+values. There is deliberately no scalar-value invariant or validation hidden
+in the datatype.
 
-`String` is nominal because it is wrapped by `text`; it cannot be accidentally
-interchanged with `List.of(Nat)`. The wrapper does not hide the data from HOL:
-its ordinary selector exposes the codepoint list for library definitions.
-Values manually constructed with `text` may contain any `Nat`; literal syntax
-itself produces only source Unicode scalar values. Unicode validity checks,
+This is the complete logical string representation. A string literal maps
+every source Unicode scalar value to a `codepoint` containing the corresponding
+native `Nat`. Equality, matching, and recursion operate on the resulting
+codepoint sequence. They are not byte equality, UTF-8 equality,
+host-language string identity, Unicode-normalized equality, or
+grapheme-cluster equality. Consequently, canonically distinct source scalar
+sequences remain distinct: `"e\u0301"` and `"\u00e9"` are not equal unless a
+user-defined normalization function proves them equal.
+
+The two nominal layers prevent accidental interchange: `Codepoint` is not
+`Nat`, and `String` is not `List.of(Codepoint)`. The ordinary `text`
+constructor still exposes the list to HOL library definitions. Values manually
+constructed with `codepoint` may contain any `Nat`; literal syntax itself
+produces only source Unicode scalar values. Unicode validity checks,
 normalization, encoding, and character classification are ordinary library
 functions, not a refinement type or frontend policy.
 
 #### Literal elaboration
 
-String literals are context-directed values of type `String`. The lexer accepts
-source Unicode scalar values; elaboration rejects no non-ASCII scalar merely for
-its magnitude. A literal expands through ordinary declared constructors and the
-native `Nat` literal path:
+String literals are context-directed values of type `String`. The lexer
+accepts source Unicode scalar values; elaboration rejects no non-ASCII scalar
+merely for its magnitude. A literal expands through ordinary declared
+constructors, with each scalar written as the corresponding surface `Nat`
+numeral:
 
 ```text
 ""       => text(nil())
-"ab"     => text(cons(97, cons(98, nil())))
+"ab"     => text(cons(codepoint(97), cons(codepoint(98), nil())))
 ```
 
-The same Core tree drives logical elaboration and runtime emission. Runtime
-emission may use an efficient host representation, but it must produce the same
-`text`/`cons`/native-`Nat` value that the logical reading denotes.
+The same Core tree drives logical elaboration and runtime emission, but the
+representations remain distinct. After elaboration, the logical `codepoint`
+contains the corresponding compact logical `Nat` term; the executable
+`codepoint` contains the host nonnegative integer emitted for the same surface
+`Nat` numeral. In both readings, `text`, list, and `codepoint` remain ordinary
+datatype values; there is no String- or Codepoint-specific compact
+representation.
 
-Literal size is proportional to the number of source scalars: one `text` node,
-one list cell, and one compact `Nat` literal per scalar. Native numeric
-conversion removes the old dependence on codepoint magnitude. Thus `"日本語"`
-has the same asymptotic literal size and native-computation path as any other
-three-scalar string.
+Logical literal size is proportional to the number of source scalars: one
+`text` node, one list cell, one `codepoint` node, and one compact logical `Nat`
+term per scalar. The executable reading likewise uses one host integer per
+scalar.
+Neither size depends on codepoint magnitude. Thus `"日本語"` has the same
+asymptotic literal size and native-computation path as any other three-scalar
+string.
 
 #### Literal patterns
 
-A string literal is valid in every pattern position where the scrutinee has type
-`String`. It is the ordinary constructor pattern corresponding to the literal:
+A string literal is valid in every pattern position where the scrutinee has
+type `String`. It is the ordinary constructor pattern corresponding to the
+literal:
 
 ```rhombus
 function first_is_a(s :: String) :: Boolean:
@@ -963,40 +1005,46 @@ function first_is_a(s :: String) :: Boolean:
   | _: #false
 ```
 
-The `"a"` row is `text(cons(97, nil()))`, with `97` handled by the native
-`Nat` literal-pattern rule. Normal ordered-pattern, reachability, and
-exhaustiveness rules apply. `""`, non-empty ASCII strings, and non-ASCII strings
-are equally supported. A source string pattern never expands a codepoint to a
-successor chain, never lowers to a host string comparison, and never introduces
-a string-specific decision-tree case.
+The `"a"` row is `text(cons(codepoint(97), nil()))`. The surface numeral `97`
+uses the logical/executable `Nat` literal-pattern split from section 7.4 inside
+the ordinary `codepoint` constructor. Normal
+ordered-pattern, reachability, and exhaustiveness rules apply. `""`, non-empty
+ASCII strings, and non-ASCII strings are equally supported. A source string
+pattern never expands a codepoint to a successor chain, never lowers to a host
+string comparison, and never introduces a string-specific decision-tree case.
 
 #### Kernel boundary
 
-`String` is **not** a kernel primitive. The language prelude derives
-`List.of` and `String` through the ordinary datatype mechanism, then exposes
-their constructors to literal elaboration. To the kernel, `String` is an
-ordinary theory type, constants, and theorems created by conservative
-extensions.
+Neither `Codepoint` nor `String` is a kernel primitive. The language prelude
+derives `List.of`, `Codepoint`, and `String` through the ordinary datatype
+mechanism, then exposes their constructors to literal elaboration. To the
+kernel, both wrappers are ordinary theory types, constants, and theorems
+created by conservative extensions.
 
-The accelerated `Nat` representation and conversions are the only kernel-level
-numeric facility string processing relies on. The kernel must not gain a
-reserved `String` type name, a string term node, native host-string equality, a
-string-specific inference rule, or a string-specific axiom. String operations
-reuse the checked native numeral conversions plus ordinary list/datatype
-theorems; no second trusted string evaluator exists.
+The compact logical `Nat` numeral representation and theorem-producing
+conversions are the only kernel-level numeric facility string processing
+relies on. The kernel must not gain a reserved `String` type name, a string term
+node, native
+host-string equality, a string-specific inference rule, or a string-specific
+axiom. Executably, the `Nat` field of an ordinary `codepoint` value uses the
+host-integer representation from section 7.4; this is not a special
+representation for `Codepoint` or `String`. Logical string operations reuse
+the checked numeral conversions plus ordinary list/datatype theorems; no
+second trusted string evaluator exists.
 
 #### API boundary and cutover
 
 String construction, matching, equality, and literal syntax are language
 features. Higher operations—append, map, size, reverse, normalization,
 encoding/decoding, indexing, and character classification—are ordinary
-library-defined functions over `String` and `Nat`; they are not kernel or
-frontend primitives.
+library-defined functions over `String`, `Codepoint`, and `Nat`; they are not
+kernel or frontend primitives.
 
-The `Char` datatype, its `char` constructor, `List.of(Char)`, and all bit-field
-literal lowering are removed. There is no compatibility alias, implicit
-conversion, or legacy literal path. All declarations that formerly exposed
-characters now expose `Nat` codepoints.
+The standard-library conversion boundary is `string_to_codepoints` and
+`string_from_codepoints`, both using `List.of(Codepoint)`. String singleton,
+map, prefix, regexp, search, and replacement APIs likewise expose `Codepoint`,
+never bare `Nat` symbols. There is no compatibility alias, implicit
+conversion, or legacy direct-`Nat` string path.
 
 ## 8. Termination and recursion
 

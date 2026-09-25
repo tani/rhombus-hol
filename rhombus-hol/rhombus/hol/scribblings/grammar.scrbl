@@ -129,44 +129,61 @@ because every function in this grammar is total.
 
 Anything outside the grammar is a compile error that names the offending
 expression. A string literal is admitted as an expression and pattern. It
-desugars to @tt{text} applied to a @tt{List.of(Nat)} of Unicode scalar
-values, over whatever datatypes provide @tt{Nat}, @tt{List.of(?a)}, and
-@tt{text}; see "Matching" below.
-
-A numeral at type @tt{Nat} elaborates to the kernel's checked
-@tt{NatLit(n)} form. This is a constant-depth representation of the same
-Peano value: its checked one-step conversion is @tt{NatLit(0) = zero()} and
-@tt{NatLit(n+1) = succ(NatLit(n))}. It is not a new logical constant or
-axiom.
+desugars to @tt{text} applied to a @tt{List.of(Codepoint)}, with each source
+Unicode scalar represented as @tt{codepoint(n)}, where @tt{n} is the
+corresponding surface numeral. The declarations providing @tt{Nat},
+@tt{Codepoint}, @tt{List.of(?a)}, and @tt{text} determine the logical and
+executable meanings; see "Matching" below.
 
 @subsection(~tag: "numerals"){Numerals}
 
-A numeral at type @tt{Nat} uses the kernel's native @tt{NatLit(n)} term,
-whose payload is a host nonnegative integer. The term remains compact
-regardless of its value. The reserved @tt{Nat}, @tt{zero}, and @tt{succ}
-objects are installed conservatively from the Isabelle-verified native Nat
-extension, with zero/successor distinctness, successor injectivity, and
-induction exposed through the ordinary datatype interface.
+At the surface, a numeral is written @tt{n}. The normalized frontend form may
+be called @tt{CoreNumeral(n)} when that implementation detail is useful. For
+the exact reserved declaration
+@tt{datatype Nat | zero() | succ(pred :: Nat)}, logical elaboration produces
+the kernel term @tt{NatLit(n)}, while executable emission produces the host
+@tt{Nat}/@tt{NonnegInt} integer @tt{n}. At @tt{Integer} and @tt{Rational},
+executable emission continues to call the existing conversion function around
+that compact @tt{Nat}; those types do not acquire a host-integer
+representation.
 
-The kernel alone may reveal one constructor step:
+For this reserved @tt{Nat} only, executable @tt{zero()} is @tt{0}, and
+executable @tt{succ(n)} is @tt{n + 1}. A runtime @tt{zero()} pattern tests for
+zero. A runtime @tt{succ(p)} pattern accepts a positive integer and binds
+@tt{p} to its predecessor. Functions, generators, and shrinkers can therefore
+retain the ordinary constructor expression and pattern interface without
+allocating Peano constructor chains. Other datatype declarations still emit
+one Rhombus class per constructor.
+
+These host operations implement only the executable reading; they neither
+prove a HOL equation nor authorize a kernel result. Logically, the reserved
+@tt{Nat}, @tt{zero}, and @tt{succ} retain their ordinary datatype meaning,
+constructor equations, distinctness, injectivity, cases, and induction
+theorems. The kernel represents a logical numeral with its native
+@tt{NatLit(n)} term, whose payload is a host nonnegative integer and whose size
+is independent of its value. @tt{NatLit} is not a new logical constant or
+axiom.
+
+The kernel alone may reveal one logical constructor step:
 
 @verbatim{
 NatLit(0)     = zero()
 NatLit(n + 1) = succ(NatLit(n))
 }
 
-Consequently, user functions that match @tt{zero()} and @tt{succ(k)} retain
-their ordinary Peano equations. Closed native equality and arithmetic use
-checked conversions instead of first constructing a successor chain. Every
-conversion returns a theorem checked by the kernel; no numeric result is
-accepted as an unproved host computation.
+Consequently, logical functions that match @tt{zero()} and @tt{succ(k)}
+retain their ordinary Peano equations. Closed kernel equality and arithmetic
+use checked conversions instead of first constructing a successor chain.
+Every conversion returns a theorem checked by the kernel; no theorem is
+accepted merely because host arithmetic produced the same numeric result.
 
-The same representation is used in patterns. A literal pattern is an atomic
-numeric discrimination and never expands to @tt{succ(...succ(zero())...)}.
-It therefore requires type @tt{Nat}; @tt{Integer} and @tt{Rational} numerals
-are conversion expressions, not atomic @tt{NatLit} patterns. A bare numeral
-is rejected when its type cannot be determined from a function domain,
-checked result, or type ascription.
+A surface @tt{Nat} literal pattern has the same split. Its logical reading is
+an atomic @tt{NatLit} discrimination, while its executable reading compares
+the host nonnegative integer with @tt{n}; neither expands to
+@tt{succ(...succ(zero())...)}. @tt{Integer} and @tt{Rational} numerals are
+conversion expressions, not literal patterns. A bare numeral is rejected when
+its type cannot be determined from a function domain, checked result, or type
+ascription.
 The lexical form @tt{-1} remains the @tt{negate} call applied to the
 nonnegative numeral @tt{1}.
 

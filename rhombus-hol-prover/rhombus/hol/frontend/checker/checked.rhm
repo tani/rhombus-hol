@@ -55,6 +55,7 @@ export:
   checked_ty
   check_expr
   resolve_checked
+  builtin_constants
 
 class CheckedInference(substitution :: Box)
 
@@ -79,6 +80,21 @@ fun checked_unify(inference :: CheckedInference,
 // otherwise an existing global may still be used, but a missing one reports
 // the restriction instead of the generic unknown-constant diagnostic.
 class RefRestriction(message :: String, block_global :: Boolean)
+
+// The base-theory constants syntax elaborates to, at their types. The
+// connectives and equality have dedicated checked forms and need no entry.
+// The driver's initial theory declares each of these at exactly this type;
+// the test suite checks the two against each other.
+def builtin_constants :: Map.of(Symbol, HType):
+  let a = mk_tyvar(#'a)
+  let b = mk_tyvar(#'b)
+  let bool = mk_tyapp(#'bool, [])
+  let pred = mk_fun(a, bool)
+  {#'true: bool,
+   #'false: bool,
+   #'pair: mk_fun(a, mk_fun(b, mk_tyapp(#'prod, [a, b]))),
+   #'exists1: mk_fun(pred, bool),
+   #'select: mk_fun(pred, a)}
 
 // `tyvars` is the declaration's type-variable scope for annotations, or
 // `#false` when any type variable may appear.
@@ -767,7 +783,21 @@ fun check_expr(env :: CheckEnv, expr :: CoreExpr,
     | CoreRef(name, _) when !env.vars.get(name, #false): name
     | CoreGlobalRef(name, _): name
     | ~else: #false
+  fun builtin_name(value :: CoreExpr) :: maybe(Symbol):
+    match value
+    | CoreBuiltin(name, _): name
+    | ~else: #false
   match expr
+  | CoreBuiltin(name, at):
+      match builtin_constants.get(name, #false)
+      | found :: HType:
+          let instance = fresh_instance(found)
+          unify_with(instance, at)
+          CheckedConstant(name, resolve(env, instance), at)
+      | #false:
+          error(~who: #'check_expr,
+                "syntax elaborated to an unknown builtin constant "
+                  ++ to_string(name))
   | CoreRef(name, at):
       match env.vars.get(name, #false)
       | found :: HType:
@@ -794,7 +824,7 @@ fun check_expr(env :: CheckEnv, expr :: CoreExpr,
       let checked = check_expr(env, inner, annotated)
       unify_with(checked_ty(checked), at)
       checked
-  | CoreCall(func, args, at) when callable_name(func) == #'eq
+  | CoreCall(func, args, at) when builtin_name(func) == #'eq
                                       && args.length() == 2:
       let left_core :~ CoreExpr = args[0]
       let right_core :~ CoreExpr = args[1]
@@ -834,19 +864,19 @@ fun check_expr(env :: CheckEnv, expr :: CoreExpr,
             "equality operands have different types")
       unify_with(mk_tyapp(#'bool, []), at)
       CheckedEq(left, right, resolve(env, checked_ty(left)), at)
-  | CoreCall(func, args, at) when (callable_name(func) == #'conj
-                                        || callable_name(func) == #'disj
-                                        || callable_name(func) == #'imp)
+  | CoreCall(func, args, at) when (builtin_name(func) == #'conj
+                                        || builtin_name(func) == #'disj
+                                        || builtin_name(func) == #'imp)
                                        && args.length() == 2:
-      let name = callable_name(func) :~ Symbol
+      let name = builtin_name(func) :~ Symbol
       let bool_ty = mk_tyapp(#'bool, [])
       let checked_args:
         args.map(fun (arg :: CoreExpr): check_expr(env, arg, bool_ty))
       unify_with(bool_ty, at)
       CheckedBoolOp(name, checked_args, at)
-  | CoreCall(func, args, at) when callable_name(func) == #'neg
+  | CoreCall(func, args, at) when builtin_name(func) == #'neg
                                       && args.length() == 1:
-      let name = callable_name(func) :~ Symbol
+      let name = builtin_name(func) :~ Symbol
       let bool_ty = mk_tyapp(#'bool, [])
       let checked_args:
         args.map(fun (arg :: CoreExpr): check_expr(env, arg, bool_ty))

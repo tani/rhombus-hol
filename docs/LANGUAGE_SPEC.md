@@ -243,6 +243,24 @@ A preceding logical declaration is in scope for all later logical declarations.
 A declaration name is not in scope within its own body unless that declaration
 form explicitly supports recursion.
 
+A name in a HOL expression denotes exactly one of:
+
+1. a variable bound by an enclosing binder, pattern, or parameter;
+2. a constant a logical declaration in scope introduces, whether declared in
+   this module or imported: a `function`, a `definition`, an `inductive`
+   predicate, a datatype constructor, or a name a `datatype` declaration
+   derives by section 4.1 (`is_Constructor`, `Constructor_field`, and
+   `TypeName_lt`);
+3. a name an `overload` declaration makes callable (section 4.7); or
+4. one of the Boolean literals `true` and `false`.
+
+Nothing else is a name. The constants that syntax elaborates to -- equality,
+the connectives, `exists1`, `select`, and the product constructor behind
+`Pair(...)` -- are reached only through that syntax: `p and q` has no second
+spelling `conj(p, q)`. They and the base theory's remaining constants are
+implementation detail. None of them can be named, and their names stay
+reserved, so declaring one is an error.
+
 ## 3. Types
 
 ```text
@@ -741,7 +759,7 @@ count.
 Input types must have registered runtime generators and shrinkers. The property
 must have an executable reading: executable calls, conditionals, Boolean
 connectives, equality, literals, and statically resolved overloads are allowed;
-implication, existential quantification, `exists1`, `select`, `wf`, and other
+implication, existential quantification, `exists1`, `select`, and other
 logic-only terms are rejected. `~samples` sets the number of input tuples,
 `~size` bounds generated depth, and `~seed` makes the run reproducible.
 
@@ -860,14 +878,16 @@ prop ::= expression
 exactly one. Binder types may be inferred where their use determines a unique
 type. A quantifier extends as far right as possible.
 
-Logical spellings are `not`, `and`, `or`, `===`, `==>`, and `<=>`. Equality and
-equivalence denote the same polymorphic equality constant but have different
-precedence. Named logical constants include `true`, `false`, `eq`, `imp`,
-`conj`, `disj`, `neg`, `exists1`, `select`, and `wf`.
+Negation, conjunction, disjunction, and equality each have a HOL spelling and a
+Rhombus spelling -- `not` and `!`, `and` and `&&`, `or` and `||`, `===` and
+`==` -- and the two spellings denote the same constant. Equivalence `<=>` is
+equality at `Boolean` with the weakest precedence. The connectives, the
+quantifiers, `exists1`, and `select` are syntax: the constants they elaborate
+to are not names (section 2).
 
-`true`, `false`, equality, conjunction, disjunction, and negation have both
-readings. `imp`, `exists1`, `select`, and `wf` are logic-only. Existential and
-choice constructs consequently cannot occur in executable `function` bodies or
+`true`, `false`, equality, and the connectives have both readings, under either
+spelling. Implication `==>`, the quantifiers, `exists1`, and `select` are
+logic-only, so they cannot occur in executable `function` bodies or
 `quickcheck` properties.
 
 ### 7.2 Sets

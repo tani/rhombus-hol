@@ -11,6 +11,7 @@ export:
   CoreExpr
   CoreRef
   CoreGlobalRef
+  CoreBuiltin
   CoreCall
   CoreNatLit
   CoreIf
@@ -52,6 +53,12 @@ class CoreRef(name :: Symbol, at :: Syntax):
 // A name introduced by surface normalization, resolved only in the global
 // declaration space so a same-named local cannot capture literal semantics.
 class CoreGlobalRef(name :: Symbol, at :: Syntax):
+  extends CoreExpr
+
+// A constant that syntax elaborates to -- equality, a connective, `exists1`,
+// `select`, the product constructor, a Boolean literal. It is reached only
+// through that syntax: no source name resolves to it (LANGUAGE_SPEC section 2).
+class CoreBuiltin(name :: Symbol, at :: Syntax):
   extends CoreExpr
 
 class CoreCall(func :: CoreExpr,
@@ -223,6 +230,10 @@ fun named_call(name :: Symbol, args :: List.of(CoreExpr),
                at :: Syntax) :: CoreExpr:
   CoreCall(global_ref(name, at), args, at)
 
+fun builtin_call(name :: Symbol, args :: List.of(CoreExpr),
+                 at :: Syntax) :: CoreExpr:
+  CoreCall(CoreBuiltin(name, at), args, at)
+
 fun constructor_list_expr(elements :: List.of(CoreExpr),
                           tail :: maybe(CoreExpr),
                           at :: Syntax) :: CoreExpr:
@@ -246,11 +257,11 @@ fun predicate_set_expr(elements :: List.of(CoreExpr),
   let parameter_name = Symbol.gen("_set_element")
   let parameter = CoreRef(parameter_name, at)
   let predicate:
-    for values(out :~ CoreExpr = global_ref(#'false, at)) (
+    for values(out :~ CoreExpr = CoreBuiltin(#'false, at)) (
           element in elements.reverse()):
-      let equal = named_call(
+      let equal = builtin_call(
                     #'eq, [parameter, element :~ CoreExpr], at)
-      named_call(#'disj, [equal, out], at)
+      builtin_call(#'disj, [equal, out], at)
   CoreFunctionExpr(
     [CoreBinder(CorePatVar(parameter_name, at), #false, at)],
     #false,
@@ -278,8 +289,9 @@ fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
             surface_error(
               (if mode == #'prop | #'theorem | #'definition),
               "a logical term admits variables, named function applications, "
-                ++ "HOL notation, natural and integer literals, `not`, `and`, "
-                ++ "`or`, `===`, `<=>`, `==>`, `forall`, `exists` and `if`",
+                ++ "HOL notation, natural and integer literals, the Boolean "
+                ++ "connectives, `===`, `<=>`, `==>`, `forall`, `exists` and "
+                ++ "`if`",
               stx)
         | ~else:
             surface_error(
@@ -293,6 +305,8 @@ fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
       CoreRef(Syntax.unwrap(name), stx)
   | '(core_global_ref $(name :: Identifier))':
       CoreGlobalRef(Syntax.unwrap(name), stx)
+  | '(core_builtin $(name :: Identifier))':
+      CoreBuiltin(Syntax.unwrap(name), stx)
   | '(core_call $func [$arg, ...])':
       CoreCall(decode_expr(func, mode),
                [decode_expr(arg, mode), ...],
@@ -339,7 +353,7 @@ fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
         decode_expr(tail, mode),
         stx)
   | '(core_pair_expr $first $second)':
-      named_call(
+      builtin_call(
         #'pair,
         [decode_expr(first, mode), decode_expr(second, mode)],
         stx)
@@ -352,12 +366,11 @@ fun decode_expr(stx :: Syntax, mode :: Symbol) :: CoreExpr:
         decoder_who(mode),
         (if logical_mode(mode)
          | "a logical term admits variables, named function applications, HOL "
-             ++ "notation, natural and integer literals, `not`, `and`, `or`, "
-             ++ "`===`, `<=>`, `==>`, `forall`, `exists` and `if`"
+             ++ "notation, natural and integer literals, the Boolean "
+             ++ "connectives, `===`, `<=>`, `==>`, `forall`, `exists` and `if`"
          | "this version admits only variables, named function applications, "
-             ++ "HOL notation, natural and integer literals, `if`, `cond`, and "
-             ++ "the Boolean operators `!`, `&&`, `||` and `==` in a function "
-             ++ "body"),
+             ++ "HOL notation, natural and integer literals, `if`, `cond`, "
+             ++ "equality, and the Boolean connectives in a function body"),
         stx)
   | ~else:
       surface_error(decoder_who(mode), "malformed parsed HOL expression", stx)

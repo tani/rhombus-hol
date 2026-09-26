@@ -49,8 +49,7 @@ built, which importing the module logically does. A theorem that cannot be
 proved or a function that cannot be shown total is an error there, with the
 remaining goals or obligation. The executable reading never runs proofs: a
 module used only for its executable reading has unchecked theorems until its
-theory is built, so the test suite builds the theory of every module it
-compiles.
+theory is built.
 
 Only the declaration forms in this document receive a logical reading. Ordinary
 Rhombus `fun`, `def`, `class`, `operator`, and all other ordinary forms retain

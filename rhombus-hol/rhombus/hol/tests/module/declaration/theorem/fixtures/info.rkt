@@ -12,5 +12,6 @@
     "theorem_do_not_stuck.rhm"
     "theorem_in_theory_stuck.rhm"
     "theorem_not_automatic.rhm"
+    "theorem_split_not_bool.rhm"
     "theorem_stuck.rhm"
     ))

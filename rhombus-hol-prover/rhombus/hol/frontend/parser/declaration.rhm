@@ -1,0 +1,380 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+// The syntactic shape of each declaration form: splitting a declaration into
+// its parts and reading its option blocks. Nothing here consults a theory,
+// resolves a name, or assigns a type.
+
+export:
+  syntax_error
+  function_parts
+  function_proof_measure
+  row_parts
+  theorem_parts
+  proof_groups
+  parse_tactic
+  datatype_decl_shape
+  quickcheck_options
+
+fun syntax_error(who :: Symbol, message :: String, at :: Syntax):
+  error(~who: who, message, error.val(~label: "in", to_string(at)))
+
+// ============================================================================
+// function
+// ============================================================================
+
+// A declaration split into its parts:
+// `[name, [param, ...], result_type, body, clauses]`. Exactly one of `body`
+// (a plain expression body) and `clauses` (a clausal `| pat: expr` form's
+// rows) is `#false`.
+fun function_parts(stx :: Syntax) :: List:
+  match stx
+  | 'function $(name :: Identifier)($param, ...) $rest ...':
+      let [rty, body, clauses] = split_signature('$rest ...', stx)
+      [name, [param, ...], rty, body, clauses]
+  | 'function $(name :: Identifier)
+     | $c
+     | ...':
+      [name, #false, #false, #false, [c, ...]]
+  | ~else:
+      syntax_error(#'function,
+                   "expected a named function declaration",
+                   stx)
+
+fun split_signature(rest :: Syntax, at :: Syntax) :: List:
+  match rest
+  | ':: $ty ... ~measure($m): $body; ...':
+      syntax_error(
+        #'function,
+        "`~measure(...)` must be written in an adjacent `proof:` block as `~measure: expression`",
+        m)
+  | ':: $ty ... ~measure($m)
+     | $c
+     | ...':
+      syntax_error(
+        #'function,
+        "`~measure(...)` must be written in an adjacent `proof:` block as `~measure: expression`",
+        m)
+  | ':: $ty ...: $body; ...': ['$ty ...', '$body; ...', #false]
+  | ':: $ty ...
+     | $c
+     | ...': ['$ty ...', #false, [c, ...]]
+  | ': $body; ...': [#false, '$body; ...', #false]
+  | '| $c | ...': [#false, #false, [c, ...]]
+  | ~else:
+      syntax_error(#'function, "malformed function body", at)
+
+fun function_proof_measure(groups :: List.of(Syntax), at :: Syntax) :: Syntax:
+  recur loop (remaining :~ List = groups,
+              measure :~ maybe(Syntax) = #false):
+    match remaining
+    | []:
+        match measure
+        | #false:
+            syntax_error(
+              #'proof,
+              "a function proof needs one `~measure: expression` option",
+              at)
+        | value: value :~ Syntax
+    | List.cons(group, rest):
+        let rest :~ List = rest
+        match group
+        | '~measure: $expr':
+            match measure
+            | #false: loop(rest, expr)
+            | ~else:
+                syntax_error(#'proof, "duplicate `~measure` option", group)
+        | '~measure: $more; ...':
+            syntax_error(#'proof, "`~measure` expects one expression", group)
+        | ~else:
+            syntax_error(#'proof, "unknown function proof option", group)
+
+fun row_parts(c :: Syntax, arity :: Int) :: values(List.of(Syntax), Syntax):
+  match c
+  | '($p, ...): $body; ...':
+      let ps = [p, ...]
+      unless ps.length() == arity
+      | syntax_error(#'function,
+                     "this clause has " ++ to_string(ps.length())
+                       ++ " patterns but the function takes "
+                       ++ to_string(arity),
+                     c)
+      values(ps, '$body; ...')
+  | '$pt ...: $body; ...':
+      let p = '$pt ...'
+      unless arity == 1
+      | syntax_error(#'function,
+                     "this clause has 1 pattern but the function takes "
+                       ++ to_string(arity),
+                     c)
+      values([p], '$body; ...')
+  | ~else:
+      syntax_error(#'function,
+                   "expected `(pattern, ...): body`", c)
+
+// ============================================================================
+// theorem
+// ============================================================================
+
+// `theorem name: <prop>`, or `#false` if this is not one.
+fun theorem_parts(form :: Syntax) :: maybe(List):
+  match form
+  | 'theorem $(name :: Identifier): $g; ...': [name, [g, ...]]
+  | ~else: #false
+
+fun proof_groups(form :: Syntax) :: maybe(List.of(Syntax)):
+  match form
+  | 'proof: $g; ...': [g, ...]
+  | ~else: #false
+
+// ============================================================================
+// Proof options
+// ============================================================================
+//
+// A `proof:` block is a sequence of declarative option groups. The block
+// itself is the boundary: each option configures the one existing waterfall
+// invocation, and none executes as a run-time Rhombus expression. Every option
+// occurs at most once. All options except `~limit` contain one nonempty list
+// whose source order is preserved.
+//
+// `~skip` names waterfall stages to omit for this proof only. The recognised
+// names are `simplify`, `eliminate`, `fertilize`, `generalize`, `irrelevance`
+// and `induct`; see `backend/proof/automation/waterfall.rhm`'s pipeline
+// comment.
+//
+// `~disable` removes rules from this proof only. `~use` enables named theorem
+// rules for this proof only. `~split` splits the goal on Boolean terms before
+// the waterfall; `~choose` supplies existential candidates.
+//
+// Returns a Map with keys `induct`, `use`, `skip`, `disable`, `split`,
+// `choose`, `limit`, and `extensionality`.
+fun parse_tactic(stx :: maybe(Syntax)) :: Map:
+  match stx
+  | #false:
+      {#'induct: [],
+       #'use: [],
+       #'skip: [],
+       #'disable: [],
+       #'split: [],
+       #'choose: [],
+       #'limit: #false,
+       #'extensionality: []}
+  | s :~ Syntax:
+      match s
+      | '$group; ...': parse_tactic_groups([group, ...])
+      | ~else: syntax_error(#'proof, "unknown proof option", s)
+
+fun parse_tactic_groups(groups :: List.of(Syntax)) :: Map:
+  recur loop (
+        remaining :~ List = groups,
+        acc :~ Map = {#'induct: [],
+                      #'use: [],
+                      #'skip: [],
+                      #'disable: [],
+                      #'split: [],
+                      #'choose: [],
+                      #'limit: #false,
+                      #'extensionality: []},
+        seen :~ List = []):
+    match remaining
+    | []: acc
+    | List.cons(group, rest):
+        let rest :~ List = rest
+        match group
+        | '~induct: [$(n :: Identifier), ...]':
+            when seen.contains(#'induct)
+            | syntax_error(#'proof, "duplicate `~induct` option", group)
+            let names = [Syntax.unwrap(n), ...]
+            when names.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~induct` expects one nonempty bracketed list of identifiers",
+                group)
+            loop(rest,
+                 acc ++ {#'induct: names},
+                 List.cons(#'induct, seen))
+        | '~induct: $arg; ...':
+            when seen.contains(#'induct)
+            | syntax_error(#'proof, "duplicate `~induct` option", group)
+            syntax_error(
+              #'proof,
+              "`~induct` expects one nonempty bracketed list of identifiers",
+              group)
+        | '~extensionality: [$(n :: Identifier), ...]':
+            when seen.contains(#'extensionality)
+            | syntax_error(
+                #'proof, "duplicate `~extensionality` option", group)
+            let names = [Syntax.unwrap(n), ...]
+            when names.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~extensionality` expects one nonempty bracketed list of identifiers",
+                group)
+            loop(rest,
+                 acc ++ {#'extensionality: names},
+                 List.cons(#'extensionality, seen))
+        | '~extensionality: $arg; ...':
+            when seen.contains(#'extensionality)
+            | syntax_error(
+                #'proof, "duplicate `~extensionality` option", group)
+            syntax_error(
+              #'proof,
+              "`~extensionality` expects one nonempty bracketed list of identifiers",
+              group)
+        | '~use: [$(u :: Identifier), ...]':
+            when seen.contains(#'use)
+            | syntax_error(#'proof, "duplicate `~use` option", group)
+            let names = [Syntax.unwrap(u), ...]
+            when names.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~use` expects one nonempty bracketed list of theorem names",
+                group)
+            loop(rest,
+                 acc ++ {#'use: names},
+                 List.cons(#'use, seen))
+        | '~use: $arg; ...':
+            when seen.contains(#'use)
+            | syntax_error(#'proof, "duplicate `~use` option", group)
+            syntax_error(
+              #'proof,
+              "`~use` expects one nonempty bracketed list of theorem names",
+              group)
+        | '~skip: [$(d :: Identifier), ...]':
+            when seen.contains(#'skip)
+            | syntax_error(#'proof, "duplicate `~skip` option", group)
+            let names = [Syntax.unwrap(d), ...]
+            when names.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~skip` expects one nonempty bracketed list of stage names",
+                group)
+            loop(rest,
+                 acc ++ {#'skip: names},
+                 List.cons(#'skip, seen))
+        | '~skip: $arg; ...':
+            when seen.contains(#'skip)
+            | syntax_error(#'proof, "duplicate `~skip` option", group)
+            syntax_error(
+              #'proof,
+              "`~skip` expects one nonempty bracketed list of stage names",
+              group)
+        | '~disable: [$(r :: Identifier), ...]':
+            when seen.contains(#'disable)
+            | syntax_error(#'proof, "duplicate `~disable` option", group)
+            let names = [Syntax.unwrap(r), ...]
+            when names.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~disable` expects one nonempty bracketed list of rule names",
+                group)
+            loop(rest,
+                 acc ++ {#'disable: names},
+                 List.cons(#'disable, seen))
+        | '~disable: $arg; ...':
+            when seen.contains(#'disable)
+            | syntax_error(#'proof, "duplicate `~disable` option", group)
+            syntax_error(
+              #'proof,
+              "`~disable` expects one nonempty bracketed list of rule names",
+              group)
+        | '~split: [$c, ...]':
+            when seen.contains(#'split)
+            | syntax_error(#'proof, "duplicate `~split` option", group)
+            let cases = [c, ...]
+            when cases.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~split` expects one nonempty bracketed list of propositions",
+                group)
+            loop(rest,
+                 acc ++ {#'split: cases},
+                 List.cons(#'split, seen))
+        | '~split: $arg; ...':
+            when seen.contains(#'split)
+            | syntax_error(#'proof, "duplicate `~split` option", group)
+            syntax_error(
+              #'proof,
+              "`~split` expects one nonempty bracketed list of propositions",
+              group)
+        | '~choose: [$w, ...]':
+            when seen.contains(#'choose)
+            | syntax_error(#'proof, "duplicate `~choose` option", group)
+            let witnesses = [w, ...]
+            when witnesses.length() == 0
+            | syntax_error(
+                #'proof,
+                "`~choose` expects one nonempty bracketed list of expressions",
+                group)
+            loop(rest,
+                 acc ++ {#'choose: witnesses},
+                 List.cons(#'choose, seen))
+        | '~choose: $arg; ...':
+            when seen.contains(#'choose)
+            | syntax_error(#'proof, "duplicate `~choose` option", group)
+            syntax_error(
+              #'proof,
+              "`~choose` expects one nonempty bracketed list of expressions",
+              group)
+        | '~limit: $(n :: Int)':
+            let steps = Syntax.unwrap(n)
+            unless steps >= 0
+            | syntax_error(#'proof, "search steps cannot be negative", group)
+            match acc[#'limit]
+            | #false:
+                loop(rest, acc ++ {#'limit: steps}, seen)
+            | ~else:
+                syntax_error(#'proof, "duplicate `~limit` option", group)
+        | '~limit: $arg; ...':
+            syntax_error(#'proof,
+                         "`~limit` expects one nonnegative integer",
+                         group)
+        | ~else:
+            syntax_error(#'proof, "unknown proof option", group)
+
+// ============================================================================
+// datatype
+// ============================================================================
+
+fun datatype_decl_shape(stx :: Syntax) :: List:
+  fun constructor_shape(constructor :: Syntax) :: List:
+    match constructor
+    | '$(name :: Identifier)($field, ...)':
+        [name, [field_name(field), ...]]
+    | '$(name :: Identifier)': [name, []]
+    | ~else: syntax_error(#'datatype, "malformed constructor", constructor)
+  fun field_name(field :: Syntax) :: Syntax:
+    match field
+    | '$(name :: Identifier) :: $_ ...': name
+    | ~else: syntax_error(#'datatype, "malformed constructor field", field)
+  match stx
+  | 'datatype $(name :: Identifier).of($_, ...)
+     | $constructor
+     | ...':
+      [name, [constructor_shape(constructor), ...]]
+  | 'datatype $(name :: Identifier)($_, ...)
+     | $_
+     | ...':
+      syntax_error(
+        #'datatype,
+        "parameterized datatype declarations use `.of`; write `datatype "
+          ++ to_string(Syntax.unwrap(name)) ++ ".of(...)`",
+        stx)
+  | 'datatype $(name :: Identifier)
+     | $constructor
+     | ...':
+      [name, [constructor_shape(constructor), ...]]
+  | ~else: syntax_error(#'datatype, "malformed datatype declaration", stx)
+
+// ============================================================================
+// quickcheck
+// ============================================================================
+
+// `[samples, size, seed]`. `~size` bounds generated value depth.
+fun quickcheck_options(opts :: List.of(Syntax)) :: List:
+  for values(acc :~ List = [100, 6, 20240904]) (o in opts):
+    match o
+    | '~samples: $(n :: Int)': [Syntax.unwrap(n), acc[1], acc[2]]
+    | '~size: $(n :: Int)': [acc[0], Syntax.unwrap(n), acc[2]]
+    | '~seed: $(n :: Int)': [acc[0], acc[1], Syntax.unwrap(n)]
+    | ~else: syntax_error(#'quickcheck, "unknown option", o)

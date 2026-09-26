@@ -1,0 +1,74 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+// ACL2 irrelevance elimination is a design reference; see THIRD_PARTY_NOTICES.
+
+
+// A waterfall stage: elimination of irrelevance.
+//
+// ACL2 drops a hypothesis before induction when it shares no variable with
+// anything the goal actually needs: such a hypothesis cannot help prove the
+// conclusion, and it can only get in the way -- most often by giving the
+// induction-variable heuristic a reason to hesitate, or by the generalizer
+// treating a variable as constrained when it is really free to generalize.
+//
+// The relevance test is a fixpoint, not a one-shot check against the
+// conclusion: an assumption that shares a variable with a *kept* assumption
+// is transitively relevant even if it shares nothing with the conclusion
+// directly (`n === length(xs)` matters to a goal about `xs` even though `n`
+// itself never appears there).
+//
+// Dropping a hypothesis needs no proof step at all.  A `Thm`'s hypothesis
+// list records only what it actually used, and a theorem proved from *fewer*
+// assumptions is already usable wherever *more* are available -- so the
+// child's proof, unchanged, is the parent's proof.  What could go wrong is
+// dropping a hypothesis the rest of the proof actually needed, and that
+// shows up as the child goal being unprovable, i.e. as a residue -- never as
+// an unsound result.
+
+import:
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/backend/proof/automation/proof/node open
+  rhombus/hol/backend/proof/automation/proof/trace open
+
+export:
+  eliminate_irrelevance_goal
+  relevant_hyps
+
+// Grow the relevant component directly. Recomputing free variables avoids a
+// second representation of assumptions as indexed variable sets.
+fun relevant_hyps(g :: Goal) :: List.of(Term):
+  recur grow (pending :: List.of(Term) = g.asms,
+              frontier :: List.of(FVar) = free_vars(g.concl),
+              relevant :: List.of(Term) = []):
+    fun shares_frontier(a :: Term) :: Boolean:
+      for any (v in free_vars(a)): frontier.contains(v)
+    let selected = pending.filter(
+                     ~keep: fun (a :: Term): shares_frontier(a))
+    cond
+    | selected == []: relevant
+    | ~else:
+        let remaining = pending.filter(
+                          ~skip: fun (a :: Term): shares_frontier(a))
+        let next_frontier:
+          for values(acc :~ List.of(FVar) = []) (a in selected):
+            acc ++ free_vars(a :~ Term)
+        grow(remaining, next_frontier, relevant ++ selected)
+
+fun eliminate_irrelevance_goal(g :: Goal) :: maybe(Step):
+  // `relevant_hyps` builds its result in the order it discovers relevance,
+  // not the goal's own order; re-filter `g.asms` so the subgoal's
+  // assumptions stay in source order like every other stage's do.
+  let relevant = relevant_hyps(g)
+  let kept = g.asms.filter(~keep: fun (a): relevant.contains(a))
+  cond
+  | kept.length() == g.asms.length(): #false // nothing dropped, no progress
+  | ~else:
+      let dropped = g.asms.filter(~skip: fun (a): kept.contains(a))
+      let subgoal = mk_goal(kept, g.concl)
+      let event = DroppedIrrelevant(dropped.length())
+      Step([subgoal],
+           fun (ths :: List.of(Thm)) :: Thm:
+             match ths
+             | [child]: child,
+           [event])

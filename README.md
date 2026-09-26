@@ -17,6 +17,14 @@ library all sit on top of that kernel.
   QuickCheck: tactics, conversions, and the `#lang rhombus/hol` language
   surface (frontend elaboration, the waterfall proof procedure, recursive
   function and datatype definition).
+  Its modules under `rhombus/hol/` follow the pipeline:
+  - `frontend/parser` — declaration shapes and HOL expression syntax into
+    theory-independent Core values;
+  - `frontend/checker` — typing and name resolution shared by both backends;
+  - `backend/code` — lowering checked terms to executable Rhombus;
+  - `backend/proof` — elaboration into kernel terms, the definition
+    principles, the derived logic, and proof automation;
+  - `module.rhm` — the declaration macros that connect the stages.
 - `rhombus-hol-stdlib` — a proved standard library built on the prover.
 - `rhombus-hol` — the top-level package: `#lang rhombus/hol` itself, the
   test suite, and the documentation.

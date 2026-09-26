@@ -1,0 +1,112 @@
+#lang rhombus/static
+
+// Immutable declaration and proof capabilities. `Context` is durable module
+// state. `ProofEnv` exposes the logical environment, proof-local rules, and
+// search configuration as one plain value threaded explicitly through proof
+// search; none of it is a durable `Context` field.
+
+import:
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/backend/proof/definition/datatype/define open
+  rhombus/hol/backend/proof/definition/function/spec open
+  rhombus/hol/backend/proof/automation/rules open
+  rhombus/hol/backend/proof/automation/induction open
+
+export:
+  Context
+  ProofEnv
+  RuleBinding
+  RuleScope
+  mk_context
+  context_update
+  run_proof_scope
+
+class Context(thy :: Theory,
+              db :: RuleDB,
+              dts :: Map.of(Symbol, DatatypeThms),
+              funs :: Map.of(Symbol, FunInfo),
+              // Kernel-derived induction-scheme evidence available to proof
+              // search: one `DatatypeScheme` per declared datatype plus
+              // whatever `RuleScheme`/`WellFoundedScheme`/`FunctionScheme`
+              // values declarations have registered. Never a closure and
+              // never a search-ranking score -- those stay in tactic code.
+              schemes :: List.of(InductionScheme) = [],
+              // Native equality conversion for compact Nat literals:
+              // `(Theory, Term) -> maybe(Thm)`. The closure owns the exact
+              // native-extension evidence; consumers receive no broader
+              // kernel authority.
+              literal_eq :: maybe(Function) = #false,
+              // NatLit simplifier callback:
+              // `(Context, RuleDB, Theory, Term) -> maybe(Thm)`. The active
+              // database preserves proof-local enable/disable semantics; the
+              // Context supplies current function evidence.
+              numerals :: maybe(Function) = #false)
+
+// `base` is the durable `Context`, unchanged. `db` is a proof-local rule
+// database -- `base.db` plus one proof's `~use`/`~disable` scope -- that
+// never leaks back into `base`. `skipped_stages` is the same proof's search
+// configuration. All three are proof-time-only, so one plain value carries
+// them together instead of a second reader capability beside this one.
+class ProofEnv(base :: Context,
+               db :: RuleDB,
+               skipped_stages :: Set.of(Symbol))
+
+class RuleBinding(name :: Symbol, theorem :: Thm)
+
+class RuleScope(using :: List.of(RuleBinding) = [],
+                disabled :: List.of(Symbol) = [],
+                skipped_stages :: Set.of(Symbol) = Set())
+
+// A datatype installed with no explicit scheme evidence still gets its own
+// case-based induction registered: exactly the `DatatypeScheme` a direct
+// test context (or the very first datatypes any session installs) needs for
+// induction to keep working without threading scheme evidence through by
+// hand.
+fun default_datatype_schemes(dts :: Map.of(Symbol, DatatypeThms))
+     :: List.of(InductionScheme):
+  for values(acc :~ List = []) ((n, thms) in dts):
+    acc ++ [DatatypeScheme(n, (thms :~ DatatypeThms).induction)]
+
+fun mk_context(thy :: Theory,
+               ~rules: db :: RuleDB = empty_db,
+               ~datatypes: dts :: Map.of(Symbol, DatatypeThms) = {},
+               ~functions: funs :: Map.of(Symbol, FunInfo) = {},
+               ~schemes: schemes :: maybe(List.of(InductionScheme)) = #false,
+               ~literal_eq: literal_eq :: maybe(Function) = #false) :: Context:
+  let resolved :~ List.of(InductionScheme):
+    match schemes
+    | #false: default_datatype_schemes(dts)
+    | given: given :~ List.of(InductionScheme)
+  Context(thy, db, dts, funs, resolved, literal_eq)
+
+// One reconstruction mechanism for every `Context` update: each keyword
+// defaults to the field it would otherwise leave alone. A generic updater
+// knows nothing about what `dts`/`funs`/`schemes` mean beyond being fields to
+// replace; a caller that is merging one datatype, function, or scheme into
+// the existing map/list passes the already-merged value, computed at the
+// call site.
+fun context_update(ctx :: Context,
+                   ~thy: thy :: Theory = ctx.thy,
+                   ~db: db :: RuleDB = ctx.db,
+                   ~dts: dts :: Map.of(Symbol, DatatypeThms) = ctx.dts,
+                   ~funs: funs :: Map.of(Symbol, FunInfo) = ctx.funs,
+                   ~schemes: schemes :: List.of(InductionScheme) = ctx.schemes,
+                   ~numerals: numerals :: maybe(Function) = ctx.numerals)
+     :: Context:
+  Context(thy, db, dts, funs, schemes, ctx.literal_eq, numerals)
+
+// Build proof-local rule state without changing the durable `Context`, then
+// hand back one plain `ProofEnv` value for the caller to thread through the
+// rest of proof search. There is no handler to install and no body to wrap:
+// callers that need other capabilities (a search budget, a trace) build and
+// thread those explicitly alongside this value.
+fun run_proof_scope(ctx :: Context, scope :: RuleScope) :: ProofEnv:
+  let db0 = for values(d :~ RuleDB = ctx.db) (binding in scope.using):
+              let binding :~ RuleBinding = binding
+              add_thm(ctx.thy, d, binding.name, binding.theorem)
+  let used_names = scope.using.map(
+                     fun (binding :: RuleBinding): binding.name)
+  let db1 = enable(db0, used_names)
+  let db2 = disable(db1, scope.disabled)
+  ProofEnv(ctx, db2, scope.skipped_stages)

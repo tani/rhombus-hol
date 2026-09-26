@@ -1,0 +1,84 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+// Importable frontend state. This remains separate from `HolState`: consumers
+// that only elaborate surface syntax must not instantiate or execute proofs.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/frontend/checker/overload open
+  rhombus/hol/frontend/checker/type/registry open
+
+export:
+  SurfaceState
+  make_surface_state
+  merge_surface_states
+
+class SurfaceState(operators :: OverloadRegistry,
+                   constants :: Map.of(Symbol, HType),
+                   runtime_arities :: Map.of(Symbol, NonnegInt),
+                   type_constructors :: TypeConstructorRegistry)
+
+fun make_surface_state(functions :: Map.of(Symbol, NonnegInt),
+                       methods :: List.of(OverloadMethod),
+                       constants :: Map.of(Symbol, HType),
+                       runtime_arities :: Map.of(Symbol, NonnegInt),
+                       type_constructors :: List.of(TypeConstructor))
+     :: SurfaceState:
+  let type_registry:
+    for values(out :~ TypeConstructorRegistry = empty_type_constructor_registry()) (
+          constructor in type_constructors):
+      add_type_constructor(out, constructor)
+  SurfaceState(OverloadRegistry(functions, methods), constants,
+               runtime_arities, type_registry)
+
+fun canonical_method_types(method :: OverloadMethod) :: List.of(HType):
+  let tys = method.argument_types ++ [method.result_type]
+  let renaming:
+    for values(out :~ Map = {}) (ty in tys):
+      for values(inner :~ Map = out) (name in type_vars(ty :~ HType)):
+        (if inner.get(name, #false)
+         | inner
+         | inner ++ {name: mk_tyvar(Symbol.from_string("t" ++ to_string(inner.length())))})
+  tys.map(fun (ty): type_subst(renaming, ty :~ HType))
+
+// Two overload methods are the same declaration -- and thus a harmless
+// duplicate registration reachable through diamond imports -- when they
+// share a function and implementation constant and their signatures agree
+// up to renaming of type variables. Comparing `argument_types`/`result_type`
+// literally is unsound: each importer's own compile-time expansion of the
+// defining module freshens polymorphic type variables independently (see
+// `fresh_type` in `overload.rhm`), so alpha-equivalent methods reached via
+// two different import paths carry different, but equivalent, type-variable
+// names.
+fun same_overload_method(left :: OverloadMethod,
+                         right :: OverloadMethod) :: Boolean:
+  left.function == right.function
+    && left.constant == right.constant
+    && left.argument_order == right.argument_order
+    && canonical_method_types(left) == canonical_method_types(right)
+
+fun contains_overload_method(registry :: OverloadRegistry,
+                             method :: OverloadMethod) :: Boolean:
+  for values(found = #false) (existing in registry.methods):
+    found || same_overload_method(existing :~ OverloadMethod, method)
+
+fun merge_surface_states(imported :: SurfaceState,
+                         current :: SurfaceState)
+     :: SurfaceState:
+  let with_functions:
+    for values(registry :~ OverloadRegistry = imported.operators) (
+          (name, arity) in current.operators.arities):
+      ensure_overload_function(registry, name, arity :~ NonnegInt)
+  let with_methods:
+    for values(registry :~ OverloadRegistry = with_functions) (
+          method in current.operators.methods):
+      (if contains_overload_method(registry, method :~ OverloadMethod)
+       | registry
+       | add_overload_method(registry, method :~ OverloadMethod))
+  SurfaceState(
+    with_methods,
+    imported.constants ++ current.constants,
+    imported.runtime_arities ++ current.runtime_arities,
+    merge_type_constructor_registries(imported.type_constructors,
+                                      current.type_constructors))

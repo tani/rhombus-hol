@@ -1,0 +1,94 @@
+#lang rhombus/static
+
+// Logical goals and the proof steps that transform them.
+//
+// A goal is only a sequent: assumptions and a conclusion. The specification's
+// pipeline is described in terms of ACL2 clauses, and clauses are the right
+// shape once case splitting on `if` matters; sequents are the same thing with
+// less bookkeeping, and every stage this version has -- simplification,
+// destructor elimination, generalization, induction -- is naturally a
+// sequent-to-sequents step. A clause layer can be added later without
+// disturbing the driver, because the driver only ever sees `Step`.
+//
+// A `Step` carries its own justification: a function from proofs of the
+// subgoals to a proof of the parent.  **That is the whole anti-bypass
+// argument.** The only way a `Thm` comes out of the prover is by composing
+// `justify` functions, each written in terms of derived rules, each of which
+// bottoms out in the kernel's ten primitives.  There is no other exit.
+// `solve_step` below is one place that composition happens, and
+// `backend/proof/automation/proof/derivation.rhm`'s `realize_derivation` is the
+// other; both do nothing but call `step.justify` on recursively-produced
+// `Thm`s, so a second schedule for the same composition is not a second trust
+// primitive.
+//
+// Search builds the `Thm` directly, one `Step` at a time, as it goes: there
+// is no proof tree built first and executed second. `solve_step` takes a
+// `Step` and a way to search each of its subgoals; it calls `search` on
+// every subgoal -- a stuck step can be stuck in more than one subgoal at
+// once, so every one of them has to be searched to report all of them, not
+// just the first -- and calls `step.justify` the moment every subgoal
+// search came back with a real `Thm`. If any subgoal search failed instead,
+// `justify` is never called; the `Residue` of every subgoal that never
+// resolved is returned instead, in subgoal order, so a caller several levels
+// up can report a genuinely multi-goal failure in one message.
+//
+// `backend/proof/automation/proof/derivation.rhm` is for the other schedule: a
+// caller that already has a finite proof tree in hand -- built by some search
+// of its own, replayed from a stored proof, whatever -- and wants it realized
+// into a `Thm` in one pass, with the same subgoal/justify contract checked
+// structurally at every node, instead of composed on the fly the way
+// `solve_step` does it.
+
+import:
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/backend/proof/automation/proof/trace open
+
+export:
+  Goal
+  Step
+  Residue
+  mk_goal
+  solve_step
+class Goal(asms :: List.of(Term),
+           concl :: Term)
+
+fun mk_goal(asms :: List.of(Term), concl :: Term) :: Goal:
+  Goal(asms, concl)
+
+// Diagnostic history belongs to an open search result, not to the logical
+// proposition that proof algorithms transform.
+class Residue(goal :: Goal,
+              trace :: List.of(TraceEvent))
+
+// `events` is parallel to `subgoals`: orchestration scopes each event around
+// the corresponding recursive search without making the algorithm effectful.
+class Step(subgoals :: List.of(Goal),
+           justify :: (List.of(Thm) -> Thm),
+           events :: List.of(TraceEvent))
+
+// Search every subgoal of `step` with `search`, which receives each subgoal
+// together with `path` extended by that subgoal's own event, and itself
+// returns a `Thm` on success or the residues of whatever it left stuck.
+// Composes `step.justify` from the subgoals' proofs, in their original
+// order, once every one of them is a real `Thm`; otherwise every stuck
+// subgoal's residues, concatenated left to right, and `justify` is never
+// called.
+fun solve_step(step :: Step, path :: List.of(TraceEvent),
+               search :: Function.of_arity(2))
+     :: values(maybe(Thm), List.of(Residue)):
+  unless step.subgoals.length() == step.events.length()
+  | error(~who: #'proof, "proof step has unpaired trace events")
+  recur loop (remaining_goals :~ List = step.subgoals,
+              remaining_events :~ List = step.events,
+              thms_rev :~ List = [],
+              residues :~ List = []):
+    match [remaining_goals, remaining_events]
+    | [[], []]:
+        (if residues.length() == 0
+         | values(step.justify(thms_rev.reverse()), [])
+         | values(#false, residues))
+    | [List.cons(subgoal, rest), List.cons(event, event_rest)]:
+        let (thm, sub_residues):
+          search(subgoal :~ Goal, List.cons(event :~ TraceEvent, path))
+        loop(rest, event_rest, List.cons(thm, thms_rev), residues ++ sub_residues)

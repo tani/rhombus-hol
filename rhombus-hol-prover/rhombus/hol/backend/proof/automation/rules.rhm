@@ -46,6 +46,9 @@ class RewriteRule(name :: Symbol,
                   // its leading implications are the rule's conditions
                   src :: Thm,
                   vars :: List.of(FVar),
+                  // variables only the conditions mention; each is bound by
+                  // matching its first condition against a known fact
+                  free :: List.of(FVar),
                   lhs :: Term,
                   rhs :: Term,
                   head :: Symbol,
@@ -151,12 +154,12 @@ fun mk_rule_from_spec(thy :: Theory, name :: Symbol,
       let vars = pvars.filter(~keep: fun (v :: FVar): lfv.contains(v))
       let rvars = pvars.filter(~keep: fun (v :: FVar): vfree_in(v, rhs))
       // A side condition may mention a pattern variable the left side does
-      // not determine either -- exactly the same hazard `rvars` guards
-      // against on the right side, and for the same reason: matching would
-      // leave it uninstantiated.
-      let cvars = for values(acc :~ List = []) (c in conds):
-                    for values(a :~ List = acc) (v in pvars):
-                      (if vfree_in(v, c) && !a.contains(v) | a ++ [v] | a)
+      // not determine, as transitivity's middle term does. Matching the left
+      // side leaves it open; discharging binds it against a known fact.
+      let free = pvars.filter(
+                   ~keep: fun (v :: FVar):
+                            !vars.contains(v)
+                              && (for any (c in conds): vfree_in(v, c)))
       cond
       // A quantified variable left-hand side would match the whole world.
       // An unquantified assumption variable is an exact-match local rule.
@@ -164,7 +167,6 @@ fun mk_rule_from_spec(thy :: Theory, name :: Symbol,
       // A pattern variable on the right that the left side does not determine
       // would be left uninstantiated by matching.
       | !(for all (v in rvars): vars.contains(v)): #false
-      | !(for all (v in cvars): vars.contains(v)): #false
       | lhs == rhs: #false
       | ~else:
           match head_symbol(lhs)
@@ -177,7 +179,7 @@ fun mk_rule_from_spec(thy :: Theory, name :: Symbol,
               cond
               | !(for all (v in rtv): ltv.contains(v)): #false
               | ~else:
-                  RewriteRule(name, spec, vars, lhs, rhs, h,
+                  RewriteRule(name, spec, vars, free, lhs, rhs, h,
                               is_variant(vars, lhs, rhs))
 fun type_vars_of(t :: Term) :: List.of(Symbol):
   fun add(ty :: HType, acc :~ List) :~ List:
@@ -382,28 +384,16 @@ fun apply_rule(r :: RewriteRule, thy :: Theory, db :: RuleDB, budget :: Budget,
   match term_match(r.vars, r.lhs, t)
   | #false: #false
   | m :~ MatchResult:
-      // Instantiate the theorem first, then read the conditions off *it*.
-      //
-      // The conditions used to be instantiated separately, as
-      // `inst_type(m.tyin, inst_fvar(m.theta, c))` -- terms before types,
-      // which is the opposite order from the theorem's own
-      // `INST(theta, INST_TYPE(tyin, src))`.  `m.theta`'s replacements are
-      // already at the instantiated types, so for a polymorphic rule the
-      // separately built condition came out at the wrong type and could
-      // never be discharged: `!x:?a. P x ==> f x = g x` simply never fired
-      // at a concrete type, even with `P(c)` in the database.
-      //
-      // Reading them back from the instantiated theorem leaves that theorem as
-      // the single condition representation, so there is no order left to get
-      // wrong.
+      // Instantiate the theorem first, then read the conditions off *it*:
+      // terms before types would build a polymorphic rule's conditions at
+      // the wrong type. The instantiated theorem stays the single
+      // representation of the conditions, so there is no order to get wrong.
       let inst_th = INST(thy, m.theta, INST_TYPE(thy, m.tyin, r.src))
-      let (inst_conds, _) = strip_imp(concl_of(inst_th))
-      match discharge_all(thy, disable(db, [r.name]), budget, inst_conds,
+      let free = r.free.map(fun (v :: FVar): inst_type(m.tyin, v) :~ FVar)
+      match discharge_all(thy, disable(db, [r.name]), budget, inst_th, free,
                           ~decide: decide)
       | #false: #false
-      | proofs :~ List:
-          let th = for values(acc :~ Thm = inst_th) (p in proofs):
-                     MP(thy, acc, p :~ Thm)
+      | th :~ Thm:
           // Stripping implications off the instantiated theorem can in
           // principle leave something that is not an equation; that is a
           // rule which does not apply, not an internal error.
@@ -419,22 +409,57 @@ fun apply_rule(r :: RewriteRule, thy :: Theory, db :: RuleDB, budget :: Budget,
               | r.permutative && !term_lt(rr, l): #false
               | ~else: th
 
-// A proof of each condition in order, or `#false` if any one does not
-// simplify all the way to `true`.
-fun discharge_all(thy :: Theory, db :: RuleDB, budget :: Budget,
-                  conds :: List.of(Term),
+// `th` with every leading condition discharged, or `#false`.
+//
+// A condition whose variables are all bound must simplify to `true`. One
+// still mentioning a `free` variable is instead matched against the known
+// facts -- the database's rules with no pattern variables and no conditions,
+// which is what a goal's assumptions become -- and each match is tried in
+// turn: ACL2 binds a rule's free variables against its hypotheses the same
+// way. A fact `p <=> true` proves a condition `p`; a fact `p <=> false`, which
+// is what an assumption `not p` becomes, proves a condition `not p`.
+fun discharge_all(thy :: Theory, db :: RuleDB, budget :: Budget, th :: Thm,
+                  free :: List.of(FVar),
                   ~decide: decide :: maybe(Function) = #false)
-     :: maybe(List.of(Thm)):
+     :: maybe(Thm):
+  let (conds, _) = strip_imp(concl_of(th))
   match conds
-  | []: []
-  | List.cons(c, rest):
-      match simp_conv(db, budget, ~decide: decide)(thy, c)
-      | #false: #false
-      | eq :~ Thm when rhs_of(eq) == tm_true:
-          match discharge_all(thy, db, budget, rest, ~decide: decide)
-          | #false: #false
-          | more: List.cons(EQT_ELIM(thy, eq), more :~ List)
-      | ~else: #false
+  | []: th
+  | List.cons(c, _):
+      let unbound = free.filter(~keep: fun (v :: FVar): vfree_in(v, c))
+      cond
+      | unbound == []:
+          match simp_conv(db, budget, ~decide: decide)(thy, c)
+          | eq :~ Thm when rhs_of(eq) == tm_true:
+              discharge_all(thy, db, budget, MP(thy, th, EQT_ELIM(thy, eq)),
+                            free, ~decide: decide)
+          | ~else: #false
+      | ~else:
+          let rest = free.filter(~skip: fun (v :: FVar): unbound.contains(v))
+          let (target, truth) = (match dest_neg(c)
+                                 | #false: values(c, tm_true)
+                                 | p: values(p, tm_false))
+          recur search (facts :~ List = db.rules):
+            match facts
+            | []: #false
+            | List.cons(f, more):
+                let f :~ RewriteRule = f
+                let bound:
+                  cond
+                  | f.vars != [] || f.conds != [] || f.rhs != truth: #false
+                  | f.name in db.disabled: #false
+                  | ~else: term_match(unbound, target, f.lhs)
+                match bound
+                | #false: search(more)
+                | m :~ MatchResult:
+                    let inst_th = INST(thy, m.theta, INST_TYPE(thy, m.tyin, th))
+                    let proof = (if truth == tm_true
+                                 | EQT_ELIM(thy, f.src)
+                                 | EQF_ELIM(thy, f.src))
+                    match discharge_all(thy, db, budget, MP(thy, inst_th, proof),
+                                        rest, ~decide: decide)
+                    | #false: search(more)
+                    | done: done
 
 // Try every enabled rule whose head matches, newest first.
 // Each candidate costs a step, not just each successful rewrite: a large

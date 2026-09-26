@@ -42,10 +42,15 @@ in two ways:
 Both readings consume the same normalized Core representation. A construct must
 not be parsed once for logic and reconstructed independently for runtime.
 
-Proofs and termination checks run while the module is compiled. A theorem that
-cannot be proved, a function that cannot be shown total, or an ill-formed
-logical declaration is a compile-time error with the remaining goals or
-obligation. At runtime, logical proofs do not execute.
+Names, types, and patterns are checked while the module is compiled; an
+ill-formed logical declaration is a compile-time error. Proofs and termination
+checks run when the module's logical theory (its `hol_theory` submodule) is
+built, which importing the module logically does. A theorem that cannot be
+proved or a function that cannot be shown total is an error there, with the
+remaining goals or obligation. The executable reading never runs proofs: a
+module used only for its executable reading has unchecked theorems until its
+theory is built, so the test suite builds the theory of every module it
+compiles.
 
 Only the declaration forms in this document receive a logical reading. Ordinary
 Rhombus `fun`, `def`, `class`, `operator`, and all other ordinary forms retain
@@ -614,7 +619,7 @@ proof:
   ~extensionality: [variable, ...]
 ```
 
-A theorem is elaborated as a Boolean HOL term and proved during compilation.
+A theorem is elaborated as a Boolean HOL term and proved when the theory is built.
 Its successful theorem object is retained under `name`, but it is **not** added
 to the global rewrite database merely because it exists. A later proof enables
 it explicitly with `~use`; adding an unrelated theorem must not silently change
@@ -1169,7 +1174,10 @@ The pipeline is:
 1. **Simplification:** rewrite the conclusion and assumptions to fixed point
    with enabled function/definition equations, datatype equations, projections,
    theorem-local `~use` facts, and assumptions; beta-normalize between rewrite
-   passes.
+   passes. A fact `c1 ==> ... ==> l === r` rewrites `l` once each condition is
+   discharged. A condition simplifies to `true`, except that one mentioning a
+   variable neither `l` nor an earlier condition determines -- the middle term
+   of transitivity -- binds it by matching an assumption instead.
 2. **Destructor elimination:** when a constructor discriminator assumption is
    present, replace a selector-observed value by its constructor-and-selector
    reconstruction.

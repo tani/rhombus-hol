@@ -20,6 +20,7 @@ import:
     rhombus/hol/frontend/checker/datatype open
     rhombus/hol/frontend/parser/core open
     rhombus/hol/frontend/checker/checked open
+    rhombus/hol/frontend/checker/declaration open
     rhombus/hol/frontend/checker/state open
     rhombus/hol/frontend/checker/type/registry open
 
@@ -196,8 +197,6 @@ meta:
           syntax_meta.error(
             "a quickcheck property starts with `forall (x :: T, ...):`",
             at)
-    let ready = state
-    let inference = make_checked_inference()
     let parsed:
       for List (binder in (binders :~ List.of(CoreBinder))):
         let binder :~ CoreBinder = binder
@@ -210,7 +209,7 @@ meta:
                 "a quickcheck input needs an explicit concrete type",
                 binder.at)
           | stx:
-              read_type(stx :~ Syntax, ready.type_constructors)
+              read_type(stx :~ Syntax, state.type_constructors)
         when type_vars(ty).length() > 0
         | syntax_meta.error(
             "a quickcheck input type must be concrete", binder.at)
@@ -219,9 +218,11 @@ meta:
       for values(out :~ Map = {}) (entry in parsed):
         let entry :~ List = entry
         out ++ {entry[1] :~ Symbol: entry[2] :~ HType}
-    let rendered = runtime_expr(
-                     inference, ready, env, body :~ CoreExpr,
-                     mk_tyapp(#'bool, [])).stx
+    let rendered = checked_to_runtime(
+                     state,
+                     check_expression(state, body :~ CoreExpr, ~vars: env,
+                                      ~who: #'quickcheck,
+                                      ~expected: mk_tyapp(#'bool, [])))
     let [v, ...] = parsed.map(fun (entry :: List): entry[0] :~ Syntax)
     let [g, ...] = parsed.map(fun (entry :: List): gen_expr(entry[2]))
     let [sh, ...] = parsed.map(fun (entry :: List): shrink_expr(entry[2], at))
@@ -249,9 +250,6 @@ meta:
       emit_quickcheck_in(state, name, options, core, at)
 
   // -- functions -------------------------------------------------------------
-
-  class RuntimeExpr(stx :: Syntax, ty :: HType)
-  class RuntimeFunction(stx :: Syntax, ty :: HType)
 
   fun source_id(name :: Symbol, _at :: Syntax) :: Syntax:
     Syntax.make_id(to_string(name), runtime_context())
@@ -291,30 +289,6 @@ meta:
             for values(call :~ Syntax = initial) (
                   argument in args.drop(arity)):
               '$call($argument)'
-
-  // The runtime `CheckEnv`: `lookup` and `lookup_global` resolve `true`,
-  // `false`, the `Pair` constructor, and every registered surface constant
-  // (function, definition, or datatype constructor) identically, since
-  // nothing here distinguishes an ordinary reference from a global one.
-  // `restricted_refs` starts empty -- `check_body` adds a local function's
-  // own forward- and self-recursion restrictions as it descends, exactly as
-  // it does for the logical elaboration path.
-  fun runtime_check_env(inference :: CheckedInference, state :: SurfaceState,
-                        vars :: Map.of(Symbol, HType)) :: CheckEnv:
-    fun lookup_cb(name :: Symbol) :: maybe(HType):
-      cond
-      | name == #'true || name == #'false: mk_tyapp(#'bool, [])
-      | name == #'pair:
-          let first_type = mk_tyvar(#'a)
-          let second_type = mk_tyvar(#'b)
-          mk_fun(first_type,
-                 mk_fun(second_type, mk_tyapp(#'prod, [first_type, second_type])))
-      | ~else: state.constants.get(name, #false)
-    CheckEnv(
-      inference, vars, lookup_cb, lookup_cb,
-      state.type_constructors, #false, state.operators,
-      fun (message :: String, at :: Syntax):
-        syntax_meta.error(message, at))
 
   // The executable reading of a Nat literal is its host nonnegative integer.
   fun checked_numeral_stx(value :: NonnegInt) :: Syntax:
@@ -357,45 +331,36 @@ meta:
   // Reads a checked body back into `Syntax`. Nothing here parses a type,
   // unifies, or looks up a name -- `check_body` already made every such
   // decision.
-  fun checked_body_to_runtime(inference :: CheckedInference,
-                              state :: SurfaceState,
-                              body :: CheckedBody) :: RuntimeExpr:
+  fun checked_body_to_runtime(state :: SurfaceState,
+                              body :: CheckedBody) :: Syntax:
     match body
     | CheckedBodyExpr(expr):
-        checked_to_runtime(inference, state, expr)
-    | CheckedBodyLet(pat, init, tail, ty, at):
+        checked_to_runtime(state, expr)
+    | CheckedBodyLet(pat, init, tail, _, _):
         let pattern_stx = checked_pattern_to_runtime(pat)
-        let value = checked_to_runtime(inference, state, init)
-        let rest = checked_body_to_runtime(inference, state, tail)
-        RuntimeExpr(
-          'block:
-             let $pattern_stx = $((value.stx))
-             $((rest.stx))',
-          checked_resolve(inference, ty))
-    | CheckedBodyMatch(scrutinee, matrix, ty, at):
-        let target = checked_to_runtime(inference, state, scrutinee)
-        RuntimeExpr(
-          checked_matrix_stx(inference, state, target.stx, matrix),
-          checked_resolve(inference, ty))
+        let value = checked_to_runtime(state, init)
+        let rest = checked_body_to_runtime(state, tail)
+        'block:
+           let $pattern_stx = $value
+           $rest'
+    | CheckedBodyMatch(scrutinee, matrix, _, _):
+        checked_matrix_stx(state, checked_to_runtime(state, scrutinee), matrix)
     | ~else:
         error(~who: #'checked_to_runtime, "unknown checked body")
 
   // A single-scrutinee `CheckedPatternMatrix` -- the shape both
   // `CheckedMatch` and `CheckedBodyMatch` carry -- renders as an ordinary
   // `match`.
-  fun checked_matrix_stx(
-        inference :: CheckedInference,
-        state :: SurfaceState,
-        scrutinee_stx :: Syntax,
-        matrix :: CheckedPatternMatrix)
+  fun checked_matrix_stx(state :: SurfaceState,
+                         scrutinee_stx :: Syntax,
+                         matrix :: CheckedPatternMatrix)
       :: Syntax:
     let [clause, ...] = matrix.rows.map(
                           fun (row :: CheckedMatchRow):
                             let [pat] = row.patterns
                             let pattern_stx = checked_pattern_to_runtime(pat)
-                            let result = checked_body_to_runtime(
-                                           inference, state, row.body)
-                            '$pattern_stx: $((result.stx))')
+                            let result = checked_body_to_runtime(state, row.body)
+                            '$pattern_stx: $result')
     'match ($scrutinee_stx)
      | $clause
      | ...'
@@ -405,15 +370,13 @@ meta:
   // top-level declaration (every row repeats the same name, which is how
   // Rhombus groups multiple `fun` clauses under it), anonymous when
   // rendering a function expression.
-  fun checked_function_row(inference :: CheckedInference,
-                           state :: SurfaceState,
+  fun checked_function_row(state :: SurfaceState,
                            name :: maybe(Syntax),
                            row :: CheckedMatchRow) :: Syntax:
     let [pattern_stx, ...] = row.patterns.map(
                                fun (pat :: CheckedPattern):
                                  checked_pattern_to_runtime(pat))
-    let body_stx = checked_body_to_runtime(
-                     inference, state, row.body).stx
+    let body_stx = checked_body_to_runtime(state, row.body)
     match name
     | #false: '($pattern_stx, ...): $body_stx'
     | id :: Syntax: '$id($pattern_stx, ...): $body_stx'
@@ -422,8 +385,7 @@ meta:
   // multi-clause `fun` when the body is a `CheckedPatternMatrix`, a single
   // `fun (params): body` (parenthesized when anonymous, so it stays a valid
   // subexpression) otherwise.
-  fun checked_function_stx(inference :: CheckedInference,
-                           state :: SurfaceState,
+  fun checked_function_stx(state :: SurfaceState,
                            params :: List.of(CheckedBinder),
                            body :: CheckedBody,
                            name :: maybe(Syntax)) :: Syntax:
@@ -431,8 +393,7 @@ meta:
     | matrix :: CheckedPatternMatrix:
         let [row_stx, ...] = matrix.rows.map(
                                fun (row :: CheckedMatchRow):
-                                 checked_function_row(
-                                   inference, state, name, row))
+                                 checked_function_row(state, name, row))
         let form:
           'fun
            | $row_stx
@@ -444,154 +405,107 @@ meta:
         let [param_stx, ...] = params.map(
                                  fun (binder :: CheckedBinder):
                                    checked_pattern_to_runtime(binder.pat))
-        let body_stx = checked_body_to_runtime(
-                         inference, state, other).stx
+        let body_stx = checked_body_to_runtime(state, other)
         match name
         | #false: '(fun ($param_stx, ...): $body_stx)'
         | id :: Syntax:
             'fun $id($param_stx, ...):
                $body_stx'
 
-  // Reads a `CheckedExpr` back into `Syntax` -- purely structural, no
-  // further type propagation, since `check_expr` already made every name,
-  // type, overload, application, pattern, and body decision.
-  fun checked_to_runtime(
-        inference :: CheckedInference,
-        state :: SurfaceState,
-        checked :: CheckedExpr)
-      :: RuntimeExpr:
+  // Reads a closed `CheckedExpr` back into `Syntax` -- purely structural,
+  // since `check_expr` already made every name, type, overload, application,
+  // pattern, and body decision.
+  fun checked_to_runtime(state :: SurfaceState,
+                         checked :: CheckedExpr)
+      :: Syntax:
     match checked
-    | CheckedLocal(name, ty, at):
-        RuntimeExpr(source_id(name, at), checked_resolve(inference, ty))
-    | CheckedConstant(name, ty, at) when name == #'true:
-        RuntimeExpr(
-          Syntax.make(#true, at), checked_resolve(inference, ty))
-    | CheckedConstant(name, ty, at) when name == #'false:
-        RuntimeExpr(
-          Syntax.make(#false, at), checked_resolve(inference, ty))
-    | CheckedConstant(name, ty, at) when name == #'pair:
+    | CheckedLocal(name, _, at): source_id(name, at)
+    | CheckedConstant(name, _, at) when name == #'true:
+        Syntax.make(#true, at)
+    | CheckedConstant(name, _, at) when name == #'false:
+        Syntax.make(#false, at)
+    | CheckedConstant(name, _, at) when name == #'pair:
         let first = source_id(Symbol.gen("_pair_first"), at)
         let second = source_id(Symbol.gen("_pair_second"), at)
-        RuntimeExpr(
-          '(fun ($first):
-              fun ($second):
-                Pair($first, $second))',
-          checked_resolve(inference, ty))
-    | CheckedConstant(name, ty, at):
-        RuntimeExpr(
-          runtime_named_apply(state, name, [], at),
-          checked_resolve(inference, ty))
+        '(fun ($first):
+            fun ($second):
+              Pair($first, $second))'
+    | CheckedConstant(name, _, at):
+        runtime_named_apply(state, name, [], at)
     | CheckedNumeral(value, _):
-        RuntimeExpr(checked_numeral_stx(value), mk_tyapp(#'Nat, []))
-    | CheckedIf(cond, then_branch, else_branch, ty, at):
-        let cond_r = checked_to_runtime(inference, state, cond)
-        let then_r = checked_to_runtime(inference, state, then_branch)
-        let else_r = checked_to_runtime(inference, state, else_branch)
-        RuntimeExpr(
-          'if $((cond_r.stx))
-           | $((then_r.stx))
-           | $((else_r.stx))',
-          checked_resolve(inference, ty))
-    | CheckedBoolOp(op, args, at):
-        let bool_ty = mk_tyapp(#'bool, [])
+        checked_numeral_stx(value)
+    | CheckedIf(cond, then_branch, else_branch, _, _):
+        let cond_stx = checked_to_runtime(state, cond)
+        let then_stx = checked_to_runtime(state, then_branch)
+        let else_stx = checked_to_runtime(state, else_branch)
+        'if $cond_stx
+         | $then_stx
+         | $else_stx'
+    | CheckedBoolOp(op, args, _):
         let rendered:
-          args.map(
-            fun (a :: CheckedExpr):
-              checked_to_runtime(inference, state, a).stx)
-        let stx:
-          match op
-          | #'conj:
-              let [left, right] = rendered
-              '($(left :~ Syntax)) && ($(right :~ Syntax))'
-          | #'disj:
-              let [left, right] = rendered
-              '($(left :~ Syntax)) || ($(right :~ Syntax))'
-          | #'imp:
-              let [left, right] = rendered
-              '(! ($(left :~ Syntax))) || ($(right :~ Syntax))'
-          | #'neg:
-              let [operand] = rendered
-              '! ($(operand :~ Syntax))'
-        RuntimeExpr(stx, bool_ty)
+          args.map(fun (a :: CheckedExpr): checked_to_runtime(state, a))
+        match op
+        | #'conj:
+            let [left, right] = rendered
+            '($(left :~ Syntax)) && ($(right :~ Syntax))'
+        | #'disj:
+            let [left, right] = rendered
+            '($(left :~ Syntax)) || ($(right :~ Syntax))'
+        | #'imp:
+            let [left, right] = rendered
+            '(! ($(left :~ Syntax))) || ($(right :~ Syntax))'
+        | #'neg:
+            let [operand] = rendered
+            '! ($(operand :~ Syntax))'
     | CheckedEq(left, right, operand_ty, at):
-        when is_fun(checked_resolve(inference, operand_ty))
+        when is_fun(operand_ty)
         | syntax_meta.error(
             "function equality has no sound executable interpretation", at)
-        let left_stx = checked_to_runtime(inference, state, left).stx
-        let right_stx = checked_to_runtime(inference, state, right).stx
-        RuntimeExpr(
-          '($(left_stx :~ Syntax)) == ($(right_stx :~ Syntax))',
-          mk_tyapp(#'bool, []))
-    | CheckedApply(head, args, ty, at):
+        let left_stx = checked_to_runtime(state, left)
+        let right_stx = checked_to_runtime(state, right)
+        '($left_stx) == ($right_stx)'
+    | CheckedApply(head, args, _, at):
         // `head` renders via `runtime_named_apply` (curry-adapting, taking
-        // the constant's own name) exactly when it is a `CheckedConstant` --
-        // the same "not a local, has a lookup entry" shape `check_expr`'s
-        // own `CoreRef` case used to decide the same thing. Anything else (a
-        // local variable, a more complex expression) renders `head` itself
-        // and applies it directly.
+        // the constant's own name) exactly when it is a `CheckedConstant`.
+        // Anything else (a local variable, a more complex expression)
+        // renders `head` itself and applies it directly.
         let args_stx:
-          args.map(
-            fun (a :: CheckedExpr):
-              checked_to_runtime(inference, state, a).stx)
-        let rendered_call:
-          match head
-          | CheckedConstant(name, _, _) when name == #'pair:
-              match args_stx
-              | [first, second]:
-                  'Pair($(first :~ Syntax), $(second :~ Syntax))'
-              | [first]:
-                  let second = source_id(Symbol.gen("_pair_second"), at)
-                  '(fun ($second):
-                      Pair($(first :~ Syntax), $second))'
-              | ~else:
-                  error(~who: #'checked_to_runtime,
-                        "pair constructor has unexpected arity")
-          | CheckedConstant(name, _, _):
-              runtime_named_apply(state, name, args_stx, at)
-          | ~else:
-              let head_stx = checked_to_runtime(
-                               inference, state, head).stx
-              let [arg, ...] = args_stx
-              '$(head_stx :~ Syntax)($arg, ...)'
-        RuntimeExpr(rendered_call, checked_resolve(inference, ty))
+          args.map(fun (a :: CheckedExpr): checked_to_runtime(state, a))
+        match head
+        | CheckedConstant(name, _, _) when name == #'pair:
+            match args_stx
+            | [first, second]:
+                'Pair($(first :~ Syntax), $(second :~ Syntax))'
+            | [first]:
+                let second = source_id(Symbol.gen("_pair_second"), at)
+                '(fun ($second):
+                    Pair($(first :~ Syntax), $second))'
+            | ~else:
+                error(~who: #'checked_to_runtime,
+                      "pair constructor has unexpected arity")
+        | CheckedConstant(name, _, _):
+            runtime_named_apply(state, name, args_stx, at)
+        | ~else:
+            let head_stx = checked_to_runtime(state, head)
+            let [arg, ...] = args_stx
+            '$head_stx($arg, ...)'
     | CheckedQuantifier(_, _, _, at):
         syntax_meta.error("a quantifier has no runtime meaning", at)
-    | CheckedFunction(params, _, body, ty, at):
-        RuntimeExpr(
-          checked_function_stx(inference, state, params, body, #false),
-          checked_resolve(inference, ty))
-    | CheckedBlock(body, ty, at):
-        RuntimeExpr(
-          checked_body_to_runtime(inference, state, body).stx,
-          checked_resolve(inference, ty))
-    | CheckedMatch(scrutinee, matrix, ty, at):
-        let scrutinee_r = checked_to_runtime(inference, state, scrutinee)
-        RuntimeExpr(
-          checked_matrix_stx(inference, state, scrutinee_r.stx, matrix),
-          checked_resolve(inference, ty))
+    | CheckedFunction(params, _, body, _, _):
+        checked_function_stx(state, params, body, #false)
+    | CheckedBlock(body, _, _):
+        checked_body_to_runtime(state, body)
+    | CheckedMatch(scrutinee, matrix, _, _):
+        checked_matrix_stx(state, checked_to_runtime(state, scrutinee), matrix)
     | ~else:
         error(~who: #'checked_to_runtime, "unknown checked expression")
-
-  // The executable half lowers the same `CoreExpr` tree as the logical
-  // half, through the same `check_expr`: every name, type, overload,
-  // application, pattern, and body decision is made exactly once here, and
-  // `checked_to_runtime` only renders the result.
-  fun runtime_expr(inference :: CheckedInference,
-                   state :: SurfaceState, vars :: Map.of(Symbol, HType),
-                   expr :: CoreExpr,
-                   expected :: maybe(HType) = #false) :: RuntimeExpr:
-    let env = runtime_check_env(inference, state, vars)
-    checked_to_runtime(inference, state, check_expr(env, expr, expected))
 
   // A function's executable reading is rendered from the one checked tree
   // the frontend produced for it.
   fun emit_function(fn :: CheckedFunction, state :: SurfaceState,
-                    name :: Syntax) :: RuntimeFunction:
+                    name :: Syntax) :: Syntax:
     parameterize { runtime_context: name }:
-      let inference = make_checked_inference()
-      RuntimeFunction(
-        checked_function_stx(inference, state, fn.params, fn.body, name),
-        fn.ty)
+      checked_function_stx(state, fn.params, fn.body, name)
 
   // -- entry points
   // ------------------------------------------------------------
@@ -609,10 +523,8 @@ meta:
           emit_shrinker(name, gen)]
 
   fun lower_function(fn :: CheckedFunction, state :: SurfaceState,
-                     name :: Syntax)
-       :: values(Syntax, HType):
-    let emitted = emit_function(fn, state, name)
-    values(emitted.stx, emitted.ty)
+                     name :: Syntax) :: Syntax:
+    emit_function(fn, state, name)
 
   fun lower_quickcheck(state :: SurfaceState, name :: Syntax,
                        options :: List, core :: Syntax,

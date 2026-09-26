@@ -445,28 +445,19 @@ fun add_function_family(st :: HolState,
                         decls :: List.of(CheckedFunctionDecl),
                         at :: Syntax) :: HolState:
   let names = decls.map(fun (decl :: CheckedFunctionDecl): decl.name)
-  let signatures = decls.map(family_member_signature)
-  let params = (signatures[0] :~ List)[0] :~ List.of(Symbol)
-  for (signature in signatures):
-    unless ((signature :~ List)[0] :~ List) == params
+  let params = (decls[0] :~ CheckedFunctionDecl).tyvars
+  for (decl in decls):
+    unless (decl :~ CheckedFunctionDecl).tyvars == params
     | hol_error(#'function,
                 "every member of a function family must use the same type "
                   ++ "variables", at)
-  // Elaboration needs the siblings to be *names*: they are constants in a
-  // scratch theory, never in the user's. Nothing derived from it survives --
-  // the combined function's clauses mention the combined function, not the
-  // members, and the members are defined in the real theory below.
-  let scratch:
-    for values(t :~ Theory = st.ctx.thy) (name in names,
-                                          signature in signatures):
-      new_constant(t, name :~ Symbol, signature_type(signature :~ List))
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
   let specs:
     for List (decl in decls):
       let spec :~ FunSpec = try:
                               declaration.elaborate_function_decl(
-                                scratch, decl :~ CheckedFunctionDecl,
+                                st.ctx.thy, decl :~ CheckedFunctionDecl,
                                 ~datatypes: dt_specs)
                               ~catch e :: Exn.Fail: reraise_at(e, at)
       spec
@@ -576,20 +567,6 @@ fun add_function_family(st :: HolState,
                             ~funs: state.ctx.funs ++ {spec.name: info}),
              state.thms,
              state.wfrec_def)
-
-// A member's type variables and its parameter and result types. The
-// frontend requires a family member to declare every one of them: members
-// are checked against each other, so their types cannot be inferred from
-// their bodies the way a lone declaration's can.
-fun family_member_signature(decl :: CheckedFunctionDecl) :: List:
-  [decl.tyvars,
-   decl.fn.params.map(fun (binder :: CheckedBinder): binder.ty),
-   decl.fn.result_ty]
-
-fun signature_type(signature :: List) :: HType:
-  for values(ty :~ HType = signature[2] :~ HType) (
-        argument in (signature[1] :~ List).reverse()):
-    mk_fun(argument :~ HType, ty)
 
 // The members' own induction hints. Only the induction heuristic reads one
 // (`backend/proof/automation/tactic/induction.rhm`'s

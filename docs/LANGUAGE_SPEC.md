@@ -907,11 +907,10 @@ is proved with theorem option `~extensionality:`.
 
 ### 7.3 Operator behavior and precedence
 
-In an executable body, Rhombus spellings have their ordinary counterparts:
-`#true`/`#false`, `!`, `&&`, `||`, and `==`. In propositions, use logical
-spellings described above. `&&` and `||` short-circuit at runtime, while `and`
-and `or` are strict logically; totality makes this difference unobservable in
-valid function bodies.
+In the executable reading, `true`/`false` are `#true`/`#false`, negation is
+`!`, equality is `==`, and conjunction and disjunction, under either spelling,
+are the short-circuiting `&&` and `||`. Logically they are strict; totality
+makes the difference unobservable in valid function bodies.
 
 `+`, `-`, unary `-`, `*`, `**`, comparisons, `++`, `in`, `union`, and
 `intersect` lower to the named overloadable calls from section 4.7. `**`, `++`,

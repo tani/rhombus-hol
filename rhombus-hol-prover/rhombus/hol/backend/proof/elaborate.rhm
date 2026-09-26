@@ -447,38 +447,6 @@ fun checked_clause_row(env :: ClauseEnv, row :: CheckedMatchRow) :: List:
   checked_parse_body(env2, row.body)
 
 
-fun local_pattern_variables(pat :: Term) :: List.of(FVar):
-  match pat
-  | variable :: FVar: [variable]
-  | ~else:
-      let (_, args) = strip_comb(pat)
-      for values(out :~ List = []) (arg in args):
-        out ++ local_pattern_variables(arg :~ Term)
-
-fun check_local_function_clauses(clauses :: List.of(DefClause),
-                                 result_type :: HType,
-                                 at :: Syntax):
-  for (clause in clauses):
-    let clause :~ DefClause = clause
-    unless type_of(clause_rhs(clause)) == result_type
-    | syntax_error(
-        #'function,
-        "a local function body has a different type from its result type",
-        at)
-    let variables:
-      for values(out :~ List = []) (pat in clause.pats):
-        out ++ local_pattern_variables(pat :~ Term)
-    recur distinct (remaining :~ List = variables,
-                    seen :~ List = []):
-      match remaining
-      | []: #void
-      | List.cons(variable, rest):
-          when seen.contains(variable)
-          | syntax_error(#'function,
-                         "a local function pattern variable is repeated",
-                         at)
-          distinct(rest, List.cons(variable, seen))
-
 fun local_tree_term(spec :: FunSpec,
                     datatypes :: Map.of(Symbol, DatatypeSpec),
                     args :: List.of(Term),
@@ -562,7 +530,6 @@ fun checked_match_term(env :: ElabEnv,
                      [root :~ Term], env.vars, at, result_type,
                      env.datatypes)
   let parsed = checked_clause_rows(clause_env, matrix)
-  check_local_function_clauses(parsed, result_type, at)
   let local_name = Symbol.gen("_match_expression")
   let spec = FunSpec(
                local_name, [type_of(scrutinee_term)], result_type, parsed)
@@ -602,21 +569,7 @@ fun checked_function_clauses(
                      parameter_vars.map(
                        fun (variable :: FVar): variable :~ Term),
                      vars, fn.at, result_type, env.datatypes)
-  let clauses0 = checked_parse_body(clause_env, fn.body)
-  let parameter_vars:
-    parameter_vars.map(
-      fun (variable :: FVar):
-        variable :~ FVar)
-  let clauses:
-    clauses0.map(
-      fun (clause :: DefClause):
-        DefClause(
-          clause.pats.map(fun (pat :: Term): pat),
-          clause.terms.map(
-            fun (term :: Term):
-              term)))
-  check_local_function_clauses(clauses, result_type, fn.at)
-  values(parameter_vars, result_type, clauses)
+  values(parameter_vars, result_type, checked_parse_body(clause_env, fn.body))
 
 fun checked_function_term(env :: ElabEnv,
                           fn :: CheckedFunction) :: Term:

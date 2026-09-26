@@ -9,6 +9,8 @@
 (define compile-omit-paths
   '(
     "anon_calls_enclosing_bad.rhm"
+    "composed_binders_stuck.rhm"
+    "exists1_select_stuck.rhm"
     "bool_pattern_partial_bad.rhm"
     "exists1_in_function_bad.rhm"
     "exists1_multi_bad.rhm"

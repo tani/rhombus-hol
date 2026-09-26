@@ -83,7 +83,7 @@ meta:
 
   def initial_surface_state:
     SurfaceState(standard_overload_registry(), base_constants, {},
-                 standard_type_constructor_registry())
+                 standard_type_constructor_registry(), base_datatypes)
 
   fun initial_expansion_state() :: ExpansionState:
     ExpansionState(initial_surface_state, [])
@@ -180,7 +180,8 @@ meta:
       add_overload_method(registry_with_function, method),
       state.constants,
       state.runtime_arities,
-      state.type_constructors)
+      state.type_constructors,
+      state.datatypes)
 
   fun surface_add_function(state :: SurfaceState,
                            spec :: CoreFunctionSpec,
@@ -191,33 +192,24 @@ meta:
       state.constants ++ {spec.name: full_type},
       state.runtime_arities
         ++ {spec.name: spec.params.length()},
-      state.type_constructors)
+      state.type_constructors,
+      state.datatypes)
 
 
-  fun surface_add_datatype(state :: SurfaceState, spec :: DatatypeSpec)
+  fun surface_add_datatype(state :: SurfaceState, spec :: DatatypeSpec,
+                           at :: Syntax)
        :: SurfaceState:
-    let additions:
-      for values(out :~ Map = state.constants) (ctor in spec.ctors):
-        let ctor :~ Ctor = ctor
-        out ++ {ctor.name: ctor_type(spec, ctor)}
-    let runtime_arities:
-      for values(out :~ Map = state.runtime_arities) (
-            ctor in spec.ctors):
-        let ctor :~ Ctor = ctor
-        out ++ {ctor.name: ctor.fields.length()}
-    let type_constructors = add_declared_type_constructor(
-                              state.type_constructors,
-                              spec.name, spec.params.length())
-    // Discriminators and selectors are logical constants of every datatype;
-    // they have no executable reading, so they get no runtime arity.
     let self = self_type(spec)
-    let observers:
-      for values(out :~ Map = additions) (ctor in spec.ctors):
+    let bool = mk_tyapp(#'bool, [])
+    // Every constant the declaration introduces: its constructors, and the
+    // discriminators and selectors every datatype derives.
+    let introduced:
+      for values(out :~ Map = {}) (ctor in spec.ctors):
         let ctor :~ Ctor = ctor
-        let with_discriminator:
-          out ++ {discriminator_name(ctor):
-                    mk_fun(self, mk_tyapp(#'bool, []))}
-        for values(inner :~ Map = with_discriminator) (field in ctor.fields):
+        let with_ctor:
+          out ++ {ctor.name: ctor_type(spec, ctor),
+                  discriminator_name(ctor): mk_fun(self, bool)}
+        for values(inner :~ Map = with_ctor) (field in ctor.fields):
           let field :~ Field = field
           inner ++ {selector_name(ctor, field): mk_fun(self, field.ty)}
     // A recursive datatype also derives its structural subterm relation.
@@ -227,17 +219,32 @@ meta:
           is_recursive_field(spec, field :~ Field)
     let derived:
       (if recursive
-       | observers ++ {names.subterm_relation_name(spec.name):
-                         mk_fun(self, mk_fun(self, mk_tyapp(#'bool, [])))}
-       | observers)
-    SurfaceState(state.operators, derived, runtime_arities, type_constructors)
+       | introduced ++ {names.subterm_relation_name(spec.name):
+                          mk_fun(self, mk_fun(self, bool))}
+       | introduced)
+    for ((name, _) in derived):
+      check_fresh_constant(state, name, #'datatype, at)
+    // Only the constructors have an executable reading.
+    let runtime_arities:
+      for values(out :~ Map = state.runtime_arities) (ctor in spec.ctors):
+        let ctor :~ Ctor = ctor
+        out ++ {ctor.name: ctor.fields.length()}
+    let constructors = spec.ctors.map(
+                         fun (ctor :: Ctor): [ctor.name, ctor.fields.length()])
+    SurfaceState(state.operators, state.constants ++ derived, runtime_arities,
+                 add_declared_type_constructor(state.type_constructors,
+                                               spec.name, spec.params.length()),
+                 state.datatypes ++ {spec.name: constructors})
 
   // A logical constant: nameable in logical expressions, with no executable
   // reading.
   fun surface_add_constant(state :: SurfaceState, name :: Symbol,
-                           ty :: HType) :: SurfaceState:
+                           ty :: HType, who :: Symbol,
+                           at :: Syntax) :: SurfaceState:
+    check_fresh_constant(state, name, who, at)
     SurfaceState(state.operators, state.constants ++ {name: ty},
-                 state.runtime_arities, state.type_constructors)
+                 state.runtime_arities, state.type_constructors,
+                 state.datatypes)
 
   // A declaration's type, resolved against the surface registry when the
   // declaration expands. Failures are reported at the declaration.
@@ -283,6 +290,13 @@ meta:
         out ++ [surface_type_constructor_expr(
                   constructor :~ TypeConstructor)]
     let [type_constructor, ...] = type_constructor_exprs
+    let [datatype, ...]:
+      for List ((name, constructors) in state.datatypes):
+        let [constructor, ...]:
+          (constructors :~ List).map(
+            fun (entry :: List):
+              surface_arity_expr(entry[0] :~ Symbol, entry[1] :~ NonnegInt))
+        '[$(symbol_expr(name :~ Symbol)), [$constructor, ...]]'
     'module hol_surface ~lang rhombus:
        import:
          rhombus/hol/kernel/type open
@@ -301,12 +315,17 @@ meta:
          for values(out :~ Map = {}) (
                [name, arity] in [$runtime_arity, ...]):
            out ++ {name :~ Symbol: arity :~ NonnegInt}
+       def datatype_map:
+         for values(out :~ Map = {}) (
+               [name, constructors] in [$datatype, ...]):
+           out ++ {name :~ Symbol: constructors :~ List}
        def state = make_surface_state(
                      function_map,
                      [$method, ...],
                      constant_map,
                      runtime_arity_map,
-                     [$type_constructor, ...])'
+                     [$type_constructor, ...],
+                     datatype_map)'
 
 
   // A term rebuilt with this module's context.
@@ -586,7 +605,7 @@ meta:
                                   spec :~ DatatypeSpec)
         let next_runtime:
           for values(state :~ SurfaceState = runtime_state) (spec in specs):
-            surface_add_datatype(state, spec :~ DatatypeSpec)
+            surface_add_datatype(state, spec :~ DatatypeSpec, at)
         let [spec_expr, ...] = specs.map(
                                  fun (spec):
                                    datatype_spec_expr(spec :~ DatatypeSpec))
@@ -609,6 +628,7 @@ meta:
           for values(state :~ SurfaceState = runtime_state) (
                 entry in encoded):
             let spec :~ CoreFunctionSpec = (entry :~ List)[2]
+            check_fresh_constant(state, spec.name, #'function, at)
             surface_add_function(state, spec,
                                  declared_function_type(spec, state.type_constructors))
         when family
@@ -628,6 +648,8 @@ meta:
             let emitted = lower_function(decl.fn, state, entry[1] :~ Syntax)
             values(acc ++ [emitted], decls ++ [decl],
                    surface_add_function(state, spec, decl.fn.ty))
+        when family
+        | check_family_type_variables(checked, at)
         let [decl_expr, ...] = checked.map(function_decl_expr)
         values(runtime,
                ['(~function $family_stx [$decl_expr, ...] [$at])'],
@@ -670,7 +692,8 @@ meta:
               state, n :~ Symbol,
               for values(acc :~ HType = mk_tyapp(#'bool, [])) (
                     ty in (tys :~ List).reverse()):
-                mk_fun(ty :~ HType, acc))
+                mk_fun(ty :~ HType, acc),
+              #'inductive, at)
         values([],
                ['(~inductive [$name, ...] [$signature, ...] [$rule_name, ...] [$rule, ...] [$at])'],
                next_runtime)
@@ -748,7 +771,8 @@ meta:
                                       decode_expr(core, #'definition)))
         values([],
                ['(~definition [$name] [$(type_expr(ty))] [$(checked_expr(checked))] [$at])'],
-               surface_add_constant(runtime_state, symbol, ty))
+               surface_add_constant(runtime_state, symbol, ty,
+                                    #'definition, at))
     | #'overload_method:
         let [function_name, argument_names, argument_types,
              result_type, constant, template_arguments] = d.parts

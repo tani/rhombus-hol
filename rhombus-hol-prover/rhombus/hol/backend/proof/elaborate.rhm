@@ -41,35 +41,19 @@ fun eager_clause_term(c :: DefClause) :: Term:
 
 
 
-// The pattern variable a `match` refines: `n` must name something still a
-// *live*, unrefined position somewhere in `pats` -- a top-level parameter
-// not yet matched, or a variable an enclosing pattern in this same clause
-// just bound.  Refusing anything else catches every way `n` could fail to
-// denote a fresh scrutinee: unbound entirely, already matched (its own name
-// lingers in `env` after refinement, since `env` only ever grows), or bound
-// by `let` to a computed term rather than a pattern position (matching on a
-// computed value has no constructor test to check exhaustively against).
-//
-// A pattern variable may shadow a parameter -- `function f(n)` with a clause
-// `succ(n)` -- and without checking liveness in `pats` (not just presence in
-// `env`) a nested `match n` after that would look like a fresh match on the
-// now-inaccessible outer `n` and silently refine nothing.
-fun matched_var(env :: Map.of(Symbol, Term), pats :: List.of(Term),
-                n :: Symbol, at :: Syntax) :: FVar:
-  match env.get(n, #false)
-  | #false:
-      syntax_error(#'function, "the matched name is not in scope", at)
-  | v when !(v is_a FVar):
-      syntax_error(#'function,
-                   "this name is not a pattern variable to match on", at)
-  | v0:
-      let v :~ FVar = v0
-      unless pattern_var_live(pats, v)
-      | syntax_error(#'function,
-                     "this argument has already been matched; a nested "
-                       ++ "`match` must be on a still-unmatched variable",
-                     at)
-      v
+// The clause variable a body `match` on `target` refines: a variable still
+// at a live, unrefined position in `pats` -- a parameter not yet matched, or
+// one an enclosing pattern in this clause just bound. Anything else (a `let`
+// binding, a variable of an enclosing function, an argument already refined)
+// is matched as an ordinary expression instead.
+fun clause_var(env :: Map.of(Symbol, Term), pats :: List.of(Term),
+               target :: CheckedExpr) :: maybe(FVar):
+  match target
+  | CheckedLocal(name, _, _):
+      match env.get(name, #false)
+      | v :: FVar when pattern_var_live(pats, v): v
+      | ~else: #false
+  | ~else: #false
 
 // Whether `v` occurs, unrefined, somewhere in `pats`'s pattern trees.
 fun pattern_var_live(pats :: List.of(Term), v :: FVar) :: Boolean:
@@ -363,15 +347,13 @@ fun checked_parse_body(env :: ClauseEnv, body :: CheckedBody) :: List:
   match body
   | matrix :: CheckedPatternMatrix:
       checked_clause_rows(env, matrix)
-  | CheckedBodyMatch(target, matrix, _, body_at):
-      let name:
-        match target
-        | CheckedLocal(local_name, _, _): local_name
-        | ~else:
-            error(~who: #'checked_parse_body,
-                  "checked clause refinement target is not local")
-      let v = matched_var(env.vars, env.pats, name, body_at)
-      checked_parse_clauses(env, v, matrix)
+  | CheckedBodyMatch(target, matrix, _, at):
+      match clause_var(env.vars, env.pats, target)
+      | #false:
+          [DefClause(env.pats,
+                     [checked_match_term(clause_elab_env(env), target,
+                                         matrix, at)])]
+      | v :~ FVar: checked_parse_clauses(env, v, matrix)
   | CheckedBodyLet(binding_pat, init, tail, _, body_at):
       let elab_env = clause_elab_env(env)
       let value = checked_to_term(elab_env, init)
@@ -405,10 +387,15 @@ fun checked_parse_clause(env :: ClauseEnv, v :: FVar,
   let [pat, bindings] = checked_sub_pattern(
                           clause_elab_env(env),
                           source_pat :~ CheckedPattern)
-  let vars2 = env.vars ++ (bindings :~ Map)
+  // In this clause `v` is `pat`: a later mention of a name bound to it, a
+  // second `match` on it included, means the refined value.
+  let refined:
+    for values(out :~ Map = {}) ((name, value) in env.vars):
+      out ++ {name: inst_fvar({v: pat :~ Term}, value :~ Term)}
   let env2 = ClauseEnv(env.thy, env.self_name, env.self,
                        refine_pats(env.pats, v, pat :~ Term),
-                       vars2, env.at, env.result_type, env.datatypes)
+                       refined ++ (bindings :~ Map), env.at, env.result_type,
+                       env.datatypes)
   checked_parse_body(env2, row.body)
 
 fun checked_clause_rows(env :: ClauseEnv,

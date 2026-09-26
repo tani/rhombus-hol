@@ -44,7 +44,7 @@ body = expr                        the value of the body
      | function Id(arg :: Type, ...) :: Type:   a named local function,
          body                                   then the rest
        body
-     | match Id | clause | ...     on a parameter or a pattern variable
+     | match expr | clause | ...   refining a parameter or pattern variable
 
 expr = Id                          a parameter, pattern variable or local
      | Id(expr, ...)               a constructor, function or named primitive
@@ -321,9 +321,10 @@ A pattern may nest to any depth: @tt{Cons(x, Cons(y, rest))} is a pattern,
 written directly in a clause head, or built the same way one level at a time
 via a nested @rhombus(match) on an already-bound variable --- @tt{match xs |
 Cons(x, rest): match rest | Nil(): ...} refines the tail @tt{Cons(x, rest)}
-already bound. A nested @rhombus(match) may not re-match a position that has
-already been refined --- which matters because a pattern variable can shadow
-a parameter of the same name.
+already bound. A @rhombus(match) on anything else --- a computed value, a
+@rhombus(let) binding, or an argument an enclosing @rhombus(match) already
+refined, which there denotes the value its pattern matched --- is an ordinary
+@rhombus(match) expression.
 
 @section(~tag: "propositions"){Propositions}
 

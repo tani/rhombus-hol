@@ -15,12 +15,14 @@ import:
   rhombus/hol/frontend/parser/core open
   rhombus/hol/frontend/checker/checked open
   rhombus/hol/frontend/checker/state open
+  rhombus/hol/frontend/checker/coverage open
 
 export:
   CheckedFunctionDecl
   CheckedTheorem
   check_expression
   check_function_decl
+  check_family_type_variables
   check_theorem
   check_definition
   check_inductive_rules
@@ -56,7 +58,8 @@ fun logical_check_env(state :: SurfaceState,
              syntax_error(who, message, at),
            restricted)
 
-// Check one expression with a fresh inference and close the result.
+// Check one expression with a fresh inference, close the result, and check
+// its structure (`coverage.rhm`).
 fun check_expression(state :: SurfaceState, expr :: CoreExpr,
                      ~vars: vars :: Map.of(Symbol, HType) = {},
                      ~tyvars: tyvars :: List.of(Symbol) = core_type_vars(expr),
@@ -67,7 +70,9 @@ fun check_expression(state :: SurfaceState, expr :: CoreExpr,
     :: CheckedExpr:
   let inference = make_checked_inference()
   let env = logical_check_env(state, inference, vars, tyvars, who, restricted)
-  resolve_checked(inference, check_expr(env, expr, expected))
+  let checked = resolve_checked(inference, check_expr(env, expr, expected))
+  check_structure(state.datatypes, checked, who)
+  checked
 
 fun append_new(base :: List.of(Symbol), more :: List.of(Symbol))
     :: List.of(Symbol):
@@ -119,9 +124,24 @@ fun check_function_decl(state :: SurfaceState,
                                      #'function),
                    expr :~ CoreExpr, #false)
   let fn = resolve_checked(inference, checked) :~ CheckedFunction
-  CheckedFunctionDecl(spec.name, tyvars, fn,
-                      measure && resolve_checked(inference,
-                                                 measure :~ CheckedExpr))
+  check_structure(state.datatypes, fn, #'function, ~executable: #true)
+  let resolved_measure = measure && resolve_checked(inference,
+                                                    measure :~ CheckedExpr)
+  when resolved_measure
+  | check_structure(state.datatypes, resolved_measure, #'function)
+  CheckedFunctionDecl(spec.name, tyvars, fn, resolved_measure)
+
+// Members of a `function.together:` family are checked against each other,
+// so they must share one type-variable scope.
+fun check_family_type_variables(decls :: List.of(CheckedFunctionDecl),
+                                at :: Syntax) :: Void:
+  let tyvars = (decls[0] :~ CheckedFunctionDecl).tyvars
+  for (decl in decls):
+    unless (decl :~ CheckedFunctionDecl).tyvars == tyvars
+    | syntax_error(#'function,
+                   "every member of a function family must use the same "
+                     ++ "type variables",
+                   at)
 
 // -- theorem -----------------------------------------------------------------
 

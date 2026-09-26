@@ -832,9 +832,14 @@ list datatype:
 String literal patterns are constructor patterns as specified in section 7.5;
 they are not a separate matching mechanism.
 
-A nested `match` may refine an already-bound subposition, but may not re-match a
-position already refined by an enclosing pattern. This preserves one pattern
-matrix with unambiguous variable scopes and decision-tree compilation.
+A `match` on a parameter or a pattern variable not yet matched refines the
+function's pattern matrix, so nested matches on different arguments define the
+function by their combined patterns. A `match` on anything else -- a `let`
+binding, a computed value, or an argument an enclosing `match` already refined,
+which in that clause denotes the value its pattern matched -- is an ordinary
+`match` expression. Coverage, unreachable clauses, and irrefutable binders are
+checked while the module is compiled, as are declarations that reuse a name
+already in scope or reserved.
 
 ## 7. Propositions, sets, operators, and literals
 

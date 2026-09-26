@@ -9,8 +9,10 @@ import:
   rhombus/hol/kernel/term open
   rhombus/hol/kernel open
   rhombus/hol/backend/proof/logic/bool open
-  rhombus/hol/backend/proof/elaborate open
   rhombus/hol/frontend/parser/declaration open
+  rhombus/hol/frontend/checker/checked open
+  rhombus/hol/frontend/checker/declaration open
+  rhombus/hol/frontend/checker/state open
   rhombus/hol/backend/proof/declaration open
   rhombus/hol/frontend/checker/overload open
   rhombus/hol/frontend/checker/type/registry open
@@ -68,6 +70,13 @@ def thy:
 def type_constructors:
   add_declared_type_constructor(
     standard_type_constructor_registry(), #'Nat, 0)
+// The frontend's view of the same constants.
+def surface:
+  let n = mk_tyapp(#'Nat, [])
+  SurfaceState(standard_overload_registry(),
+               base_constants ++ {#'zero: n, #'succ: mk_fun(n, n),
+                                  #'p: mk_fun(n, bool), #'q: mk_fun(n, bool)},
+               {}, type_constructors)
 
 // Core proposition elaboration builds the expected logical term at every
 // connective and binder boundary.
@@ -76,8 +85,7 @@ fun cref(n :: Symbol): CoreRef(n, at)
 fun ccall(n :: Symbol, args :: List.of(CoreExpr)):
   CoreCall(cref(n), args, at)
 fun parsed(e :: CoreExpr) :: Term:
-  parse_core_prop(
-    thy, [], {}, e, ~type_constructors: type_constructors)
+  lower_expr(thy, check_expression(surface, e))
 
 def nat_ty = mk_tyapp(#'Nat, [])
 def zero_t = mk_const(#'zero, nat_ty)
@@ -89,23 +97,10 @@ def pz = ccall(#'p, [zero_c])
 def qz = ccall(#'q, [zero_c])
 def p_zero = mk_comb(p_t, zero_t)
 def q_zero = mk_comb(q_t, zero_t)
+check parsed(pz) ~is p_zero
+check read_type('? a', type_constructors, [#'a]) ~is mk_tyvar(#'a)
 check:
-  run_elaboration(
-    ElabEnv(thy, [], {}, #'prop, #false, #false,
-            standard_overload_registry(), type_constructors),
-    pz)
-  ~is p_zero
-check:
-  run_type_elaboration(
-    ElabEnv(thy, [#'a], {}, #'prop, #false, #false,
-            standard_overload_registry(), type_constructors),
-    '? a')
-  ~is mk_tyvar(#'a)
-check:
-  run_checked_elaboration(
-    ElabEnv(thy, [], {}, #'prop, #false, #false,
-            standard_overload_registry(), type_constructors),
-    pz, bool)
+  lower_expr(thy, check_expression(surface, pz, ~expected: bool))
   ~is p_zero
 fun binary(n :: Symbol, left :: CoreExpr, right :: CoreExpr):
   ccall(n, [left, right])
@@ -169,10 +164,7 @@ check:
   let statement = CoreForall([binder(#'xs), binder(#'ys)],
                              binary(#'eq, cref(#'xs), cref(#'ys)),
                              at)
-  let (_, names) = elaborate_theorem_statement(
-                     thy, statement,
-                     ~type_constructors: type_constructors)
-  names
+  check_theorem(surface, statement, [], []).binder_names
   ~is [#'xs, #'ys]
 
 // ==========================================================================

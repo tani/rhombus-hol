@@ -25,7 +25,6 @@ export:
   read_type
   core_type_vars
   function_type_vars
-  declared_signature
   declared_function_type
   CheckedPattern
   CheckedPatWildcard
@@ -55,6 +54,7 @@ export:
   CheckedMatch
   checked_ty
   check_expr
+  resolve_checked
 
 class CheckedInference(substitution :: Box)
 
@@ -996,26 +996,72 @@ fun function_type_vars(spec :: CoreFunctionSpec) :: List.of(Symbol):
         append_unique(pattern_types, optional_vars(binder.type_stx)))
   append_unique(from_params, optional_vars(spec.result_type))
 
-// The declared parameter and result types of a function, `#false` where the
-// declaration leaves one to inference.
-fun declared_signature(spec :: CoreFunctionSpec,
-                       registry :: TypeConstructorRegistry)
-    :: values(List.of(maybe(HType)), maybe(HType)):
-  let tyvars = function_type_vars(spec)
-  fun declared(type_stx :: maybe(Syntax)) :: maybe(HType):
-    match type_stx
-    | #false: #false
-    | stx: read_type(stx :~ Syntax, registry, tyvars)
-  values(spec.params.map(fun (b :: CoreBinder): declared(b.type_stx)),
-         declared(spec.result_type))
-
-// The declared signature as one curried type, with a fresh type variable
-// wherever the declaration leaves a type to inference.
+// A function's declared signature as one curried type, with a fresh type
+// variable wherever the declaration leaves a type to inference.
 fun declared_function_type(spec :: CoreFunctionSpec,
                            registry :: TypeConstructorRegistry) :: HType:
-  let (params, result) = declared_signature(spec, registry)
-  fun or_fresh(ty :: maybe(HType), hint :: String) :: HType:
-    ty || mk_tyvar(Symbol.gen(hint))
-  for values(ty :~ HType = or_fresh(result, "_result")) (
-        param in params.reverse()):
-    mk_fun(or_fresh(param, "_parameter"), ty)
+  let tyvars = function_type_vars(spec)
+  fun declared(type_stx :: maybe(Syntax), hint :: String) :: HType:
+    match type_stx
+    | #false: mk_tyvar(Symbol.gen(hint))
+    | stx: read_type(stx :~ Syntax, registry, tyvars)
+  for values(ty :~ HType = declared(spec.result_type, "_result")) (
+        binder in spec.params.reverse()):
+    mk_fun(declared((binder :~ CoreBinder).type_stx, "_parameter"), ty)
+
+
+// -- closing a checked tree --------------------------------------------------
+//
+// Every type in a checked tree is resolved against the final substitution, so
+// the tree can leave the checker: consumers read its types directly and need
+// no inference state.
+
+fun resolve_checked(inference :: CheckedInference,
+                    expr :: CheckedExpr) :: CheckedExpr:
+  fun ty(t :: HType) :: HType: checked_resolve(inference, t)
+  fun pattern(pat :: CheckedPattern) :: CheckedPattern:
+    match pat
+    | CheckedPatWildcard(t, at): CheckedPatWildcard(ty(t), at)
+    | CheckedPatVar(name, t, at): CheckedPatVar(name, ty(t), at)
+    | CheckedPatCtor(name, args, constructor_ty, t, at):
+        CheckedPatCtor(name, args.map(pattern), ty(constructor_ty), ty(t), at)
+    | CheckedPatLiteral(value, t, at): CheckedPatLiteral(value, ty(t), at)
+  fun binder(b :: CheckedBinder) :: CheckedBinder:
+    CheckedBinder(pattern(b.pat), ty(b.ty), b.at)
+  fun matrix(m :: CheckedPatternMatrix) :: CheckedPatternMatrix:
+    CheckedPatternMatrix(
+      m.rows.map(fun (row :: CheckedMatchRow):
+                   CheckedMatchRow(row.patterns.map(pattern),
+                                   body(row.body), row.at)),
+      ty(m.ty))
+  fun body(b :: CheckedBody) :: CheckedBody:
+    match b
+    | m :: CheckedPatternMatrix: matrix(m)
+    | CheckedBodyExpr(e): CheckedBodyExpr(expression(e))
+    | CheckedBodyLet(pat, init, tail, t, at):
+        CheckedBodyLet(pattern(pat), expression(init), body(tail), ty(t), at)
+    | CheckedBodyMatch(scrutinee, m, t, at):
+        CheckedBodyMatch(expression(scrutinee), matrix(m), ty(t), at)
+  fun expression(e :: CheckedExpr) :: CheckedExpr:
+    match e
+    | CheckedLocal(name, t, at): CheckedLocal(name, ty(t), at)
+    | CheckedConstant(name, t, at): CheckedConstant(name, ty(t), at)
+    | CheckedNumeral(_, _): e
+    | CheckedIf(c, then_branch, else_branch, t, at):
+        CheckedIf(expression(c), expression(then_branch),
+                  expression(else_branch), ty(t), at)
+    | CheckedBoolOp(op, args, at): CheckedBoolOp(op, args.map(expression), at)
+    | CheckedEq(left, right, t, at):
+        CheckedEq(expression(left), expression(right), ty(t), at)
+    | CheckedApply(head, args, t, at):
+        CheckedApply(expression(head), args.map(expression), ty(t), at)
+    | CheckedQuantifier(binders, inner, is_forall, at):
+        CheckedQuantifier(binders.map(binder), expression(inner),
+                          is_forall, at)
+    | CheckedFunction(params, result_ty, inner, t, at):
+        CheckedFunction(params.map(binder), ty(result_ty), body(inner),
+                        ty(t), at)
+    | CheckedBlock(inner, t, at): CheckedBlock(body(inner), ty(t), at)
+    | CheckedMatch(scrutinee, m, t, at):
+        CheckedMatch(expression(scrutinee), matrix(m), ty(t), at)
+  expression(expr)

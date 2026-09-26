@@ -20,10 +20,11 @@ library all sit on top of that kernel.
   Its modules under `rhombus/hol/` follow the pipeline:
   - `frontend/parser` — declaration shapes and HOL expression syntax into
     theory-independent Core values;
-  - `frontend/checker` — typing and name resolution shared by both backends;
+  - `frontend/checker` — typing and name resolution: each declaration is
+    checked once, and both backends consume the closed result;
   - `backend/code` — lowering checked terms to executable Rhombus;
-  - `backend/proof` — elaboration into kernel terms, the definition
-    principles, the derived logic, and proof automation;
+  - `backend/proof` — lowering checked terms into kernel terms, the
+    definition principles, the derived logic, and proof automation;
   - `module.rhm` — the declaration macros that connect the stages.
 - `rhombus-hol-stdlib` — a proved standard library built on the prover.
 - `rhombus-hol` — the top-level package: `#lang rhombus/hol` itself, the

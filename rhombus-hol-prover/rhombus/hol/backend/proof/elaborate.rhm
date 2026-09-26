@@ -3,17 +3,13 @@
 // ACL2 hint handling is a design reference; see THIRD_PARTY_NOTICES.
 
 
-// Reading the surface syntax into the logical world.
+// Lowering checked expressions into the logical world.
 //
-// This module only *analyses*: syntax in, kernel-level data out.  It builds no
-// templates, because a syntax template created at phase 0 loses its bindings
-// on the way out of a phase-1 macro -- `'def x = 1'` written here and returned
-// from a macro reports `def: unbound identifier`.  Emission therefore lives in
-// `module.rhm`; see the note at the top of `frontend/parser/expand.rhm`.
-//
-// Shared source-level typing and name resolution live in
-// `frontend/checker/checked.rhm`. This module only lowers that representation
-// into kernel terms and function specifications.
+// Typing and name resolution happen once, in `frontend/checker`. This module
+// turns the closed checked trees it produces into kernel terms and function
+// specifications: binders become variables, constants appear at their
+// checked types, and pattern matches become decision trees over the
+// datatypes' discriminators and selectors.
 
 import:
   rhombus/hol/kernel/type open
@@ -25,14 +21,7 @@ import:
   rhombus/hol/backend/proof/definition/function/decision_tree open
   rhombus/hol/frontend/parser/core open
   rhombus/hol/backend/proof/logic/bool open
-  rhombus/hol/frontend/checker/type/unify open
   rhombus/hol/frontend/checker/checked open
-  rhombus/hol/frontend/checker/overload open
-  rhombus/hol/frontend/checker/type/registry open
-
-// `?` is already one shrubbery operator token. A type variable is therefore
-// parsed structurally as that operator followed by one identifier; no string
-// splitting or keyword conversion is needed.
 
 fun fresh_wildcard(ty :: HType) :: FVar:
   mk_var(Symbol.gen("_wild"), ty)
@@ -112,82 +101,28 @@ fun refine_pats(pats :: List.of(Term), v :: FVar,
 // Core elaboration
 // ============================================================================
 //
-// Surface enforestation has already resolved precedence, associativity, and
-// extension bindings. This module resolves names and types against a Theory.
+// The checker has already made every name, type, overload, and pattern
+// decision and closed its result. This module turns that result into kernel
+// terms: variables for binders, constants at their checked types, and
+// decision trees for pattern matches.
 
 export:
-  parse_core_prop
   ElabEnv
-  RefRestriction
-  run_type_elaboration
-  run_elaboration
-  run_checked_elaboration
-  logical_check_env
+  checked_to_term
   checked_function_clauses
   merge_pattern_bindings
   bind_checked_irrefutable_pattern
-  close_substitution
-// `self_name` and `self` are the definition being elaborated, so that a
-// recursive call resolves before the constant exists in the theory.  In
-// `#'prop` mode there is no such definition and both are `#false`.
 
+// `vars` maps each local name in scope to its term. `self_name` and `self`
+// are the definition being elaborated, so that a recursive call resolves
+// before the constant exists in the theory; outside a definition both are
+// `#false`. `who` names the declaration kind in diagnostics.
 class ElabEnv(thy :: Theory,
-              tyvars :: List.of(Symbol),
               vars :: Map.of(Symbol, Term),
-              mode :: Symbol,
-              self_name :: maybe(Symbol),
-              self :: maybe(Term),
-              operators :: OverloadRegistry = standard_overload_registry(),
-              type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry(),
-              datatypes :: Map.of(Symbol, DatatypeSpec) = {},
-              restricted_refs :: Map.of(Symbol, RefRestriction) = {},
-              inference :: CheckedInference = make_checked_inference()):
-  property who :: Symbol:
-    cond
-    | mode == #'definition: #'definition
-    | mode == #'prop: #'theorem
-    | ~else: #'function
-
-fun current_substitution(env :: ElabEnv) :: Map.of(Symbol, HType):
-  env.inference.substitution.value :~ Map
-
-// Terms constructed before inference closes can still contain generated type
-// variables. Apply the final fixed-point substitution at lowering boundaries.
-fun close_substitution(theta :: Map.of(Symbol, HType))
-     :: Map.of(Symbol, HType):
-  for values(out :~ Map = {}) ((name, ty) in theta):
-    out ++ {name: deep_resolve(theta, ty :~ HType, [])}
-
-fun resolve_type(env :: ElabEnv, ty :: HType) :: HType:
-  checked_resolve(env.inference, ty)
-
-fun resolve_term(env :: ElabEnv, term :: Term) :: Term:
-  inst_type(close_substitution(current_substitution(env)), term)
-
-fun logical_check_vars(env :: ElabEnv) :: Map.of(Symbol, HType):
-  let with_self:
-    match env.self_name
-    | name :: Symbol:
-        match env.self
-        | term :: Term: {name: type_of(term)}
-        | #false: {}
-    | #false: {}
-  for values(out :~ Map = with_self) ((name, term) in env.vars):
-    out ++ {name: type_of(term :~ Term) :~ HType}
-
-fun logical_check_env(env :: ElabEnv) :: CheckEnv:
-  CheckEnv(
-    env.inference,
-    logical_check_vars(env),
-    fun (name): const_type(env.thy, name),
-    fun (name): const_type(env.thy, name),
-    env.type_constructors,
-    env.tyvars,
-    env.operators,
-    fun (message, at): syntax_error(
-                         env.who, message :~ String, at :~ Syntax),
-    env.restricted_refs)
-
+              who :: Symbol,
+              self_name :: maybe(Symbol) = #false,
+              self :: maybe(Term) = #false,
+              datatypes :: Map.of(Symbol, DatatypeSpec) = {})
 
 // -- CoreExpr elaboration ----------------------------------------------------
 
@@ -260,7 +195,7 @@ fun bind_checked_irrefutable_pattern(
   | CheckedPatWildcard(_, _): {}
   | CheckedPatVar(name, _, _): {name: value}
   | CheckedPatCtor(name, args, _, _, at) when name == c_pair:
-      let resolved = resolve_term(env, value)
+      let resolved = value
       let first_bindings = bind_checked_irrefutable_pattern(
                              env, args[0] :~ CheckedPattern,
                              mk_fst(resolved))
@@ -272,13 +207,13 @@ fun bind_checked_irrefutable_pattern(
   | CheckedPatCtor(name, args, _, _, at):
       let [_spec, ctor] = single_constructor(env, name, at)
       let ctor :~ Ctor = ctor
-      let resolved_value = resolve_term(env, value)
+      let resolved_value = value
       let parsed:
         for List (arg in args, field in ctor.fields):
           let arg :~ CheckedPattern = arg
           let selector_type = mk_fun(
                                 type_of(resolved_value),
-                                resolve_type(env, checked_pattern_ty(arg)))
+                                checked_pattern_ty(arg))
           let selected = mk_comb(
                            mk_const(
                              selector_name(ctor, field :~ Field),
@@ -295,12 +230,12 @@ fun bind_checked_irrefutable_pattern(
 fun checked_local_term(env :: ElabEnv, name :: Symbol,
                        at :: Syntax) :: Term:
   match env.vars.get(name, #false)
-  | term :: Term: resolve_term(env, term)
+  | term :: Term: term
   | #false:
       match env.self_name
       | self_name :: Symbol when self_name == name:
           match env.self
-          | term :: Term: resolve_term(env, term)
+          | term :: Term: term
           | #false:
               error(~who: #'checked_local_term,
                     "checked recursive reference has no logical term")
@@ -316,7 +251,7 @@ fun checked_quantifier_term(env :: ElabEnv,
     for List (binder in binders):
       let binder :~ CheckedBinder = binder
       mk_var(checked_pattern_root_name(binder.pat, "_bound"),
-             resolve_type(env, binder.ty))
+             binder.ty)
   let local_bindings:
     for values(out :~ Map = {}) (binder in binders,
                                  variable in variables):
@@ -329,15 +264,15 @@ fun checked_quantifier_term(env :: ElabEnv,
   let inner = checked_to_term(
                 sub_env(env, env.vars ++ local_bindings), body)
   let build = (if is_forall | mk_forall | mk_exists)
-  for values(term :~ Term = resolve_term(env, inner)) (
+  for values(term :~ Term = inner) (
         variable in variables.reverse()):
-    build(resolve_term(env, variable :~ FVar) :~ FVar, term)
+    build(variable :~ FVar, term)
 
 fun checked_to_term(env :: ElabEnv, expr :: CheckedExpr) :: Term:
   match expr
   | CheckedLocal(name, _, at): checked_local_term(env, name, at)
   | CheckedConstant(name, ty, _):
-      mk_const(name, resolve_type(env, ty))
+      mk_const(name, ty)
   | CheckedNumeral(value, _):
       mk_nat_lit(env.thy, value)
   | CheckedIf(condition, then_branch, else_branch, _, _):
@@ -381,42 +316,18 @@ fun checked_to_term(env :: ElabEnv, expr :: CheckedExpr) :: Term:
 
 
 
-// The shared checker owns every source-level type decision. Logical
-// elaboration only lowers its semantic result into kernel terms.
-fun run_elaboration(env :: ElabEnv, expr :: CoreExpr) :: Term:
-  let checked = check_expr(logical_check_env(env), expr, #false)
-  resolve_term(env, checked_to_term(env, checked))
-
-fun run_checked_elaboration(env :: ElabEnv, expr :: CoreExpr,
-                            expected :: HType) :: Term:
-  let checked = check_expr(logical_check_env(env), expr, expected)
-  resolve_term(env, checked_to_term(env, checked))
-
-fun run_type_elaboration(env :: ElabEnv, stx :: Syntax) :: HType:
-  read_type(stx, env.type_constructors, env.tyvars)
-
-fun parse_core_prop(
-      thy :: Theory, tyvars :: List.of(Symbol),
-      vars :: Map.of(Symbol, Term), expr :: CoreExpr,
-      ~operators: operators :: OverloadRegistry = standard_overload_registry(),
-      ~type_constructors: type_constructors :: TypeConstructorRegistry = standard_type_constructor_registry(),
-      ~datatypes: datatypes :: Map.of(Symbol, DatatypeSpec) = {})
-     :: Term:
-  run_elaboration(ElabEnv(thy, tyvars, vars, #'prop, #false, #false,
-                          operators, type_constructors, datatypes), expr)
-
 fun checked_sub_pattern(env :: ElabEnv,
                         pat :: CheckedPattern) :: List:
   match pat
   | CheckedPatWildcard(ty, _):
-      [fresh_wildcard(resolve_type(env, ty)) :~ Term, {}]
+      [fresh_wildcard(ty) :~ Term, {}]
   | CheckedPatVar(name, ty, _):
-      let variable = mk_var(name, resolve_type(env, ty))
+      let variable = mk_var(name, ty)
       [variable :~ Term, {name: variable :~ Term}]
   // Products are not declared datatypes, so retain their irrefutable binding
   // interpretation while using the checked component types.
   | CheckedPatCtor(name, _, _, ty, _) when name == c_pair:
-      let root = fresh_wildcard(resolve_type(env, ty))
+      let root = fresh_wildcard(ty)
       [root :~ Term, bind_checked_irrefutable_pattern(env, pat, root)]
   | CheckedPatCtor(name, args, constructor_ty, _, at):
       let parsed:
@@ -428,7 +339,7 @@ fun checked_sub_pattern(env :: ElabEnv,
           merge_pattern_bindings(
             env.who, out, (pair :~ List)[1] :~ Map, at)
       [list_mk_comb(
-         mk_const(name, resolve_type(env, constructor_ty)), subpats),
+         mk_const(name, constructor_ty), subpats),
        bindings]
   | CheckedPatLiteral(value, _, _):
       [mk_nat_lit(env.thy, value), {}]
@@ -441,17 +352,10 @@ class ClauseEnv(thy :: Theory,
                 vars :: Map.of(Symbol, Term),
                 at :: Syntax,
                 result_type :: HType,
-                operators :: OverloadRegistry,
-                type_constructors :: TypeConstructorRegistry,
-                tyvars :: List.of(Symbol),
-                datatypes :: Map.of(Symbol, DatatypeSpec),
-                restricted_refs :: Map.of(Symbol, RefRestriction),
-                inference :: CheckedInference)
+                datatypes :: Map.of(Symbol, DatatypeSpec))
 fun clause_elab_env(env :: ClauseEnv) :: ElabEnv:
-  ElabEnv(env.thy, env.tyvars, env.vars, #'function,
-          env.self_name, env.self, env.operators,
-          env.type_constructors, env.datatypes,
-          env.restricted_refs, env.inference)
+  ElabEnv(env.thy, env.vars, #'function, env.self_name, env.self,
+          env.datatypes)
 
 
 
@@ -475,9 +379,7 @@ fun checked_parse_body(env :: ClauseEnv, body :: CheckedBody) :: List:
                        elab_env, binding_pat, value)
       let vars2 = env.vars ++ bindings
       let env2 = ClauseEnv(env.thy, env.self_name, env.self, env.pats,
-                           vars2, env.at, env.result_type, env.operators,
-                           env.type_constructors, env.tyvars, env.datatypes,
-                           env.restricted_refs, env.inference)
+                           vars2, env.at, env.result_type, env.datatypes)
       let clauses = checked_parse_body(env2, tail)
       for List (clause in clauses):
         let clause :~ DefClause = clause
@@ -506,9 +408,7 @@ fun checked_parse_clause(env :: ClauseEnv, v :: FVar,
   let vars2 = env.vars ++ (bindings :~ Map)
   let env2 = ClauseEnv(env.thy, env.self_name, env.self,
                        refine_pats(env.pats, v, pat :~ Term),
-                       vars2, env.at, env.result_type, env.operators,
-                       env.type_constructors, env.tyvars, env.datatypes,
-                       env.restricted_refs, env.inference)
+                       vars2, env.at, env.result_type, env.datatypes)
   checked_parse_body(env2, row.body)
 
 fun checked_clause_rows(env :: ClauseEnv,
@@ -543,9 +443,7 @@ fun checked_clause_row(env :: ClauseEnv, row :: CheckedMatchRow) :: List:
           #'function, bindings, bound :~ Map, row.at))
   let vars2 = env.vars ++ local_bindings
   let env2 = ClauseEnv(env.thy, env.self_name, env.self, pats2, vars2, env.at,
-                       env.result_type, env.operators, env.type_constructors,
-                       env.tyvars, env.datatypes, env.restricted_refs,
-                       env.inference)
+                       env.result_type, env.datatypes)
   checked_parse_body(env2, row.body)
 
 
@@ -640,9 +538,9 @@ fun checked_body_term(env :: ElabEnv, body :: CheckedBody) :: Term:
       let bindings = bind_checked_irrefutable_pattern(env, pat, root)
       let result = checked_body_term(
                      sub_env(env, env.vars ++ bindings), tail)
-      mk_comb(mk_abs(resolve_term(env, root) :~ FVar,
-                     resolve_term(env, result)),
-              resolve_term(env, value))
+      mk_comb(mk_abs(root :~ FVar,
+                     result),
+              value)
   | CheckedBodyMatch(scrutinee, matrix, _, at):
       checked_match_term(env, scrutinee, matrix, at)
   | _ :: CheckedPatternMatrix:
@@ -658,12 +556,11 @@ fun checked_match_term(env :: ElabEnv,
   let scrutinee_term = checked_to_term(env, scrutinee)
   let root = mk_var(
                Symbol.gen("_match_scrutinee"), type_of(scrutinee_term))
-  let result_type = resolve_type(env, matrix.ty)
+  let result_type = matrix.ty
   let clause_env = ClauseEnv(
                      env.thy, env.self_name, env.self,
                      [root :~ Term], env.vars, at, result_type,
-                     env.operators, env.type_constructors, env.tyvars,
-                     env.datatypes, env.restricted_refs, env.inference)
+                     env.datatypes)
   let parsed = checked_clause_rows(clause_env, matrix)
   check_local_function_clauses(parsed, result_type, at)
   let local_name = Symbol.gen("_match_expression")
@@ -688,7 +585,7 @@ fun checked_function_clauses(
       let binder :~ CheckedBinder = binder
       mk_var(
         checked_pattern_root_name(binder.pat, "_parameter"),
-        resolve_type(env, binder.ty))
+        binder.ty)
   let local_bindings:
     for values(out :~ Map = {}) (binder in fn.params,
                                  variable in parameter_vars):
@@ -699,27 +596,25 @@ fun checked_function_clauses(
           env, binder.pat, variable :~ Term),
         binder.at)
   let vars = env.vars ++ local_bindings
-  let result_type = resolve_type(env, fn.result_ty)
+  let result_type = fn.result_ty
   let clause_env = ClauseEnv(
                      env.thy, env.self_name, env.self,
                      parameter_vars.map(
                        fun (variable :: FVar): variable :~ Term),
-                     vars, fn.at, result_type, env.operators,
-                     env.type_constructors, env.tyvars, env.datatypes,
-                     env.restricted_refs, env.inference)
+                     vars, fn.at, result_type, env.datatypes)
   let clauses0 = checked_parse_body(clause_env, fn.body)
   let parameter_vars:
     parameter_vars.map(
       fun (variable :: FVar):
-        resolve_term(env, variable) :~ FVar)
+        variable :~ FVar)
   let clauses:
     clauses0.map(
       fun (clause :: DefClause):
         DefClause(
-          clause.pats.map(fun (pat :: Term): resolve_term(env, pat)),
+          clause.pats.map(fun (pat :: Term): pat),
           clause.terms.map(
             fun (term :: Term):
-              resolve_term(env, term))))
+              term)))
   check_local_function_clauses(clauses, result_type, fn.at)
   values(parameter_vars, result_type, clauses)
 
@@ -749,6 +644,4 @@ fun checked_function_term(env :: ElabEnv,
 
 
 fun sub_env(env :: ElabEnv, vars :: Map.of(Symbol, Term)) :: ElabEnv:
-  ElabEnv(env.thy, env.tyvars, vars, env.mode, env.self_name, env.self,
-          env.operators, env.type_constructors, env.datatypes,
-          env.restricted_refs, env.inference)
+  ElabEnv(env.thy, vars, env.who, env.self_name, env.self, env.datatypes)

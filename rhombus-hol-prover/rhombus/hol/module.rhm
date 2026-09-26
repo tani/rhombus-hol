@@ -5,9 +5,15 @@
 // place where the pipeline's stages meet.
 //
 //   frontend/parser    syntax -> Core values
-//   frontend/checker   Core -> typed, name-resolved Checked values
+//   frontend/checker   Core -> closed Checked values, once per declaration
 //   backend/code       Checked -> executable Rhombus (`lower.rhm`)
-//   backend/proof      Core -> kernel theory, via `driver.rhm`
+//   backend/proof      Checked -> kernel theory, via `driver.rhm`
+//
+// Every declaration is checked while the module expands, against the surface
+// state in force at that point. Its runtime forms are rendered from the
+// checked result, and its logical transition carries the same result into
+// the `hol_theory` submodule (`frontend/checker/encode.rhm`), so the two
+// readings cannot disagree about a name or a type.
 //
 // Each public declaration macro recognises and emits one declaration. Its
 // encoded logical transition is accumulated in an `ExpansionState` carried by
@@ -22,8 +28,8 @@
 // `hol_theory` submodule.
 //
 // Syntax templates live only in `meta` blocks of `rhombus/and_meta` modules
-// -- here and in `backend/code/lower.rhm` -- so that their identifiers resolve
-// against the emitting module's imports. A template built in a phase-0
+// -- here, in `backend/code/lower.rhm`, and in `frontend/checker/encode.rhm`
+// -- so that their identifiers resolve against the emitting module's imports. A template built in a phase-0
 // helper module loses its bindings on the way out of a phase-1 macro --
 // `'def x = 1'` written there and returned from a macro reports `def:
 // unbound identifier` -- so the parser and checker only analyse.
@@ -31,6 +37,7 @@
 import:
   rhombus/meta open
   rhombus/hol/backend/code/lower open
+  rhombus/hol/frontend/checker/encode open
   rhombus/hol/frontend/parser/space!meta:
     expose:
       hol_expr_meta
@@ -45,6 +52,7 @@ import:
     rhombus/hol/frontend/parser/declaration as declaration
     rhombus/hol/frontend/checker/overload open
     rhombus/hol/frontend/checker/checked open
+    rhombus/hol/frontend/checker/declaration open
     rhombus/hol/frontend/checker/state open
     rhombus/hol/frontend/checker/type/registry open
     rhombus/hol/frontend/checker/type/parse as type_parser
@@ -74,7 +82,7 @@ meta:
                        steps_rev :: List.of(Syntax))
 
   def initial_surface_state:
-    SurfaceState(standard_overload_registry(), {}, {},
+    SurfaceState(standard_overload_registry(), base_constants, {},
                  standard_type_constructor_registry())
 
   fun initial_expansion_state() :: ExpansionState:
@@ -139,7 +147,7 @@ meta:
         argument_type_stxs :: List.of(Syntax),
         result_type_stx :: maybe(Syntax),
         constant :: Symbol, argument_order :: List.of(NonnegInt),
-        at :: Syntax) :: values(SurfaceState, OverloadMethod):
+        at :: Syntax) :: SurfaceState:
     let arity = argument_type_stxs.length()
     let registry_with_function = ensure_overload_function(
                                    state.operators,
@@ -168,12 +176,11 @@ meta:
           constant, constant_type, argument_order)
         ~catch e :: Exn.Fail:
           syntax_meta.error(e.message, at)
-    values(SurfaceState(
-             add_overload_method(registry_with_function, method),
-             state.constants,
-             state.runtime_arities,
-             state.type_constructors),
-           method)
+    SurfaceState(
+      add_overload_method(registry_with_function, method),
+      state.constants,
+      state.runtime_arities,
+      state.type_constructors)
 
   fun surface_add_function(state :: SurfaceState,
                            spec :: CoreFunctionSpec,
@@ -201,19 +208,26 @@ meta:
     let type_constructors = add_declared_type_constructor(
                               state.type_constructors,
                               spec.name, spec.params.length())
-    SurfaceState(state.operators, additions, runtime_arities, type_constructors)
+    // Discriminators and selectors are logical constants of every datatype;
+    // they have no executable reading, so they get no runtime arity.
+    let self = self_type(spec)
+    let observers:
+      for values(out :~ Map = additions) (ctor in spec.ctors):
+        let ctor :~ Ctor = ctor
+        let with_discriminator:
+          out ++ {discriminator_name(ctor):
+                    mk_fun(self, mk_tyapp(#'bool, []))}
+        for values(inner :~ Map = with_discriminator) (field in ctor.fields):
+          let field :~ Field = field
+          inner ++ {selector_name(ctor, field): mk_fun(self, field.ty)}
+    SurfaceState(state.operators, observers, runtime_arities, type_constructors)
 
-  fun surface_symbol_expr(name :: Symbol) :: Syntax:
-    let text = Syntax.make(to_string(name), id_ctx)
-    'Symbol.from_string($text)'
-
-  fun surface_type_expr(ty :: HType) :: Syntax:
-    match ty
-    | TyVar(name):
-        'mk_tyvar($(surface_symbol_expr(name)))'
-    | TyApp(name, args):
-        let [arg, ...] = args.map(surface_type_expr)
-        'mk_tyapp($(surface_symbol_expr(name)), [$arg, ...])'
+  // A logical constant: nameable in logical expressions, with no executable
+  // reading.
+  fun surface_add_constant(state :: SurfaceState, name :: Symbol,
+                           ty :: HType) :: SurfaceState:
+    SurfaceState(state.operators, state.constants ++ {name: ty},
+                 state.runtime_arities, state.type_constructors)
 
   // A declaration's type, resolved against the surface registry when the
   // declaration expands. Failures are reported at the declaration.
@@ -223,42 +237,18 @@ meta:
       read_type(stx, state.type_constructors)
       ~catch e :: Exn.Fail: reraise_at(e, at)
 
-  fun datatype_spec_expr(spec :: DatatypeSpec) :: Syntax:
-    let [param, ...] = spec.params.map(surface_symbol_expr)
-    let [ctor, ...]:
-      for List (c in spec.ctors):
-        let c :~ Ctor = c
-        let [field, ...]:
-          for List (f in c.fields):
-            let f :~ Field = f
-            'Field($(surface_symbol_expr(f.name)), $(surface_type_expr(f.ty)))'
-        'Ctor($(surface_symbol_expr(c.name)), [$field, ...])'
-    'DatatypeSpec($(surface_symbol_expr(spec.name)), [$param, ...], [$ctor, ...])'
-
   fun surface_arity_expr(name :: Symbol, arity :: NonnegInt) :: Syntax:
     let arity_stx = Syntax.make(arity, id_ctx)
-    '[$(surface_symbol_expr(name)), $arity_stx]'
-
-  fun surface_method_expr(method :: OverloadMethod) :: Syntax:
-    let [argument_type, ...] = method.argument_types.map(surface_type_expr)
-    let result_type = surface_type_expr(method.result_type)
-    let [position, ...] = method.argument_order.map(
-                            fun (value): Syntax.make(value, id_ctx))
-    'OverloadMethod(
-       $(surface_symbol_expr(method.function)),
-       [$argument_type, ...],
-       $result_type,
-       $(surface_symbol_expr(method.constant)),
-       [$position, ...])'
+    '[$(symbol_expr(name)), $arity_stx]'
 
   fun surface_constant_expr(name :: Symbol, ty :: HType) :: Syntax:
-    '[$(surface_symbol_expr(name)), $(surface_type_expr(ty))]'
+    '[$(symbol_expr(name)), $(type_expr(ty))]'
   fun surface_type_constructor_expr(
         constructor :: TypeConstructor) :: Syntax:
     let arity_stx = Syntax.make(constructor.arity, id_ctx)
     'TypeConstructor(
-       $(surface_symbol_expr(constructor.surface_name)),
-       $(surface_symbol_expr(constructor.kernel_name)),
+       $(symbol_expr(constructor.surface_name)),
+       $(symbol_expr(constructor.kernel_name)),
        $arity_stx)'
 
   fun emit_surface_state(state :: SurfaceState) :: Syntax:
@@ -269,7 +259,7 @@ meta:
     let [overload_function, ...] = function_exprs
     let [method, ...] = ready.operators.methods.map(
                           fun (value):
-                            surface_method_expr(value :~ OverloadMethod))
+                            overload_method_expr(value :~ OverloadMethod))
     let constant_exprs:
       for values(out :~ List = []) ((name, ty) in ready.constants):
         out ++ [surface_constant_expr(name, ty :~ HType)]
@@ -406,6 +396,36 @@ meta:
     | #false: Syntax.make(#false, id_ctx)
     | n: Syntax.make(n, id_ctx)
 
+  // Check part of a declaration, reporting any failure at the declaration.
+  fun checking(at :: Syntax, thunk :: Function.of_arity(0)):
+    try:
+      thunk()
+      ~catch e :: Exn.Fail: reraise_at(e, at)
+
+  // A member of a function family is checked against its siblings' declared
+  // signatures, so every one of its types has to be written down.
+  fun require_family_signature(spec :: CoreFunctionSpec, at :: Syntax):
+    unless spec.result_type
+    | rb.#{raise-syntax-error}(
+        #'function,
+        "a member of a function family needs a declared result type: "
+          ++ to_string(spec.name),
+        at)
+    for (binder in spec.params):
+      unless (binder :~ CoreBinder).type_stx
+      | rb.#{raise-syntax-error}(
+          #'function,
+          "a member of a function family needs a declared type for every "
+            ++ "parameter: " ++ to_string(spec.name),
+          at)
+
+  // The proof options the prover reads. Case splits and witnesses travel
+  // checked, beside the theorem statement, instead of in this encoding.
+  fun without_expressions(tactic :: Syntax) :: Syntax:
+    match tactic
+    | '(core_tactic $induct $using $skipped $disabled [$_, ...] [$_, ...] $steps $extensionality)':
+        '(core_tactic $induct $using $skipped $disabled [] [] $steps $extensionality)'.relocate_span([tactic])
+
   fun tactic_encoding(tactic :: maybe(List.of(Syntax)), at :: Syntax) :: Syntax:
     let tactic_stx:
       match tactic
@@ -461,55 +481,36 @@ meta:
           '(fun (_hol_step):
               _hol_driver.add_datatypes(
                 _hol_step, [$spec, ...], '$at', $family))')
-    | '(~function $family [$core, ...] [$at])':
+    | '(~function $family [$decl, ...] [$at])':
         values(
           [],
           '(fun (_hol_step):
-              let specs = try:
-                            [_hol_surface.decode_function('$core'), ...]
-                            ~catch e :: Exn.Fail:
-                              _hol_surface.reraise_at(e, '$at')
-              _hol_driver.add_functions(_hol_step, specs, '$at', $family))')
-    | '(~theorem [$name] [$core] [$tactic] [$at])':
+              _hol_driver.add_functions(_hol_step, [$decl, ...], '$at',
+                                        $family))')
+    | '(~theorem [$name] [$theorem] [$tactic] [$at])':
         values(
           [],
           '(fun (_hol_step):
-              let statement = try:
-                               _hol_surface.decode_prop('$core')
-                               ~catch e :: Exn.Fail:
-                                 _hol_surface.reraise_at(e, '$at')
               let proof = try:
                             _hol_surface.decode_tactic('$tactic')
                             ~catch e :: Exn.Fail:
                               _hol_surface.reraise_at(e, '$at')
               _hol_driver.add_theorem(_hol_step, Syntax.unwrap('$name'),
-                                      statement, proof, '$at'))')
-    | '(~definition [$name] [$type] [$core] [$at])':
+                                      $theorem, proof, '$at'))')
+    | '(~definition [$name] [$type] [$expr] [$at])':
         values(
           [],
           '(fun (_hol_step):
-              let expression = try:
-                               _hol_surface.decode_expr('$core', #'definition)
-                               ~catch e :: Exn.Fail:
-                                 _hol_surface.reraise_at(e, '$at')
               _hol_driver.add_definition(_hol_step, Syntax.unwrap('$name'),
-                                         $type, expression, '$at'))')
-    | '(~inductive [$name, ...] [$signature, ...] [$rule_name, ...] [$rule_core, ...] [$at])':
+                                         $type, $expr, '$at'))')
+    | '(~inductive [$name, ...] [$signature, ...] [$rule_name, ...] [$rule, ...] [$at])':
         values(
           [],
           '(fun (_hol_step):
-              let rules = try:
-                            [_hol_surface.decode_prop('$rule_core'), ...]
-                            ~catch e :: Exn.Fail:
-                              _hol_surface.reraise_at(e, '$at')
               _hol_driver.add_inductive(
                 _hol_step, [Syntax.unwrap('$name'), ...],
                 [$signature, ...],
-                [Syntax.unwrap('$rule_name'), ...], rules, '$at'))')
-    | '(~overload [$method] [$at])':
-        values(
-          [],
-          '(fun (_hol_step): _hol_driver.add_overload(_hol_step, $method, '$at'))')
+                [Syntax.unwrap('$rule_name'), ...], [$rule, ...], '$at'))')
     | ~else: syntax_meta.error("internal malformed logical step", step)
 
   // -- diagnostics -----------------------------------------------------------
@@ -616,33 +617,38 @@ meta:
             let spec :~ CoreFunctionSpec = (entry :~ List)[2]
             surface_add_function(state, spec,
                                  declared_function_type(spec, state.type_constructors))
-        let (runtime, next_runtime):
+        when family
+        | for (entry in encoded):
+            require_family_signature((entry :~ List)[2] :~ CoreFunctionSpec,
+                                     at)
+        // Each member is checked once; its executable reading and its
+        // logical transition both come from that one checked tree.
+        let (runtime, checked, next_runtime):
           for values(acc :~ List.of(Syntax) = [],
+                     decls :~ List.of(CheckedFunctionDecl) = [],
                      state :~ SurfaceState = declared) (entry in encoded):
             let entry :~ List = entry
             let spec :~ CoreFunctionSpec = entry[2]
-            let (emitted, ty) = lower_function(
-                                  spec, state, entry[1] :~ Syntax,
-                                  declared_function_type(spec, state.type_constructors))
-            values(acc ++ [emitted],
+            let decl = checking(at,
+                                fun (): check_function_decl(state, spec))
+            let (emitted, ty) = lower_function(decl.fn, state,
+                                               entry[1] :~ Syntax)
+            values(acc ++ [emitted], decls ++ [decl],
                    surface_add_function(state, spec, ty))
-        let [core, ...] = encoded.map(fun (entry :: List): entry[0] :~ Syntax)
+        let [decl_expr, ...] = checked.map(function_decl_expr)
         values(runtime,
-               ['(~function $family_stx [$core, ...] [$at])'],
+               ['(~function $family_stx [$decl_expr, ...] [$at])'],
                next_runtime)
     | #'inductive:
-        let [name, ...] = decls.map(
-                            fun (d :: expand.Decl): (d.parts :~ List)[0])
-        // One parenthesized group of argument types per predicate, so the
-        // family's heads stay separable after encoding.
-        let [signature, ...]:
+        let name_stxs = decls.map(
+                          fun (d :: expand.Decl): (d.parts :~ List)[0])
+        let [name, ...] = name_stxs
+        let names = name_stxs.map(fun (n :: Syntax): Syntax.unwrap(n))
+        let signatures:
           for List (d in decls):
             let parameter_types = ((d :~ expand.Decl).parts :~ List)[1] :~ List
-            let [type_expr, ...]:
-              for List (stx in parameter_types):
-                surface_type_expr(
-                  declaration_type(stx :~ Syntax, runtime_state, at))
-            '[$type_expr, ...]'
+            for List (stx in parameter_types):
+              declaration_type(stx :~ Syntax, runtime_state, at)
         // The family shares every rule: that is what makes the predicates
         // mutually recursive, and it is why the rules are concatenated here
         // rather than kept per member.
@@ -650,13 +656,31 @@ meta:
           for values(acc :~ List = []) (d in decls):
             acc ++ (((d :~ expand.Decl).parts :~ List)[2] :~ List)
         let [rule_name, ...] = rules.map(fun (r :: List): r[0] :~ Syntax)
-        let [rule_core, ...]:
-          for List (r in rules):
-            let [g, ...] = (r :~ List)[1] :~ List
-            parse_hol_encoding('$g; ...')
+        let checked:
+          checking(at,
+                   fun ():
+                     let rule_exprs:
+                       for List (r in rules):
+                         let [g, ...] = (r :~ List)[1] :~ List
+                         decode_prop(parse_hol_encoding('$g; ...'))
+                     check_inductive_rules(runtime_state, names, signatures,
+                                           rule_exprs))
+        let [signature, ...]:
+          signatures.map(fun (tys :: List):
+                           let [ty, ...] = tys.map(type_expr)
+                           '[$ty, ...]')
+        let [rule, ...] = checked.map(checked_expr)
+        let next_runtime:
+          for values(state :~ SurfaceState = runtime_state) (
+                n in names, tys in signatures):
+            surface_add_constant(
+              state, n :~ Symbol,
+              for values(acc :~ HType = mk_tyapp(#'bool, [])) (
+                    ty in (tys :~ List).reverse()):
+                mk_fun(ty :~ HType, acc))
         values([],
-               ['(~inductive [$name, ...] [$signature, ...] [$rule_name, ...] [$rule_core, ...] [$at])'],
-               runtime_state)
+               ['(~inductive [$name, ...] [$signature, ...] [$rule_name, ...] [$rule, ...] [$at])'],
+               next_runtime)
     | ~else:
         syntax_meta.error("internal unknown declaration family",
                           (decls[0] :~ expand.Decl).form)
@@ -696,8 +720,15 @@ meta:
         let [g, ...] = gs
         let core = parse_hol_encoding('$g; ...')
         let tactic_core = tactic_encoding(tactic, at)
+        let checked:
+          checking(at,
+                   fun ():
+                     let proof = decode_tactic(tactic_core)
+                     check_theorem(runtime_state, decode_prop(core),
+                                   proof.cases, proof.witnesses))
+        let proof_options = without_expressions(tactic_core)
         values([],
-               ['(~theorem [$name] [$core] [$tactic_core] [$at])'],
+               ['(~theorem [$name] [$(theorem_expr(checked))] [$proof_options] [$at])'],
                runtime_state)
     | #'definition:
         let [name, parameter_parts, result_type, body_groups] = d.parts
@@ -706,6 +737,7 @@ meta:
         let type_stx = definition_type_syntax(
                          parameters, result_type :~ Syntax)
         let ty = declaration_type(type_stx, runtime_state, at)
+        let symbol = Syntax.unwrap(name)
         let [g, ...] = (body_groups :~ List)
         let core:
           match parameters
@@ -716,9 +748,14 @@ meta:
                   encode_binder((part :~ List)[0] :~ Syntax)
               let encoded_body = encode_function_body('$g; ...')
               '(core_function_expr [$binder, ...] ($result_type) $encoded_body)'.relocate_span([at])
+        let checked:
+          checking(at,
+                   fun ():
+                     check_definition(runtime_state, symbol, ty,
+                                      decode_expr(core, #'definition)))
         values([],
-               ['(~definition [$name] [$(surface_type_expr(ty))] [$core] [$at])'],
-               runtime_state)
+               ['(~definition [$name] [$(type_expr(ty))] [$(checked_expr(checked))] [$at])'],
+               surface_add_constant(runtime_state, symbol, ty))
     | #'overload_method:
         let [function_name, argument_names, argument_types,
              result_type, constant, template_arguments] = d.parts
@@ -730,17 +767,16 @@ meta:
             | name_stx: Syntax.unwrap(name_stx :~ Syntax)
         let positions = overload_argument_order(
                           names, template_arguments, at)
-        let (next_runtime, method):
-          surface_add_method(
-            runtime_state,
-            Syntax.unwrap(function_name),
-            argument_types :~ List.of(Syntax),
-            result_type :~ maybe(Syntax),
-            Syntax.unwrap(constant),
-            positions, at)
-        values([],
-               ['(~overload [$(surface_method_expr(method))] [$at])'],
-               next_runtime)
+        // Overloads are static surface metadata: they resolve while a
+        // declaration is checked, and the theory never sees them.
+        let next_runtime = surface_add_method(
+                             runtime_state,
+                             Syntax.unwrap(function_name),
+                             argument_types :~ List.of(Syntax),
+                             result_type :~ maybe(Syntax),
+                             Syntax.unwrap(constant),
+                             positions, at)
+        values([], [], next_runtime)
 
 syntax_parameter.bridge hol_expansion_state:
   Box(initial_expansion_state())
@@ -836,7 +872,8 @@ meta:
          import:
            rhombus/hol/kernel/type open
            rhombus/hol/frontend/checker/datatype open
-           rhombus/hol/frontend/checker/overload open
+           rhombus/hol/frontend/checker/checked open
+           rhombus/hol/frontend/checker/declaration open
          export: theory
          $import_form
          ...

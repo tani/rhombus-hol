@@ -1,0 +1,175 @@
+#lang rhombus/and_meta
+// SPDX-License-Identifier: 0BSD
+
+// Checker results as expressions that rebuild them.
+//
+// The frontend checks a declaration while the module expands; the logical
+// backend runs when the module's `hol_theory` submodule is instantiated. What
+// crosses between the two is an expression per value -- a type, a datatype
+// specification, an overload method, or a closed checked tree -- that
+// reconstructs the same value there.
+//
+// Every function here is a `meta` function returning syntax. Its templates
+// are written in this module, so their identifiers resolve against this
+// module's own imports wherever the result is spliced.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/frontend/checker/datatype open
+  rhombus/hol/frontend/checker/overload open
+  rhombus/hol/frontend/checker/checked open
+  rhombus/hol/frontend/checker/declaration open
+  meta:
+    rhombus/hol/kernel/type open
+    rhombus/hol/frontend/checker/datatype open
+    rhombus/hol/frontend/checker/overload open
+    rhombus/hol/frontend/checker/checked open
+    rhombus/hol/frontend/checker/declaration open
+
+export:
+  meta:
+    symbol_expr
+    type_expr
+    datatype_spec_expr
+    overload_method_expr
+    checked_expr
+    function_decl_expr
+    theorem_expr
+
+meta:
+  // Literals take this module's lexical context, so the implicit literal
+  // form resolves wherever they are spliced.
+  def literal_context :: Syntax = 'literal'
+
+  fun literal(value) :: Syntax: Syntax.make(value, literal_context)
+
+  fun symbol_expr(name :: Symbol) :: Syntax:
+    'Symbol.from_string($(literal(to_string(name))))'
+
+  // Source locations travel as quoted syntax: diagnostics raised while the
+  // theory is built still point into the user's program.
+  fun location(at :: Syntax) :: Syntax: '«'$at'»'
+
+  fun list_expr(items :: List.of(Syntax)) :: Syntax:
+    let [item, ...] = items
+    '[$item, ...]'
+
+  fun symbols_expr(names :: List.of(Symbol)) :: Syntax:
+    list_expr(names.map(symbol_expr))
+
+  fun type_expr(ty :: HType) :: Syntax:
+    match ty
+    | TyVar(name): 'mk_tyvar($(symbol_expr(name)))'
+    | TyApp(name, args):
+        'mk_tyapp($(symbol_expr(name)), $(list_expr(args.map(type_expr))))'
+
+  fun datatype_spec_expr(spec :: DatatypeSpec) :: Syntax:
+    let ctors:
+      for List (c in spec.ctors):
+        let c :~ Ctor = c
+        let fields:
+          for List (f in c.fields):
+            let f :~ Field = f
+            'Field($(symbol_expr(f.name)), $(type_expr(f.ty)))'
+        'Ctor($(symbol_expr(c.name)), $(list_expr(fields)))'
+    'DatatypeSpec($(symbol_expr(spec.name)), $(symbols_expr(spec.params)),
+                  $(list_expr(ctors)))'
+
+  fun overload_method_expr(method :: OverloadMethod) :: Syntax:
+    'OverloadMethod(
+       $(symbol_expr(method.function)),
+       $(list_expr(method.argument_types.map(type_expr))),
+       $(type_expr(method.result_type)),
+       $(symbol_expr(method.constant)),
+       $(list_expr(method.argument_order.map(literal))))'
+
+  // -- checked trees ---------------------------------------------------------
+
+  fun pattern_expr(pat :: CheckedPattern) :: Syntax:
+    match pat
+    | CheckedPatWildcard(ty, at):
+        'CheckedPatWildcard($(type_expr(ty)), $(location(at)))'
+    | CheckedPatVar(name, ty, at):
+        'CheckedPatVar($(symbol_expr(name)), $(type_expr(ty)), $(location(at)))'
+    | CheckedPatCtor(name, args, constructor_ty, ty, at):
+        'CheckedPatCtor($(symbol_expr(name)),
+                        $(list_expr(args.map(pattern_expr))),
+                        $(type_expr(constructor_ty)), $(type_expr(ty)),
+                        $(location(at)))'
+    | CheckedPatLiteral(value, ty, at):
+        'CheckedPatLiteral($(literal(value)), $(type_expr(ty)), $(location(at)))'
+
+  fun binder_expr(binder :: CheckedBinder) :: Syntax:
+    'CheckedBinder($(pattern_expr(binder.pat)), $(type_expr(binder.ty)),
+                   $(location(binder.at)))'
+
+  fun matrix_expr(matrix :: CheckedPatternMatrix) :: Syntax:
+    let rows:
+      for List (row in matrix.rows):
+        let row :~ CheckedMatchRow = row
+        'CheckedMatchRow($(list_expr(row.patterns.map(pattern_expr))),
+                         $(body_expr(row.body)), $(location(row.at)))'
+    'CheckedPatternMatrix($(list_expr(rows)), $(type_expr(matrix.ty)))'
+
+  fun body_expr(body :: CheckedBody) :: Syntax:
+    match body
+    | matrix :: CheckedPatternMatrix: matrix_expr(matrix)
+    | CheckedBodyExpr(expr): 'CheckedBodyExpr($(checked_expr(expr)))'
+    | CheckedBodyLet(pat, init, tail, ty, at):
+        'CheckedBodyLet($(pattern_expr(pat)), $(checked_expr(init)),
+                        $(body_expr(tail)), $(type_expr(ty)), $(location(at)))'
+    | CheckedBodyMatch(scrutinee, matrix, ty, at):
+        'CheckedBodyMatch($(checked_expr(scrutinee)), $(matrix_expr(matrix)),
+                          $(type_expr(ty)), $(location(at)))'
+
+  fun checked_expr(expr :: CheckedExpr) :: Syntax:
+    match expr
+    | CheckedLocal(name, ty, at):
+        'CheckedLocal($(symbol_expr(name)), $(type_expr(ty)), $(location(at)))'
+    | CheckedConstant(name, ty, at):
+        'CheckedConstant($(symbol_expr(name)), $(type_expr(ty)),
+                         $(location(at)))'
+    | CheckedNumeral(value, at):
+        'CheckedNumeral($(literal(value)), $(location(at)))'
+    | CheckedIf(c, then_branch, else_branch, ty, at):
+        'CheckedIf($(checked_expr(c)), $(checked_expr(then_branch)),
+                   $(checked_expr(else_branch)), $(type_expr(ty)),
+                   $(location(at)))'
+    | CheckedBoolOp(op, args, at):
+        'CheckedBoolOp($(symbol_expr(op)), $(list_expr(args.map(checked_expr))),
+                       $(location(at)))'
+    | CheckedEq(left, right, ty, at):
+        'CheckedEq($(checked_expr(left)), $(checked_expr(right)),
+                   $(type_expr(ty)), $(location(at)))'
+    | CheckedApply(head, args, ty, at):
+        'CheckedApply($(checked_expr(head)), $(list_expr(args.map(checked_expr))),
+                      $(type_expr(ty)), $(location(at)))'
+    | CheckedQuantifier(binders, body, is_forall, at):
+        'CheckedQuantifier($(list_expr(binders.map(binder_expr))),
+                           $(checked_expr(body)), $(literal(is_forall)),
+                           $(location(at)))'
+    | CheckedFunction(params, result_ty, body, ty, at):
+        'CheckedFunction($(list_expr(params.map(binder_expr))),
+                         $(type_expr(result_ty)), $(body_expr(body)),
+                         $(type_expr(ty)), $(location(at)))'
+    | CheckedBlock(body, ty, at):
+        'CheckedBlock($(body_expr(body)), $(type_expr(ty)), $(location(at)))'
+    | CheckedMatch(scrutinee, matrix, ty, at):
+        'CheckedMatch($(checked_expr(scrutinee)), $(matrix_expr(matrix)),
+                      $(type_expr(ty)), $(location(at)))'
+
+  fun function_decl_expr(decl :: CheckedFunctionDecl) :: Syntax:
+    let measure:
+      match decl.measure
+      | #false: '#false'
+      | expr: checked_expr(expr :~ CheckedExpr)
+    'CheckedFunctionDecl($(symbol_expr(decl.name)),
+                         $(symbols_expr(decl.tyvars)),
+                         $(checked_expr(decl.fn)),
+                         $measure)'
+
+  fun theorem_expr(thm :: CheckedTheorem) :: Syntax:
+    'CheckedTheorem($(checked_expr(thm.statement)),
+                    $(symbols_expr(thm.binder_names)),
+                    $(list_expr(thm.cases.map(checked_expr))),
+                    $(list_expr(thm.witnesses.map(checked_expr))))'

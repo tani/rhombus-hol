@@ -225,8 +225,11 @@ import:
 
 - Runtime bindings are imported by normal Rhombus import semantics.
 - The importing module adopts the exported `hol_theory` value itself, including
-  its transitive imports, declarations, theorem objects, and overload registry.
-  It does not reparse or reassert a textual description of that theory.
+  its transitive imports, declarations, and theorem objects. It does not
+  reparse or reassert a textual description of that theory.
+- The frontend merges the imported module's surface state -- the constants,
+  overloads, and type constructors later declarations are checked against --
+  while the importing module expands.
 - An ordinary module with no `hol_theory` submodule remains an ordinary import.
 
 Theory imports must precede the importing module's own logical declarations.
@@ -1026,7 +1029,7 @@ numeral:
 "ab"     => text(cons(codepoint(97), cons(codepoint(98), nil())))
 ```
 
-The same Core tree drives logical elaboration and runtime emission, but the
+The same checked tree drives logical elaboration and runtime emission, but the
 representations remain distinct. After elaboration, the logical `codepoint`
 contains the corresponding compact logical `Nat` term; the executable
 `codepoint` contains the host nonnegative integer emitted for the same surface

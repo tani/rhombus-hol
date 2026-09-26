@@ -269,9 +269,10 @@ meta:
                           args :: List.of(Syntax), at :: Syntax) :: Syntax:
     match state.runtime_arities.get(name, #false)
     | #false:
-        (if args.length() == 0
-         | source_id(name, at)
-         | runtime_call_syntax(name, args, at))
+        // A logical constant -- a definition, an inductive predicate, a
+        // datatype's discriminator or selector, a base-theory constant -- is
+        // nameable in a checked expression but has no executable reading.
+        syntax_meta.error("unknown constant " ++ to_string(name), at)
     | declared:
         let arity :~ NonnegInt = declared
         cond
@@ -582,20 +583,15 @@ meta:
     let env = runtime_check_env(inference, state, vars)
     checked_to_runtime(inference, state, check_expr(env, expr, expected))
 
-  fun emit_function(spec :: CoreFunctionSpec, state :: SurfaceState,
-                    name :: Syntax, full_type :: HType) :: RuntimeFunction:
+  // A function's executable reading is rendered from the one checked tree
+  // the frontend produced for it.
+  fun emit_function(fn :: CheckedFunction, state :: SurfaceState,
+                    name :: Syntax) :: RuntimeFunction:
     parameterize { runtime_context: name }:
       let inference = make_checked_inference()
-      let check_env = runtime_check_env(inference, state, {spec.name: full_type})
-      let checked = check_expr(
-                     check_env,
-                     CoreFunctionExpr(spec.params, spec.result_type, spec.body,
-                                      spec.at),
-                     full_type) :~ CheckedFunction
       RuntimeFunction(
-        checked_function_stx(
-          inference, state, checked.params, checked.body, name),
-        checked_resolve(inference, checked.ty))
+        checked_function_stx(inference, state, fn.params, fn.body, name),
+        fn.ty)
 
   // -- entry points
   // ------------------------------------------------------------
@@ -612,10 +608,10 @@ meta:
       ++ [emit_generator(name, spec.params, gen),
           emit_shrinker(name, gen)]
 
-  fun lower_function(spec :: CoreFunctionSpec, state :: SurfaceState,
-                     name :: Syntax, full_type :: HType)
+  fun lower_function(fn :: CheckedFunction, state :: SurfaceState,
+                     name :: Syntax)
        :: values(Syntax, HType):
-    let emitted = emit_function(spec, state, name, full_type)
+    let emitted = emit_function(fn, state, name)
     values(emitted.stx, emitted.ty)
 
   fun lower_quickcheck(state :: SurfaceState, name :: Syntax,

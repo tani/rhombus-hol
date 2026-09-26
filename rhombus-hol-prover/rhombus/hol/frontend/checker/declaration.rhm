@@ -1,0 +1,207 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+// Checking whole declarations.
+//
+// Every expression a declaration contributes -- a function body and its
+// measure, a theorem statement and its proof's case splits and witnesses, a
+// definition body, an inductive rule -- is checked here exactly once, against
+// the surface state in force at that declaration. The results are closed
+// checked trees: every type is resolved, so both backends read them directly
+// and neither repeats any name, type, overload, or pattern decision.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/frontend/parser/core open
+  rhombus/hol/frontend/checker/checked open
+  rhombus/hol/frontend/checker/state open
+
+export:
+  CheckedFunctionDecl
+  CheckedTheorem
+  logical_check_env
+  check_expression
+  check_function_decl
+  check_theorem
+  check_definition
+  check_inductive_rules
+
+// A `function` declaration after checking. `tyvars` is the declaration's
+// type-variable scope, in the order its annotations mention them.
+class CheckedFunctionDecl(name :: Symbol,
+                          tyvars :: List.of(Symbol),
+                          fn :: CheckedFunction,
+                          measure :: maybe(CheckedExpr))
+
+// A `theorem` after checking: its statement, the source names of its leading
+// universally quantified variables, and its proof's case splits (`~split`)
+// and existential witnesses (`~choose`), which may mention those variables.
+class CheckedTheorem(statement :: CheckedExpr,
+                     binder_names :: List.of(Symbol),
+                     cases :: List.of(CheckedExpr),
+                     witnesses :: List.of(CheckedExpr))
+
+// The environment for checking one logical expression: every constant the
+// surface state knows, the given local variables, and the declaration's
+// type-variable scope. Failures are ordinary errors naming `who`.
+fun logical_check_env(state :: SurfaceState,
+                      inference :: CheckedInference,
+                      vars :: Map.of(Symbol, HType),
+                      tyvars :: List.of(Symbol),
+                      who :: Symbol,
+                      restricted :: Map.of(Symbol, RefRestriction) = {})
+    :: CheckEnv:
+  fun lookup(name :: Symbol) :: maybe(HType):
+    state.constants.get(name, #false)
+  CheckEnv(inference, vars, lookup, lookup, state.type_constructors, tyvars,
+           state.operators,
+           fun (message :: String, at :: Syntax):
+             syntax_error(who, message, at),
+           restricted)
+
+// Check one expression with a fresh inference and close the result.
+fun check_expression(state :: SurfaceState, expr :: CoreExpr,
+                     ~vars: vars :: Map.of(Symbol, HType) = {},
+                     ~tyvars: tyvars :: List.of(Symbol) = core_type_vars(expr),
+                     ~who: who :: Symbol = #'theorem,
+                     ~expected: expected :: maybe(HType) = #false,
+                     ~restricted: restricted :: Map.of(Symbol, RefRestriction)
+                                    = {})
+    :: CheckedExpr:
+  let inference = make_checked_inference()
+  let env = logical_check_env(state, inference, vars, tyvars, who, restricted)
+  resolve_checked(inference, check_expr(env, expr, expected))
+
+fun append_new(base :: List.of(Symbol), more :: List.of(Symbol))
+    :: List.of(Symbol):
+  for values(acc :~ List = base) (name in more):
+    (if acc.contains(name) | acc | acc ++ [name])
+
+// The variables an irrefutable parameter pattern binds, with their types.
+fun pattern_var_types(pat :: CheckedPattern) :: Map.of(Symbol, HType):
+  match pat
+  | CheckedPatVar(name, ty, _): {name: ty}
+  | CheckedPatCtor(_, args, _, _, _):
+      for values(out :~ Map = {}) (arg in args):
+        out ++ pattern_var_types(arg :~ CheckedPattern)
+  | ~else: {}
+
+// -- function ----------------------------------------------------------------
+
+// The body is checked against the declared signature, with the function's
+// own name bound to that signature so a recursive call resolves before the
+// constant exists. A measure is checked afterwards in the same inference,
+// over the parameters' pattern variables, so constraints it adds reach the
+// parameter types too.
+fun check_function_decl(state :: SurfaceState,
+                        spec :: CoreFunctionSpec) :: CheckedFunctionDecl:
+  unless spec.result_type
+  | syntax_error(#'function, "a function needs a result type", spec.at)
+  let tyvars = function_type_vars(spec)
+  let inference = make_checked_inference()
+  let full_type = declared_function_type(spec, state.type_constructors)
+  let checked :: CheckedFunction:
+    match check_expr(
+            logical_check_env(state, inference, {spec.name: full_type},
+                              tyvars, #'function),
+            CoreFunctionExpr(spec.params, spec.result_type, spec.body,
+                             spec.at),
+            full_type)
+    | fn :: CheckedFunction: fn
+    | ~else:
+        error(~who: #'check_function_decl,
+              "the checker did not return a checked function")
+  let measure:
+    match spec.measure
+    | #false: #false
+    | expr:
+        let vars:
+          for values(out :~ Map = {}) (binder in checked.params):
+            out ++ pattern_var_types((binder :~ CheckedBinder).pat)
+        check_expr(logical_check_env(state, inference, vars, tyvars,
+                                     #'function),
+                   expr :~ CoreExpr, #false)
+  let fn = resolve_checked(inference, checked) :~ CheckedFunction
+  CheckedFunctionDecl(spec.name, tyvars, fn,
+                      measure && resolve_checked(inference,
+                                                 measure :~ CheckedExpr))
+
+// -- theorem -----------------------------------------------------------------
+
+fun required_pattern_name(pat :: CorePattern, who :: Symbol,
+                          message :: String) :: Symbol:
+  match pat
+  | CorePatVar(name, _): name
+  | CorePatTyped(inner, _, _):
+      required_pattern_name(inner, who, message)
+  | ~else: syntax_error(who, message, pattern_at(pat))
+
+fun leading_binder_names(expr :: CoreExpr) :: List.of(Symbol):
+  match expr
+  | CoreForall(bs, body, _):
+      bs.map(
+        fun (b :: CoreBinder):
+          required_pattern_name(
+            b.pattern, #'theorem,
+            "a quantified binder needs a name"))
+        ++ leading_binder_names(body)
+  | ~else: []
+
+// The statement's leading universally quantified variables, as the prover
+// strips them, with their checked types.
+fun leading_binder_types(expr :: CheckedExpr) :: Map.of(Symbol, HType):
+  match expr
+  | CheckedQuantifier(binders, body, #true, _):
+      let bound:
+        for values(out :~ Map = {}) (binder in binders):
+          out ++ pattern_var_types((binder :~ CheckedBinder).pat)
+      bound ++ leading_binder_types(body)
+  | ~else: {}
+
+fun check_theorem(state :: SurfaceState, statement :: CoreExpr,
+                  cases :: List.of(CoreExpr),
+                  witnesses :: List.of(CoreExpr)) :: CheckedTheorem:
+  let names = leading_binder_names(statement)
+  let tyvars = core_type_vars(statement)
+  let checked = check_expression(state, statement, ~tyvars: tyvars)
+  let vars = leading_binder_types(checked)
+  fun under_binders(expr :: CoreExpr) :: CheckedExpr:
+    check_expression(state, expr, ~vars: vars, ~tyvars: tyvars)
+  CheckedTheorem(checked, names, cases.map(under_binders),
+                 witnesses.map(under_binders))
+
+// -- definition --------------------------------------------------------------
+
+// A `definition` is never recursive, so its own name is refused in its body.
+// The name is not a constant yet, so without the restriction the checker
+// would report an unknown one; what the author wrote is a recursion, and a
+// `definition` has none.
+fun check_definition(state :: SurfaceState, name :: Symbol, ty :: HType,
+                     expr :: CoreExpr) :: CheckedExpr:
+  let tyvars = append_new(type_vars(ty), core_type_vars(expr))
+  let restricted:
+    {name: RefRestriction(
+             "a `definition` cannot refer to the constant it introduces",
+             #false)}
+  check_expression(state, expr, ~tyvars: tyvars, ~who: #'definition,
+                   ~expected: ty, ~restricted: restricted)
+
+// -- inductive ---------------------------------------------------------------
+
+// Each rule is checked with the declared predicates bound to variables of
+// their types: those are what the definitions quantify over.
+fun check_inductive_rules(state :: SurfaceState, names :: List.of(Symbol),
+                          signatures :: List.of(List.of(HType)),
+                          rules :: List.of(CoreExpr))
+    :: List.of(CheckedExpr):
+  let tyvars:
+    for values(acc :~ List.of(Symbol) = []) (signature in signatures):
+      for values(out :~ List.of(Symbol) = acc) (ty in signature):
+        append_new(out, type_vars(ty :~ HType))
+  let vars:
+    for values(out :~ Map = {}) (name in names, signature in signatures):
+      out ++ {name: for values(acc :~ HType = mk_tyapp(#'bool, [])) (
+                      ty in (signature :~ List).reverse()):
+                      mk_fun(ty :~ HType, acc)}
+  rules.map(fun (rule :: CoreExpr):
+              check_expression(state, rule, ~vars: vars, ~tyvars: tyvars))

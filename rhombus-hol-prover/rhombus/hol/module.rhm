@@ -360,9 +360,6 @@ meta:
              stx)
          | throw e)
 
-  fun symbol_id(n :: Symbol) :: Syntax:
-    Syntax.make_id(to_string(n), id_ctx)
-
 
 
   fun row_encoding(row :: Syntax, arity :: Int) :: Syntax:
@@ -415,10 +412,6 @@ meta:
     let core:
       '(core_function $name [$param, ...] $result $measure $body_core)'.relocate_span([form])
     values(core, name)
-  fun option_int_stx(v) :: Syntax:
-    match v
-    | #false: Syntax.make(#false, id_ctx)
-    | n: Syntax.make(n, id_ctx)
 
   // Check part of a declaration, reporting any failure at the declaration.
   fun checking(at :: Syntax, thunk :: Function.of_arity(0)):
@@ -443,14 +436,10 @@ meta:
             ++ "parameter: " ++ to_string(spec.name),
           at)
 
-  // The proof options the prover reads. Case splits and witnesses travel
-  // checked, beside the theorem statement, instead of in this encoding.
-  fun without_expressions(tactic :: Syntax) :: Syntax:
-    match tactic
-    | '(core_tactic $induct $using $skipped $disabled [$_, ...] [$_, ...] $steps $extensionality)':
-        '(core_tactic $induct $using $skipped $disabled [] [] $steps $extensionality)'.relocate_span([tactic])
-
-  fun tactic_encoding(tactic :: maybe(List.of(Syntax)), at :: Syntax) :: Syntax:
+  // A theorem's proof clause, parsed once: its options, and its case splits
+  // and witnesses as expressions to check with the statement.
+  fun theorem_proof(tactic :: maybe(List.of(Syntax)))
+       :: values(ProofOptions, List.of(CoreExpr), List.of(CoreExpr)):
     let tactic_stx:
       match tactic
       | #false: #false
@@ -458,28 +447,14 @@ meta:
           let [g, ...] = groups :~ List
           '$g; ...'
     let parsed = declaration.parse_tactic(tactic_stx)
-    let induct = parsed[#'induct]
-    let using_names = parsed[#'use]
-    let skipped_stage_names = parsed[#'skip]
-    let disabled_rule_names = parsed[#'disable]
-    let case_stxs = parsed[#'split]
-    let witness_stxs = parsed[#'choose]
-    let search_steps = parsed[#'limit]
-    let extensionality = parsed[#'extensionality]
-    let [i, ...] = (induct :~ List).map(fun (n): symbol_id(n :~ Symbol))
-    let [u, ...] = (using_names :~ List).map(fun (n): symbol_id(n :~ Symbol))
-    let [d, ...] = (skipped_stage_names :~ List).map(
-                     fun (n): symbol_id(n :~ Symbol))
-    let [r, ...] = (disabled_rule_names :~ List).map(
-                     fun (n): symbol_id(n :~ Symbol))
-    let [c, ...] = (case_stxs :~ List).map(
-                      fun (s): parse_core_encoding(s :~ Syntax))
-    let [w, ...] = (witness_stxs :~ List).map(
-                      fun (s): parse_core_encoding(s :~ Syntax))
-    let [x, ...] = (extensionality :~ List).map(
-                     fun (n): symbol_id(n :~ Symbol))
-    let steps_stx = option_int_stx(search_steps)
-    '(core_tactic [$i, ...] [$u, ...] [$d, ...] [$r, ...] [$c, ...] [$w, ...] $steps_stx [$x, ...])'.relocate_span([at])
+    fun expressions(key :: Symbol, mode :: Symbol) :: List.of(CoreExpr):
+      (parsed[key] :~ List).map(
+        fun (s): decode_expr(parse_core_encoding(s :~ Syntax), mode))
+    values(ProofOptions(parsed[#'induct], parsed[#'use], parsed[#'skip],
+                        parsed[#'disable], parsed[#'limit],
+                        parsed[#'extensionality]),
+           expressions(#'split, #'prop),
+           expressions(#'choose, #'expr))
 
   // Each non-import step becomes one state-transition function -- a value
   // closing over its own decoded syntax and error span, folded left to
@@ -511,16 +486,12 @@ meta:
           '(fun (_hol_step):
               _hol_driver.add_functions(_hol_step, [$decl, ...], '$at',
                                         $family))')
-    | '(~theorem [$name] [$theorem] [$tactic] [$at])':
+    | '(~theorem [$name] [$theorem] [$at])':
         values(
           [],
           '(fun (_hol_step):
-              let proof = try:
-                            _hol_surface.decode_tactic('$tactic')
-                            ~catch e :: Exn.Fail:
-                              _hol_surface.reraise_at(e, '$at')
               _hol_driver.add_theorem(_hol_step, Syntax.unwrap('$name'),
-                                      $theorem, proof, '$at'))')
+                                      $theorem, '$at'))')
     | '(~definition [$name] [$type] [$expr] [$at])':
         values(
           [],
@@ -731,16 +702,14 @@ meta:
         let gs :~ List = stmt
         let [g, ...] = gs
         let core = parse_hol_encoding('$g; ...')
-        let tactic_core = tactic_encoding(tactic, at)
         let checked:
           checking(at,
                    fun ():
-                     let proof = decode_tactic(tactic_core)
-                     check_theorem(runtime_state, decode_prop(core),
-                                   proof.cases, proof.witnesses))
-        let proof_options = without_expressions(tactic_core)
+                     let (options, cases, witnesses) = theorem_proof(tactic)
+                     check_theorem(runtime_state, decode_prop(core), options,
+                                   cases, witnesses))
         values([],
-               ['(~theorem [$name] [$(theorem_expr(checked))] [$proof_options] [$at])'],
+               ['(~theorem [$name] [$(theorem_expr(checked))] [$at])'],
                runtime_state)
     | #'definition:
         let [name, parameter_parts, result_type, body_groups] = d.parts
@@ -874,9 +843,11 @@ meta:
        $surface_state
        module hol_theory ~lang rhombus:
          import: rhombus/hol/backend/proof/driver as _hol_driver
-         import: rhombus/hol/frontend/parser/core as _hol_surface
          import:
            rhombus/hol/kernel/type open
+           rhombus/hol/frontend/parser/core:
+             expose:
+               ProofOptions
            rhombus/hol/frontend/checker/datatype open
            rhombus/hol/frontend/checker/checked open
            rhombus/hol/frontend/checker/declaration open

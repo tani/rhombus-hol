@@ -10,6 +10,8 @@ import:
   rhombus/hol/kernel/type open
   rhombus/hol/frontend/checker/type/unify open
   rhombus/hol/frontend/checker/overload open
+  rhombus/hol/frontend/checker/type/registry open
+  rhombus/hol/frontend/checker/type/parse open
   rhombus/hol/frontend/parser/core open
 
 export:
@@ -20,6 +22,11 @@ export:
   RefRestriction
   CheckEnv
   check_env_with
+  read_type
+  core_type_vars
+  function_type_vars
+  declared_signature
+  declared_function_type
   CheckedPattern
   CheckedPatWildcard
   CheckedPatVar
@@ -73,13 +80,15 @@ fun checked_unify(inference :: CheckedInference,
 // the restriction instead of the generic unknown-constant diagnostic.
 class RefRestriction(message :: String, block_global :: Boolean)
 
+// `tyvars` is the declaration's type-variable scope for annotations, or
+// `#false` when any type variable may appear.
 class CheckEnv(inference :: CheckedInference,
                vars :: Map.of(Symbol, HType),
                lookup :: Function.of_arity(1),
                lookup_global :: Function.of_arity(1),
-               parse_type :: Function.of_arity(1),
+               type_constructors :: TypeConstructorRegistry,
+               tyvars :: maybe(List.of(Symbol)),
                operators :: OverloadRegistry,
-               show_type :: Function.of_arity(1),
                error :: Function.of_arity(2),
                restricted_refs :: Map.of(Symbol, RefRestriction) = {})
 
@@ -89,7 +98,7 @@ fun check_env_with(env :: CheckEnv,
                      = env.restricted_refs)
     :: CheckEnv:
   CheckEnv(env.inference, vars, env.lookup, env.lookup_global,
-           env.parse_type, env.operators, env.show_type, env.error,
+           env.type_constructors, env.tyvars, env.operators, env.error,
            restricted_refs)
 class CheckedExpr():
   nonfinal
@@ -283,11 +292,21 @@ fun global_constant_type(env :: CheckEnv, name :: Symbol, at :: Syntax)
   | #false:
       fail(env, "unknown constant " ++ to_string(name), at)
 
+// A source type annotation, resolved against the surface type registry.
+fun read_type(stx :: Syntax, registry :: TypeConstructorRegistry,
+              tyvars :: maybe(List.of(Symbol)) = #false) :: HType:
+  match tyvars
+  | #false: parse_open_type(stx, registry)
+  | scope: parse_type(stx, scope :~ List.of(Symbol), registry)
+
+fun env_type(env :: CheckEnv, stx :: Syntax) :: HType:
+  read_type(stx, env.type_constructors, env.tyvars)
+
 fun optional_type(env :: CheckEnv, type_stx :: maybe(Syntax),
                   hint :: String) :: HType:
   match type_stx
   | #false: mk_tyvar(Symbol.gen(hint))
-  | stx: env.parse_type(stx :~ Syntax)
+  | stx: env_type(env, stx :~ Syntax)
 
 fun peel_type(env :: CheckEnv, ty :: HType, count :: NonnegInt,
               at :: Syntax, message :: String)
@@ -349,7 +368,7 @@ fun check_pattern(env :: CheckEnv, pat :: CorePattern,
       let ty = resolve(env, expected)
       values(CheckedPatVar(name, ty, at), {name: ty})
   | CorePatTyped(inner, type_stx, at):
-      let annotated = env.parse_type(type_stx)
+      let annotated = env_type(env, type_stx)
       unify(env, expected, annotated, at,
             "a pattern annotation does not match the expected type")
       check_pattern(env, inner, resolve(env, annotated))
@@ -364,7 +383,7 @@ fun check_pattern(env :: CheckEnv, pat :: CorePattern,
              at)
       unless ty == mk_tyapp(#'Nat, [])
       | fail(env,
-             "a numeral has no representation at type " ++ env.show_type(ty),
+             "a numeral has no representation at type " ++ type_to_surface_string(env.type_constructors, ty),
              at)
       values(CheckedPatLiteral(raw :~ NonnegInt, ty, at), {})
   | CorePatCtor(name, args, at) when name == #'pair:
@@ -771,7 +790,7 @@ fun check_expr(env :: CheckEnv, expr :: CoreExpr,
       unify_with(ty, at)
       CheckedNumeral(value, at)
   | CoreTypedExpr(inner, type_stx, at):
-      let annotated = env.parse_type(type_stx)
+      let annotated = env_type(env, type_stx)
       let checked = check_expr(env, inner, annotated)
       unify_with(checked_ty(checked), at)
       checked
@@ -883,3 +902,120 @@ fun check_expr(env :: CheckEnv, expr :: CoreExpr,
           let ty = resolve(env, checked_body_ty(checked_matrix))
           CheckedMatch(target, checked_matrix, ty, at)
   | ~else: error(~who: #'check_expr, "unknown CoreExpr variant")
+
+
+// -- declaration type-variable scope and signatures --------------------------
+//
+// A declaration's type variables are the ones its annotations mention. The
+// annotations are source syntax inside Core, so collecting them and reading
+// a declared signature are the checker's job, not either backend's.
+
+fun append_unique(base :: List.of(Symbol),
+                  more :: List.of(Symbol)) :: List.of(Symbol):
+  for values(acc :~ List = base) (n in more):
+    (if acc.contains(n) | acc | acc ++ [n])
+
+fun core_type_vars(expr :: CoreExpr) :: List.of(Symbol):
+  fun optional_vars(type_stx :: maybe(Syntax)) :: List.of(Symbol):
+    match type_stx
+    | #false: []
+    | stx: collect_type_vars(stx :~ Syntax)
+  fun binders_vars(bs :: List.of(CoreBinder)) :: List.of(Symbol):
+    for values(acc :~ List = []) (b in bs):
+      let binder :~ CoreBinder = b
+      append_unique(
+        acc,
+        append_unique(pattern_vars(binder.pattern),
+                      optional_vars(binder.type_stx)))
+  fun pattern_vars(pat :: CorePattern) :: List.of(Symbol):
+    match pat
+    | CorePatVar(_, _): []
+    | CorePatWildcard(_): []
+    | CorePatCtor(_, args, _):
+        for values(acc :~ List = []) (arg in args):
+          append_unique(acc, pattern_vars(arg :~ CorePattern))
+    | CorePatLiteral(_, _): []
+    | CorePatTyped(inner, type_stx, _):
+        append_unique(pattern_vars(inner), collect_type_vars(type_stx))
+    | ~else: []
+  fun matrix_vars(matrix :: CorePatternMatrix) :: List.of(Symbol):
+    for values(acc :~ List = []) (row in matrix.rows):
+      let row :~ CoreMatchRow = row
+      let from_patterns:
+        for values(out :~ List = []) (pat in row.patterns):
+          append_unique(out, pattern_vars(pat :~ CorePattern))
+      append_unique(
+        acc, append_unique(from_patterns, body_vars(row.body)))
+  fun body_vars(body :: CoreFunBody) :: List.of(Symbol):
+    match body
+    | CoreBodyExpr(inner): core_type_vars(inner)
+    | CoreBodyLet(_, init, tail, _):
+        append_unique(core_type_vars(init), body_vars(tail))
+    | CoreBodyMatch(_, matrix, _): matrix_vars(matrix)
+    | matrix :: CorePatternMatrix: matrix_vars(matrix)
+    | ~else: []
+  match expr
+  | CoreRef(_, _): []
+  | CoreGlobalRef(_, _): []
+  | CoreCall(func, args, _):
+      for values(acc :~ List = core_type_vars(func)) (a in args):
+        append_unique(acc, core_type_vars(a))
+  | CoreIf(c, t, e, _):
+      append_unique(core_type_vars(c),
+                    append_unique(core_type_vars(t), core_type_vars(e)))
+  | CoreForall(bs, body, _):
+      append_unique(binders_vars(bs), core_type_vars(body))
+  | CoreNatLit(_, _): []
+  | CoreExists(bs, body, _):
+      append_unique(binders_vars(bs), core_type_vars(body))
+  | CoreFunctionExpr(bs, result_type, body, _):
+      append_unique(
+        binders_vars(bs),
+        append_unique(optional_vars(result_type), body_vars(body)))
+  | CoreBlockExpr(body, _): body_vars(body)
+  | CoreMatchExpr(scrutinee, matrix, _):
+      append_unique(core_type_vars(scrutinee), matrix_vars(matrix))
+  | CoreTypedExpr(inner, type_stx, _):
+      append_unique(core_type_vars(inner), collect_type_vars(type_stx))
+  | ~else: []
+
+fun function_type_vars(spec :: CoreFunctionSpec) :: List.of(Symbol):
+  fun optional_vars(type_stx :: maybe(Syntax)) :: List.of(Symbol):
+    match type_stx
+    | #false: []
+    | stx: collect_type_vars(stx :~ Syntax)
+  let from_params:
+    for values(acc :~ List = []) (b in spec.params):
+      let binder :~ CoreBinder = b
+      let pattern_types:
+        match binder.pattern
+        | CorePatTyped(_, stx, _): collect_type_vars(stx)
+        | ~else: []
+      append_unique(
+        acc,
+        append_unique(pattern_types, optional_vars(binder.type_stx)))
+  append_unique(from_params, optional_vars(spec.result_type))
+
+// The declared parameter and result types of a function, `#false` where the
+// declaration leaves one to inference.
+fun declared_signature(spec :: CoreFunctionSpec,
+                       registry :: TypeConstructorRegistry)
+    :: values(List.of(maybe(HType)), maybe(HType)):
+  let tyvars = function_type_vars(spec)
+  fun declared(type_stx :: maybe(Syntax)) :: maybe(HType):
+    match type_stx
+    | #false: #false
+    | stx: read_type(stx :~ Syntax, registry, tyvars)
+  values(spec.params.map(fun (b :: CoreBinder): declared(b.type_stx)),
+         declared(spec.result_type))
+
+// The declared signature as one curried type, with a fresh type variable
+// wherever the declaration leaves a type to inference.
+fun declared_function_type(spec :: CoreFunctionSpec,
+                           registry :: TypeConstructorRegistry) :: HType:
+  let (params, result) = declared_signature(spec, registry)
+  fun or_fresh(ty :: maybe(HType), hint :: String) :: HType:
+    ty || mk_tyvar(Symbol.gen(hint))
+  for values(ty :~ HType = or_fresh(result, "_result")) (
+        param in params.reverse()):
+    mk_fun(or_fresh(param, "_parameter"), ty)

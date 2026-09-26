@@ -54,19 +54,17 @@ import:
   rhombus/hol/backend/proof/declaration as declaration
   rhombus/hol/frontend/checker/overload open
   rhombus/hol/frontend/checker/type/registry open
-  rhombus/hol/frontend/checker/type/parse as type_parser
+  rhombus/hol/frontend/checker/checked open
 
 export:
-  hol_reraise
   HolState
   initial_state
   add_datatypes
   add_definition
-  inductive_signature
   add_inductive
   add_functions
   add_theorem
-  add_overload_method_encoded
+  add_overload
   adopt
 // The sole production instance of the infinity bootstrap. Its theory and
 // theorems stay paired so every declaration extends one Stamp ancestry.
@@ -84,25 +82,6 @@ def infinity_base :: IndBase = build_ind_base(definition_logic_rules)
 // user's.
 fun hol_error(who :: Symbol, message :: String, at :: Syntax):
   rb.#{raise-syntax-error}(who, message, at)
-
-// Re-raise a failure from the logical layer at the user's source location.
-//
-// The caught message already begins with its own `who: ` prefix, and
-// `raise-syntax-error` adds one of its own taken from the form -- so the
-// prefix has to be stripped or the reader sees `type: type: ...`.
-fun hol_reraise(e :: Exn.Fail, at :: Syntax):
-  rb.#{raise-syntax-error}(#false, strip_who(e.message), at)
-
-fun strip_who(msg :: String) :~ String:
-  match msg.find(": ")
-  | #false: msg
-  | i:
-      let head = msg.substring(0 .. i)
-      // Only a bare word is a `who` prefix; anything with a space in it is
-      // already part of the message.
-      (if head.contains(" ") || head.contains("\n")
-       | msg
-       | msg.substring((i + 2) .. msg.length()))
 
 class HolState(ctx :: Context,
                thms :: Map.of(Symbol, Thm),
@@ -387,18 +366,13 @@ fun initial_state() :: HolState:
 // An ordinary declaration uses the direct path. A `datatype.together:` group
 // always takes the union-family path, whether or not its members refer to
 // each other; this keeps one semantics for the family spelling.
-fun add_datatypes(st :: HolState, forms :: List.of(Syntax),
+fun add_datatypes(st :: HolState, specs :: List.of(DatatypeSpec),
                   at :: Syntax, family :: Boolean) :: HolState:
   cond
-  | family:
-      let specs :: List.of(DatatypeSpec) = try:
-                  type_parser.parse_datatype_decls(
-                    forms, st.type_constructors)
-                  ~catch e :: Exn.Fail: hol_reraise(e, at)
-      add_datatype_family(st, specs, at)
+  | family: add_datatype_family(st, specs, at)
   | ~else:
-      for values(state :~ HolState = st) (form in forms):
-        add_datatype(state, form, at)
+      for values(state :~ HolState = st) (spec in specs):
+        add_datatype(state, spec :~ DatatypeSpec, at)
 
 // The family is built as one union datatype with the members carved out of it
 // (`backend/proof/definition/datatype/family.rhm`). The union is installed like
@@ -419,7 +393,7 @@ fun add_datatype_family(st :: HolState, specs :: List.of(DatatypeSpec),
                                                 infinity_base.thms,
                                                 definition_logic_rules,
                                                 algebra_base_thms())
-                          ~catch e :: Exn.Fail: hol_reraise(e, at)
+                          ~catch e :: Exn.Fail: reraise_at(e, at)
   let family :~ DatatypeFamily = family0
   for (spec in specs):
     require_no_new_axioms(#'datatype, st.ctx.thy, thy2,
@@ -507,7 +481,7 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
                                 ~operators: st.operators,
                                 ~type_constructors: st.type_constructors,
                                 ~datatypes: dt_specs)
-                              ~catch e :: Exn.Fail: hol_reraise(e, at)
+                              ~catch e :: Exn.Fail: reraise_at(e, at)
       spec
   for (spec in specs, name in names):
     when const_type(st.ctx.thy, name :~ Symbol) != #false
@@ -536,7 +510,7 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
       let (thy2, thms0) = try:
                             build_nonrecursive_datatype_thms(state.ctx.thy,
                                                              spec)
-                            ~catch e :: Exn.Fail: hol_reraise(e, at)
+                            ~catch e :: Exn.Fail: reraise_at(e, at)
       let thms :~ DatatypeThms = thms0
       require_no_new_axioms(#'function, state.ctx.thy, thy2, spec.name, at)
       let db2 = for values(d :~ RuleDB = state.ctx.db) (
@@ -584,7 +558,7 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
                                           fun_type(spec :~ FunSpec)),
                                    member_definition_term(
                                      impl, m :~ FamilyMemberFn)))
-                           ~catch e :: Exn.Fail: hol_reraise(e, at)
+                           ~catch e :: Exn.Fail: reraise_at(e, at)
       values(t2, acc ++ [def_th])
   require_no_new_axioms(#'function, thy3, thy4, impl_name, at)
   let selector_theorems:
@@ -598,7 +572,7 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
       derive_member_equations(
         thy4, specs, members, definitions, impl, selector_theorems,
         impl_prepared, tagged_dt_specs, impl_info.equations)
-      ~catch e :: Exn.Fail: hol_reraise(e, at)
+      ~catch e :: Exn.Fail: reraise_at(e, at)
   let recursive_members:
     for values(indices :~ Set = Set()) (
           site in family_call_sites(members, specs)):
@@ -622,32 +596,19 @@ fun add_function_family(st :: HolState, cores :: List.of(CoreFunctionSpec),
 // their bodies the way a lone declaration's can.
 fun family_member_signature(st :: HolState, core :: CoreFunctionSpec,
                             at :: Syntax) :: List:
-  let result_stx:
-    match core.result_type
-    | #false:
-        hol_error(#'function,
-                  "a member of a function family needs a declared result "
-                    ++ "type: " ++ to_string(core.name), at)
-    | stx: stx :~ Syntax
-  let parameter_stxs:
-    for List (binder in core.params):
-      match (binder :~ CoreBinder).type_stx
-      | #false:
-          hol_error(#'function,
-                    "a member of a function family needs a declared type "
-                      ++ "for every parameter: " ++ to_string(core.name), at)
-      | stx: stx :~ Syntax
-  let tyvars:
-    for values(acc :~ List.of(Symbol) = []) (
-          stx in parameter_stxs ++ [result_stx]):
-      for values(out :~ List.of(Symbol) = acc) (
-            name in type_parser.collect_type_vars(stx :~ Syntax)):
-        (if out.contains(name) | out | out ++ [name])
-  fun parse(stx :: Syntax) :: HType:
-    try:
-      type_parser.parse_type(stx, tyvars, st.type_constructors)
-      ~catch e :: Exn.Fail: hol_reraise(e, at)
-  [tyvars, parameter_stxs.map(parse), parse(result_stx)]
+  unless core.result_type
+  | hol_error(#'function,
+              "a member of a function family needs a declared result "
+                ++ "type: " ++ to_string(core.name), at)
+  for (binder in core.params):
+    unless (binder :~ CoreBinder).type_stx
+    | hol_error(#'function,
+                "a member of a function family needs a declared type "
+                  ++ "for every parameter: " ++ to_string(core.name), at)
+  let (params, result) = try:
+                           declared_signature(core, st.type_constructors)
+                           ~catch e :: Exn.Fail: reraise_at(e, at)
+  [function_type_vars(core), params, result]
 
 fun signature_type(signature :: List) :: HType:
   for values(ty :~ HType = signature[2] :~ HType) (
@@ -916,8 +877,8 @@ fun site_descends(specs :: List.of(FunSpec), types :: List.of(HType),
 
 
 
-fun add_datatype(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
-  let spec = type_parser.parse_datatype_decl(form, st.type_constructors)
+fun add_datatype(st :: HolState, spec :: DatatypeSpec,
+                 at :: Syntax) :: HolState:
   let type_constructors = add_declared_type_constructor(
                             st.type_constructors, spec.name, spec.params.length())
   match st.ctx.dts.get(spec.name, #false)
@@ -942,7 +903,7 @@ fun add_datatype(st :: HolState, form :: Syntax, at :: Syntax) :: HolState:
                                  build_recursive_datatype_thms(
                                    st.ctx.thy, spec, infinity_base.thms,
                                    definition_logic_rules, algebra_base_thms()))
-                            ~catch e :: Exn.Fail: hol_reraise(e, at)
+                            ~catch e :: Exn.Fail: reraise_at(e, at)
       let thms :~ DatatypeThms = thms0
       require_no_new_axioms(#'datatype, st.ctx.thy, thy2, spec.name, at)
       let db2 = for values(d :~ RuleDB = st.ctx.db) (
@@ -983,7 +944,7 @@ fun add_subterm_relation(st :: HolState, spec :: DatatypeSpec,
                             derive_subterm_relation(
                               st.ctx.thy, spec, dt,
                               definition_logic_rules, definition_rewrite_support)
-                            ~catch e :: Exn.Fail: hol_reraise(e, at)
+                            ~catch e :: Exn.Fail: reraise_at(e, at)
       let info :~ FunInfo = info0
       require_no_new_axioms(#'datatype, st.ctx.thy, thy2, fs.name, at)
       require_closed_theorems(#'datatype, thy2, fs.name, info.equations, at)
@@ -1040,7 +1001,7 @@ fun add_function(st0 :: HolState, core :: CoreFunctionSpec,
                             st.ctx.thy, core, ~operators: st.operators,
                             ~type_constructors: st.type_constructors,
                             ~datatypes: dt_specs)
-                          ~catch e :: Exn.Fail: hol_reraise(e, at)
+                          ~catch e :: Exn.Fail: reraise_at(e, at)
   let (thy2, info) = define_from_spec(st, spec, dt_specs,
                                       prepare_measure(st, spec), at)
   require_closed_theorems(#'function, thy2, spec.name, info.equations, at)
@@ -1068,17 +1029,17 @@ fun definition_rewrite_equation(thy :: Theory, def_th :: Thm,
         let unfolded = unfold_def(thy, def_th, args)
         (if vars == [] | unfolded | GENL(thy, vars, unfolded))
 
-fun definition_type_vars(type_stx :: Syntax, expr :: CoreExpr)
+fun definition_type_vars(ty :: HType, expr :: CoreExpr)
     :: List.of(Symbol):
-  for values(out :~ List = type_parser.collect_type_vars(type_stx)) (
-        name in elab.core_type_vars(expr)):
+  for values(out :~ List = type_vars(ty)) (
+        name in core_type_vars(expr)):
     (if out.contains(name) | out | out ++ [name])
 
 // A `definition` is never recursive, so its own name is refused in its
 // body. The name is not a constant yet, so without the restriction the
 // elaborator would report an unknown one; what the author wrote is a
 // recursion, and a `definition` has none.
-fun add_definition(st :: HolState, name :: Symbol, type_stx :: Syntax,
+fun add_definition(st :: HolState, name :: Symbol, ty :: HType,
                    expr :: CoreExpr, at :: Syntax) :: HolState:
   let dt_specs = for values(m :~ Map = {}) ((n, thms) in st.ctx.dts):
                    m ++ {n: (thms :~ DatatypeThms).spec}
@@ -1087,18 +1048,14 @@ fun add_definition(st :: HolState, name :: Symbol, type_stx :: Syntax,
        elab.RefRestriction(
          "a `definition` cannot refer to the constant it introduces",
          #false)}
-  let tyvars = definition_type_vars(type_stx, expr)
-  let ty = try:
-             type_parser.parse_type(type_stx, tyvars,
-                                    st.type_constructors)
-             ~catch e :: Exn.Fail: hol_reraise(e, at)
+  let tyvars = definition_type_vars(ty, expr)
   let rhs = try:
               elab.run_checked_elaboration(
                 elab.ElabEnv(st.ctx.thy, tyvars, {}, #'definition, #false,
                              #false, st.operators, st.type_constructors,
                              dt_specs, restricted),
                 expr, ty)
-              ~catch e :: Exn.Fail: hol_reraise(e, at)
+              ~catch e :: Exn.Fail: reraise_at(e, at)
   install_definition(st, name, ty, rhs, at)
 
 fun install_definition(st :: HolState, name :: Symbol, ty :: HType,
@@ -1106,7 +1063,7 @@ fun install_definition(st :: HolState, name :: Symbol, ty :: HType,
   let (thy2, def_th) = try:
                          new_basic_definition(
                            st.ctx.thy, mk_eq(mk_var(name, ty), rhs))
-                         ~catch e :: Exn.Fail: hol_reraise(e, at)
+                         ~catch e :: Exn.Fail: reraise_at(e, at)
   require_no_new_axioms(#'definition, st.ctx.thy, thy2, name, at)
   let equation = definition_rewrite_equation(thy2, def_th, ty)
   let db2 = add_thm(thy2, st.ctx.db, name, equation)
@@ -1128,24 +1085,20 @@ fun install_definition(st :: HolState, name :: Symbol, ty :: HType,
 // name, like a `theorem`, so a later proof asks for them with `~use` instead
 // of the automation silently unfolding the fixed point.
 fun add_inductive(st :: HolState, names :: List.of(Symbol),
-                  signatures :: List.of(List.of(Syntax)),
+                  signatures :: List.of(List.of(HType)),
                   rule_names :: List.of(Symbol),
                   rule_exprs :: List.of(CoreExpr), at :: Syntax) :: HolState:
   let tyvars:
     for values(acc :~ List.of(Symbol) = []) (signature in signatures):
-      for values(outer :~ List.of(Symbol) = acc) (stx in signature):
+      for values(outer :~ List.of(Symbol) = acc) (ty in signature):
         for values(inner :~ List.of(Symbol) = outer) (
-              n in type_parser.collect_type_vars(stx)):
+              n in type_vars(ty :~ HType)):
           (if inner.contains(n) | inner | inner ++ [n])
   let preds:
     for List (name in names, signature in signatures):
-      let arg_tys:
-        for List (stx in signature):
-          try:
-            type_parser.parse_type(stx, tyvars, st.type_constructors)
-            ~catch e :: Exn.Fail: hol_reraise(e, at)
       mk_var(name,
-             for values(acc :~ HType = bool) (ty in arg_tys.reverse()):
+             for values(acc :~ HType = bool) (
+                   ty in (signature :~ List).reverse()):
                mk_fun(ty :~ HType, acc))
   let env:
     for values(acc :~ Map = {}) (name in names, pred in preds):
@@ -1164,10 +1117,10 @@ fun add_inductive(st :: HolState, names :: List.of(Symbol),
           ~operators: st.operators,
           ~type_constructors: st.type_constructors,
           ~datatypes: dt_specs)
-        ~catch e :: Exn.Fail: hol_reraise(e, at)
+        ~catch e :: Exn.Fail: reraise_at(e, at)
   let (thy2, derived0) = try:
                            define_inductive(st.ctx.thy, names, preds, rules)
-                           ~catch e :: Exn.Fail: hol_reraise(e, at)
+                           ~catch e :: Exn.Fail: reraise_at(e, at)
   let derived :~ InductiveThms = derived0
   for (name in names):
     require_no_new_axioms(#'inductive, st.ctx.thy, thy2, name, at)
@@ -1198,16 +1151,6 @@ fun add_inductive(st :: HolState, names :: List.of(Symbol),
   let ctx2 = context_update(st.ctx, ~thy: thy2, ~schemes: rule_schemes)
   HolState(ctx2, thms, st.operators, st.type_constructors, st.wfrec_def)
 
-// One predicate's argument types, as written in its head. The encoded step
-// carries them parenthesized so that a mutual declaration's heads survive as
-// separate groups.
-fun inductive_signature(stx :: Syntax) :: List.of(Syntax):
-  match stx
-  | '($ty, ...)': [ty, ...]
-  | ~else:
-      rb.#{raise-syntax-error}(#'inductive,
-                               "internal malformed inductive head", stx)
-
 // Prepare once at the declaration boundary. Callers that need transient
 // analysis metadata (function-family leaf ownership) keep this value through
 // installation; ordinary callers immediately discard it afterward.
@@ -1217,7 +1160,7 @@ fun prepare_spec(st :: HolState, spec :: FunSpec,
                  at :: Syntax) :: PreparedFunction:
   try:
     prepare_function(st.ctx.thy, spec, dt_specs, ~measure: measure)
-    ~catch e :: Exn.Fail: hol_reraise(e, at)
+    ~catch e :: Exn.Fail: reraise_at(e, at)
 
 // Derive one already-prepared function: directly when it does not call
 // itself, from the well-founded recursion theorem when it does.
@@ -1239,7 +1182,7 @@ fun define_prepared(st :: HolState, prepared :: PreparedFunction,
                               algebra_base_thms(), definition_logic_rules,
                               definition_rewrite_support,
                               st.ctx.literal_eq :~ Function)
-                        ~catch e :: Exn.Fail: hol_reraise(e, at)
+                        ~catch e :: Exn.Fail: reraise_at(e, at)
   require_no_new_axioms(#'function, st.ctx.thy, thy2, spec.name, at)
   values(thy2, info0 :~ FunInfo)
 
@@ -1371,7 +1314,7 @@ fun add_theorem(st0 :: HolState, name :: Symbol,
                                st.ctx.thy, stmt, ~operators: st.operators,
                                ~type_constructors: st.type_constructors,
                                ~datatypes: dt_specs)
-                             ~catch e :: Exn.Fail: hol_reraise(e, at)
+                             ~catch e :: Exn.Fail: reraise_at(e, at)
   let induct = tactic.induct
   let using_names = tactic.using_names
   let skipped_stage_names = tactic.skipped_stage_names
@@ -1391,7 +1334,7 @@ fun add_theorem(st0 :: HolState, name :: Symbol,
                   acc ++ {d :~ Symbol}
   let scope = RuleScope(using, disabled_rule_names :~ List, skipped)
   let (vars, _) = strip_forall_all(statement, names)
-  let tyvars = elab.core_type_vars(stmt)
+  let tyvars = core_type_vars(stmt)
   let env = for values(m :~ Map = {}) (v in vars):
               m ++ {(v :~ FVar).name: v :~ Term}
   let cases:
@@ -1401,7 +1344,7 @@ fun add_theorem(st0 :: HolState, name :: Symbol,
           st.ctx.thy, tyvars, env, c, ~operators: st.operators,
           ~type_constructors: st.type_constructors,
           ~datatypes: dt_specs)
-        ~catch e :: Exn.Fail: hol_reraise(e, at)
+        ~catch e :: Exn.Fail: reraise_at(e, at)
   let witnesses:
     for List (w in witness_exprs):
       try:
@@ -1409,7 +1352,7 @@ fun add_theorem(st0 :: HolState, name :: Symbol,
           st.ctx.thy, tyvars, env, w, ~operators: st.operators,
           ~type_constructors: st.type_constructors,
           ~datatypes: dt_specs)
-        ~catch e :: Exn.Fail: hol_reraise(e, at)
+        ~catch e :: Exn.Fail: reraise_at(e, at)
   let limits :~ NonnegInt:
     match search_steps
     | #false: default_search_steps
@@ -1431,66 +1374,18 @@ fun add_theorem(st0 :: HolState, name :: Symbol,
 // -- static overload metadata ----------------------------------------------
 
 
-fun add_overload_method_decl(
-      st :: HolState, function_name :: Symbol,
-      argument_type_stxs :: List.of(Syntax),
-      result_type_stx :: maybe(Syntax),
-      constant :: Symbol, argument_order :: List.of(NonnegInt),
-      at :: Syntax) :: HolState:
-  let arity = argument_type_stxs.length()
-  let registry_with_function:
-    try:
-      ensure_overload_function(st.operators, function_name, arity)
-      ~catch e :: Exn.Fail: hol_reraise(e, at)
-  let argument_types:
-    argument_type_stxs.map(
-      fun (type_stx):
-        try:
-          type_parser.parse_open_type(type_stx, st.type_constructors)
-          ~catch e :: Exn.Fail: hol_reraise(e, at))
-  let result_type:
-    match result_type_stx
-    | #false: #false
-    | result_stx:
-        try:
-          type_parser.parse_open_type(
-            result_stx :~ Syntax, st.type_constructors)
-          ~catch e :: Exn.Fail: hol_reraise(e, at)
-  let constant_type:
-    match const_type(st.ctx.thy, constant)
-    | #false:
-        hol_error(#'overload,
-                  "implementation constant is not declared: "
-                    ++ to_string(constant),
-                  at)
-    | ty: ty :~ HType
-  let method:
-    try:
-      build_overload_method(
-        function_name, argument_types, result_type,
-        constant, constant_type, argument_order)
-      ~catch e :: Exn.Fail: hol_reraise(e, at)
+// The frontend builds and validates the method against the surface
+// constants it tracks; the theory side records the same static metadata.
+fun add_overload(st :: HolState, method :: OverloadMethod,
+                 at :: Syntax) :: HolState:
   let registry:
     try:
-      add_overload_method(registry_with_function, method)
-      ~catch e :: Exn.Fail: hol_reraise(e, at)
+      add_overload_method(
+        ensure_overload_function(st.operators, method.function,
+                                 method.argument_types.length()),
+        method)
+      ~catch e :: Exn.Fail: reraise_at(e, at)
   HolState(st.ctx, st.thms, registry, st.type_constructors, st.wfrec_def)
-
-fun add_overload_method_encoded(
-      st :: HolState, function_name :: Symbol,
-      signature :: Syntax,
-      constant :: Symbol, argument_order :: List.of(NonnegInt),
-      at :: Syntax) :: HolState:
-  match signature
-  | '(overload_signature [$argument_type, ...] [$result_type])':
-      let result = (if Syntax.unwrap(result_type) == #false
-                    | #false
-                    | result_type)
-      add_overload_method_decl(
-        st, function_name, [argument_type, ...],
-        result, constant, argument_order, at)
-  | ~else:
-      hol_error(#'overload, "internal malformed overload signature", at)
 
 
 // -- adopting an imported theory ----------------------------------------------

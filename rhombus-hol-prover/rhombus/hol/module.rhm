@@ -44,6 +44,7 @@ import:
     rhombus/hol/frontend/parser/expand as expand
     rhombus/hol/frontend/parser/declaration as declaration
     rhombus/hol/frontend/checker/overload open
+    rhombus/hol/frontend/checker/checked open
     rhombus/hol/frontend/checker/state open
     rhombus/hol/frontend/checker/type/registry open
     rhombus/hol/frontend/checker/type/parse as type_parser
@@ -138,23 +139,20 @@ meta:
         argument_type_stxs :: List.of(Syntax),
         result_type_stx :: maybe(Syntax),
         constant :: Symbol, argument_order :: List.of(NonnegInt),
-        at :: Syntax) :: SurfaceState:
+        at :: Syntax) :: values(SurfaceState, OverloadMethod):
     let arity = argument_type_stxs.length()
     let registry_with_function = ensure_overload_function(
                                    state.operators,
                                    function_name, arity)
     let argument_types = argument_type_stxs.map(
                            fun (argument):
-                             type_parser.parse_open_type(
-                               argument,
-                               state.type_constructors))
+                             read_type(argument,
+                                       state.type_constructors))
     let result_type:
       match result_type_stx
       | #false: #false
       | result_stx:
-          type_parser.parse_open_type(
-            result_stx :~ Syntax,
-            state.type_constructors)
+          read_type(result_stx :~ Syntax, state.type_constructors)
     let constant_type:
       match surface_const_type(state, constant)
       | #false:
@@ -170,18 +168,12 @@ meta:
           constant, constant_type, argument_order)
         ~catch e :: Exn.Fail:
           syntax_meta.error(e.message, at)
-    SurfaceState(
-      add_overload_method(registry_with_function, method),
-      state.constants,
-      state.runtime_arities,
-      state.type_constructors)
-
-  fun surface_optional_type(type_stx :: maybe(Syntax),
-                            registry :: TypeConstructorRegistry,
-                            hint :: String) :: HType:
-    match type_stx
-    | #false: mk_tyvar(Symbol.gen(hint))
-    | stx: type_parser.parse_open_type(stx :~ Syntax, registry)
+    values(SurfaceState(
+             add_overload_method(registry_with_function, method),
+             state.constants,
+             state.runtime_arities,
+             state.type_constructors),
+           method)
 
   fun surface_add_function(state :: SurfaceState,
                            spec :: CoreFunctionSpec,
@@ -222,6 +214,26 @@ meta:
     | TyApp(name, args):
         let [arg, ...] = args.map(surface_type_expr)
         'mk_tyapp($(surface_symbol_expr(name)), [$arg, ...])'
+
+  // A declaration's type, resolved against the surface registry when the
+  // declaration expands. Failures are reported at the declaration.
+  fun declaration_type(stx :: Syntax, state :: SurfaceState,
+                       at :: Syntax) :: HType:
+    try:
+      read_type(stx, state.type_constructors)
+      ~catch e :: Exn.Fail: reraise_at(e, at)
+
+  fun datatype_spec_expr(spec :: DatatypeSpec) :: Syntax:
+    let [param, ...] = spec.params.map(surface_symbol_expr)
+    let [ctor, ...]:
+      for List (c in spec.ctors):
+        let c :~ Ctor = c
+        let [field, ...]:
+          for List (f in c.fields):
+            let f :~ Field = f
+            'Field($(surface_symbol_expr(f.name)), $(surface_type_expr(f.ty)))'
+        'Ctor($(surface_symbol_expr(c.name)), [$field, ...])'
+    'DatatypeSpec($(surface_symbol_expr(spec.name)), [$param, ...], [$ctor, ...])'
 
   fun surface_arity_expr(name :: Symbol, arity :: NonnegInt) :: Syntax:
     let arity_stx = Syntax.make(arity, id_ctx)
@@ -443,12 +455,12 @@ meta:
         values(
           [],
           '(fun (_hol_step): _hol_driver.adopt(_hol_step, $(alias).theory, '$at'))')
-    | '(~datatype $family [$form, ...] [$at])':
+    | '(~datatype $family [$spec, ...] [$at])':
         values(
           [],
           '(fun (_hol_step):
               _hol_driver.add_datatypes(
-                _hol_step, ['$form', ...], '$at', $family))')
+                _hol_step, [$spec, ...], '$at', $family))')
     | '(~function $family [$core, ...] [$at])':
         values(
           [],
@@ -456,7 +468,7 @@ meta:
               let specs = try:
                             [_hol_surface.decode_function('$core'), ...]
                             ~catch e :: Exn.Fail:
-                              _hol_driver.hol_reraise(e, '$at')
+                              _hol_surface.reraise_at(e, '$at')
               _hol_driver.add_functions(_hol_step, specs, '$at', $family))')
     | '(~theorem [$name] [$core] [$tactic] [$at])':
         values(
@@ -465,11 +477,11 @@ meta:
               let statement = try:
                                _hol_surface.decode_prop('$core')
                                ~catch e :: Exn.Fail:
-                                 _hol_driver.hol_reraise(e, '$at')
+                                 _hol_surface.reraise_at(e, '$at')
               let proof = try:
                             _hol_surface.decode_tactic('$tactic')
                             ~catch e :: Exn.Fail:
-                              _hol_driver.hol_reraise(e, '$at')
+                              _hol_surface.reraise_at(e, '$at')
               _hol_driver.add_theorem(_hol_step, Syntax.unwrap('$name'),
                                       statement, proof, '$at'))')
     | '(~definition [$name] [$type] [$core] [$at])':
@@ -479,9 +491,9 @@ meta:
               let expression = try:
                                _hol_surface.decode_expr('$core', #'definition)
                                ~catch e :: Exn.Fail:
-                                 _hol_driver.hol_reraise(e, '$at')
+                                 _hol_surface.reraise_at(e, '$at')
               _hol_driver.add_definition(_hol_step, Syntax.unwrap('$name'),
-                                         '$type', expression, '$at'))')
+                                         $type, expression, '$at'))')
     | '(~inductive [$name, ...] [$signature, ...] [$rule_name, ...] [$rule_core, ...] [$at])':
         values(
           [],
@@ -489,18 +501,15 @@ meta:
               let rules = try:
                             [_hol_surface.decode_prop('$rule_core'), ...]
                             ~catch e :: Exn.Fail:
-                              _hol_driver.hol_reraise(e, '$at')
+                              _hol_surface.reraise_at(e, '$at')
               _hol_driver.add_inductive(
                 _hol_step, [Syntax.unwrap('$name'), ...],
-                [_hol_driver.inductive_signature('$signature'), ...],
+                [$signature, ...],
                 [Syntax.unwrap('$rule_name'), ...], rules, '$at'))')
-    | '(~overload_method [$function_name] [$signature] [$constant] [$order, ...] [$at])':
+    | '(~overload [$method] [$at])':
         values(
           [],
-          '(fun (_hol_step):
-              _hol_driver.add_overload_method_encoded(
-                _hol_step, Syntax.unwrap('$function_name'), '$signature',
-                Syntax.unwrap('$constant'), [$order, ...], '$at'))')
+          '(fun (_hol_step): _hol_driver.add_overload(_hol_step, $method, '$at'))')
     | ~else: syntax_meta.error("internal malformed logical step", step)
 
   // -- diagnostics -----------------------------------------------------------
@@ -539,14 +548,6 @@ meta:
   //
   // A whole `.together:` group travels to the driver as one transition: a
   // member of a mutually recursive family is not a declaration on its own.
-  fun declared_function_type(state :: SurfaceState,
-                             spec :: CoreFunctionSpec) :: HType:
-    let registry = state.type_constructors
-    let result = surface_optional_type(spec.result_type, registry, "_result")
-    for values(ty :~ HType = result) (binder in spec.params.reverse()):
-      mk_fun(surface_optional_type((binder :~ CoreBinder).type_stx,
-                                   registry, "_parameter"),
-             ty)
 
   // Parenthesize each layer so an argument type that is itself a function
   // remains one domain while the declaration's parameters become a curried
@@ -591,8 +592,11 @@ meta:
         let next_runtime:
           for values(state :~ SurfaceState = ready) (spec in specs):
             surface_add_datatype(state, spec :~ DatatypeSpec)
+        let [spec_expr, ...] = specs.map(
+                                 fun (spec):
+                                   datatype_spec_expr(spec :~ DatatypeSpec))
         values(runtime,
-               ['(~datatype $family_stx [$form, ...] [$at])'],
+               ['(~datatype $family_stx [$spec_expr, ...] [$at])'],
                next_runtime)
     | #'function:
         let encoded:
@@ -611,7 +615,7 @@ meta:
                 entry in encoded):
             let spec :~ CoreFunctionSpec = (entry :~ List)[2]
             surface_add_function(state, spec,
-                                 declared_function_type(state, spec))
+                                 declared_function_type(spec, state.type_constructors))
         let (runtime, next_runtime):
           for values(acc :~ List.of(Syntax) = [],
                      state :~ SurfaceState = declared) (entry in encoded):
@@ -619,7 +623,7 @@ meta:
             let spec :~ CoreFunctionSpec = entry[2]
             let (emitted, ty) = lower_function(
                                   spec, state, entry[1] :~ Syntax,
-                                  declared_function_type(state, spec))
+                                  declared_function_type(spec, state.type_constructors))
             values(acc ++ [emitted],
                    surface_add_function(state, spec, ty))
         let [core, ...] = encoded.map(fun (entry :: List): entry[0] :~ Syntax)
@@ -633,8 +637,12 @@ meta:
         // family's heads stay separable after encoding.
         let [signature, ...]:
           for List (d in decls):
-            let [parameter_type, ...] = ((d :~ expand.Decl).parts :~ List)[1] :~ List
-            '($parameter_type, ...)'
+            let parameter_types = ((d :~ expand.Decl).parts :~ List)[1] :~ List
+            let [type_expr, ...]:
+              for List (stx in parameter_types):
+                surface_type_expr(
+                  declaration_type(stx :~ Syntax, runtime_state, at))
+            '[$type_expr, ...]'
         // The family shares every rule: that is what makes the predicates
         // mutually recursive, and it is why the rules are concatenated here
         // rather than kept per member.
@@ -697,6 +705,7 @@ meta:
         let parameters :~ List = parameter_parts
         let type_stx = definition_type_syntax(
                          parameters, result_type :~ Syntax)
+        let ty = declaration_type(type_stx, runtime_state, at)
         let [g, ...] = (body_groups :~ List)
         let core:
           match parameters
@@ -708,7 +717,7 @@ meta:
               let encoded_body = encode_function_body('$g; ...')
               '(core_function_expr [$binder, ...] ($result_type) $encoded_body)'.relocate_span([at])
         values([],
-               ['(~definition [$name] [$type_stx] [$core] [$at])'],
+               ['(~definition [$name] [$(surface_type_expr(ty))] [$core] [$at])'],
                runtime_state)
     | #'overload_method:
         let [function_name, argument_names, argument_types,
@@ -721,23 +730,16 @@ meta:
             | name_stx: Syntax.unwrap(name_stx :~ Syntax)
         let positions = overload_argument_order(
                           names, template_arguments, at)
-        let next_runtime = surface_add_method(
-                             runtime_state,
-                             Syntax.unwrap(function_name),
-                             argument_types :~ List.of(Syntax),
-                             result_type :~ maybe(Syntax),
-                             Syntax.unwrap(constant),
-                             positions, at)
-        let [argument_type, ...] = argument_types :~ List.of(Syntax)
-        let result_stx = (if result_type
-                          | result_type :~ Syntax
-                          | Syntax.make(#false, id_ctx))
-        let signature:
-          '(overload_signature [$argument_type, ...] [$result_stx])'
-        let [position, ...] = positions.map(
-                              fun (value): Syntax.make(value, id_ctx))
+        let (next_runtime, method):
+          surface_add_method(
+            runtime_state,
+            Syntax.unwrap(function_name),
+            argument_types :~ List.of(Syntax),
+            result_type :~ maybe(Syntax),
+            Syntax.unwrap(constant),
+            positions, at)
         values([],
-               ['(~overload_method [$function_name] [$signature] [$constant] [$position, ...] [$at])'],
+               ['(~overload [$(surface_method_expr(method))] [$at])'],
                next_runtime)
 
 syntax_parameter.bridge hol_expansion_state:
@@ -831,6 +833,10 @@ meta:
        module hol_theory ~lang rhombus:
          import: rhombus/hol/backend/proof/driver as _hol_driver
          import: rhombus/hol/frontend/parser/core as _hol_surface
+         import:
+           rhombus/hol/kernel/type open
+           rhombus/hol/frontend/checker/datatype open
+           rhombus/hol/frontend/checker/overload open
          export: theory
          $import_form
          ...

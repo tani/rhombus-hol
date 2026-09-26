@@ -149,14 +149,27 @@ fun leaf_equation(thy :: Theory, spec :: FunSpec, fn :: Term, def_th :: Thm,
                    rewrite.add_rewrite_thm(thy, d, Symbol.gen("_literal_guard"),
                                            ASSUME(thy, guard :~ Term))
   let simplified :~ maybe(Thm) = rewrite.simplify(local_db, thy, rhs_of(unf))
-  let reduced:
+  let unfolded:
     match simplified
     | #false: unf
     | s :~ Thm: TRANS(unf, s)
-  // The reduction is supposed to land on the clause as written.  If it did
-  // not, installing whatever it did land on would quietly give the caller a
-  // different function than the one they declared, so this is an error and
-  // not a fallback.
+  // The reduction is supposed to land on the clause as written. The rules
+  // that remove the scaffolding also normalize propositional structure, so
+  // a right-hand side that is itself reducible -- a set literal's trailing
+  // `or false`, say -- lands on its normal form instead. Normalizing the
+  // declared right-hand side with the same rules and meeting in the middle
+  // still yields the equation exactly as declared.
+  let reduced:
+    cond
+    | rhs_of(unfolded) == rhs: unfolded
+    | ~else:
+        match rewrite.simplify(local_db, thy, rhs)
+        | declared :~ Thm when rhs_of(declared) == rhs_of(unfolded):
+            TRANS(unfolded, SYM(thy, declared))
+        | ~else: unfolded
+  // If the two still differ, installing whatever the reduction landed on
+  // would quietly give the caller a different function than the one they
+  // declared, so this is an error and not a fallback.
   unless concl_of(reduced) == mk_eq(lhs, rhs)
   | error(~who: #'define_nonrecursive,
           "the clause did not reduce to what was declared",

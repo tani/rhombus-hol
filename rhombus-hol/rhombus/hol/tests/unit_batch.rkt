@@ -10,10 +10,10 @@
 ;; fixture and integration tests in this collection.
 (for ([name (in-list '("kernel/type.rhm"
                        "kernel/term.rhm"
-                       "logic/tyunify.rhm"
-                       "logic/order.rhm"
-                       "logic/conv.rhm"
-                       "logic/drule.rhm"
-                       "prover/rules/ruledb.rhm"
-                       "definition/function/terminate.rhm"))])
+                       "frontend/checker/type/tyunify.rhm"
+                       "backend/proof/logic/order.rhm"
+                       "backend/proof/logic/conv.rhm"
+                       "backend/proof/logic/drule.rhm"
+                       "backend/proof/automation/rules/ruledb.rhm"
+                       "backend/proof/definition/function/terminate.rhm"))])
   (dynamic-require `(file ,(path->string (build-path tests-dir name))) #f))

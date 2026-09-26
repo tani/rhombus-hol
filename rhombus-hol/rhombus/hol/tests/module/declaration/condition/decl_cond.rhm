@@ -1,0 +1,140 @@
+#lang rhombus/static
+
+// `cond` in a function body is the reflected subset's first expansion beyond
+// `if` and Boolean operators. One parser reads `cond` for both the logical
+// statement (checked by
+// the theorems `rhombus/hol/tests/module/declaration/condition/fixtures/cond_ok.rhm` proves while it compiles) and the
+// executable code (checked here), so the two readings cannot drift.
+
+import:
+  lib("rhombus/hol/tests/fixture_load.rhm") open
+  lib("rhombus/hol/tests/module/declaration/condition/fixtures/cond_ok.rhm") as c
+
+fun load(mp :: ModulePath):
+  instantiate_hol_fixture(mp)
+
+// -- the executable half ------------------------------------------------------
+
+check c.pick3(#true, #false, c.zero(), c.two, c.succ(c.two)) ~is c.zero()
+check c.pick3(#false, #true, c.zero(), c.two, c.succ(c.two)) ~is c.two
+check c.pick3(#false, #false, c.zero(), c.two, c.succ(c.two)) ~is c.succ(c.two)
+
+// A type-ascribed branch is erased to its own value at runtime -- the
+// ascription is a pure type hint with no separate representation.
+check c.typed_branch(#true) ~is c.two
+check c.typed_branch(#false) ~is c.succ(c.zero())
+
+// The ascription still has to agree with the `if`'s other branch: it
+// pins `inner`'s own type, not an escape hatch from ordinary unification.
+check:
+  load(ModulePath'lib("rhombus/hol/tests/module/declaration/condition/fixtures/typed_branch_mismatch_bad.rhm")')
+  ~throws "expression has an unexpected type"
+
+// A `Pair` expression inside an `if` branch renders and type-checks
+// structurally -- both branches' element values, not just the branch
+// as an opaque whole.
+check c.pair_fst(c.pair_branch(#true)) ~is c.succ(c.zero())
+check c.pair_snd(c.pair_branch(#true)) ~is c.succ(c.succ(c.zero()))
+check c.pair_fst(c.pair_branch(#false)) ~is c.zero()
+check c.pair_snd(c.pair_branch(#false)) ~is c.succ(c.zero())
+check c.pair_fst(c.pair_shadowed(c.zero(), c.succ(c.zero()))) ~is c.zero()
+check c.pair_snd(c.pair_shadowed(c.zero(), c.succ(c.zero()))) ~is c.succ(c.zero())
+check:
+  load(ModulePath'lib("rhombus/hol/tests/module/declaration/condition/fixtures/pair_branch_mismatch_bad.rhm")')
+  ~throws "expression has an unexpected type"
+
+// A `[...]` list expression inside an `if` branch renders and type-checks
+// structurally -- the element type has to reach `if`'s own unification,
+// not bypass it as an opaque whole. `[]` (zero elements) exercises the
+// destructure-from-expected path with no element to peek at.
+check c.list_branch(#true) ~is c.cons(c.succ(c.zero()), c.cons(c.succ(c.succ(c.zero())), c.nil()))
+check c.list_branch(#false) ~is c.nil()
+check:
+  load(ModulePath'lib("rhombus/hol/tests/module/declaration/condition/fixtures/list_expr_branch_mismatch_bad.rhm")')
+  ~throws "expression has an unexpected type"
+
+// String constructor lowering must agree in both conditional branches and
+// equality operands.
+check c.is_hi(c.string_branch(#true)) ~is #true
+check c.is_empty_string(c.string_branch(#false)) ~is #true
+check:
+  load(ModulePath'lib("rhombus/hol/tests/module/declaration/condition/fixtures/string_expr_branch_mismatch_bad.rhm")')
+  ~throws "expression has an unexpected type"
+
+// Set predicate lowering propagates its element type from the other branch
+// and rejects executable equality on function-valued elements.
+check c.is_member(c.set_branch(#true), c.succ(c.zero())) ~is #true
+check c.is_not_member(c.set_branch(#true), c.zero()) ~is #true
+check c.is_not_member(c.set_branch(#false), c.zero()) ~is #true
+check:
+  c.is_member(
+    c.set_shadowed(c.succ(c.zero()), c.zero(), c.zero()),
+    c.succ(c.zero()))
+  ~is #true
+check:
+  c.is_not_member(
+    c.set_shadowed(c.succ(c.zero()), c.zero(), c.zero()),
+    c.zero())
+  ~is #true
+check:
+  load(ModulePath'lib("rhombus/hol/tests/module/declaration/condition/fixtures/set_expr_branch_mismatch_bad.rhm")')
+  ~throws "equality operands have different types"
+check:
+  load(ModulePath'lib("rhombus/hol/tests/module/declaration/condition/fixtures/set_expr_fn_element_bad.rhm")')
+  ~throws "function equality has no sound executable interpretation"
+
+// `conj`/`disj`/`imp`/`neg` inside an `if` branch render and type-check
+// through `check_expr`'s own special-cased `CoreCall` arms -- against
+// the `if`'s own unification, not the general apply/overload path.
+check c.conj_branch(#true, #true, #true) ~is #true
+check c.conj_branch(#true, #true, #false) ~is #false
+check c.conj_branch(#false, #true, #true) ~is #false
+check c.disj_branch(#true, #false, #true) ~is #true
+check c.disj_branch(#true, #false, #false) ~is #false
+check c.imp_branch(#true, #true, #false) ~is #false
+check c.imp_branch(#true, #false, #false) ~is #true
+check c.neg_branch(#true, #true) ~is #false
+check c.neg_branch(#true, #false) ~is #true
+check:
+  load(ModulePath'lib("rhombus/hol/tests/module/declaration/condition/fixtures/bool_op_branch_mismatch_bad.rhm")')
+  ~throws "expression has an unexpected type"
+
+// `eq` (`==`) inside an `if` branch renders and type-checks through
+// `check_expr`'s dedicated `CoreCall` arm with self-typed `Nat` literals in
+// either operand order.
+check c.eq_left_numeral(#true) ~is #true
+check c.eq_right_numeral(#true) ~is #true
+check c.eq_neither_numeral(#true) ~is #true
+check c.eq_left_numeral(#false) ~is #false
+check:
+  load(ModulePath'lib("rhombus/hol/tests/module/declaration/condition/fixtures/eq_branch_mismatch_bad.rhm")')
+  ~throws "equality operands have different types"
+
+// The general (non-overloaded) `CoreCall` case inside an `if` branch
+// renders and type-checks through `check_expr`'s own `CheckedApply`:
+// named-constant (`runtime_named_apply`) and direct-call (local variable
+// head) renderings, a zero-argument call, and a polymorphic call whose first
+// argument is fixed to `Nat` by its bare literal.
+check c.named_apply_branch(#true, c.succ(c.zero()), c.succ(c.succ(c.zero()))) ~is c.succ(c.succ(c.succ(c.zero())))
+check c.named_apply_branch(#false, c.succ(c.zero()), c.succ(c.succ(c.zero()))) ~is c.zero()
+check c.local_apply_branch(#true, c.double, c.succ(c.zero())) ~is c.succ(c.succ(c.zero()))
+check c.local_apply_branch(#false, c.double, c.succ(c.zero())) ~is c.zero()
+check c.zero_arg_branch(#true) ~is c.zero()
+check c.zero_arg_branch(#false) ~is c.succ(c.zero())
+check c.nat_literal_branch(#true) ~is c.cons(c.succ(c.zero()), c.cons(c.succ(c.zero()), c.nil()))
+check c.nat_literal_branch(#false) ~is c.nil()
+check:
+  load(ModulePath'lib("rhombus/hol/tests/module/declaration/condition/fixtures/apply_branch_mismatch_bad.rhm")')
+  ~throws "expression has an unexpected type"
+check:
+  load(ModulePath'lib("rhombus/hol/tests/module/declaration/condition/fixtures/apply_overapplied_bad.rhm")')
+  ~throws "the applied expression is not a function"
+
+// -- the logical half ---------------------------------------------------------
+//
+// `cond_ok.rhm` proves `pick3_first`/`pick3_second`/`pick3_else` as it
+// compiles, so importing it at all is the positive test.
+
+check:
+  load(ModulePath'lib("rhombus/hol/tests/module/declaration/condition/fixtures/cond_missing_else.rhm")')
+  ~throws "a `cond` needs a final `~else` clause"

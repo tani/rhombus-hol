@@ -1,7 +1,8 @@
 #lang rhombus/static
 
-// Algebraic datatypes: their specification, well-formedness checks, and the
-// theorem bundle installed by a declaration.
+// Algebraic datatypes in the theory: the well-formedness checks against a
+// `Theory` and the theorem bundle installed by a declaration. The
+// theory-independent specification lives in `frontend/checker/datatype.rhm`.
 //
 // A `datatype` is derived -- a non-recursive one as a sum of products over
 // `unit` (`backend/proof/definition/datatype/generate.rhm`), a self-recursive
@@ -21,30 +22,14 @@
 import:
   rhombus/hol/kernel/type open
   rhombus/hol/kernel open
+  rhombus/hol/frontend/checker/datatype open
 
 export:
-  Field
-  Ctor
-  DatatypeSpec
   DatatypeThms
   DatatypeView
   instantiate_datatype
   check_spec
-  is_recursive_field
-  occurs_in_type
-  ctor_type
-  ctor_index
-  discriminator_name
-  selector_name
-  self_type
-  recursive_field_indexes
   all_ctor_names
-
-class Field(name :: Symbol, ty :: HType)
-class Ctor(name :: Symbol, fields :: List.of(Field))
-class DatatypeSpec(name :: Symbol,
-                   params :: List.of(Symbol),
-                   ctors :: List.of(Ctor))
 
 class DatatypeThms(spec :: DatatypeSpec,
                    // `Ci x... = Ci y... <=> x = y and ...`, one per ctor with fields
@@ -84,9 +69,6 @@ class DatatypeView(spec :: DatatypeSpec,
                    selectors :: List.of(Thm),
                    elim_rules :: Map.of(Symbol, Thm))
 
-fun self_type(spec :: DatatypeSpec) :: HType:
-  mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol): mk_tyvar(p)))
-
 // `#false` unless `ty` is an instance of `dt` -- the same type constructor,
 // applied to as many arguments as the declaration has parameters.  The
 // schematic type is the instance that substitutes each parameter for
@@ -113,22 +95,6 @@ fun instantiate_datatype(thy :: Theory, dt :: DatatypeThms,
                      m ++ {k: at(th :~ Thm)})
   | ~else: #false
 
-fun is_recursive_field(spec :: DatatypeSpec, f :: Field) :: Boolean:
-  f.ty == self_type(spec)
-
-fun ctor_type(spec :: DatatypeSpec, c :: Ctor) :: HType:
-  for values(ty :~ HType = self_type(spec)) (f in c.fields.reverse()):
-    mk_fun(f.ty, ty)
-
-fun ctor_index(spec :: DatatypeSpec, name :: Symbol) :: Int:
-  recur loop (remaining :~ List.of(Ctor) = spec.ctors, i = 0):
-    match remaining
-    | []:
-        error(~who: #'datatype, "unknown constructor",
-              error.val(~label: "constructor", name))
-    | List.cons(c, rest):
-        (if (c :~ Ctor).name == name | i | loop(rest, i + 1))
-
 // Every constructor name across a set of declared datatypes, for the
 // tactics that must not treat one as an ordinary function.
 fun all_ctor_names(dts :: Map.of(Symbol, DatatypeThms)) :: Set.of(Symbol):
@@ -136,26 +102,11 @@ fun all_ctor_names(dts :: Map.of(Symbol, DatatypeThms)) :: Set.of(Symbol):
     for values(a :~ Set = acc) (c in (d :~ DatatypeThms).spec.ctors):
       a ++ {(c :~ Ctor).name}
 
-fun discriminator_name(c :: Ctor) :: Symbol:
-  Symbol.from_string("is_" ++ to_string(c.name))
-
-fun selector_name(c :: Ctor, f :: Field) :: Symbol:
-  Symbol.from_string(to_string(c.name) ++ "_" ++ to_string(f.name))
-
 fun nonrecursive_ctors(spec :: DatatypeSpec) :: List.of(Ctor):
   spec.ctors.filter(~keep: fun (c :: Ctor):
                              for all (f in c.fields): !is_recursive_field(spec, f))
 
-fun recursive_field_indexes(spec :: DatatypeSpec, c :: Ctor) :: List.of(Int):
-  for values(acc :~ List = []) (f in c.fields, i in List.iota(c.fields.length())):
-    (if is_recursive_field(spec, f) | acc ++ [i] | acc)
-
 // -- the positivity checker: the load-bearing soundness component ----------
-
-fun occurs_in_type(n :: Symbol, t :: HType) :: Boolean:
-  match t
-  | TyVar(_): #false
-  | TyApp(m, args): m == n || (for any (a in args): occurs_in_type(n, a))
 
 // An argument type is admissible when it is either the datatype applied to
 // exactly its own parameters -- a direct recursive occurrence -- or a type in

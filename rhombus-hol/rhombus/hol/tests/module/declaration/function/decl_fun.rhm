@@ -1,0 +1,189 @@
+#lang rhombus/static
+
+// `function` emits executable Rhombus and, from the same source, installs the
+// clausal equations logically.  This is the first test of type erasure: the
+// emitted code actually runs.
+
+import:
+  lib("rhombus/hol/tests/fixture_load.rhm") open
+  lib("rhombus/hol/tests/module/declaration/function/fixtures/funs_ok.rhm") as f
+  lib("rhombus/hol/tests/module/declaration/function/fixtures/funs_ok.rhm")!hol_theory as logical
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/backend/proof/definition/function/spec open
+  rhombus/hol/backend/proof/driver open
+  rhombus/hol/backend/proof/automation/proof/node open
+  rhombus/hol/backend/proof/automation/induction open
+  rhombus/hol/backend/proof/automation/tactic/induction open
+  rhombus/hol/backend/proof/automation/proof/trace open
+
+fun load(mp :: ModulePath):
+  instantiate_hol_fixture(mp)
+
+fun bad(which :: Symbol):
+  match which
+  | #'nonterminating:
+      load(ModulePath'lib("rhombus/hol/tests/module/declaration/function/fixtures/fun_nonterminating.rhm")')
+  | #'inexhaustive:
+      load(ModulePath'lib("rhombus/hol/tests/module/declaration/function/fixtures/fun_inexhaustive.rhm")')
+  | #'no_result_type:
+      load(ModulePath'lib("rhombus/hol/tests/module/declaration/function/fixtures/function_no_result_type.rhm")')
+  | #'bad_body:
+      load(ModulePath'lib("rhombus/hol/tests/module/declaration/function/fixtures/function_bad_body.rhm")')
+fun bad_message(which :: Symbol) :: String:
+  try:
+    block:
+      bad(which)
+      "fixture compiled"
+    ~catch e :: Exn.Fail: e.message
+
+// -- the emitted code computes -----------------------------------------------
+
+check f.rev(f.sample) ~is f.Cons(3, f.Cons(2, f.Cons(1, f.Nil())))
+check f.rev(f.Nil()) ~is f.Nil()
+check f.rev(f.rev(f.sample)) ~is f.sample
+check:
+  f.app(f.Cons(1, f.Nil()), f.Cons(2, f.Nil()))
+  ~is f.Cons(1, f.Cons(2, f.Nil()))
+check f.app(f.Nil(), f.sample) ~is f.sample
+check f.length(f.sample) ~is f.succ(f.succ(f.succ(f.zero())))
+check f.length(f.Nil()) ~is f.zero()
+check:
+  f.plus(f.succ(f.zero()), f.succ(f.zero()))
+  ~is f.succ(f.succ(f.zero()))
+
+// The self-typed `Nat` literal fixes `first_of`'s shared type variable before
+// its later constructor argument is checked.
+check:
+  f.nat_literal_probe()
+  ~is f.succ(f.succ(f.succ(f.zero())))
+
+// Erasure really is erasure: the emitted `app` is monomorphic-free and works
+// at any element type.
+check:
+  f.app(f.Cons("a", f.Nil()), f.Cons("b", f.Nil()))
+  ~is f.Cons("a", f.Cons("b", f.Nil()))
+check f.rev(f.Cons("a", f.Cons("b", f.Nil()))) ~is f.Cons("b", f.Cons("a", f.Nil()))
+
+// -- an ordinary Rhombus `fun` is never intercepted -------------------------
+//
+// Only `function` declares a logical definition, so `fun` keeps its ordinary
+// meaning and `#lang rhombus/hol` stays usable as a general-purpose language.
+// Calling `double` below confirms that the ordinary Rhombus definition was
+// emitted unchanged.
+
+check f.double(21) ~is 42
+
+// -- the logical half rejects what it cannot admit ---------------------------
+
+def nonterminating_message = bad_message(#'nonterminating)
+def inexhaustive_message = bad_message(#'inexhaustive)
+def no_result_type_message = bad_message(#'no_result_type)
+def bad_body_message = bad_message(#'bad_body)
+
+check nonterminating_message.contains("cannot see that the definition terminates") ~is #true
+check nonterminating_message.contains("fun_nonterminating.rhm:8") ~is #true
+check inexhaustive_message.contains("not exhaustive") ~is #true
+check inexhaustive_message.contains("fun_inexhaustive.rhm:12") ~is #true
+
+// A `function` that is not definable is an error, never a silent demotion to
+// an ordinary Rhombus binding: the whole point of the separate keyword is that
+// the author has said which one they meant.
+
+check no_result_type_message.contains("a function needs a result type") ~is #true
+// The error names the offending expression, not just the declaration.
+check bad_body_message.contains("unknown constant println") ~is #true
+
+// A recursive unary definition retains the exact well-founded induction
+// theorem used to define it. With no explicit hint, scheme selection recognizes
+// the function call and builds a theorem-backed strong-induction step.
+def logical_state :~ HolState = logical.theory
+def rev_info :~ FunInfo = logical_state.ctx.funs[#'rev]
+def xs = mk_var(#'xs, rev_info.spec.arg_types[0])
+def rev_xs = mk_comb(rev_info.fn, xs)
+def functional_goal = Goal([], mk_eq(rev_xs, rev_xs))
+check:
+  let step0 = induction_attempt(
+                logical_state.ctx.thy, logical_state.ctx.funs,
+                logical_state.ctx.dts, logical_state.ctx.schemes,
+                #false, functional_goal)
+  match step0
+  | #false: #false
+  | step :: Step:
+      match step.events
+      | [Inducted(_, kind)]: [kind, step.subgoals.length()]
+      | ~else: #false
+  ~is [#'function, 1]
+check:
+  let step = induction_attempt(
+               logical_state.ctx.thy, logical_state.ctx.funs,
+               logical_state.ctx.dts, logical_state.ctx.schemes,
+               #false, functional_goal) :~ Step
+  let child = step.subgoals[0] :~ Goal
+  let [left, _] = (dest_eq(child.concl) :~ List)
+  let proved = step.justify([REFL(logical_state.ctx.thy, left :~ Term)])
+  [hyps_of(proved), concl_of(proved)]
+  ~is [[], functional_goal.concl]
+// The registered theorem is polymorphic. A concrete `List.of(Nat)` call
+// specializes both its function head and its well-founded relation before
+// constructing the strong-induction step.
+def nat_ty = mk_tyapp(#'Nat, [])
+def list_nat_ty = mk_tyapp(#'List, [nat_ty])
+def rev_nat_substitution:
+  type_match(rev_info.spec.arg_types[0], list_nat_ty, {}) :~ Map
+def rev_nat = inst_type(rev_nat_substitution, rev_info.fn)
+def nat_xs = mk_var(#'nat_xs, list_nat_ty)
+def concrete_function_goal:
+  Goal([], mk_eq(mk_comb(rev_nat, nat_xs), mk_comb(rev_nat, nat_xs)))
+def concrete_function_step:
+  induction_attempt(
+    logical_state.ctx.thy, logical_state.ctx.funs,
+    logical_state.ctx.dts, logical_state.ctx.schemes,
+    #false, concrete_function_goal) :~ Step
+check:
+  match concrete_function_step.events
+  | [Inducted(_, kind)]: kind
+  | ~else: #false
+  ~is #'function
+// The strong-step child already contains this scheme's relation in its
+// induction hypothesis. It must make structural progress through datatype
+// induction rather than select the same function scheme again.
+check:
+  let next = induction_attempt(
+               logical_state.ctx.thy, logical_state.ctx.funs,
+               logical_state.ctx.dts, logical_state.ctx.schemes,
+               #false, concrete_function_step.subgoals[0])
+  match next
+  | step :: Step:
+      match step.events
+      | List.cons(Inducted(_, kind), _): kind != #'function
+      | ~else: #false
+  | #false: #false
+  ~is #true
+
+// A datatype's derived subterm relation is registered with its closed,
+// kernel-derived well-founded induction theorem. Registration is evidence;
+// automatic selection remains conservative and does not replace datatype
+// induction merely because a goal mentions a value of the same type.
+fun list_well_founded_scheme(
+      schemes :: List.of(InductionScheme)) :: List:
+  recur loop (remaining :~ List = schemes):
+    match remaining
+    | []: error(~who: #'test, "missing well-founded List scheme")
+    | List.cons(scheme, rest):
+        match scheme :~ InductionScheme
+        | WellFoundedScheme(name, relation, theorem):
+            let (domain, _) = dest_fun(type_of(relation))
+            (if domain == xs.ty
+             | [name, relation, theorem]
+             | loop(rest))
+        | ~else: loop(rest)
+def list_wf = list_well_founded_scheme(logical_state.ctx.schemes)
+check:
+  let name = list_wf[0] :~ Symbol
+  let relation = list_wf[1] :~ Term
+  let theorem = list_wf[2] :~ Thm
+  [(logical_state.ctx.funs[name] :~ FunInfo).fn == relation,
+   hyps_of(theorem)]
+  ~is [#true, []]

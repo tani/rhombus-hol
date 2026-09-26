@@ -44,6 +44,11 @@ raco make rhombus-hol-prover/rhombus/hol.rkt
 raco test --jobs 4 rhombus-hol/rhombus/hol/tests
 ```
 
+The test tree mirrors the prover's layout (`frontend/`, `backend/`), with
+`module/` holding end-to-end tests of whole declarations, and `kernel/`,
+`quickcheck/`, `stdlib/`, and `spec/` covering the other packages and the
+language specification.
+
 ## Formal kernel generation
 
 `rhombus-hol-kernel/rhombus/hol/kernel/generated.rhm` is generated from the

@@ -1,0 +1,65 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+
+// The specification of an algebraic datatype: its name, type parameters, and
+// constructors with typed fields. It is produced by checking a `datatype`
+// declaration and consumed by both backends; nothing here refers to a
+// `Theory` or a theorem.
+
+import:
+  rhombus/hol/kernel/type open
+
+export:
+  Field
+  Ctor
+  DatatypeSpec
+  self_type
+  is_recursive_field
+  recursive_field_indexes
+  occurs_in_type
+  ctor_type
+  ctor_index
+  discriminator_name
+  selector_name
+
+class Field(name :: Symbol, ty :: HType)
+
+class Ctor(name :: Symbol, fields :: List.of(Field))
+
+class DatatypeSpec(name :: Symbol,
+                   params :: List.of(Symbol),
+                   ctors :: List.of(Ctor))
+
+fun self_type(spec :: DatatypeSpec) :: HType:
+  mk_tyapp(spec.name, spec.params.map(fun (p :: Symbol): mk_tyvar(p)))
+
+fun is_recursive_field(spec :: DatatypeSpec, f :: Field) :: Boolean:
+  f.ty == self_type(spec)
+
+fun ctor_type(spec :: DatatypeSpec, c :: Ctor) :: HType:
+  for values(ty :~ HType = self_type(spec)) (f in c.fields.reverse()):
+    mk_fun(f.ty, ty)
+
+fun ctor_index(spec :: DatatypeSpec, name :: Symbol) :: Int:
+  recur loop (remaining :~ List.of(Ctor) = spec.ctors, i = 0):
+    match remaining
+    | []:
+        error(~who: #'datatype, "unknown constructor",
+              error.val(~label: "constructor", name))
+    | List.cons(c, rest):
+        (if (c :~ Ctor).name == name | i | loop(rest, i + 1))
+
+fun discriminator_name(c :: Ctor) :: Symbol:
+  Symbol.from_string("is_" ++ to_string(c.name))
+
+fun selector_name(c :: Ctor, f :: Field) :: Symbol:
+  Symbol.from_string(to_string(c.name) ++ "_" ++ to_string(f.name))
+
+fun recursive_field_indexes(spec :: DatatypeSpec, c :: Ctor) :: List.of(Int):
+  for values(acc :~ List = []) (f in c.fields, i in List.iota(c.fields.length())):
+    (if is_recursive_field(spec, f) | acc ++ [i] | acc)
+
+fun occurs_in_type(n :: Symbol, t :: HType) :: Boolean:
+  match t
+  | TyVar(_): #false
+  | TyApp(m, args): m == n || (for any (a in args): occurs_in_type(n, a))

@@ -502,8 +502,8 @@ definition theorem; the theorem is an oriented rewrite rule for later logical
 declarations and proofs.
 
 `definition` has no executable reading. It emits no Rhombus binding, cannot be
-called from ordinary Rhombus code, an executable `function` body, or
-`quickcheck`, and has no runtime fallback.
+called from ordinary Rhombus code or an executable `function` body, and has no
+runtime fallback.
 
 The following are static errors:
 
@@ -744,29 +744,6 @@ The language-reserved notation-facing names are `add`, `subtract`, `negate`,
 `append`, `member`, `union`, and `intersection`. Their implementations are
 library or module declarations, not language primitives.
 
-### 4.8 `quickcheck`
-
-```rhombus
-quickcheck name:
-  forall (arg :: ConcreteType, ...): proposition
-
-quickcheck name(~samples: n, ~size: n, ~seed: n):
-  forall (arg :: ConcreteType, ...): proposition
-```
-
-`quickcheck` runs the executable reading of a universally quantified property
-over generated concrete values. It adds no theorem and no theory content. A
-passing check is testing evidence, not proof; a failing check aborts module
-initialization with a shrunk counterexample, its effective seed, and shrink
-count.
-
-Input types must have registered runtime generators and shrinkers. The property
-must have an executable reading: executable calls, conditionals, Boolean
-connectives, equality, literals, and statically resolved overloads are allowed;
-implication, existential quantification, `exists1`, `select`, and other
-logic-only terms are rejected. `~samples` sets the number of input tuples,
-`~size` bounds generated depth, and `~seed` makes the run reproducible.
-
 ## 5. Function bodies and expressions
 
 A top-level `function` body is a sequence whose final expression is its value:
@@ -891,8 +868,7 @@ to are not names (section 2).
 
 `true`, `false`, equality, and the connectives have both readings, under either
 spelling. Implication `==>`, the quantifiers, `exists1`, and `select` are
-logic-only, so they cannot occur in executable `function` bodies or
-`quickcheck` properties.
+logic-only, so they cannot occur in executable `function` bodies.
 
 ### 7.2 Sets
 
@@ -957,7 +933,7 @@ representation.
 For this reserved declaration only, executable `zero()` returns `0` and
 executable `succ(n)` returns `n + 1`. A `zero()` runtime pattern tests that the
 value is zero. A `succ(p)` runtime pattern accepts only a positive integer and
-binds `p` to its predecessor. Thus generic generators, shrinkers, and functions
+binds `p` to its predecessor. Thus functions
 written with `zero` and `succ` continue to use the same expression and pattern
 interface without allocating Peano constructor chains. Every other datatype
 retains the class-per-constructor executable representation.

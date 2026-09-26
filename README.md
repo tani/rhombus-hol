@@ -11,10 +11,7 @@ library all sit on top of that kernel.
   from and checked against `isabelle-hol-kernel`.
 - `isabelle-hol-kernel` — the Isabelle/HOL formalization the kernel is
   generated from and checked against.
-- `rhombus-hol-quickcheck` — runtime property-checking support, independent
-  of the prover.
-- `rhombus-hol-prover` — the derived layer built over the kernel and
-  QuickCheck: tactics, conversions, and the `#lang rhombus/hol` language
+- `rhombus-hol-prover` — the derived layer built over the kernel: tactics, conversions, and the `#lang rhombus/hol` language
   surface (frontend elaboration, the waterfall proof procedure, recursive
   function and datatype definition).
   Its modules under `rhombus/hol/` follow the pipeline:
@@ -34,7 +31,7 @@ library all sit on top of that kernel.
 
 ```sh
 raco pkg install --auto --link \
-  ./rhombus-hol-kernel ./rhombus-hol-quickcheck ./rhombus-hol-prover \
+  ./rhombus-hol-kernel ./rhombus-hol-prover \
   ./rhombus-hol-stdlib ./rhombus-hol
 raco make rhombus-hol-prover/rhombus/hol.rkt
 ```
@@ -47,7 +44,7 @@ raco test --jobs 4 rhombus-hol/rhombus/hol/tests
 
 The test tree mirrors the prover's layout (`frontend/`, `backend/`), with
 `module/` holding end-to-end tests of whole declarations, and `kernel/`,
-`quickcheck/`, `stdlib/`, and `spec/` covering the other packages and the
+`stdlib/`, and `spec/` covering the other packages and the
 language specification.
 
 ## Formal kernel generation

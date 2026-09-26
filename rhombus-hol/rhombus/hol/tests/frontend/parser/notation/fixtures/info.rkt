@@ -10,7 +10,7 @@
   '(
     "name_alias_bad.rhm"
     "name_builtin_bad.rhm"
-    "name_builtin_quickcheck_bad.rhm"
+    "name_builtin_function_bad.rhm"
     "notation_associativity_bad.rhm"
     "notation_duplicate_operand_bad.rhm"
     "notation_empty_bad.rhm"

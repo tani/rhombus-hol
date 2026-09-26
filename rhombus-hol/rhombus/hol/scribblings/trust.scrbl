@@ -262,7 +262,7 @@ Beyond the termination restrictions in @secref("termination"):
 
 @itemlist(
 
- @item{Logical declarations, including @rhombus(quickcheck, ~datum), must
+ @item{Logical declarations must
   appear directly in a @rhombuslangname(rhombus/hol) module body --- not
   inside @rhombus(block) and not inside a macro expansion.}
 
@@ -285,12 +285,6 @@ Beyond the termination restrictions in @secref("termination"):
 
  @item{Adopting a theory re-runs the exporting module's proofs, once per
   importing compilation.}
-
- @item{@rhombus(quickcheck, ~datum) executes the runtime reading of a
-  universally quantified proposition over concrete input types. Each input
-  type needs a generator and shrinker registered by a declared datatype.
-  Success does not construct a theorem or modify the theory; failure aborts
-  module initialization with a shrunk counterexample.}
 
  @item{The function body grammar has named applications, @rhombus(if),
   @rhombus(cond), local @rhombus(let), matching, Booleans, self-typed

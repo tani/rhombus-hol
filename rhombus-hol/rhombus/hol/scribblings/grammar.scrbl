@@ -171,7 +171,7 @@ representation.
 For this reserved @tt{Nat} only, executable @tt{zero()} is @tt{0}, and
 executable @tt{succ(n)} is @tt{n + 1}. A runtime @tt{zero()} pattern tests for
 zero. A runtime @tt{succ(p)} pattern accepts a positive integer and binds
-@tt{p} to its predecessor. Functions, generators, and shrinkers can therefore
+@tt{p} to its predecessor. Functions can therefore
 retain the ordinary constructor expression and pattern interface without
 allocating Peano constructor chains. Other datatype declarations still emit
 one Rhombus class per constructor.
@@ -364,42 +364,21 @@ the two spellings differ only in precedence, so that an equivalence between
 equations reads without parentheses.)
 
 The same @rhombus(cond) form is available in a proposition, with proposition
-guards and results and the same mandatory final @rhombus(~else). Since
-@rhombus(quickcheck) uses this proposition grammar, it accepts
-@rhombus(cond) when every branch has an executable reading.
+guards and results and the same mandatory final @rhombus(~else).
 
 @subsection{Named logical constants}
 
-The initial theory exposes the canonical names of its logical constants to HOL
-name resolution. The named and operator forms below denote the same constants:
+Of the base theory's constants, only @tt{true} and @tt{false} are names.
+Equality, the connectives, unique existence, and choice are reached only
+through their syntax (@tt{===}, @tt{and}, @tt{exists1 (x :: T): p}, and so
+on): @tt{p and q} has no second spelling @tt{conj(p, q)}. The base theory's
+remaining constants, such as well-foundedness, cannot be named at all, and
+declaring any of these reserved names is an error.
 
-@verbatim{
-true, false                       Boolean values (#true, #false)
-eq(x, y)                          equality (==, ===, <=>)
-imp(p, q)                         implication (==>)
-conj(p, q), disj(p, q)            conjunction and disjunction (&&/and, ||/or)
-neg(p)                            negation (!, not)
-exists1(predicate)                unique existence
-select(predicate)                 choice
-wf(relation)                      well-foundedness
-}
-
-Their types are @tt{eq :: ?a -> ?a -> Boolean},
-@tt{imp, conj, disj :: Boolean -> Boolean -> Boolean},
-@tt{neg :: Boolean -> Boolean},
-@tt{exists1 :: (?a -> Boolean) -> Boolean},
-@tt{select :: (?a -> Boolean) -> ?a}, and
-@tt{wf :: (?a -> ?a -> Boolean) -> Boolean}.
-
-@tt{true}, @tt{false}, @tt{eq}, @tt{conj}, @tt{disj}, and @tt{neg} have both
-logical and executable readings, so they may appear in a
-@rhombus(function) body or executable @rhombus(quickcheck) property.
-@tt{imp}, @tt{exists1}, @tt{select}, and @tt{wf} are logic-only named
-applications. Use them in theorem statements and proof terms, not in a
-@rhombus(function) or @rhombus(quickcheck). Universal quantification,
-existential quantification, and conditionals use the dedicated
-@rhombus(forall), @rhombus(exists), @rhombus(if), and @rhombus(cond) forms
-instead of calls to their kernel constants.
+@tt{true}, @tt{false}, equality, and the connectives other than implication
+have both logical and executable readings, so they may appear in a
+@rhombus(function) body. Implication, @rhombus(exists1), and @rhombus(select)
+are logic-only: use them in theorem statements, not in a @rhombus(function).
 
 @subsection{Quantifier and choice binders, and @tt{Set} values}
 
@@ -438,8 +417,7 @@ in @secref("declarations").
 Because they assert existence or uniqueness without computing a witness,
 @rhombus(exists), @rhombus(exists1), and @rhombus(select) have no
 executable reading: they may appear in a @rhombus(theorem) statement but
-not in a @rhombus(function) body or an executable @rhombus(quickcheck)
-property. A @tt{Set} comprehension's own body, and @rhombus(forall), are
+not in a @rhombus(function) body. A @tt{Set} comprehension's own body, and @rhombus(forall), are
 ordinary predicates and follow the same executability rule as any other
 expression they are built from.
 

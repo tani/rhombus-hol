@@ -67,7 +67,6 @@ export:
   theorem
   proof
   overload
-  quickcheck
   hol_import
 
 meta:
@@ -580,25 +579,11 @@ meta:
         let [form, ...] = decls.map(fun (d :: expand.Decl): d.form)
         let specs = type_parser.parse_datatype_decls(
                       [form, ...], runtime_state.type_constructors)
-        let selves:
-          for List (spec in specs):
-            mk_tyapp((spec :~ DatatypeSpec).name,
-                     (spec :~ DatatypeSpec).params.map(
-                       fun (parameter :: Symbol): mk_tyvar(parameter)))
         let runtime:
           for values(acc :~ List.of(Syntax) = []) (d in decls, spec in specs):
             let [name, ctors] = (d :~ expand.Decl).parts
-            let cs :~ List = ctors
-            // A field at any member of the family counts as recursive for
-            // generation: a base case has to avoid every member, or sampling
-            // a mutually recursive family would not terminate.
-            let gen:
-              for List (ctor in cs, semantic in (spec :~ DatatypeSpec).ctors):
-                let types = (semantic :~ Ctor).fields.map(
-                              fun (field :: Field): field.ty)
-                [(ctor :~ List)[0], types,
-                 for any (type in types): selves.contains(type)]
-            acc ++ lower_datatype(name :~ Syntax, cs, spec :~ DatatypeSpec, gen)
+            acc ++ lower_datatype(name :~ Syntax, ctors :~ List,
+                                  spec :~ DatatypeSpec)
         let next_runtime:
           for values(state :~ SurfaceState = runtime_state) (spec in specs):
             surface_add_datatype(state, spec :~ DatatypeSpec)
@@ -852,13 +837,6 @@ meta:
     ensure_module_declaration(forms[0])
     emit_planned(kind, expand.plan_group(forms, kind), #true)
 
-  fun quickcheck_expansion(name :: Syntax, opts :: List.of(Syntax),
-                           core :: Syntax, at :: Syntax) :: Syntax:
-    let box = current_expansion_box()
-    let state = box.value :~ ExpansionState
-    lower_quickcheck(state.surface, name,
-                     declaration.quickcheck_options(opts), core, at)
-
   fun finish_expansion() :: Syntax:
     let state = current_expansion_state()
     let (import_forms, transitions):
@@ -947,15 +925,6 @@ decl.macro 'overload $term ...':
   ~all_stx use
   let head = macro_use_head(use)
   declaration_expansion(['$head $term ...'])
-
-decl.macro
-| 'quickcheck $(name :: Identifier)($option, ...):
-     $(stmt :: hol_expr_meta.Parsed)':
-    quickcheck_expansion(
-      name, [option, ...], hol_expr_meta.unpack(stmt), name)
-| 'quickcheck $(name :: Identifier):
-     $(stmt :: hol_expr_meta.Parsed)':
-    quickcheck_expansion(name, [], hol_expr_meta.unpack(stmt), name)
 
 decl.macro 'proof: $body; ...':
   ~all_stx form

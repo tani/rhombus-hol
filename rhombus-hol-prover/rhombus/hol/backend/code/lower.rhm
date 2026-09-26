@@ -1,34 +1,27 @@
 #lang rhombus/and_meta
 // SPDX-License-Identifier: 0BSD
-// QuickCheck is a design reference for generated testing support; see THIRD_PARTY_NOTICES.
 
 // Executable lowering: the Rhombus code a declaration contributes to the
 // user's module. Datatypes become classes (or the host's compact Nat),
-// functions become ordinary `fun`s rendered from the shared checker's
-// output, and `quickcheck` becomes a run of that real executable code.
+// and functions become ordinary `fun`s rendered from the shared checker's
+// output.
 //
 // Every function here is a `meta` function returning syntax. Its templates
 // are written in this module, so their identifiers resolve against this
-// module's own imports -- `rhombus` and `rhombus/hol/quickcheck` -- wherever
-// the result is spliced.
+// module's own imports wherever the result is spliced.
 
 import:
   rhombus/meta open
-  rhombus/hol/quickcheck as _hol_qc
   meta:
     rhombus/hol/kernel/type open
     rhombus/hol/frontend/checker/datatype open
-    rhombus/hol/frontend/parser/core open
     rhombus/hol/frontend/checker/checked open
-    rhombus/hol/frontend/checker/declaration open
     rhombus/hol/frontend/checker/state open
-    rhombus/hol/frontend/checker/type/registry open
 
 export:
   meta:
     lower_datatype
     lower_function
-    lower_quickcheck
 
 meta:
   // Any literal from this module will do as a lexical context for generated
@@ -37,15 +30,6 @@ meta:
   // The context of identifiers the user's own code refers to -- function
   // and constructor names -- is the declaration's name.
   Parameter.def runtime_context :: Syntax = id_ctx
-
-  fun core_pattern_name(pat :: CorePattern, who :: String) :: Symbol:
-    match pat
-    | CorePatVar(name, _): name
-    | CorePatTyped(inner, _, _): core_pattern_name(inner, who)
-    | ~else:
-        syntax_meta.error(
-          who ++ " currently needs a named binding pattern",
-          pattern_at(pat))
 
   // -- datatypes -------------------------------------------------------------
 
@@ -94,160 +78,6 @@ meta:
      '«bind.macro '$succ($('$')$predecessor)':
           '$('$')$predecessor
             :: converting(fun ($matched when $matched > 0): $matched - 1)'»']
-
-  // -- generators and shrinkers ----------------------------------------------
-  //
-  // Emitted alongside a datatype, from the same declaration, so that
-  // `quickcheck` has values to sample. What is built here is a plain-data
-  // descriptor per constructor (`_hol_qc.CtorSpec`/`_hol_qc.ShrinkClause`) --
-  // that much needs this module's macro-expansion capability, to name
-  // constructors and fields as `Syntax`. The enumeration over those
-  // descriptors (`_hol_qc.derive_generator`/`_hol_qc.derive_shrinker`) is
-  // ordinary runtime code, generic over any datatype, and lives in
-  // `quickcheck.rhm`; checking runs the real executable code.
-  //
-  // They reach `quickcheck` through `quickcheck.rhm`'s registry rather than
-  // through a guessed identifier. `datatype` registers its generator and
-  // shrinker under the type's own name when its module is instantiated. No
-  // generated helper needs to be exported.
-  //
-  // A name has to travel as a plain string, not a `Symbol`: a symbol written
-  // `#'foo` cannot appear inside a syntax template, the quote would close it.
-
-  fun type_name_str(n :: Symbol) :: Syntax:
-    Syntax.make(to_string(n), id_ctx)
-
-  fun param_gen_id(p :: Symbol) :: Syntax:
-    Syntax.make_id("_hol_g_" ++ to_string(p), id_ctx)
-
-  // A generator expression for a type: a function from a size to a value.
-  fun gen_expr(ty) :: Syntax:
-    match ty
-    | TyVar(a): param_gen_id(a)
-    | TyApp(n, args):
-        let nm = type_name_str(n)
-        let [sub, ...] = args.map(fun (t): gen_expr(t))
-        // Parenthesised: a `fun ...:` block cannot sit in application position
-        // or before a comma without one.
-        '(fun (_hol_s): _hol_qc.lookup_gen($nm)(_hol_s, $sub, ...))'
-
-  fun shrink_expr(ty, at :: Syntax) :: Syntax:
-    match ty
-    | TyApp(n, _): '_hol_qc.lookup_shrink($(type_name_str(n)))'
-    | ~else:
-        error(~who: #'quickcheck,
-              "cannot shrink a value of variable type",
-              error.val(~label: "in", to_string(at)))
-
-  fun emit_generator(name :: Syntax, params :: List, ctors :: List) :: Syntax:
-    let nm = type_name_str(Syntax.unwrap(name))
-    let [pg, ...] = params.map(fun (p :: Symbol): param_gen_id(p))
-    let [spec, ...] = ctors.map(ctor_spec)
-    let build = 'fun (_hol_sz, $pg, ...):
-                   _hol_qc.derive_generator([$spec, ...])(_hol_sz)'
-    '_hol_qc.register_gen($nm, $build)'
-
-  // `[ctor_id, [field_type, ...], recursive?]`
-  fun ctor_spec(c :: List) :: Syntax:
-    let cname = c[0] :~ Syntax
-    let ftys :~ List = c[1]
-    let base = Syntax.make(!(c[2] :~ Boolean), id_ctx)
-    let [g, ...] = ftys.map(gen_expr)
-    '_hol_qc.CtorSpec($cname, [$g, ...], $base)'
-
-  fun emit_shrinker(name :: Syntax, ctors :: List) :: Syntax:
-    let nm = type_name_str(Syntax.unwrap(name))
-    let [clause, ...] = ctors.map(fun (c :: List): shrink_clause(name, c))
-    '_hol_qc.register_shrink($nm, _hol_qc.derive_shrinker([$clause, ...]))'
-
-  // The classic shrink for an algebraic value: its recursive subterms.
-  fun shrink_clause(tname :: Syntax, c :: List) :: Syntax:
-    let cname = c[0] :~ Syntax
-    let ftys :~ List = c[1]
-    let n = ftys.length()
-    let vs = for List (i in List.iota(n)):
-               Syntax.make_id("_hol_f" ++ to_string(i), id_ctx)
-    let [v, ...] = vs
-    let keep = for values(acc :~ List = []) (t in ftys, vv in vs):
-                 (if same_type_name(t, tname) | acc ++ [vv] | acc)
-    let [k, ...] = keep
-    '_hol_qc.ShrinkClause(
-       fun (_hol_v):
-         match _hol_v
-         | $cname($v, ...): [$k, ...]
-         | ~else: #false)'
-
-  fun same_type_name(ty, tname :: Syntax) :: Boolean:
-    match ty
-    | TyApp(n, _): n == Syntax.unwrap(tname)
-    | ~else: #false
-
-  // -- quickcheck -------------------------------------------------------------
-
-  fun emit_quickcheck_in(state :: SurfaceState,
-                         name :: Syntax,
-                         options :: List,
-                         core :: Syntax,
-                         at :: Syntax) :: Syntax:
-    let expr = decode_prop(core)
-    let (binders, body):
-      match expr
-      | CoreForall(bs, proposition, _): values(bs, proposition)
-      | ~else:
-          syntax_meta.error(
-            "a quickcheck property starts with `forall (x :: T, ...):`",
-            at)
-    let parsed:
-      for List (binder in (binders :~ List.of(CoreBinder))):
-        let binder :~ CoreBinder = binder
-        let name = core_pattern_name(
-                     binder.pattern, "a quickcheck binder")
-        let ty:
-          match binder.type_stx
-          | #false:
-              syntax_meta.error(
-                "a quickcheck input needs an explicit concrete type",
-                binder.at)
-          | stx:
-              read_type(stx :~ Syntax, state.type_constructors)
-        when type_vars(ty).length() > 0
-        | syntax_meta.error(
-            "a quickcheck input type must be concrete", binder.at)
-        [source_id(name, binder.at), name, ty]
-    let env:
-      for values(out :~ Map = {}) (entry in parsed):
-        let entry :~ List = entry
-        out ++ {entry[1] :~ Symbol: entry[2] :~ HType}
-    let rendered = checked_to_runtime(
-                     state,
-                     check_expression(state, body :~ CoreExpr, ~vars: env,
-                                      ~who: #'quickcheck,
-                                      ~expected: mk_tyapp(#'bool, [])))
-    let [v, ...] = parsed.map(fun (entry :: List): entry[0] :~ Syntax)
-    let [g, ...] = parsed.map(fun (entry :: List): gen_expr(entry[2]))
-    let [sh, ...] = parsed.map(fun (entry :: List): shrink_expr(entry[2], at))
-    let [samples, size, seed] = options
-    let count = Syntax.make(samples, id_ctx)
-    let sz = Syntax.make(size, id_ctx)
-    let seed_stx = Syntax.make(seed, id_ctx)
-    let prop = 'fun ($v, ...): $rendered'
-    'import: rhombus/hol/quickcheck as _hol_qc
-     _hol_qc.assert_run(
-       Syntax.unwrap('$name'),
-       ~samples: $count,
-       ~size: $sz,
-       ~seed: $seed_stx,
-       ~gens: [$g, ...],
-       ~shrinks: [$sh, ...],
-       ~prop: $prop)'
-
-  fun emit_quickcheck(state :: SurfaceState,
-                      name :: Syntax,
-                      options :: List,
-                      core :: Syntax,
-                      at :: Syntax) :: Syntax:
-    parameterize { runtime_context: name }:
-      emit_quickcheck_in(state, name, options, core, at)
 
   // -- functions -------------------------------------------------------------
 
@@ -451,9 +281,6 @@ meta:
         | #'disj:
             let [left, right] = rendered
             '($(left :~ Syntax)) || ($(right :~ Syntax))'
-        | #'imp:
-            let [left, right] = rendered
-            '(! ($(left :~ Syntax))) || ($(right :~ Syntax))'
         | #'neg:
             let [operand] = rendered
             '! ($(operand :~ Syntax))'
@@ -489,8 +316,6 @@ meta:
             let head_stx = checked_to_runtime(state, head)
             let [arg, ...] = args_stx
             '$head_stx($arg, ...)'
-    | CheckedQuantifier(_, _, _, at):
-        syntax_meta.error("a quantifier has no runtime meaning", at)
     | CheckedFunction(params, _, body, _, _):
         checked_function_stx(state, params, body, #false)
     | CheckedBlock(body, _, _):
@@ -510,23 +335,13 @@ meta:
   // -- entry points
   // ------------------------------------------------------------
 
-  // One member of a datatype declaration group. Each `gen` entry is
-  // `[ctor_id, [field_type, ...], recursive?]`.
-  fun lower_datatype(name :: Syntax, ctors :: List, spec :: DatatypeSpec,
-                     gen :: List) :: List.of(Syntax):
-    let emitted_type:
-      (if compact_nat_spec(spec)
-       | emit_compact_nat(name, ctors)
-       | [emit_type(name, ctors)])
-    emitted_type
-      ++ [emit_generator(name, spec.params, gen),
-          emit_shrinker(name, gen)]
+  // One member of a datatype declaration group.
+  fun lower_datatype(name :: Syntax, ctors :: List, spec :: DatatypeSpec)
+      :: List.of(Syntax):
+    if compact_nat_spec(spec)
+    | emit_compact_nat(name, ctors)
+    | [emit_type(name, ctors)]
 
   fun lower_function(fn :: CheckedFunction, state :: SurfaceState,
                      name :: Syntax) :: Syntax:
     emit_function(fn, state, name)
-
-  fun lower_quickcheck(state :: SurfaceState, name :: Syntax,
-                       options :: List, core :: Syntax,
-                       at :: Syntax) :: Syntax:
-    emit_quickcheck(state, name, options, core, at)

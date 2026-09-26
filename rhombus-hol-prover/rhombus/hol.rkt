@@ -29,7 +29,6 @@ export:
     mb.theorem as theorem
     mb.proof as proof
     mb.overload as overload
-    mb.quickcheck as quickcheck
     mb.hol_import as import
     sn.notation as notation
   hol_expr

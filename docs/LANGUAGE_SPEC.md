@@ -268,7 +268,10 @@ vocabulary -- `eq`, `imp`, `conj`, `disj`, `neg`, `forall`, `exists`,
 those names is an error. Every other constant or type the implementation
 introduces for itself, in the base theory or for a declaration, has a name
 containing `'`, which no identifier can spell, so it takes no name away from
-declarations.
+declarations. The kernel's own types are taken too: `bool` is spelled `Boolean`,
+`fun` is the arrow, and `Nat` with its constructors `zero` and `succ` may be
+declared only as the native `datatype Nat | zero() | succ(pred :: Nat)`
+(section 4.1).
 
 ## 3. Types
 

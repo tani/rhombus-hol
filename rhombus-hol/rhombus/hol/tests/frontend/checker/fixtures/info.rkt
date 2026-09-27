@@ -10,8 +10,11 @@
   '(
     "coverage_duplicate_bad.rhm"
     "coverage_family_bad.rhm"
+    "coverage_fun_type_bad.rhm"
     "coverage_inexhaustive_bad.rhm"
     "coverage_literal_bad.rhm"
+    "coverage_nat_shape_bad.rhm"
+    "coverage_native_name_bad.rhm"
     "coverage_reserved_bad.rhm"
     "coverage_unreachable_bad.rhm"
     ))

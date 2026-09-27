@@ -373,8 +373,12 @@ Of the base theory's constants, only @tt{true} and @tt{false} are names.
 Equality, the connectives, unique existence, and choice are reached only
 through their syntax (@tt{===}, @tt{and}, @tt{exists1 (x :: T): p}, and so
 on): @tt{p and q} has no second spelling @tt{conj(p, q)}. The base theory's
-remaining constants, such as well-foundedness, cannot be named at all, and
-declaring any of these reserved names is an error.
+remaining constants, such as well-foundedness, cannot be named at all. The
+logic's own vocabulary (@tt{eq}, @tt{imp}, @tt{conj}, @tt{disj}, @tt{neg},
+@tt{forall}, @tt{exists}, @tt{exists1}, @tt{select}, @tt{cond}, @tt{wf}) is
+reserved, so declaring one of those names is an error; the constants the
+implementation builds for itself have names containing @tt{'}, which no
+identifier can spell.
 
 @tt{true}, @tt{false}, equality, and the connectives other than implication
 have both logical and executable readings, so they may appear in a

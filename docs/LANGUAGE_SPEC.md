@@ -262,8 +262,13 @@ Nothing else is a name. The constants that syntax elaborates to -- equality,
 the connectives, `exists1`, `select`, and the product constructor behind
 `Pair(...)` -- are reached only through that syntax: `p and q` has no second
 spelling `conj(p, q)`. They and the base theory's remaining constants are
-implementation detail. None of them can be named, and their names stay
-reserved, so declaring one is an error.
+implementation detail, and none of them can be named. The logic's own
+vocabulary -- `eq`, `imp`, `conj`, `disj`, `neg`, `forall`, `exists`,
+`exists1`, `select`, `cond`, and `wf` -- stays reserved, so declaring one of
+those names is an error. Every other constant or type the implementation
+introduces for itself, in the base theory or for a declaration, has a name
+containing `'`, which no identifier can spell, so it takes no name away from
+declarations.
 
 ## 3. Types
 

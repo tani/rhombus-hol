@@ -52,8 +52,10 @@ else
 fi
 
 echo
-echo "SORRY: $(grep -rho '~sorry' "$stdlib_src"/*.rhm | wc -l) remaining"
-grep -rc '~sorry' "$stdlib_src"/*.rhm | while IFS=: read -r file count
+# Matches only a bare `~sorry` proof-option line, not the substring inside a
+# FIXME comment explaining why some other theorem is still ~sorry.
+echo "SORRY: $(grep -rhoE '^\s*~sorry\s*$' "$stdlib_src"/*.rhm | wc -l) remaining"
+grep -rcE '^\s*~sorry\s*$' "$stdlib_src"/*.rhm | while IFS=: read -r file count
 do
   [ "$count" -gt 0 ] && printf '  %s: %s\n' "$(basename "$file")" "$count"
 done

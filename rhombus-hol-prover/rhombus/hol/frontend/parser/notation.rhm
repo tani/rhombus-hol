@@ -1,0 +1,479 @@
+#lang rhombus/and_meta
+
+import:
+  rhombus/meta open
+  rhombus/hol/frontend/parser/space open
+  rhombus/hol/frontend/parser/space!meta:
+    expose:
+      hol_expr_meta
+      encode_pattern
+      encode_function_body
+
+export:
+  notation
+
+meta:
+  fun notation_error(message :: String, at :: Syntax):
+    syntax_meta.error(message, at)
+
+  fun normalize_pattern(pat :: Syntax) :: Syntax:
+    match pat
+    | '($inside ...)': normalize_pattern('$inside ...')
+    | ~else: pat
+
+  // Keep this traversal in step with `encode_pattern`. Besides making
+  // repeated binders an error at the notation case, it lets us diagnose the
+  // dynamic annotation form before the closed HOL pattern encoder sees it as
+  // merely malformed.
+  fun pattern_names(raw_pattern :: Syntax) :: List.of(Syntax):
+    let pat = normalize_pattern(raw_pattern)
+    match pat
+    | '$inner ... :~ $_ ...':
+        notation_error(
+          "`:~` is not supported in HOL notation patterns; "
+            ++ "HOL annotations are static",
+          pat)
+    | '$inner ... :: $_ ...':
+        pattern_names('$inner ...')
+    | '_': []
+    | 'Pair($first, $second)':
+        pattern_names(first) ++ pattern_names(second)
+    | '[$element, ..., & $tail]':
+        let from_elements:
+          for values(out :~ List.of(Syntax) = []) (one in [element, ...]):
+            out ++ pattern_names(one)
+        from_elements ++ pattern_names(tail)
+    | '[$element, ...]':
+        for values(out :~ List.of(Syntax) = []) (one in [element, ...]):
+          out ++ pattern_names(one)
+    | '$(name :: Identifier)($argument, ...)':
+        for values(out :~ List.of(Syntax) = []) (
+              one in [argument, ...]):
+          out ++ pattern_names(one)
+    | '$(name :: Identifier)': [name]
+    | '$(value :: Term)': []
+    | ~else: []
+
+  fun encode_case_patterns(patterns :: List.of(Syntax))
+      :: List.of(Syntax):
+    let normalized = patterns.map(normalize_pattern)
+    let names:
+      for values(out :~ List.of(Syntax) = []) (pat in normalized):
+        out ++ pattern_names(pat)
+    let _seen:
+      for values(seen :~ List.of(Symbol) = []) (name in names):
+        let raw :~ Symbol = Syntax.unwrap(name)
+        when seen.contains(raw)
+        | notation_error(
+            "HOL notation operand names must be distinct within a case; "
+              ++ "pattern variable `" ++ to_string(raw) ++ "` repeats",
+            name)
+        seen ++ [raw]
+    normalized.map(encode_pattern)
+
+  // `[operator, fixity, operand-patterns]`. Parentheses around the complete
+  // operator head select the canonical layout. Parentheses around an operand
+  // make a multi-term pattern such as `x :: T` one operand term.
+  fun notation_pattern(head :: Syntax) :: List:
+    match head
+    | '($inside ...)': notation_pattern('$inside ...')
+    | '$_ ... :~ $_ ...':
+        notation_error(
+          "`:~` is not supported by HOL notation; HOL annotations are static",
+          head)
+    | '($left ...) $(op :: Name) ($right ...)':
+        [op, #'infix, ['($left ...)', '($right ...)']]
+    | '($left ...) $(op :: Name) $(right :: Term)':
+        [op, #'infix, ['($left ...)', normalize_pattern(right)]]
+    | '$(left :: Term) $(op :: Name) ($right ...)':
+        [op, #'infix, [normalize_pattern(left), '($right ...)']]
+    | '($operand ...) $(op :: Operator)':
+        [op, #'postfix, ['($operand ...)']]
+    | '$(op :: Name) ($operand ...)':
+        [op, #'prefix, ['($operand ...)']]
+    | '($operand ...) $(op :: Name)':
+        [op, #'postfix, ['($operand ...)']]
+    | '$(left :: Term) $(op :: Name) $(right :: Term)':
+        [op, #'infix,
+         [normalize_pattern(left), normalize_pattern(right)]]
+    | '$(operand :: Term) $(op :: Operator)':
+        [op, #'postfix, [normalize_pattern(operand)]]
+    | '$(op :: Name) $(operand :: Term)':
+        [op, #'prefix, [normalize_pattern(operand)]]
+    | '$(operand :: Term) $(op :: Name)':
+        [op, #'postfix, [normalize_pattern(operand)]]
+    | ~else:
+        notation_error(
+          "malformed HOL notation operator head; expected prefix "
+            ++ "`(operator pattern)`, infix `(pattern operator pattern)`, "
+            ++ "or postfix `(pattern operator)` form (parentheses optional)",
+          head)
+
+  fun keyword_clause(clause :: Syntax) :: Boolean:
+    match clause
+    | '$(keyword :: Keyword) $_ ...; ...': #true
+    | ~else: #false
+
+  fun option_name(kind :: Symbol) :: String:
+    match kind
+    | #'order: "order"
+    | #'stronger_than: "stronger_than"
+    | #'weaker_than: "weaker_than"
+    | #'same_as: "same_as"
+    | #'same_on_left_as: "same_on_left_as"
+    | #'same_on_right_as: "same_on_right_as"
+    | #'associativity: "associativity"
+    | ~else: "unknown"
+
+  fun fixity_name(fixity :: Symbol) :: String:
+    match fixity
+    | #'prefix: "prefix"
+    | #'infix: "infix"
+    | #'postfix: "postfix"
+    | ~else: "unknown"
+
+  fun notation_option_kind(option :: Syntax) :: Symbol:
+    match option
+    | '~associativity: ~left'
+        || '~associativity: ~right'
+        || '~associativity: ~none'
+        || '~associativity ~left'
+        || '~associativity ~right'
+        || '~associativity ~none':
+        #'associativity
+    | '~associativity: $_ ...'
+        || '~associativity $_ ...':
+        notation_error(
+          "`~associativity` must be `~left`, `~right`, or `~none`",
+          option)
+    | '~order: $_ ...' || '~order $_ ...': #'order
+    | '~stronger_than: $_ ...' || '~stronger_than $_ ...': #'stronger_than
+    | '~weaker_than: $_ ...' || '~weaker_than $_ ...': #'weaker_than
+    | '~same_as: $_ ...' || '~same_as $_ ...': #'same_as
+    | '~same_on_left_as: $_ ...'
+        || '~same_on_left_as $_ ...':
+        #'same_on_left_as
+    | '~same_on_right_as: $_ ...'
+        || '~same_on_right_as $_ ...':
+        #'same_on_right_as
+    | '~unsafe: $_ ...'
+        || '~unsafe $_ ...':
+        notation_error(
+          "`~unsafe` is not supported by HOL notation; "
+            ++ "dynamic implementations are unavailable",
+          option)
+    | '~name: $_ ...'
+        || '~name $_ ...'
+        || '~who: $_ ...'
+        || '~who $_ ...':
+        notation_error(
+          "`~name` and `~who` are ordinary Rhombus operator options and "
+            ++ "are not supported by HOL notation",
+          option)
+    | '$(keyword :: Keyword) $_ ...':
+        notation_error(
+          "unsupported HOL notation option; expected `~order`, "
+            ++ "`~stronger_than`, `~weaker_than`, `~same_as`, "
+            ++ "`~same_on_left_as`, `~same_on_right_as`, or "
+            ++ "`~associativity`",
+          option)
+    | ~else:
+        notation_error("malformed HOL notation parsing option", option)
+
+  fun validate_options(options :: List.of(Syntax)) :: List.of(Symbol):
+    for values(kinds :~ List.of(Symbol) = []) (option in options):
+      let kind = notation_option_kind(option)
+      when kinds.contains(kind)
+      | notation_error(
+          "duplicate HOL notation option `~" ++ option_name(kind) ++ "`",
+          option)
+      kinds ++ [kind]
+
+  fun split_notation_body(body :: List.of(Syntax)) :: List:
+    recur loop(rest = body, options :~ List.of(Syntax) = []):
+      match rest
+      | List.cons(clause, more) when keyword_clause(clause :~ Syntax):
+          loop(more, options ++ [clause :~ Syntax])
+      | ~else: [options, rest]
+
+  // A result annotation on a case belongs after a parenthesized operator
+  // head. Keeping that restriction removes the ambiguity between an
+  // unparenthesized typed operand and a case result.
+  fun split_case_head(head :: Syntax) :: List:
+    match head
+    | '($inside ...) :~ $_ ...':
+        notation_error(
+          "`:~` is not supported by HOL notation; result annotations are static",
+          head)
+    | '$_ ... :~ $_ ...':
+        notation_error(
+          "`:~` is not supported by HOL notation; HOL annotations are static",
+          head)
+    | '($inside ...) :: $result_type ...':
+        ['($inside ...)', '$result_type ...']
+    | '$_ ... :: $_ ...':
+        notation_error(
+          "a case-local HOL result annotation requires a parenthesized "
+            ++ "operator head",
+          head)
+    | ~else: [head, #false]
+
+  fun encode_implementation(clauses :: List.of(Syntax),
+                            result_type :: maybe(Syntax),
+                            at :: Syntax) :: Syntax:
+    let [clause, ...] = clauses
+    let body = encode_function_body('$clause; ...')
+    match result_type
+    | #false: body
+    | ty:
+        let typed = '(core_typed_expr (core_block_expr $body) ($((ty :~ Syntax))))'
+        '(core_body_expr $typed)'.relocate_span([at])
+
+  // `[operator, fixity, encoded-patterns, local-options,
+  //   encoded-body, source-head]`.
+  fun parse_notation_case(head :: Syntax,
+                          body :: List.of(Syntax)) :: List:
+    let [operator_head, result_type] = split_case_head(head)
+    let pattern_info = notation_pattern(operator_head :~ Syntax)
+    let source_patterns :~ List.of(Syntax) = pattern_info[2]
+    let encoded_patterns = encode_case_patterns(source_patterns)
+    let [options, implementation] = split_notation_body(body)
+    let options :~ List.of(Syntax) = options
+    let implementation :~ List.of(Syntax) = implementation
+    validate_options(options)
+    when implementation.length() == 0
+    | notation_error("a notation case needs a HOL body", head)
+    for (clause in implementation):
+      when keyword_clause(clause)
+      | notation_option_kind(clause)
+        notation_error(
+          "precedence options must precede a notation implementation",
+          clause)
+    [pattern_info[0],
+     pattern_info[1],
+     encoded_patterns,
+     options,
+     encode_implementation(implementation, result_type, head),
+     head]
+
+  fun combined_fixity_options(shared :: List.of(Syntax),
+                              cases :: List,
+                              fixity :: Symbol) :: List.of(Syntax):
+    let shared_kinds = validate_options(shared)
+    let first :~ List = cases[0]
+    for (entry in cases.drop(1)):
+      let local :~ List.of(Syntax) = (entry :~ List)[3]
+      when local.length() != 0
+      | notation_error(
+          "HOL notation parsing options are allowed only on the first "
+            ++ fixity_name(fixity) ++ " case",
+          local[0])
+    let local :~ List.of(Syntax) = (first :~ List)[3]
+    let local_kinds = validate_options(local)
+    for (option in local, kind in local_kinds):
+      when fixity != #'infix && kind == #'associativity
+      | notation_error(
+          "`~associativity` applies only to infix HOL notation",
+          option)
+      when shared_kinds.contains(kind)
+      | notation_error(
+          "duplicate HOL notation option `~" ++ option_name(kind) ++ "`",
+          option)
+    let applicable_shared:
+      (if fixity == #'infix
+       | shared
+       | shared.filter(
+           ~skip: fun (option):
+                    notation_option_kind(option) == #'associativity))
+    applicable_shared ++ local
+
+  fun notation_function(cases :: List,
+                        shared_result :: maybe(Syntax)) :: Syntax:
+    let first :~ List = cases[0]
+    let patterns :~ List.of(Syntax) = first[2]
+    let [binder, ...]:
+      for List (_ in List.iota(patterns.length())):
+        '(core_binder (core_pat_wildcard) #false)'
+    let [row, ...]:
+      for List (entry in cases):
+        let entry :~ List = entry
+        let encoded :~ List.of(Syntax) = entry[2]
+        let [pat, ...] = encoded
+        let body :~ Syntax = entry[4]
+        '(core_match_row [$pat, ...] $body)'
+          .relocate_span([entry[5] :~ Syntax])
+    let result:
+      match shared_result
+      | #false: '#false'
+      | ty: '($((ty :~ Syntax)))'
+    let encoded_function = '(core_function_expr [$binder, ...] $result (core_pattern_matrix [$row, ...]))'
+    encoded_function.relocate_span(
+      cases.map(fun (entry): (entry :~ List)[5] :~ Syntax))
+
+  fun apply_notation(function :: Syntax,
+                     operands :: List.of(Syntax)) :: Syntax:
+    let [argument, ...] = operands.map(hol_expr_meta.unpack)
+    hol_expr_meta.wrap_allowed(
+      'both',
+      '(core_call $function [$argument, ...])',
+      ~track: operands)
+
+  fun hol_rule(fixity :: Symbol, op :: Syntax,
+               options :: List.of(Syntax),
+               function :: Syntax) :: Syntax:
+    let [option, ...] = options
+    match fixity
+    | #'infix:
+        '«
+           '$('$')left $op $('$')right':
+             $option
+             ...
+             apply_notation('$function', [left, right])
+         »'
+    | #'prefix:
+        '«
+           '$op $('$')operand':
+             $option
+             ...
+             apply_notation('$function', [operand])
+         »'
+    | #'postfix:
+        '«
+           '$('$')operand $op':
+             $option
+             ...
+             apply_notation('$function', [operand])
+         »'
+    | ~else: notation_error("internal unknown notation fixity", op)
+
+  fun grouped_hol(rules :: List.of(Syntax)) :: Syntax:
+    let [rule, ...] = rules
+    'hol_expr.macro
+     | $rule
+     | ...'
+
+  fun expand_notation(shared :: List.of(Syntax),
+                      heads :: List.of(Syntax),
+                      bodies :: List.of(List.of(Syntax)),
+                      declared_name :: maybe(Syntax) = #false,
+                      shared_result :: maybe(Syntax) = #false) :: Syntax:
+    for (option in shared):
+      unless keyword_clause(option)
+      | notation_error(
+          "a shared HOL notation block can contain parsing options only",
+          option)
+    let shared_kinds = validate_options(shared)
+    let parsed:
+      for List (head in heads, body in bodies):
+        parse_notation_case(head, body)
+    let expected_name:
+      match declared_name
+      | #false: (parsed[0] :~ List)[0] :~ Syntax
+      | name: name :~ Syntax
+    for (entry in parsed):
+      let entry :~ List = entry
+      let op :~ Syntax = entry[0]
+      unless to_string(op) == to_string(expected_name)
+      | notation_error(
+          (if declared_name
+           | "every case in a named HOL notation must use the declared "
+               ++ "operator name"
+           | "every case in an immediate HOL notation must use the initial "
+               ++ "case operator name"),
+          entry[5] :~ Syntax)
+    let fixities:
+      for values(out :~ List.of(Symbol) = []) (entry in parsed):
+        let fixity :~ Symbol = (entry :~ List)[1]
+        (if out.contains(fixity) | out | out ++ [fixity])
+    when fixities.contains(#'infix) && fixities.contains(#'postfix)
+    | notation_error(
+        "combination of infix and postfix HOL notation cases is not allowed",
+        heads[0])
+    unless fixities.contains(#'infix)
+    | for (option in shared, kind in shared_kinds):
+        when kind == #'associativity
+        | notation_error(
+            "`~associativity` was specified without an infix HOL notation case",
+            option)
+    let rules:
+      for List (fixity in fixities):
+        let cases = parsed.filter(
+                      ~keep: fun (entry):
+                               ((entry :~ List)[1] :~ Symbol) == fixity)
+        let options = combined_fixity_options(shared, cases, fixity)
+        hol_rule(
+          fixity,
+          (cases[0] :~ List)[0] :~ Syntax,
+          options,
+          notation_function(cases, shared_result))
+    grouped_hol(rules)
+
+
+defn.macro
+| 'notation $(name :: Name) :~ $_ ...: $shared; ...
+   | $(head :: Sequence): $body; ...
+   | ...':
+    notation_error(
+      "`:~` is not supported by HOL notation; result annotations are static",
+      name)
+| 'notation $(name :: Name) :: $shared_result ...: $shared; ...
+   | $(head :: Sequence): $body; ...
+   | ...':
+    expand_notation([shared, ...],
+                    [head, ...],
+                    [[body, ...], ...],
+                    name,
+                    '$shared_result ...')
+| 'notation $(name :: Name): $shared; ...
+   | $(head :: Sequence): $body; ...
+   | ...':
+    expand_notation([shared, ...],
+                    [head, ...],
+                    [[body, ...], ...],
+                    name)
+| 'notation $(name :: Name) :~ $_ ...
+   | $(head :: Sequence): $body; ...
+   | ...':
+    notation_error(
+      "`:~` is not supported by HOL notation; result annotations are static",
+      name)
+| 'notation $(name :: Name) :: $shared_result ...
+   | $(head :: Sequence): $body; ...
+   | ...':
+    expand_notation([],
+                    [head, ...],
+                    [[body, ...], ...],
+                    name,
+                    '$shared_result ...')
+| 'notation $(name :: Name)
+   | $(head :: Sequence): $body; ...
+   | ...':
+    expand_notation([], [head, ...], [[body, ...], ...], name)
+| 'notation
+   | $(head :: Sequence): $body; ...
+   | ...':
+    expand_notation([], [head, ...], [[body, ...], ...])
+| 'notation ($inside ...) :~ $_ ...: $body; ...':
+    notation_error(
+      "`:~` is not supported by HOL notation; result annotations are static",
+      '($inside ...)')
+| 'notation $operator_head ... :~ $_ ...: $body; ...':
+    notation_error(
+      "`:~` is not supported by HOL notation; result annotations are static",
+      '$operator_head ...')
+| 'notation ($inside ...) :: $result_type ...: $body; ...':
+    expand_notation(
+      [],
+      ['($inside ...) :: $result_type ...'],
+      [[body, ...]])
+| 'notation $operator_head ... :: $_ ...: $body; ...':
+    notation_error(
+      "a case-local HOL result annotation requires a parenthesized "
+        ++ "operator head",
+      '$operator_head ...')
+| 'notation $(head :: Sequence): $body; ...':
+    expand_notation([], [head], [[body, ...]])
+| 'notation $rest ...':
+    syntax_meta.error(
+      "expected an operator-style HOL `notation` case or `|` cases",
+      '$rest ...')

@@ -11,12 +11,18 @@ library all sit on top of that kernel.
   from and checked against `isabelle-hol-kernel`.
 - `isabelle-hol-kernel` — the Isabelle/HOL formalization the kernel is
   generated from and checked against.
-- `rhombus-hol-quickcheck` — runtime property-checking support, independent
-  of the prover.
-- `rhombus-hol-prover` — the derived layer built over the kernel and
-  QuickCheck: tactics, conversions, and the `#lang rhombus/hol` language
+- `rhombus-hol-prover` — the derived layer built over the kernel: tactics, conversions, and the `#lang rhombus/hol` language
   surface (frontend elaboration, the waterfall proof procedure, recursive
   function and datatype definition).
+  Its modules under `rhombus/hol/` follow the pipeline:
+  - `frontend/parser` — declaration shapes and HOL expression syntax into
+    theory-independent Core values;
+  - `frontend/checker` — typing and name resolution: each declaration is
+    checked once, and both backends consume the closed result;
+  - `backend/code` — lowering checked terms to executable Rhombus;
+  - `backend/proof` — lowering checked terms into kernel terms, the
+    definition principles, the derived logic, and proof automation;
+  - `module.rhm` — the declaration macros that connect the stages.
 - `rhombus-hol-stdlib` — a proved standard library built on the prover.
 - `rhombus-hol` — the top-level package: `#lang rhombus/hol` itself, the
   test suite, and the documentation.
@@ -25,7 +31,7 @@ library all sit on top of that kernel.
 
 ```sh
 raco pkg install --auto --link \
-  ./rhombus-hol-kernel ./rhombus-hol-quickcheck ./rhombus-hol-prover \
+  ./rhombus-hol-kernel ./rhombus-hol-prover \
   ./rhombus-hol-stdlib ./rhombus-hol
 raco make rhombus-hol-prover/rhombus/hol.rkt
 ```
@@ -35,6 +41,11 @@ raco make rhombus-hol-prover/rhombus/hol.rkt
 ```sh
 raco test --jobs 4 rhombus-hol/rhombus/hol/tests
 ```
+
+The test tree mirrors the prover's layout (`frontend/`, `backend/`), with
+`module/` holding end-to-end tests of whole declarations, and `kernel/`,
+`stdlib/`, and `spec/` covering the other packages and the
+language specification.
 
 ## Formal kernel generation
 

@@ -66,7 +66,7 @@ comparison: none of the three exists in @tt{fusion.ml} either, and none of
 the three is one of the ten rules or a definitional principle --- printing
 lives beside the kernel only because @tt{check_term}'s error messages need it;
 moving it would create a circular import. Type unification was already moved
-out to the elaborator (@tt{rhombus-hol-prover/rhombus/hol/surface/elaborate.rhm})
+out to the elaborator (@tt{rhombus-hol-prover/rhombus/hol/backend/proof/elaborate.rhm})
 before this section was written.
 
 @section{The axioms}
@@ -113,7 +113,7 @@ the transitive closure of a direct-child predicate spelled with the
 datatype's own discriminators and selectors, so neither the closure nor the
 child predicate is a recursive definition and neither needs a recursion
 theorem. The equations then follow from the closure's induction principle
-(@tt{rhombus/hol/definition/function/transitive_closure}).
+(@tt{rhombus/hol/backend/proof/definition/function/transitive_closure}).
 
 @section{What is postulated beyond that}
 
@@ -133,8 +133,8 @@ whether recursive or not. A non-recursive one --- any number of constructors,
 fields and type parameters --- is built as a sum of products of @tt{unit} over
 its field types. A @emph{self-recursive} one is carved out of the labelled
 trees over
-@tt{num} (@tt{rhombus/hol/definition/datatype/tree},
-@tt{rhombus/hol/definition/datatype/recursion}): its
+@tt{num} (@tt{rhombus/hol/backend/proof/definition/datatype/tree},
+@tt{rhombus/hol/backend/proof/definition/datatype/recursion}): its
 representation is the least set of trees closed under its constructors, cut
 out by @tt{new_basic_type_definition}, and its injectivity, distinctness,
 exhaustiveness, induction, discriminators, selectors and destructor
@@ -262,7 +262,7 @@ Beyond the termination restrictions in @secref("termination"):
 
 @itemlist(
 
- @item{Logical declarations, including @rhombus(quickcheck, ~datum), must
+ @item{Logical declarations must
   appear directly in a @rhombuslangname(rhombus/hol) module body --- not
   inside @rhombus(block) and not inside a macro expansion.}
 
@@ -285,12 +285,6 @@ Beyond the termination restrictions in @secref("termination"):
 
  @item{Adopting a theory re-runs the exporting module's proofs, once per
   importing compilation.}
-
- @item{@rhombus(quickcheck, ~datum) executes the runtime reading of a
-  universally quantified proposition over concrete input types. Each input
-  type needs a generator and shrinker registered by a declared datatype.
-  Success does not construct a theorem or modify the theory; failure aborts
-  module initialization with a shrunk counterexample.}
 
  @item{The function body grammar has named applications, @rhombus(if),
   @rhombus(cond), local @rhombus(let), matching, Booleans, self-typed

@@ -8,9 +8,9 @@
 
 import:
   rhombus/meta open
-  "hol/surface/module.rhm" as mb
-  "hol/surface/space.rhm" open
-  "hol/surface/notation.rhm" as sn
+  "hol/module.rhm" as mb
+  "hol/frontend/parser/space.rhm" open
+  "hol/frontend/parser/notation.rhm" as sn
 
 module reader ~lang rhombus/reader:
   ~lang: "hol.rkt"
@@ -29,7 +29,6 @@ export:
     mb.theorem as theorem
     mb.proof as proof
     mb.overload as overload
-    mb.quickcheck as quickcheck
     mb.hol_import as import
     sn.notation as notation
   hol_expr

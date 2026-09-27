@@ -1,0 +1,587 @@
+#lang rhombus/static
+// SPDX-License-Identifier: 0BSD
+// ACL2 hint handling is a design reference; see THIRD_PARTY_NOTICES.
+
+
+// Lowering checked expressions into the logical world.
+//
+// Typing and name resolution happen once, in `frontend/checker`. This module
+// turns the closed checked trees it produces into kernel terms and function
+// specifications: binders become variables, constants appear at their
+// checked types, and pattern matches become decision trees over the
+// datatypes' discriminators and selectors.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/frontend/checker/datatype open
+  rhombus/hol/backend/proof/definition/datatype/algebra open
+  rhombus/hol/backend/proof/definition/function/spec open
+  rhombus/hol/backend/proof/definition/function/decision_tree open
+  rhombus/hol/frontend/parser/core open
+  rhombus/hol/backend/proof/logic/bool open
+  rhombus/hol/frontend/checker/checked open
+
+fun fresh_wildcard(ty :: HType) :: FVar:
+  mk_var(Symbol.gen("_wild"), ty)
+
+// Reify eager initializer evaluation as beta-redexes when a clause is used
+// inside a lambda or expression-level match. The logical normal form remains
+// the clause's last term, while recursive-call traversal still sees every
+// initializer.
+fun eager_clause_term(c :: DefClause) :: Term:
+  recur loop (remaining :~ List.of(Term) = c.terms):
+    match remaining
+    | [last]: last
+    | List.cons(initializer, rest):
+        let initializer :~ Term = initializer
+        let ignored = mk_var(Symbol.gen("_eager"), type_of(initializer))
+        mk_comb(mk_abs(ignored, loop(rest)), initializer)
+
+
+
+// The clause variable a body `match` on `target` refines: a variable still
+// at a live, unrefined position in `pats` -- a parameter not yet matched, or
+// one an enclosing pattern in this clause just bound. Anything else (a `let`
+// binding, a variable of an enclosing function, an argument already refined)
+// is matched as an ordinary expression instead.
+fun clause_var(env :: Map.of(Symbol, Term), pats :: List.of(Term),
+               target :: CheckedExpr) :: maybe(FVar):
+  match target
+  | CheckedLocal(name, _, _):
+      match env.get(name, #false)
+      | v :: FVar when pattern_var_live(pats, v): v
+      | ~else: #false
+  | ~else: #false
+
+// Whether `v` occurs, unrefined, somewhere in `pats`'s pattern trees.
+fun pattern_var_live(pats :: List.of(Term), v :: FVar) :: Boolean:
+  fun walk(t :: Term) :: Boolean:
+    match t
+    | FVar(_, _): t == (v :~ Term)
+    | ~else:
+        let (head, args) = strip_comb(t)
+        match head
+        | Const(_, _): for any (a in args): walk(a)
+        | ~else: #false
+  for any (p in pats): walk(p)
+
+// `pats` with the one live occurrence of `v` replaced by `new_pat`.
+fun refine_pats(pats :: List.of(Term), v :: FVar,
+                new_pat :: Term) :: List.of(Term):
+  fun walk(t :: Term) :: Term:
+    match t
+    | FVar(_, _): (if t == (v :~ Term) | new_pat | t)
+    | ~else:
+        let (head, args) = strip_comb(t)
+        match head
+        | Const(_, _): list_mk_comb(head, args.map(walk))
+        | ~else: t
+  pats.map(walk)
+
+
+// ============================================================================
+// Core elaboration
+// ============================================================================
+//
+// The checker has already made every name, type, overload, and pattern
+// decision and closed its result. This module turns that result into kernel
+// terms: variables for binders, constants at their checked types, and
+// decision trees for pattern matches.
+
+export:
+  ElabEnv
+  checked_to_term
+  checked_function_clauses
+  merge_pattern_bindings
+  bind_checked_irrefutable_pattern
+
+// `vars` maps each local name in scope to its term. `self_name` and `self`
+// are the definition being elaborated, so that a recursive call resolves
+// before the constant exists in the theory; outside a definition both are
+// `#false`. `who` names the declaration kind in diagnostics.
+class ElabEnv(thy :: Theory,
+              vars :: Map.of(Symbol, Term),
+              who :: Symbol,
+              self_name :: maybe(Symbol) = #false,
+              self :: maybe(Term) = #false,
+              datatypes :: Map.of(Symbol, DatatypeSpec) = {})
+
+// -- CoreExpr elaboration ----------------------------------------------------
+
+
+// Specialize phantom type variables in already-elaborated arguments from the
+// function domains selected by unification. This is needed for expressions
+// such as `left(x) === left(y)`: each `left` initially has an independent
+// unconstrained right-hand sum parameter.
+fun specialize_call_args(fty :: HType, args :: List.of(Term)) :: List.of(Term):
+  recur loop (ty :~ HType = fty, rest :~ List.of(Term) = args,
+              acc :~ List.of(Term) = []):
+    match rest
+    | []: acc
+    | List.cons(arg, more):
+        let (domain, range) = dest_fun(ty)
+        let arg2:
+          cond
+          | type_of(arg) == domain: arg
+          | ~else:
+              match type_match(type_of(arg), domain, {})
+              | #false: arg
+              | theta: inst_type(theta :~ Map, arg)
+        loop(range, more, acc ++ [arg2])
+
+
+
+fun merge_pattern_bindings(who :: Symbol,
+                           left :: Map.of(Symbol, Term),
+                           right :: Map.of(Symbol, Term),
+                           at :: Syntax) :: Map.of(Symbol, Term):
+  for values(out :~ Map = left) ((name, value) in right):
+    when out.get(name, #false)
+    | syntax_error(
+        who, "a binding pattern repeats `" ++ to_string(name) ++ "`", at)
+    out ++ {name: value :~ Term}
+
+fun single_constructor(env :: ElabEnv, name :: Symbol, at :: Syntax) :: List:
+  let matches:
+    for values(out :~ List = []) ((_, spec) in env.datatypes):
+      let spec :~ DatatypeSpec = spec
+      let constructors:
+        for values(found :~ List = []) (ctor in spec.ctors):
+          let ctor :~ Ctor = ctor
+          (if ctor.name == name | found ++ [ctor] | found)
+      match constructors
+      | [ctor] when spec.ctors.length() == 1:
+          out ++ [[spec, ctor]]
+      | _: out
+  match matches
+  | [entry]: entry :~ List
+  | ~else:
+      syntax_error(
+        env.who,
+        "a binder accepts only irrefutable patterns; `" ++ to_string(name)
+          ++ "` is not the sole constructor of its datatype",
+        at)
+
+fun checked_pattern_root_name(pat :: CheckedPattern,
+                              hint :: String) :: Symbol:
+  match pat
+  | CheckedPatVar(name, _, _): name
+  | ~else: Symbol.gen(hint)
+
+fun bind_checked_irrefutable_pattern(
+      env :: ElabEnv,
+      pat :: CheckedPattern,
+      value :: Term)
+    :: Map.of(Symbol, Term):
+  match pat
+  | CheckedPatWildcard(_, _): {}
+  | CheckedPatVar(name, _, _): {name: value}
+  | CheckedPatCtor(name, args, _, _, at) when name == c_pair:
+      let resolved = value
+      let first_bindings = bind_checked_irrefutable_pattern(
+                             env, args[0] :~ CheckedPattern,
+                             mk_fst(resolved))
+      let second_bindings = bind_checked_irrefutable_pattern(
+                              env, args[1] :~ CheckedPattern,
+                              mk_snd(resolved))
+      merge_pattern_bindings(
+        env.who, first_bindings, second_bindings, at)
+  | CheckedPatCtor(name, args, _, _, at):
+      let [_spec, ctor] = single_constructor(env, name, at)
+      let ctor :~ Ctor = ctor
+      let resolved_value = value
+      let parsed:
+        for List (arg in args, field in ctor.fields):
+          let arg :~ CheckedPattern = arg
+          let selector_type = mk_fun(
+                                type_of(resolved_value),
+                                checked_pattern_ty(arg))
+          let selected = mk_comb(
+                           mk_const(
+                             selector_name(ctor, field :~ Field),
+                             selector_type),
+                           resolved_value)
+          bind_checked_irrefutable_pattern(env, arg, selected)
+      for values(out :~ Map = {}) (bindings in parsed):
+        merge_pattern_bindings(env.who, out, bindings :~ Map, at)
+  | CheckedPatLiteral(_, _, at):
+      syntax_error(
+        env.who, "a literal pattern is refutable and cannot bind here", at)
+
+
+fun checked_local_term(env :: ElabEnv, name :: Symbol,
+                       at :: Syntax) :: Term:
+  match env.vars.get(name, #false)
+  | term :: Term: term
+  | #false:
+      match env.self_name
+      | self_name :: Symbol when self_name == name:
+          match env.self
+          | term :: Term: term
+          | #false:
+              error(~who: #'checked_local_term,
+                    "checked recursive reference has no logical term")
+      | ~else:
+          error(~who: #'checked_local_term,
+                "checked local reference is absent from the logical environment")
+
+fun checked_quantifier_term(env :: ElabEnv,
+                            binders :: List.of(CheckedBinder),
+                            body :: CheckedExpr,
+                            is_forall :: Boolean) :: Term:
+  let variables:
+    for List (binder in binders):
+      let binder :~ CheckedBinder = binder
+      mk_var(checked_pattern_root_name(binder.pat, "_bound"),
+             binder.ty)
+  let local_bindings:
+    for values(out :~ Map = {}) (binder in binders,
+                                 variable in variables):
+      let binder :~ CheckedBinder = binder
+      merge_pattern_bindings(
+        env.who, out,
+        bind_checked_irrefutable_pattern(
+          env, binder.pat, variable :~ Term),
+        binder.at)
+  let inner = checked_to_term(
+                sub_env(env, env.vars ++ local_bindings), body)
+  let build = (if is_forall | mk_forall | mk_exists)
+  for values(term :~ Term = inner) (
+        variable in variables.reverse()):
+    build(variable :~ FVar, term)
+
+fun checked_to_term(env :: ElabEnv, expr :: CheckedExpr) :: Term:
+  match expr
+  | CheckedLocal(name, _, at): checked_local_term(env, name, at)
+  | CheckedConstant(name, ty, _):
+      mk_const(name, ty)
+  | CheckedNumeral(value, _):
+      mk_nat_lit(env.thy, value)
+  | CheckedIf(condition, then_branch, else_branch, _, _):
+      mk_cond(checked_to_term(env, condition),
+              checked_to_term(env, then_branch),
+              checked_to_term(env, else_branch))
+  | CheckedBoolOp(op, args, _):
+      let terms = args.map(
+                    fun (arg :: CheckedExpr):
+                      checked_to_term(env, arg))
+      cond
+      | op == #'conj:
+          mk_conj(terms[0] :~ Term, terms[1] :~ Term)
+      | op == #'disj:
+          mk_disj(terms[0] :~ Term, terms[1] :~ Term)
+      | op == #'imp:
+          mk_imp(terms[0] :~ Term, terms[1] :~ Term)
+      | op == #'neg:
+          mk_neg(terms[0] :~ Term)
+      | ~else:
+          error(~who: #'checked_to_term, "unknown checked Boolean operator")
+  | CheckedEq(left, right, _, _):
+      mk_eq(checked_to_term(env, left), checked_to_term(env, right))
+  | CheckedApply(head, args, _, _):
+      let head_term = checked_to_term(env, head)
+      let arg_terms = args.map(
+                        fun (arg :: CheckedExpr):
+                          checked_to_term(env, arg))
+      list_mk_comb(
+        head_term, specialize_call_args(type_of(head_term), arg_terms))
+  | CheckedQuantifier(binders, body, is_forall, _):
+      checked_quantifier_term(env, binders, body, is_forall)
+  | fn :: CheckedFunction:
+      checked_function_term(env, fn)
+  | CheckedBlock(body, _, _):
+      checked_body_term(env, body)
+  | CheckedMatch(scrutinee, matrix, _, at):
+      checked_match_term(env, scrutinee, matrix, at)
+  | ~else:
+      error(~who: #'checked_to_term, "unknown CheckedExpr variant")
+
+
+
+fun checked_sub_pattern(env :: ElabEnv,
+                        pat :: CheckedPattern) :: List:
+  match pat
+  | CheckedPatWildcard(ty, _):
+      [fresh_wildcard(ty) :~ Term, {}]
+  | CheckedPatVar(name, ty, _):
+      let variable = mk_var(name, ty)
+      [variable :~ Term, {name: variable :~ Term}]
+  // Products are not declared datatypes, so retain their irrefutable binding
+  // interpretation while using the checked component types.
+  | CheckedPatCtor(name, _, _, ty, _) when name == c_pair:
+      let root = fresh_wildcard(ty)
+      [root :~ Term, bind_checked_irrefutable_pattern(env, pat, root)]
+  | CheckedPatCtor(name, args, constructor_ty, _, at):
+      let parsed:
+        args.map(
+          fun (arg :: CheckedPattern): checked_sub_pattern(env, arg))
+      let subpats = parsed.map(fun (pair :: List): pair[0] :~ Term)
+      let bindings:
+        for values(out :~ Map = {}) (pair in parsed):
+          merge_pattern_bindings(
+            env.who, out, (pair :~ List)[1] :~ Map, at)
+      [list_mk_comb(
+         mk_const(name, constructor_ty), subpats),
+       bindings]
+  | CheckedPatLiteral(value, _, _):
+      [mk_nat_lit(env.thy, value), {}]
+
+
+class ClauseEnv(thy :: Theory,
+                self_name :: maybe(Symbol),
+                self :: maybe(Term),
+                pats :: List.of(Term),
+                vars :: Map.of(Symbol, Term),
+                at :: Syntax,
+                result_type :: HType,
+                datatypes :: Map.of(Symbol, DatatypeSpec))
+fun clause_elab_env(env :: ClauseEnv) :: ElabEnv:
+  ElabEnv(env.thy, env.vars, #'function, env.self_name, env.self,
+          env.datatypes)
+
+
+
+fun checked_parse_body(env :: ClauseEnv, body :: CheckedBody) :: List:
+  match body
+  | matrix :: CheckedPatternMatrix:
+      checked_clause_rows(env, matrix)
+  | CheckedBodyMatch(target, matrix, _, at):
+      match clause_var(env.vars, env.pats, target)
+      | #false:
+          [DefClause(env.pats,
+                     [checked_match_term(clause_elab_env(env), target,
+                                         matrix, at)])]
+      | v :~ FVar: checked_parse_clauses(env, v, matrix)
+  | CheckedBodyLet(binding_pat, init, tail, _, body_at):
+      let elab_env = clause_elab_env(env)
+      let value = checked_to_term(elab_env, init)
+      let bindings = bind_checked_irrefutable_pattern(
+                       elab_env, binding_pat, value)
+      let vars2 = env.vars ++ bindings
+      let env2 = ClauseEnv(env.thy, env.self_name, env.self, env.pats,
+                           vars2, env.at, env.result_type, env.datatypes)
+      let clauses = checked_parse_body(env2, tail)
+      for List (clause in clauses):
+        let clause :~ DefClause = clause
+        DefClause(clause.pats, List.cons(value, clause.terms))
+  | CheckedBodyExpr(expr):
+      let value = checked_to_term(clause_elab_env(env), expr)
+      [DefClause(env.pats, [value])]
+  | ~else:
+      error(~who: #'checked_parse_body, "unknown CheckedBody variant")
+
+fun checked_parse_clauses(env :: ClauseEnv, v :: FVar,
+                          matrix :: CheckedPatternMatrix) :: List:
+  recur loop (remaining :~ List = matrix.rows, acc :~ List = []):
+    match remaining
+    | []: acc
+    | List.cons(row, rest):
+        let parsed = checked_parse_clause(env, v, row :~ CheckedMatchRow)
+        loop(rest, acc ++ parsed)
+
+fun checked_parse_clause(env :: ClauseEnv, v :: FVar,
+                         row :: CheckedMatchRow) :: List:
+  let [source_pat] = row.patterns
+  let [pat, bindings] = checked_sub_pattern(
+                          clause_elab_env(env),
+                          source_pat :~ CheckedPattern)
+  // In this clause `v` is `pat`: a later mention of a name bound to it, a
+  // second `match` on it included, means the refined value.
+  let refined:
+    for values(out :~ Map = {}) ((name, value) in env.vars):
+      out ++ {name: inst_fvar({v: pat :~ Term}, value :~ Term)}
+  let env2 = ClauseEnv(env.thy, env.self_name, env.self,
+                       refine_pats(env.pats, v, pat :~ Term),
+                       refined ++ (bindings :~ Map), env.at, env.result_type,
+                       env.datatypes)
+  checked_parse_body(env2, row.body)
+
+fun checked_clause_rows(env :: ClauseEnv,
+                        matrix :: CheckedPatternMatrix) :: List:
+  recur loop (remaining :~ List = matrix.rows, acc :~ List = []):
+    match remaining
+    | []: acc
+    | List.cons(row, rest):
+        let parsed = checked_clause_row(env, row :~ CheckedMatchRow)
+        loop(rest, acc ++ parsed)
+
+fun checked_clause_row(env :: ClauseEnv, row :: CheckedMatchRow) :: List:
+  unless row.patterns.length() == env.pats.length()
+  | error(~who: #'checked_clause_row,
+          "checked clause arity differs from its function")
+  let elab_env = clause_elab_env(env)
+  let (pats2, local_bindings):
+    for values(ps :~ List = env.pats, bindings :~ Map = {}) (
+          col in List.iota(row.patterns.length())):
+      let v :~ FVar:
+        match ps[col]
+        | FVar(_, _): ps[col]
+        | ~else:
+            error(~who: #'checked_clause_row,
+                  "checked argument has already been matched")
+      let [pat, bound] = checked_sub_pattern(
+                           elab_env,
+                           row.patterns[col] :~ CheckedPattern)
+      values(
+        refine_pats(ps, v, pat :~ Term),
+        merge_pattern_bindings(
+          #'function, bindings, bound :~ Map, row.at))
+  let vars2 = env.vars ++ local_bindings
+  let env2 = ClauseEnv(env.thy, env.self_name, env.self, pats2, vars2, env.at,
+                       env.result_type, env.datatypes)
+  checked_parse_body(env2, row.body)
+
+
+fun local_tree_term(spec :: FunSpec,
+                    datatypes :: Map.of(Symbol, DatatypeSpec),
+                    args :: List.of(Term),
+                    tree :: DecisionTree) :: Term:
+  fun datatype_for(ty :: HType) :: DatatypeSpec:
+    match ty
+    | TyApp(name, _): datatypes[name]
+    | ~else:
+        error(~who: #'function,
+              "internal local match on a non-datatype")
+  match tree
+  | DTLeaf(clause_index, bindings):
+      let clause :~ DefClause = spec.clauses[clause_index]
+      let substitutions:
+        for values(out :~ Map = {}) (binding in bindings):
+          let binding :~ DTBinding = binding
+          out ++ {binding.var: path_term(datatype_for, args, binding.path)}
+      inst_fvar(substitutions, eager_clause_term(clause))
+  | DTSwitch(path, self_type, branches):
+      let scrutinee = path_term(datatype_for, args, path)
+      recur branch_term (remaining :~ List = branches):
+        match remaining
+        | [last]:
+            local_tree_term(
+              spec, datatypes, args, (last :~ DTBranch).tree)
+        | List.cons(first, rest):
+            let first :~ DTBranch = first
+            let discriminator = mk_const(
+                                  discriminator_name(first.ctor),
+                                  mk_fun(self_type, bool))
+            mk_cond(
+              mk_comb(discriminator, scrutinee),
+              local_tree_term(spec, datatypes, args, first.tree),
+              branch_term(rest))
+  | DTLiteralSwitch(path, branches, default):
+      let scrutinee = path_term(datatype_for, args, path)
+      recur branch_term (remaining :~ List = branches):
+        match remaining
+        | []: local_tree_term(spec, datatypes, args, default)
+        | List.cons(first, rest):
+            let first :~ DTLiteralBranch = first
+            mk_cond(
+              mk_eq(scrutinee, first.literal),
+              local_tree_term(spec, datatypes, args, first.tree),
+              branch_term(rest))
+  | ~else:
+      error(~who: #'function, "unknown local function decision-tree node")
+fun checked_body_term(env :: ElabEnv, body :: CheckedBody) :: Term:
+  match body
+  | CheckedBodyExpr(expr):
+      checked_to_term(env, expr)
+  | CheckedBodyLet(pat, init, tail, _, _):
+      let value = checked_to_term(env, init)
+      let root = mk_var(
+                   checked_pattern_root_name(pat, "_let"),
+                   checked_pattern_ty(pat))
+      let bindings = bind_checked_irrefutable_pattern(env, pat, root)
+      let result = checked_body_term(
+                     sub_env(env, env.vars ++ bindings), tail)
+      mk_comb(mk_abs(root :~ FVar,
+                     result),
+              value)
+  | CheckedBodyMatch(scrutinee, matrix, _, at):
+      checked_match_term(env, scrutinee, matrix, at)
+  | _ :: CheckedPatternMatrix:
+      error(~who: #'checked_body_term,
+            "checked function clauses are not an expression block")
+  | ~else:
+      error(~who: #'checked_body_term, "unknown CheckedBody variant")
+
+fun checked_match_term(env :: ElabEnv,
+                       scrutinee :: CheckedExpr,
+                       matrix :: CheckedPatternMatrix,
+                       at :: Syntax) :: Term:
+  let scrutinee_term = checked_to_term(env, scrutinee)
+  let root = mk_var(
+               Symbol.gen("_match_scrutinee"), type_of(scrutinee_term))
+  let result_type = matrix.ty
+  let clause_env = ClauseEnv(
+                     env.thy, env.self_name, env.self,
+                     [root :~ Term], env.vars, at, result_type,
+                     env.datatypes)
+  let parsed = checked_clause_rows(clause_env, matrix)
+  let local_name = Symbol.gen("_match_expression")
+  let spec = FunSpec(
+               local_name, [type_of(scrutinee_term)], result_type, parsed)
+  let tree = compile_patterns(
+               env.thy, env.who, local_name,
+               parsed.map(fun (clause :: DefClause): clause.pats),
+               env.datatypes,
+               ~show_clause:
+                 fun (_ :: Int): "match expression clause")
+  let body_term = local_tree_term(
+                    spec, env.datatypes, [root :~ Term], tree)
+  mk_comb(mk_abs(root, body_term), scrutinee_term)
+
+fun checked_function_clauses(
+      env :: ElabEnv,
+      fn :: CheckedFunction)
+    :: values(List.of(FVar), HType, List.of(DefClause)):
+  let parameter_vars:
+    for List (binder in fn.params):
+      let binder :~ CheckedBinder = binder
+      mk_var(
+        checked_pattern_root_name(binder.pat, "_parameter"),
+        binder.ty)
+  let local_bindings:
+    for values(out :~ Map = {}) (binder in fn.params,
+                                 variable in parameter_vars):
+      let binder :~ CheckedBinder = binder
+      merge_pattern_bindings(
+        env.who, out,
+        bind_checked_irrefutable_pattern(
+          env, binder.pat, variable :~ Term),
+        binder.at)
+  let vars = env.vars ++ local_bindings
+  let result_type = fn.result_ty
+  let clause_env = ClauseEnv(
+                     env.thy, env.self_name, env.self,
+                     parameter_vars.map(
+                       fun (variable :: FVar): variable :~ Term),
+                     vars, fn.at, result_type, env.datatypes)
+  values(parameter_vars, result_type, checked_parse_body(clause_env, fn.body))
+
+fun checked_function_term(env :: ElabEnv,
+                          fn :: CheckedFunction) :: Term:
+  let (parameter_vars, result_type, clauses) = checked_function_clauses(
+                                                  env, fn)
+  let local_name = Symbol.gen("_local_function")
+  let spec = FunSpec(
+               local_name,
+               parameter_vars.map(
+                 fun (variable :: FVar): variable.ty),
+               result_type, clauses)
+  let tree = compile_patterns(
+               env.thy, #'function, local_name,
+               clauses.map(fun (clause :: DefClause): clause.pats),
+               env.datatypes,
+               ~show_clause:
+                 fun (_ :: Int): "local function clause")
+  let body_term = local_tree_term(
+                    spec, env.datatypes,
+                    parameter_vars.map(
+                      fun (variable :: FVar): variable :~ Term),
+                    tree)
+  list_mk_abs(parameter_vars, body_term)
+
+
+
+fun sub_env(env :: ElabEnv, vars :: Map.of(Symbol, Term)) :: ElabEnv:
+  ElabEnv(env.thy, vars, env.who, env.self_name, env.self, env.datatypes)

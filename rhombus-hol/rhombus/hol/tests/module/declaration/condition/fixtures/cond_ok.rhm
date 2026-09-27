@@ -1,0 +1,233 @@
+#lang rhombus/hol
+
+// `cond` extends the reflected function-body subset beyond `if` and Boolean
+// operators. It desugars to nested `if` and requires an explicit
+// `~else` clause -- there is no exhaustiveness analysis over arbitrary
+// Boolean guards the way `match` has over constructors.
+
+export:
+  Nat
+  zero
+  succ
+  pick3
+  two
+  typed_branch
+  pair_branch
+  pair_fst
+  pair_snd
+  pair_shadowed
+  List
+  nil
+  cons
+  list_branch
+  Codepoint
+  codepoint
+  String
+  text
+  string_branch
+  is_hi
+  is_empty_string
+  set_branch
+  is_member
+  is_not_member
+  set_shadowed
+  conj_branch
+  disj_branch
+  imp_branch
+  neg_branch
+  eq_left_numeral
+  eq_right_numeral
+  eq_neither_numeral
+  plus
+  double
+  named_apply_branch
+  local_apply_branch
+  zero_arg_branch
+  poly_first
+  nat_literal_branch
+
+datatype Nat
+| zero()
+| succ(pred :: Nat)
+
+function pick3(b1 :: Boolean, b2 :: Boolean, m :: Nat, n :: Nat, k :: Nat) :: Nat:
+  cond
+  | b1: m
+  | b2: n
+  | ~else: k
+
+def two = succ(succ(zero()))
+
+// A type-ascribed branch (`(2 :: Nat)`) is purely a type hint with no
+// runtime representation of its own -- the executable reading must reduce
+// through the ascription to the branch's own value.
+function typed_branch(b :: Boolean) :: Nat:
+  if b
+  | (2 :: Nat)
+  | succ(zero())
+
+// A `Pair` expression inside an `if` branch is checked and rendered
+// structurally: it has to reach `if`'s own type unification (matching
+// against the other branch) through the pair's element types, not
+// bypass it.
+function pair_fst(p :: Pair.of(Nat, Nat)) :: Nat:
+  let Pair(a, b) = p
+  a
+
+function pair_snd(p :: Pair.of(Nat, Nat)) :: Nat:
+  let Pair(a, b) = p
+  b
+
+function pair_branch(b :: Boolean) :: Pair.of(Nat, Nat):
+  if b
+  | Pair(succ(zero()), succ(succ(zero())))
+  | Pair(zero(), succ(zero()))
+
+// A local `pair` value cannot capture the global constructor inserted by
+// normalization.
+function pair_shadowed(pair :: Nat, second :: Nat) :: Pair.of(Nat, Nat):
+  Pair(pair, second)
+
+// List syntax lowers to `nil`/`cons` calls before checking. The element
+// type still reaches `if`'s own unification; `[]` exercises propagation
+// from the expected branch type with no element to inspect.
+datatype List.of(?a)
+| nil()
+| cons(head :: ?a, tail :: List.of(?a))
+
+function list_branch(b :: Boolean) :: List.of(Nat):
+  if b
+  | [succ(zero()), succ(succ(zero()))]
+  | []
+
+// String syntax lowers to `text` over a list of nominal codepoints.
+// Its fixed `String` result must still agree with the other branch.
+datatype Codepoint
+| codepoint(codepoint_value :: Nat)
+
+datatype String
+| text(codepoints :: List.of(Codepoint))
+
+function string_branch(b :: Boolean) :: String:
+  if b
+  | "hi"
+  | ""
+
+function is_hi(s :: String) :: Boolean:
+  s == "hi"
+
+function is_empty_string(s :: String) :: Boolean:
+  s == ""
+
+// Set syntax lowers to a predicate lambda before checking. The element
+// type reaches `if`'s unification and the runtime result is the predicate.
+function set_branch(b :: Boolean) :: Nat -> Boolean:
+  if b
+  | Set{succ(zero()), succ(succ(zero()))}
+  | Set{}
+
+// Generated equality, disjunction, and false references remain global even
+// when all three names are local parameters.
+function set_shadowed(eq :: Nat, disj :: Nat, false :: Nat) :: Nat -> Boolean:
+  Set{eq}
+
+function is_member(s :: Nat -> Boolean, n :: Nat) :: Boolean:
+  s(n)
+
+function is_not_member(s :: Nat -> Boolean, n :: Nat) :: Boolean:
+  !s(n)
+
+// The connectives inside an `if` branch are checked and rendered through
+// `check_expr`'s own arms for the builtin connectives: each operand still
+// has to be `Boolean`, and so does the branch as a whole, matching `if`'s
+// own unification against the other branch -- not routed through the
+// general apply/overload machinery at all.
+function conj_branch(x :: Boolean, a :: Boolean, b :: Boolean) :: Boolean:
+  if x
+  | a && b
+  | #false
+
+function disj_branch(x :: Boolean, a :: Boolean, b :: Boolean) :: Boolean:
+  if x
+  | a || b
+  | #false
+
+function imp_branch(x :: Boolean, a :: Boolean, b :: Boolean) :: Boolean:
+  if x
+  | !a || b
+  | #false
+
+function neg_branch(x :: Boolean, a :: Boolean) :: Boolean:
+  if x
+  | !a
+  | #false
+
+// `eq` (`==`) inside an `if` branch is checked and rendered through
+// `check_expr`'s dedicated `CoreCall` arm. Bare numerals arrive with type
+// `Nat`, so either operand order follows the same ordinary equality check.
+function eq_left_numeral(x :: Boolean) :: Boolean:
+  if x
+  | 1 == succ(zero())
+  | #false
+
+function eq_right_numeral(x :: Boolean) :: Boolean:
+  if x
+  | succ(zero()) == 1
+  | #false
+
+function eq_neither_numeral(x :: Boolean) :: Boolean:
+  if x
+  | succ(zero()) == succ(zero())
+  | #false
+
+// A named-constant call inside an `if` branch renders through
+// `check_expr`'s own general (non-overloaded) `CoreCall` case, via
+// `CheckedApply`'s `runtime_named_apply` rendering.
+function plus(m :: Nat, n :: Nat) :: Nat:
+  match m
+  | zero(): n
+  | succ(k): succ(plus(k, n))
+
+function double(n :: Nat) :: Nat:
+  plus(n, n)
+
+function named_apply_branch(x :: Boolean, a :: Nat, b :: Nat) :: Nat:
+  if x
+  | plus(a, b)
+  | zero()
+
+// A local-variable-headed call (the function value came in as a
+// parameter, not a named constant) exercises `CheckedApply`'s other
+// rendering: applying the checked head expression directly rather
+// than through `runtime_named_apply`.
+function local_apply_branch(x :: Boolean, f :: Nat -> Nat, a :: Nat) :: Nat:
+  if x
+  | f(a)
+  | zero()
+
+// A zero-argument call inside an `if` branch.
+function zero_arg_branch(x :: Boolean) :: Nat:
+  if x
+  | zero()
+  | succ(zero())
+
+// A bare numeral fixes the polymorphic argument to `Nat` immediately; the
+// later list argument agrees with that already-known type.
+function poly_first(x :: ?a, xs :: List.of(?a)) :: List.of(?a):
+  cons(x, xs)
+
+function nat_literal_branch(b :: Boolean) :: List.of(Nat):
+  if b
+  | poly_first(1, cons(succ(zero()), nil()))
+  | nil()
+
+// Proved while this module compiles: `cond`'s desugaring into `mk_cond`
+// reuses the same derived conditional rules `if` already has.
+theorem pick3_first:
+  forall (m :: Nat, n :: Nat, k :: Nat): pick3(true, false, m, n, k) === m
+
+theorem pick3_second:
+  forall (m :: Nat, n :: Nat, k :: Nat): pick3(false, true, m, n, k) === n
+
+theorem pick3_else:
+  forall (m :: Nat, n :: Nat, k :: Nat): pick3(false, false, m, n, k) === k

@@ -42,10 +42,14 @@ in two ways:
 Both readings consume the same normalized Core representation. A construct must
 not be parsed once for logic and reconstructed independently for runtime.
 
-Proofs and termination checks run while the module is compiled. A theorem that
-cannot be proved, a function that cannot be shown total, or an ill-formed
-logical declaration is a compile-time error with the remaining goals or
-obligation. At runtime, logical proofs do not execute.
+Names, types, and patterns are checked while the module is compiled; an
+ill-formed logical declaration is a compile-time error. Proofs and termination
+checks run when the module's logical theory (its `hol_theory` submodule) is
+built, which importing the module logically does. A theorem that cannot be
+proved or a function that cannot be shown total is an error there, with the
+remaining goals or obligation. The executable reading never runs proofs: a
+module used only for its executable reading has unchecked theorems until its
+theory is built.
 
 Only the declaration forms in this document receive a logical reading. Ordinary
 Rhombus `fun`, `def`, `class`, `operator`, and all other ordinary forms retain
@@ -225,8 +229,11 @@ import:
 
 - Runtime bindings are imported by normal Rhombus import semantics.
 - The importing module adopts the exported `hol_theory` value itself, including
-  its transitive imports, declarations, theorem objects, and overload registry.
-  It does not reparse or reassert a textual description of that theory.
+  its transitive imports, declarations, and theorem objects. It does not
+  reparse or reassert a textual description of that theory.
+- The frontend merges the imported module's surface state -- the constants,
+  overloads, and type constructors later declarations are checked against --
+  while the importing module expands.
 - An ordinary module with no `hol_theory` submodule remains an ordinary import.
 
 Theory imports must precede the importing module's own logical declarations.
@@ -239,6 +246,32 @@ logical import.
 A preceding logical declaration is in scope for all later logical declarations.
 A declaration name is not in scope within its own body unless that declaration
 form explicitly supports recursion.
+
+A name in a HOL expression denotes exactly one of:
+
+1. a variable bound by an enclosing binder, pattern, or parameter;
+2. a constant a logical declaration in scope introduces, whether declared in
+   this module or imported: a `function`, a `definition`, an `inductive`
+   predicate, a datatype constructor, or a name a `datatype` declaration
+   derives by section 4.1 (`is_Constructor`, `Constructor_field`, and
+   `TypeName_lt`);
+3. a name an `overload` declaration makes callable (section 4.7); or
+4. one of the Boolean literals `true` and `false`.
+
+Nothing else is a name. The constants that syntax elaborates to -- equality,
+the connectives, `exists1`, `select`, and the product constructor behind
+`Pair(...)` -- are reached only through that syntax: `p and q` has no second
+spelling `conj(p, q)`. They and the base theory's remaining constants are
+implementation detail, and none of them can be named. The logic's own
+vocabulary -- `eq`, `imp`, `conj`, `disj`, `neg`, `forall`, `exists`,
+`exists1`, `select`, `cond`, and `wf` -- stays reserved, so declaring one of
+those names is an error. Every other constant or type the implementation
+introduces for itself, in the base theory or for a declaration, has a name
+containing `'`, which no identifier can spell, so it takes no name away from
+declarations. The kernel's own types are taken too: `bool` is spelled `Boolean`,
+`fun` is the arrow, and `Nat` with its constructors `zero` and `succ` may be
+declared only as the native `datatype Nat | zero() | succ(pred :: Nat)`
+(section 4.1).
 
 ## 3. Types
 
@@ -477,8 +510,8 @@ definition theorem; the theorem is an oriented rewrite rule for later logical
 declarations and proofs.
 
 `definition` has no executable reading. It emits no Rhombus binding, cannot be
-called from ordinary Rhombus code, an executable `function` body, or
-`quickcheck`, and has no runtime fallback.
+called from ordinary Rhombus code or an executable `function` body, and has no
+runtime fallback.
 
 The following are static errors:
 
@@ -593,7 +626,7 @@ proof:
   ~extensionality: [variable, ...]
 ```
 
-A theorem is elaborated as a Boolean HOL term and proved during compilation.
+A theorem is elaborated as a Boolean HOL term and proved when the theory is built.
 Its successful theorem object is retained under `name`, but it is **not** added
 to the global rewrite database merely because it exists. A later proof enables
 it explicitly with `~use`; adding an unrelated theorem must not silently change
@@ -719,29 +752,6 @@ The language-reserved notation-facing names are `add`, `subtract`, `negate`,
 `append`, `member`, `union`, and `intersection`. Their implementations are
 library or module declarations, not language primitives.
 
-### 4.8 `quickcheck`
-
-```rhombus
-quickcheck name:
-  forall (arg :: ConcreteType, ...): proposition
-
-quickcheck name(~samples: n, ~size: n, ~seed: n):
-  forall (arg :: ConcreteType, ...): proposition
-```
-
-`quickcheck` runs the executable reading of a universally quantified property
-over generated concrete values. It adds no theorem and no theory content. A
-passing check is testing evidence, not proof; a failing check aborts module
-initialization with a shrunk counterexample, its effective seed, and shrink
-count.
-
-Input types must have registered runtime generators and shrinkers. The property
-must have an executable reading: executable calls, conditionals, Boolean
-connectives, equality, literals, and statically resolved overloads are allowed;
-implication, existential quantification, `exists1`, `select`, `wf`, and other
-logic-only terms are rejected. `~samples` sets the number of input tuples,
-`~size` bounds generated depth, and `~seed` makes the run reproducible.
-
 ## 5. Function bodies and expressions
 
 A top-level `function` body is a sequence whose final expression is its value:
@@ -830,9 +840,14 @@ list datatype:
 String literal patterns are constructor patterns as specified in section 7.5;
 they are not a separate matching mechanism.
 
-A nested `match` may refine an already-bound subposition, but may not re-match a
-position already refined by an enclosing pattern. This preserves one pattern
-matrix with unambiguous variable scopes and decision-tree compilation.
+A `match` on a parameter or a pattern variable not yet matched refines the
+function's pattern matrix, so nested matches on different arguments define the
+function by their combined patterns. A `match` on anything else -- a `let`
+binding, a computed value, or an argument an enclosing `match` already refined,
+which in that clause denotes the value its pattern matched -- is an ordinary
+`match` expression. Coverage, unreachable clauses, and irrefutable binders are
+checked while the module is compiled, as are declarations that reuse a name
+already in scope or reserved.
 
 ## 7. Propositions, sets, operators, and literals
 
@@ -857,15 +872,16 @@ prop ::= expression
 exactly one. Binder types may be inferred where their use determines a unique
 type. A quantifier extends as far right as possible.
 
-Logical spellings are `not`, `and`, `or`, `===`, `==>`, and `<=>`. Equality and
-equivalence denote the same polymorphic equality constant but have different
-precedence. Named logical constants include `true`, `false`, `eq`, `imp`,
-`conj`, `disj`, `neg`, `exists1`, `select`, and `wf`.
+Negation, conjunction, disjunction, and equality each have a HOL spelling and a
+Rhombus spelling -- `not` and `!`, `and` and `&&`, `or` and `||`, `===` and
+`==` -- and the two spellings denote the same constant. Equivalence `<=>` is
+equality at `Boolean` with the weakest precedence. The connectives, the
+quantifiers, `exists1`, and `select` are syntax: the constants they elaborate
+to are not names (section 2).
 
-`true`, `false`, equality, conjunction, disjunction, and negation have both
-readings. `imp`, `exists1`, `select`, and `wf` are logic-only. Existential and
-choice constructs consequently cannot occur in executable `function` bodies or
-`quickcheck` properties.
+`true`, `false`, equality, and the connectives have both readings, under either
+spelling. Implication `==>`, the quantifiers, `exists1`, and `select` are
+logic-only, so they cannot occur in executable `function` bodies.
 
 ### 7.2 Sets
 
@@ -880,11 +896,10 @@ is proved with theorem option `~extensionality:`.
 
 ### 7.3 Operator behavior and precedence
 
-In an executable body, Rhombus spellings have their ordinary counterparts:
-`#true`/`#false`, `!`, `&&`, `||`, and `==`. In propositions, use logical
-spellings described above. `&&` and `||` short-circuit at runtime, while `and`
-and `or` are strict logically; totality makes this difference unobservable in
-valid function bodies.
+In the executable reading, `true`/`false` are `#true`/`#false`, negation is
+`!`, equality is `==`, and conjunction and disjunction, under either spelling,
+are the short-circuiting `&&` and `||`. Logically they are strict; totality
+makes the difference unobservable in valid function bodies.
 
 `+`, `-`, unary `-`, `*`, `**`, comparisons, `++`, `in`, `union`, and
 `intersect` lower to the named overloadable calls from section 4.7. `**`, `++`,
@@ -931,7 +946,7 @@ representation.
 For this reserved declaration only, executable `zero()` returns `0` and
 executable `succ(n)` returns `n + 1`. A `zero()` runtime pattern tests that the
 value is zero. A `succ(p)` runtime pattern accepts only a positive integer and
-binds `p` to its predecessor. Thus generic generators, shrinkers, and functions
+binds `p` to its predecessor. Thus functions
 written with `zero` and `succ` continue to use the same expression and pattern
 interface without allocating Peano constructor chains. Every other datatype
 retains the class-per-constructor executable representation.
@@ -1026,7 +1041,7 @@ numeral:
 "ab"     => text(cons(codepoint(97), cons(codepoint(98), nil())))
 ```
 
-The same Core tree drives logical elaboration and runtime emission, but the
+The same checked tree drives logical elaboration and runtime emission, but the
 representations remain distinct. After elaboration, the logical `codepoint`
 contains the corresponding compact logical `Nat` term; the executable
 `codepoint` contains the host nonnegative integer emitted for the same surface
@@ -1146,7 +1161,10 @@ The pipeline is:
 1. **Simplification:** rewrite the conclusion and assumptions to fixed point
    with enabled function/definition equations, datatype equations, projections,
    theorem-local `~use` facts, and assumptions; beta-normalize between rewrite
-   passes.
+   passes. A fact `c1 ==> ... ==> l === r` rewrites `l` once each condition is
+   discharged. A condition simplifies to `true`, except that one mentioning a
+   variable neither `l` nor an earlier condition determines -- the middle term
+   of transitivity -- binds it by matching an assumption instead.
 2. **Destructor elimination:** when a constructor discriminator assumption is
    present, replace a selector-observed value by its constructor-and-selector
    reconstruction.

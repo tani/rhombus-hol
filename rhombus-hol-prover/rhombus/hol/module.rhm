@@ -1,0 +1,960 @@
+#lang rhombus/and_meta
+// SPDX-License-Identifier: 0BSD
+
+// Macro expansion for the declarations of `#lang rhombus/hol`: the one
+// place where the pipeline's stages meet.
+//
+//   frontend/parser    syntax -> Core values
+//   frontend/checker   Core -> closed Checked values, once per declaration
+//   backend/code       Checked -> executable Rhombus (`lower.rhm`)
+//   backend/proof      Checked -> kernel theory, via `driver.rhm`
+//
+// Every declaration is checked while the module expands, against the surface
+// state in force at that point. Its runtime forms are rendered from the
+// checked result, and its logical transition carries the same result into
+// the `hol_theory` submodule (`frontend/checker/encode.rhm`), so the two
+// readings cannot disagree about a name or a type.
+//
+// Each public declaration macro recognises and emits one declaration. Its
+// encoded logical transition is accumulated in an `ExpansionState` carried by
+// a syntax parameter. The parameter contains a fresh box for each module, so
+// mutating it cannot leak state through a transformer instance reused by
+// `raco make`.
+//
+// `#%module_block` only installs that expansion-local box, splices the source
+// body, and appends a finalizer. The finalizer renders the accumulated
+// logical transitions as a list of state-transition functions and folds
+// them, left to right, over the theory value inside the private
+// `hol_theory` submodule.
+//
+// Syntax templates live only in `meta` blocks of `rhombus/and_meta` modules
+// -- here, in `backend/code/lower.rhm`, and in `frontend/checker/encode.rhm`
+// -- so that their identifiers resolve against the emitting module's imports. A template built in a phase-0
+// helper module loses its bindings on the way out of a phase-1 macro --
+// `'def x = 1'` written there and returned from a macro reports `def:
+// unbound identifier` -- so the parser and checker only analyse.
+
+import:
+  rhombus/meta open
+  rhombus/hol/backend/code/lower open
+  rhombus/hol/frontend/checker/encode open
+  rhombus/hol/frontend/parser/space!meta:
+    expose:
+      hol_expr_meta
+      encode_binder
+      encode_pattern
+      encode_function_body
+  meta:
+    lib("racket/base.rkt") as rb
+    rhombus/hol/kernel/type open
+    rhombus/hol/kernel/names as names
+    rhombus/hol/frontend/checker/datatype open
+    rhombus/hol/frontend/parser/expand as expand
+    rhombus/hol/frontend/parser/declaration as declaration
+    rhombus/hol/frontend/checker/overload open
+    rhombus/hol/frontend/checker/checked open
+    rhombus/hol/frontend/checker/declaration open
+    rhombus/hol/frontend/checker/state open
+    rhombus/hol/frontend/checker/type/registry open
+    rhombus/hol/frontend/checker/type/parse as type_parser
+    rhombus/hol/frontend/parser/core open
+export:
+  module_block
+  datatype
+  inductive
+  definition
+  function
+  theorem
+  proof
+  overload
+  hol_import
+
+meta:
+  // Any literal from this module will do as a lexical context: what matters is
+  // that all the generated identifiers share one, and that the expander's
+  // introduction scope lands on them alike.
+  def id_ctx :: Syntax = 'hol_state'
+
+  // Per-module expansion state. The syntax-parameter binding is rebound at
+  // the start of every module, so no value is shared through the transformer
+  // instance that `raco make` reuses for other modules.
+  class ExpansionState(surface :: SurfaceState,
+                       steps_rev :: List.of(Syntax))
+
+  def initial_surface_state:
+    SurfaceState(standard_overload_registry(), base_constants, {},
+                 standard_type_constructor_registry(), base_datatypes)
+
+  fun initial_expansion_state() :: ExpansionState:
+    ExpansionState(initial_surface_state, [])
+
+  // The imported theory's own surface metadata. An `import` merges this
+  // into the importing module's accumulated state right away (see
+  // `emit_one`'s `#'import` case), so nothing downstream ever holds an
+  // unmerged import.
+  fun imported_surface_state(terms :: List.of(Syntax)) :: SurfaceState:
+    let [t, ...] = terms
+    let path:
+      match ModulePath.maybe('$t ...')
+      | #false: error(~who: #'import, "invalid imported theory path")
+      | p: p :~ ModulePath
+    let imported = Evaluator.instantiate(
+                     path.add(ModulePath('self ! hol_surface')), #'state)
+    imported :~ SurfaceState
+
+  fun surface_const_type(state :: SurfaceState, name :: Symbol)
+       :: maybe(HType):
+    state.constants.get(name, #false)
+
+
+  fun overload_argument_position(argument_positions :: Map.of(Symbol, NonnegInt),
+                                 name :: Symbol,
+                                 at :: Syntax) :: NonnegInt:
+    match argument_positions.get(name, #false)
+    | #false:
+        syntax_meta.error(
+          "implementation template uses an unknown overload argument `"
+            ++ to_string(name) ++ "`",
+          at)
+    | position: position :~ NonnegInt
+
+  fun overload_argument_order(argument_names :: List,
+                              template_arguments :: maybe(List.of(Symbol)),
+                              at :: Syntax) :: List.of(NonnegInt):
+    let arity = argument_names.length()
+    match template_arguments
+    | #false: List.iota(arity)
+    | arguments:
+        when argument_names.contains(#false)
+        | syntax_meta.error(
+            "an implementation template needs named overload arguments", at)
+        let argument_positions:
+          for values(m :~ Map = {}) (
+                n in argument_names, i in List.iota(argument_names.length())):
+            m ++ {n :~ Symbol: i}
+        let order:
+          for List (argument in (arguments :~ List.of(Symbol))):
+            overload_argument_position(argument_positions, argument, at)
+        unless valid_argument_order(order, arity)
+        | syntax_meta.error(
+            "implementation template must use every overload argument "
+              ++ "exactly once",
+            at)
+        order
+
+  fun surface_add_method(
+        state :: SurfaceState, function_name :: Symbol,
+        argument_type_stxs :: List.of(Syntax),
+        result_type_stx :: maybe(Syntax),
+        constant :: Symbol, argument_order :: List.of(NonnegInt),
+        at :: Syntax) :: SurfaceState:
+    let arity = argument_type_stxs.length()
+    let registry_with_function = ensure_overload_function(
+                                   state.operators,
+                                   function_name, arity)
+    let argument_types = argument_type_stxs.map(
+                           fun (argument):
+                             read_type(argument,
+                                       state.type_constructors))
+    let result_type:
+      match result_type_stx
+      | #false: #false
+      | result_stx:
+          read_type(result_stx :~ Syntax, state.type_constructors)
+    let constant_type:
+      match surface_const_type(state, constant)
+      | #false:
+          syntax_meta.error(
+            "implementation constant is not declared: "
+              ++ to_string(constant),
+            at)
+      | ty: ty :~ HType
+    let method:
+      try:
+        build_overload_method(
+          function_name, argument_types, result_type,
+          constant, constant_type, argument_order)
+        ~catch e :: Exn.Fail:
+          syntax_meta.error(e.message, at)
+    SurfaceState(
+      add_overload_method(registry_with_function, method),
+      state.constants,
+      state.runtime_arities,
+      state.type_constructors,
+      state.datatypes)
+
+  fun surface_add_function(state :: SurfaceState,
+                           spec :: CoreFunctionSpec,
+                           full_type :: HType)
+       :: SurfaceState:
+    SurfaceState(
+      state.operators,
+      state.constants ++ {spec.name: full_type},
+      state.runtime_arities
+        ++ {spec.name: spec.params.length()},
+      state.type_constructors,
+      state.datatypes)
+
+
+  fun surface_add_datatype(state :: SurfaceState, spec :: DatatypeSpec,
+                           at :: Syntax)
+       :: SurfaceState:
+    let self = self_type(spec)
+    let bool = mk_tyapp(#'bool, [])
+    // Every constant the declaration introduces: its constructors, and the
+    // discriminators and selectors every datatype derives.
+    let introduced:
+      for values(out :~ Map = {}) (ctor in spec.ctors):
+        let ctor :~ Ctor = ctor
+        let with_ctor:
+          out ++ {ctor.name: ctor_type(spec, ctor),
+                  discriminator_name(ctor): mk_fun(self, bool)}
+        for values(inner :~ Map = with_ctor) (field in ctor.fields):
+          let field :~ Field = field
+          inner ++ {selector_name(ctor, field): mk_fun(self, field.ty)}
+    // A recursive datatype also derives its structural subterm relation.
+    let derived:
+      (if is_recursive_datatype(spec)
+       | introduced ++ {names.subterm_relation_name(spec.name):
+                          mk_fun(self, mk_fun(self, bool))}
+       | introduced)
+    for ((name, _) in derived):
+      check_fresh_constant(state, name, #'datatype, at,
+                           ~native: spec == native_nat_spec)
+    // Only the constructors have an executable reading.
+    let runtime_arities:
+      for values(out :~ Map = state.runtime_arities) (ctor in spec.ctors):
+        let ctor :~ Ctor = ctor
+        out ++ {ctor.name: ctor.fields.length()}
+    let constructors = spec.ctors.map(
+                         fun (ctor :: Ctor): [ctor.name, ctor.fields.length()])
+    SurfaceState(state.operators, state.constants ++ derived, runtime_arities,
+                 add_declared_type_constructor(state.type_constructors,
+                                               spec.name, spec.params.length()),
+                 state.datatypes ++ {spec.name: constructors})
+
+  // A logical constant: nameable in logical expressions, with no executable
+  // reading.
+  fun surface_add_constant(state :: SurfaceState, name :: Symbol,
+                           ty :: HType, who :: Symbol,
+                           at :: Syntax) :: SurfaceState:
+    check_fresh_constant(state, name, who, at)
+    SurfaceState(state.operators, state.constants ++ {name: ty},
+                 state.runtime_arities, state.type_constructors,
+                 state.datatypes)
+
+  // A declaration's type, resolved against the surface registry when the
+  // declaration expands. Failures are reported at the declaration.
+  fun declaration_type(stx :: Syntax, state :: SurfaceState,
+                       at :: Syntax) :: HType:
+    try:
+      read_type(stx, state.type_constructors)
+      ~catch e :: Exn.Fail: reraise_at(e, at)
+
+  fun surface_arity_expr(name :: Symbol, arity :: NonnegInt) :: Syntax:
+    let arity_stx = Syntax.make(arity, id_ctx)
+    '[$(symbol_expr(name)), $arity_stx]'
+
+  fun surface_constant_expr(name :: Symbol, ty :: HType) :: Syntax:
+    '[$(symbol_expr(name)), $(type_expr(ty))]'
+  fun surface_type_constructor_expr(
+        constructor :: TypeConstructor) :: Syntax:
+    let arity_stx = Syntax.make(constructor.arity, id_ctx)
+    'TypeConstructor(
+       $(symbol_expr(constructor.surface_name)),
+       $(symbol_expr(constructor.kernel_name)),
+       $arity_stx)'
+
+  fun emit_surface_state(state :: SurfaceState) :: Syntax:
+    let function_exprs:
+      for values(out :~ List = []) ((name, arity) in state.operators.arities):
+        out ++ [surface_arity_expr(name, arity :~ NonnegInt)]
+    let [overload_function, ...] = function_exprs
+    let [method, ...] = state.operators.methods.map(
+                          fun (value):
+                            overload_method_expr(value :~ OverloadMethod))
+    let constant_exprs:
+      for values(out :~ List = []) ((name, ty) in state.constants):
+        out ++ [surface_constant_expr(name, ty :~ HType)]
+    let [constant, ...] = constant_exprs
+    let runtime_arity_exprs:
+      for values(out :~ List = []) ((name, arity) in state.runtime_arities):
+        out ++ [surface_arity_expr(name, arity :~ NonnegInt)]
+    let [runtime_arity, ...] = runtime_arity_exprs
+    let type_constructor_exprs:
+      for values(out :~ List = []) (
+            (_, constructor) in state.type_constructors.bindings):
+        out ++ [surface_type_constructor_expr(
+                  constructor :~ TypeConstructor)]
+    let [type_constructor, ...] = type_constructor_exprs
+    let [datatype, ...]:
+      for List ((name, constructors) in state.datatypes):
+        let [constructor, ...]:
+          (constructors :~ List).map(
+            fun (entry :: List):
+              surface_arity_expr(entry[0] :~ Symbol, entry[1] :~ NonnegInt))
+        '[$(symbol_expr(name :~ Symbol)), [$constructor, ...]]'
+    'module hol_surface ~lang rhombus:
+       import:
+         rhombus/hol/kernel/type open
+         rhombus/hol/frontend/checker/overload open
+         rhombus/hol/frontend/checker/state open
+         rhombus/hol/frontend/checker/type/registry open
+       export: state
+       def function_map:
+         for values(out :~ Map = {}) (
+               [name, arity] in [$overload_function, ...]):
+           out ++ {name :~ Symbol: arity :~ NonnegInt}
+       def constant_map:
+         for values(out :~ Map = {}) ([name, ty] in [$constant, ...]):
+           out ++ {name :~ Symbol: ty :~ HType}
+       def runtime_arity_map:
+         for values(out :~ Map = {}) (
+               [name, arity] in [$runtime_arity, ...]):
+           out ++ {name :~ Symbol: arity :~ NonnegInt}
+       def datatype_map:
+         for values(out :~ Map = {}) (
+               [name, constructors] in [$datatype, ...]):
+           out ++ {name :~ Symbol: constructors :~ List}
+       def state = make_surface_state(
+                     function_map,
+                     [$method, ...],
+                     constant_map,
+                     runtime_arity_map,
+                     [$type_constructor, ...],
+                     datatype_map)'
+
+
+  // A term rebuilt with this module's context.
+  //
+  // Needed for the terms of a module path emitted into the `hol_theory`
+  // submodule: that submodule's language is plain `rhombus`, and a term
+  // carrying the user's `rhombus/hol` context cannot reach the implicit import
+  // forms there -- a string path fails looking for `#%literal`.  Only the
+  // datum matters for a module path, so rebuilding it loses nothing.
+  fun recontext(t :: Syntax) :: Syntax:
+    Syntax.make(Syntax.unwrap(t), id_ctx)
+
+  // -- HOL surface parsing ---------------------------------------------------
+
+  fun parse_hol_encoding(stx :: Syntax) :: Syntax:
+    let '$(parsed :: hol_expr_meta.Parsed)' = stx
+    hol_expr_meta.unpack(parsed)
+
+  fun parse_core_encoding(stx :: Syntax) :: Syntax:
+    try:
+      parse_hol_encoding(stx)
+      ~catch e :: Exn.Fail:
+        (if e.message.contains("unbound HOL expression operator")
+         | syntax_meta.error("unexpected text after an expression", stx)
+         | throw e)
+
+  fun parse_function_expression(stx :: Syntax) :: Syntax:
+    try:
+      parse_core_encoding(stx)
+      ~catch e :: Exn.Fail:
+        (if e.message.contains("hol_expr_meta.Parsed")
+             && e.message.contains("annotation")
+         | syntax_meta.error(
+             "this version admits only variables, named applications, `if`, "
+               ++ "`cond`, and HOL notation in a function body",
+             stx)
+         | throw e)
+
+
+
+  fun row_encoding(row :: Syntax, arity :: Int) :: Syntax:
+    let (patterns, body) = declaration.row_parts(row, arity)
+    let [p, ...] = patterns.map(encode_pattern)
+    let b = encode_function_body(body)
+    '(core_match_row [$p, ...] $b)'.relocate_span([row])
+
+  fun function_row_arity(row :: Syntax) :: NonnegInt:
+    match row
+    | '($pat, ...): $body; ...': [pat, ...].length()
+    | '$pat ...: $body; ...': 1
+    | ~else: syntax_meta.error("malformed function clause", row)
+
+  fun inferred_parameter_syntax(rows :: List.of(Syntax),
+                                at :: Syntax) :: List.of(Syntax):
+    match rows
+    | []: syntax_meta.error("a case function needs at least one clause", at)
+    | List.cons(first, _):
+        for List (index in List.iota(function_row_arity(first))):
+          Syntax.make_id("_arg" ++ to_string(index), id_ctx)
+
+  fun function_encoding(form :: Syntax,
+                        measure_stx :: maybe(Syntax))
+       :: values(Syntax, Syntax):
+    let [name, declared_params, result_type, body, clauses] = declaration.function_parts(form)
+    let ps:
+      match declared_params
+      | #false:
+          inferred_parameter_syntax(clauses :~ List.of(Syntax), form)
+      | present: present :~ List
+    let [param, ...] = (ps :~ List).map(
+                         fun (p :: Syntax): encode_binder(p))
+    let measure:
+      match measure_stx
+      | #false: Syntax.make(#false, id_ctx)
+      | m: parse_function_expression(m :~ Syntax)
+    let body_core:
+      match clauses
+      | #false: encode_function_body(body :~ Syntax)
+      | rows:
+          let [row, ...] = (rows :~ List).map(
+                             fun (r :: Syntax):
+                               row_encoding(r, (ps :~ List).length()))
+          '(core_pattern_matrix [$row, ...])'.relocate_span(rows :~ List)
+    let result:
+      match result_type
+      | #false: '#false'
+      | ty: '($((ty :~ Syntax)))'
+    let core:
+      '(core_function $name [$param, ...] $result $measure $body_core)'.relocate_span([form])
+    values(core, name)
+
+  // Check part of a declaration, reporting any failure at the declaration.
+  fun checking(at :: Syntax, thunk :: Function.of_arity(0)):
+    try:
+      thunk()
+      ~catch e :: Exn.Fail: reraise_at(e, at)
+
+  // A member of a function family is checked against its siblings' declared
+  // signatures, so every one of its types has to be written down.
+  fun require_family_signature(spec :: CoreFunctionSpec, at :: Syntax):
+    unless spec.result_type
+    | rb.#{raise-syntax-error}(
+        #'function,
+        "a member of a function family needs a declared result type: "
+          ++ to_string(spec.name),
+        at)
+    for (binder in spec.params):
+      unless (binder :~ CoreBinder).type_stx
+      | rb.#{raise-syntax-error}(
+          #'function,
+          "a member of a function family needs a declared type for every "
+            ++ "parameter: " ++ to_string(spec.name),
+          at)
+
+  // A theorem's proof clause, parsed once: its options, and its case splits
+  // and witnesses as expressions to check with the statement.
+  fun theorem_proof(tactic :: maybe(List.of(Syntax)))
+       :: values(ProofOptions, List.of(CoreExpr), List.of(CoreExpr)):
+    let tactic_stx:
+      match tactic
+      | #false: #false
+      | groups:
+          let [g, ...] = groups :~ List
+          '$g; ...'
+    let parsed = declaration.parse_tactic(tactic_stx)
+    fun expressions(key :: Symbol, mode :: Symbol) :: List.of(CoreExpr):
+      (parsed[key] :~ List).map(
+        fun (s): decode_expr(parse_core_encoding(s :~ Syntax), mode))
+    values(ProofOptions(parsed[#'induct], parsed[#'use], parsed[#'skip],
+                        parsed[#'disable], parsed[#'limit],
+                        parsed[#'extensionality]),
+           expressions(#'split, #'prop),
+           expressions(#'choose, #'expr))
+
+  // Each non-import step becomes one state-transition function -- a value
+  // closing over its own decoded syntax and error span, folded left to
+  // right over the theory value threaded through every declaration in
+  // `finish_expansion`. A `~import` step carries no transition of its own:
+  // it only brings an alias into scope for a later `~adopt` step, so it
+  // renders as an ordinary top-level `import:` instead of joining the
+  // fold.
+  fun render_step(step :: Syntax) :: values(List.of(Syntax), maybe(Syntax)):
+    let step = step.replace_scopes(id_ctx)
+    match step
+    | '(~import $alias [$term, ...])':
+        let [t, ...] = [term, ...]
+        let path = '$t ...'
+        values(['import: $path!hol_theory as $alias'], #false)
+    | '(~adopt $alias [$at])':
+        values(
+          [],
+          '(fun (_hol_step): _hol_driver.adopt(_hol_step, $(alias).theory, '$at'))')
+    | '(~datatype $family [$spec, ...] [$at])':
+        values(
+          [],
+          '(fun (_hol_step):
+              _hol_driver.add_datatypes(
+                _hol_step, [$spec, ...], '$at', $family))')
+    | '(~function $family [$decl, ...] [$at])':
+        values(
+          [],
+          '(fun (_hol_step):
+              _hol_driver.add_functions(_hol_step, [$decl, ...], '$at',
+                                        $family))')
+    | '(~theorem [$name] [$theorem] [$at])':
+        values(
+          [],
+          '(fun (_hol_step):
+              _hol_driver.add_theorem(_hol_step, Syntax.unwrap('$name'),
+                                      $theorem, '$at'))')
+    | '(~definition [$name] [$type] [$expr] [$at])':
+        values(
+          [],
+          '(fun (_hol_step):
+              _hol_driver.add_definition(_hol_step, Syntax.unwrap('$name'),
+                                         $type, $expr, '$at'))')
+    | '(~inductive [$name, ...] [$signature, ...] [$rule_name, ...] [$rule, ...] [$at])':
+        values(
+          [],
+          '(fun (_hol_step):
+              _hol_driver.add_inductive(
+                _hol_step, [Syntax.unwrap('$name'), ...],
+                [$signature, ...],
+                [Syntax.unwrap('$rule_name'), ...], [$rule, ...], '$at'))')
+    | ~else: syntax_meta.error("internal malformed logical step", step)
+
+  // -- diagnostics -----------------------------------------------------------
+
+  // `raise-syntax-error` reports the location of the syntax object it is
+  // given, and a *group* built by a template carries the template's location,
+  // not the user's.  The head term still carries the user's.
+  fun head_term(form :: Syntax) :: Syntax:
+    match form
+    | '$head $_ ...': head
+    | ~else: form
+
+  // A sequence macro receives the untouched tail as more groups. Peel that
+  // outer sequence before recovering the declaration keyword.
+  fun macro_use_head(use :: Syntax) :: Syntax:
+    match use
+    | '$first; $_; ...': head_term(first)
+    | ~else: head_term(use)
+
+  // Rebuild a user-facing HOL import with this module's ordinary Rhombus
+  // `import` binding. Returning the original head after the language rebinds
+  // `import` would invoke the HOL wrapper recursively.
+  fun emit_plain_import(form :: Syntax) :: Syntax:
+    match form
+    | '$_: $clause; ...': 'import: $clause; ...'
+    | '$_ $term ...': 'import $term ...'
+    | ~else: syntax_meta.error("internal malformed import declaration", form)
+
+  // -- a declaration family --------------------------------------------------
+  //
+  // `datatype`, `function`, and `inductive` are declared either singly or as
+  // a `<kind>.together:` family whose members are elaborated simultaneously.
+  // Both spellings share this encoding; an explicit family bit tells the
+  // driver whether to use direct declaration installation or the combined
+  // family construction.
+  //
+  // A whole `.together:` group travels to the driver as one transition: a
+  // member of a mutually recursive family is not a declaration on its own.
+
+  // Parenthesize each layer so an argument type that is itself a function
+  // remains one domain while the declaration's parameters become a curried
+  // type from left to right.
+  fun definition_type_syntax(parameters :: List,
+                             result_type :: Syntax) :: Syntax:
+    for values(type_stx :~ Syntax = result_type) (
+          parameter in parameters.reverse()):
+      let domain = ((parameter :~ List)[2] :~ Syntax)
+      '($((domain :~ Syntax))) -> ($((type_stx :~ Syntax)))'
+
+  fun emit_group(kind :: Symbol, decls :: List.of(expand.Decl),
+                 runtime_state :: SurfaceState, family :: Boolean)
+       :: values(List.of(Syntax), List.of(Syntax), SurfaceState):
+    let at = head_term((decls[0] :~ expand.Decl).form)
+    let family_stx = Syntax.make(family, id_ctx)
+    match kind
+    | #'datatype:
+        let [form, ...] = decls.map(fun (d :: expand.Decl): d.form)
+        let specs = type_parser.parse_datatype_decls(
+                      [form, ...], runtime_state.type_constructors)
+        let runtime:
+          for values(acc :~ List.of(Syntax) = []) (d in decls, spec in specs):
+            let [name, ctors] = (d :~ expand.Decl).parts
+            acc ++ lower_datatype(name :~ Syntax, ctors :~ List,
+                                  spec :~ DatatypeSpec)
+        let next_runtime:
+          for values(state :~ SurfaceState = runtime_state) (spec in specs):
+            surface_add_datatype(state, spec :~ DatatypeSpec, at)
+        let [spec_expr, ...] = specs.map(
+                                 fun (spec):
+                                   datatype_spec_expr(spec :~ DatatypeSpec))
+        values(runtime,
+               ['(~datatype $family_stx [$spec_expr, ...] [$at])'],
+               next_runtime)
+    | #'function:
+        let encoded:
+          for List (d in decls):
+            let d = d :~ expand.Decl
+            let [measure] = d.parts
+            let (core, name) = function_encoding(
+                                 d.form, measure :~ maybe(Syntax))
+            [core, name, decode_function(core)]
+        // Every member's signature is registered before any member's body is
+        // rendered, so that a call to a sibling resolves while the family is
+        // still being emitted.  Rhombus module-level definitions are mutually
+        // visible, so the emitted `fun`s need no other arrangement.
+        let declared:
+          for values(state :~ SurfaceState = runtime_state) (
+                entry in encoded):
+            let spec :~ CoreFunctionSpec = (entry :~ List)[2]
+            check_fresh_constant(state, spec.name, #'function, at)
+            surface_add_function(state, spec,
+                                 declared_function_type(spec, state.type_constructors))
+        when family
+        | for (entry in encoded):
+            require_family_signature((entry :~ List)[2] :~ CoreFunctionSpec,
+                                     at)
+        // Each member is checked once; its executable reading and its
+        // logical transition both come from that one checked tree.
+        let (runtime, checked, next_runtime):
+          for values(acc :~ List.of(Syntax) = [],
+                     decls :~ List.of(CheckedFunctionDecl) = [],
+                     state :~ SurfaceState = declared) (entry in encoded):
+            let entry :~ List = entry
+            let spec :~ CoreFunctionSpec = entry[2]
+            let decl = checking(at,
+                                fun (): check_function_decl(state, spec))
+            let emitted = lower_function(decl.fn, state, entry[1] :~ Syntax)
+            values(acc ++ [emitted], decls ++ [decl],
+                   surface_add_function(state, spec, decl.fn.ty))
+        when family
+        | check_family_type_variables(checked, at)
+        let [decl_expr, ...] = checked.map(function_decl_expr)
+        values(runtime,
+               ['(~function $family_stx [$decl_expr, ...] [$at])'],
+               next_runtime)
+    | #'inductive:
+        let name_stxs = decls.map(
+                          fun (d :: expand.Decl): (d.parts :~ List)[0])
+        let [name, ...] = name_stxs
+        let names = name_stxs.map(fun (n :: Syntax): Syntax.unwrap(n))
+        let signatures:
+          for List (d in decls):
+            let parameter_types = ((d :~ expand.Decl).parts :~ List)[1] :~ List
+            for List (stx in parameter_types):
+              declaration_type(stx :~ Syntax, runtime_state, at)
+        // The family shares every rule: that is what makes the predicates
+        // mutually recursive, and it is why the rules are concatenated here
+        // rather than kept per member.
+        let rules:
+          for values(acc :~ List = []) (d in decls):
+            acc ++ (((d :~ expand.Decl).parts :~ List)[2] :~ List)
+        let [rule_name, ...] = rules.map(fun (r :: List): r[0] :~ Syntax)
+        let checked:
+          checking(at,
+                   fun ():
+                     let rule_exprs:
+                       for List (r in rules):
+                         let [g, ...] = (r :~ List)[1] :~ List
+                         decode_prop(parse_hol_encoding('$g; ...'))
+                     check_inductive_rules(runtime_state, names, signatures,
+                                           rule_exprs))
+        let [signature, ...]:
+          signatures.map(fun (tys :: List):
+                           let [ty, ...] = tys.map(type_expr)
+                           '[$ty, ...]')
+        let [rule, ...] = checked.map(checked_expr)
+        let next_runtime:
+          for values(state :~ SurfaceState = runtime_state) (
+                n in names, tys in signatures):
+            surface_add_constant(
+              state, n :~ Symbol,
+              for values(acc :~ HType = mk_tyapp(#'bool, [])) (
+                    ty in (tys :~ List).reverse()):
+                mk_fun(ty :~ HType, acc),
+              #'inductive, at)
+        values([],
+               ['(~inductive [$name, ...] [$signature, ...] [$rule_name, ...] [$rule, ...] [$at])'],
+               next_runtime)
+    | ~else:
+        syntax_meta.error("internal unknown declaration family",
+                          (decls[0] :~ expand.Decl).form)
+
+  // -- one declaration -------------------------------------------------------
+
+  // Two outputs, because they go to two places: runtime forms stay in the
+  // module, while logical transition encodings go into the `hol_theory`
+  // submodule. Neither half refers to the other's state.
+  fun emit_one(d :: expand.Decl, alias_seed :: Int,
+               runtime_state :: SurfaceState)
+       :: values(List.of(Syntax), List.of(Syntax), SurfaceState):
+    match d.kind
+    | #'import:
+        let [paths] = d.parts
+        let at = head_term(d.form)
+        let (steps, _):
+          for values(acc :~ List = [], k = alias_seed) (terms in (paths :~ List)):
+            let alias = Syntax.make_id("_hol_used" ++ to_string(k), id_ctx)
+            let [t, ...] = (terms :~ List).map(recontext)
+            values(acc ++ ['(~import $alias [$t, ...])',
+                           '(~adopt $alias [$at])'],
+                   k + 1)
+        // Imported surface metadata merges into the running state right
+        // here, in source order, rather than waiting for a later
+        // declaration to force it: the next declaration in the module
+        // already sees every name and overload the import brought in.
+        let next_runtime:
+          for values(state :~ SurfaceState = runtime_state) (terms in (paths :~ List)):
+            merge_surface_states(
+              imported_surface_state(terms :~ List.of(Syntax)), state)
+        values([emit_plain_import(d.form)], steps, next_runtime)
+    | #'theorem:
+        let [name, stmt, tactic] = d.parts
+        let at = head_term(d.form)
+        let gs :~ List = stmt
+        let [g, ...] = gs
+        let core = parse_hol_encoding('$g; ...')
+        let checked:
+          checking(at,
+                   fun ():
+                     let (options, cases, witnesses) = theorem_proof(tactic)
+                     check_theorem(runtime_state, decode_prop(core), options,
+                                   cases, witnesses))
+        values([],
+               ['(~theorem [$name] [$(theorem_expr(checked))] [$at])'],
+               runtime_state)
+    | #'definition:
+        let [name, parameter_parts, result_type, body_groups] = d.parts
+        let at = head_term(d.form)
+        let parameters :~ List = parameter_parts
+        let type_stx = definition_type_syntax(
+                         parameters, result_type :~ Syntax)
+        let ty = declaration_type(type_stx, runtime_state, at)
+        let symbol = Syntax.unwrap(name)
+        let [g, ...] = (body_groups :~ List)
+        let core:
+          match parameters
+          | []: parse_hol_encoding('$g; ...')
+          | _:
+              let [binder, ...]:
+                for List (part in parameters):
+                  encode_binder((part :~ List)[0] :~ Syntax)
+              let encoded_body = encode_function_body('$g; ...')
+              '(core_function_expr [$binder, ...] ($result_type) $encoded_body)'.relocate_span([at])
+        let checked:
+          checking(at,
+                   fun ():
+                     check_definition(runtime_state, symbol, ty,
+                                      decode_expr(core, #'definition)))
+        values([],
+               ['(~definition [$name] [$(type_expr(ty))] [$(checked_expr(checked))] [$at])'],
+               surface_add_constant(runtime_state, symbol, ty,
+                                    #'definition, at))
+    | #'overload_method:
+        let [function_name, argument_names, argument_types,
+             result_type, constant, template_arguments] = d.parts
+        let at = head_term(d.form)
+        let names:
+          for List (name in (argument_names :~ List)):
+            match name
+            | #false: #false
+            | name_stx: Syntax.unwrap(name_stx :~ Syntax)
+        let positions = overload_argument_order(
+                          names, template_arguments, at)
+        // Overloads are static surface metadata: they resolve while a
+        // declaration is checked, and the theory never sees them.
+        let next_runtime = surface_add_method(
+                             runtime_state,
+                             Syntax.unwrap(function_name),
+                             argument_types :~ List.of(Syntax),
+                             result_type :~ maybe(Syntax),
+                             Syntax.unwrap(constant),
+                             positions, at)
+        values([], [], next_runtime)
+
+syntax_parameter.bridge hol_expansion_state:
+  Box(initial_expansion_state())
+
+meta:
+  fun current_expansion_box() :: Box:
+    syntax_parameter_meta.lookup('hol_expansion_state') :~ Box
+
+  fun current_expansion_state() :: ExpansionState:
+    current_expansion_box().value :~ ExpansionState
+
+  fun ensure_module_declaration(at :: Syntax):
+    unless rb.#{syntax-local-context}() == #'module
+    | syntax_meta.error("allowed only in a module body", at)
+
+  // These kinds share one encoding and driver entry point for ordinary and
+  // `.together:` declarations. The explicit family bit preserves which
+  // spelling selected the family semantics.
+  def family_kinds :: List.of(Symbol) = [#'datatype, #'function,
+                                         #'inductive]
+
+  fun emit_planned(kind :: Symbol, decls :: List.of(expand.Decl),
+                   family :: Boolean = #false) :: Syntax:
+    let box = current_expansion_box()
+    let state = box.value :~ ExpansionState
+    let (runtime, steps, surface):
+      cond
+      | family_kinds.contains(kind):
+          emit_group(kind, decls, state.surface, family)
+      | ~else:
+          emit_one(decls[0] :~ expand.Decl, state.steps_rev.length(),
+                   state.surface)
+    let steps_rev:
+      for values(acc :~ List.of(Syntax) = state.steps_rev) (step in steps):
+        List.cons(step :~ Syntax, acc)
+    box.value := ExpansionState(surface, steps_rev)
+    let [runtime_form, ...] = runtime
+    '«
+       $runtime_form
+       ...
+     »'
+
+  fun emit_planned_declaration(d :: expand.Decl) :: Syntax:
+    emit_planned(d.kind, [d])
+
+  fun declaration_expansion(forms :: List.of(Syntax)) :: Syntax:
+    let (planned, rest) = expand.plan_next(forms)
+    match planned
+    | #false:
+        syntax_meta.error("internal missing HOL declaration", forms[0])
+    | d:
+        unless rest == []
+        | syntax_meta.error("internal unconsumed HOL declaration tail",
+                            rest[0])
+        emit_planned_declaration(d :~ expand.Decl)
+
+  // A `<kind>.together:` block: its members are planned as ordinary
+  // declarations and then emitted as one family.
+  fun group_expansion(kind :: Symbol, forms :: List.of(Syntax)) :: Syntax:
+    when forms.length() == 0
+    | syntax_meta.error(
+        "a `" ++ to_string(kind)
+          ++ ".together:` block needs at least one declaration",
+        Syntax.make_id(to_string(kind), id_ctx))
+    ensure_module_declaration(forms[0])
+    emit_planned(kind, expand.plan_group(forms, kind), #true)
+
+  fun finish_expansion() :: Syntax:
+    let state = current_expansion_state()
+    let (import_forms, transitions):
+      for values(imports :~ List.of(Syntax) = [],
+                 transitions :~ List.of(Syntax) = []) (
+            encoded in state.steps_rev.reverse()):
+        let (forms, transition) = render_step(encoded :~ Syntax)
+        match transition
+        | #false: values(imports ++ forms, transitions)
+        | fn :: Syntax: values(imports ++ forms, transitions ++ [fn])
+    let [import_form, ...] = import_forms
+    let [transition, ...] = transitions
+    let surface_state = emit_surface_state(state.surface)
+    '«
+       $surface_state
+       module hol_theory ~lang rhombus:
+         import: rhombus/hol/backend/proof/driver as _hol_driver
+         import:
+           rhombus/hol/kernel/type open
+           rhombus/hol/frontend/parser/core:
+             expose:
+               ProofOptions
+           rhombus/hol/frontend/checker/datatype open
+           rhombus/hol/frontend/checker/checked open
+           rhombus/hol/frontend/checker/declaration open
+         export: theory
+         $import_form
+         ...
+         def theory:
+           for values(_hol_step = _hol_driver.initial_state()) (
+                 _hol_transition in [$transition, ...]):
+             _hol_transition(_hol_step)
+     »'
+
+  fun sequence_declaration_expansion(forms :: List.of(Syntax),
+                                     expected_kind :: Symbol):
+    ensure_module_declaration(forms[0])
+    let (planned, rest) = expand.plan_next(forms)
+    match planned
+    | #false:
+        syntax_meta.error("internal missing HOL sequence declaration",
+                          forms[0])
+    | d:
+        let d = d :~ expand.Decl
+        unless d.kind == expected_kind
+        | syntax_meta.error("internal wrong HOL sequence declaration",
+                            d.form)
+        let [tail, ...] = rest
+        values(emit_planned_declaration(d), '$tail; ...')
+
+decl.macro 'hol_finalize':
+  finish_expansion()
+
+// Each declaration kind that can be mutually recursive has the same two
+// spellings: one declaration on its own, or a `.together:` block whose
+// members are declared simultaneously.
+decl.macro 'datatype $term ...':
+  ~all_stx use
+  let head = macro_use_head(use)
+  declaration_expansion(['$head $term ...'])
+
+namespace datatype:
+  export together
+  decl.macro 'together: $form; ...':
+    group_expansion(#'datatype, [form, ...])
+
+decl.macro 'inductive $term ...':
+  ~all_stx use
+  let head = macro_use_head(use)
+  declaration_expansion(['$head $term ...'])
+
+namespace inductive:
+  export together
+  decl.macro 'together: $form; ...':
+    group_expansion(#'inductive, [form, ...])
+
+decl.macro 'definition $term ...':
+  ~all_stx use
+  let head = macro_use_head(use)
+  declaration_expansion(['$head $term ...'])
+
+namespace function:
+  export together
+  decl.macro 'together: $form; ...':
+    group_expansion(#'function, [form, ...])
+
+decl.macro 'overload $term ...':
+  ~all_stx use
+  let head = macro_use_head(use)
+  declaration_expansion(['$head $term ...'])
+
+decl.macro 'proof: $body; ...':
+  ~all_stx form
+  syntax_meta.error(
+    "a `proof:` must immediately follow a `theorem` or `function` declaration",
+    form)
+
+decl.macro
+| 'hol_import: $clause; ...':
+    ~all_stx use
+    let head = macro_use_head(use)
+    declaration_expansion(['$head: $clause; ...'])
+| 'hol_import $term ...':
+    ~all_stx use
+    let head = macro_use_head(use)
+    declaration_expansion(['$head $term ...'])
+
+defn.sequence_macro 'function $term ...; $tail; ...':
+  ~all_stx use
+  let head = macro_use_head(use)
+  let form = '$head $term ...'
+  sequence_declaration_expansion(
+    [form] ++ [tail, ...], #'function)
+
+defn.sequence_macro 'theorem $term ...; $tail; ...':
+  ~all_stx use
+  let head = macro_use_head(use)
+  let form = '$head $term ...'
+  sequence_declaration_expansion(
+    [form] ++ [tail, ...], #'theorem)
+
+// Every `#lang rhombus/hol` module initializes an expansion-local state,
+// expands its declarations normally, and finalizes the accumulated surface
+// metadata and logical steps after the source body.
+decl.macro 'module_block: $form; ...':
+  '#%module_block:
+     syntax_parameter.relet hol_expansion_state:
+       Box(initial_expansion_state())
+     $form
+     ...
+     hol_finalize'

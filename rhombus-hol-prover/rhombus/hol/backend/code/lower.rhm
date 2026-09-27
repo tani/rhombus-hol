@@ -1,0 +1,337 @@
+#lang rhombus/and_meta
+// SPDX-License-Identifier: 0BSD
+
+// Executable lowering: the Rhombus code a declaration contributes to the
+// user's module. Datatypes become classes (or the host's compact Nat),
+// and functions become ordinary `fun`s rendered from the shared checker's
+// output.
+//
+// Every function here is a `meta` function returning syntax. Its templates
+// are written in this module, so their identifiers resolve against this
+// module's own imports wherever the result is spliced.
+
+import:
+  rhombus/meta open
+  meta:
+    rhombus/hol/kernel/type open
+    rhombus/hol/frontend/checker/datatype open
+    rhombus/hol/frontend/parser/core open
+    rhombus/hol/frontend/checker/checked open
+    rhombus/hol/frontend/checker/state open
+
+export:
+  meta:
+    lower_datatype
+    lower_function
+
+meta:
+  // Any literal from this module will do as a lexical context for generated
+  // helper names: what matters is that they share one.
+  def id_ctx :: Syntax = 'hol_code'
+  // The context of identifiers the user's own code refers to -- function
+  // and constructor names -- is the declaration's name.
+  Parameter.def runtime_context :: Syntax = id_ctx
+
+  // -- datatypes -------------------------------------------------------------
+
+  // `class.together` so that a datatype can refer to itself, and an
+  // `interface` rather than a base class as the sum: an interface carries no
+  // fields and imposes no field order on the variants.
+  //
+  // Field annotations are dropped -- that is the type erasure.  Rhombus has no
+  // parametric polymorphism, so `List.of(?a)` has nothing to erase *to*, and
+  // the logical side has already checked the types.
+  fun emit_type(name :: Syntax, ctors :: List) :: Syntax:
+    let [variant, ...] = ctors.map(fun (c :: List): emit_variant(name, c))
+    'class.together:
+       interface $name
+       $variant
+       ...'
+
+  fun emit_variant(iface :: Syntax, c :: List) :: Syntax:
+    let [cname, fields] = c
+    let fs :~ List = fields
+    let [f, ...] = fs
+    'class $cname($f, ...):
+       implements $iface'
+
+  // The native `Nat` (`native_nat_spec`) executes as the host's compact
+  // nonnegative integer; every other datatype keeps the class representation
+  // emitted above.
+  fun emit_compact_nat(name :: Syntax, ctors :: List) :: List.of(Syntax):
+    let zero = ((ctors[0] :~ List)[0] :~ Syntax)
+    let succ = ((ctors[1] :~ List)[0] :~ Syntax)
+    let argument = source_id(Symbol.gen("_hol_nat"), name)
+    let predecessor = source_id(Symbol.gen("_hol_pred"), name)
+    let matched = source_id(Symbol.gen("_hol_nat"), name)
+    ['annot $name = NonnegInt',
+     'fun $zero(): 0',
+     'fun $succ($argument): $argument + 1',
+     '«bind.macro '$zero()': '0'»',
+     '«bind.macro '$succ($('$')$predecessor)':
+          '$('$')$predecessor
+            :: converting(fun ($matched when $matched > 0): $matched - 1)'»']
+
+  // -- functions -------------------------------------------------------------
+
+  fun source_id(name :: Symbol, _at :: Syntax) :: Syntax:
+    Syntax.make_id(to_string(name), runtime_context())
+
+  fun runtime_call_syntax(name :: Symbol, args :: List.of(Syntax),
+                          at :: Syntax) :: Syntax:
+    let id = source_id(name, at)
+    let [arg, ...] = args
+    '$id($arg, ...)'
+
+  // Logical constants are curried, while generated Rhombus functions accept
+  // all declaration parameters at once. Adapt a named function whenever it is
+  // used with fewer or more arguments than its generated runtime arity.
+  fun runtime_named_apply(state :: SurfaceState, name :: Symbol,
+                          args :: List.of(Syntax), at :: Syntax) :: Syntax:
+    match state.runtime_arities.get(name, #false)
+    | #false:
+        // A logical constant -- a definition, an inductive predicate, a
+        // datatype's discriminator or selector, a base-theory constant -- is
+        // nameable in a checked expression but has no executable reading.
+        syntax_meta.error("unknown constant " ++ to_string(name), at)
+    | declared:
+        let arity :~ NonnegInt = declared
+        cond
+        | args.length() < arity:
+            recur curry (all_args :: List.of(Syntax) = args):
+              cond
+              | all_args.length() == arity:
+                  runtime_call_syntax(name, all_args, at)
+              | ~else:
+                  let parameter = source_id(Symbol.gen("_hol_arg"), at)
+                  let body = curry(all_args ++ [parameter])
+                  '(fun ($parameter): $body)'
+        | ~else:
+            let initial = runtime_call_syntax(
+                            name, args.take(arity), at)
+            for values(call :~ Syntax = initial) (
+                  argument in args.drop(arity)):
+              '$call($argument)'
+
+  // The executable reading of a Nat literal is its host nonnegative integer.
+  fun checked_numeral_stx(value :: NonnegInt) :: Syntax:
+    Syntax.make(value, runtime_context())
+
+  // Rhombus's guarded binding keeps executable literal patterns constant
+  // size: bind the matched Nat, then compare it with the ordinary executable
+  // reading of the literal. This is numeric structural equality, not a
+  // string-specific or host-string comparison.
+  fun checked_numeral_pattern(value :: NonnegInt, at :: Syntax) :: Syntax:
+    let matched = source_id(Symbol.gen("_hol_literal"), at)
+    let literal = checked_numeral_stx(value)
+    '($matched when $matched == $literal)'
+
+  // Reads a `CheckedPattern` back into `Syntax` -- purely structural, since
+  // `check_pattern` already resolved every field's type and constructor
+  // identity. `Pair` and Boolean patterns have no generic runtime datatype
+  // behind them and render specially; every other constructor pattern
+  // renders as a direct positional application.
+  fun checked_pattern_to_runtime(pat :: CheckedPattern) :: Syntax:
+    match pat
+    | CheckedPatWildcard(_, at): source_id(#'_, at)
+    | CheckedPatVar(name, _, at): source_id(name, at)
+    | CheckedPatLiteral(value, _, at): checked_numeral_pattern(value, at)
+    | CheckedPatCtor(name, args, _, _, at) when name == c_pair:
+        let [first, second] = args.map(
+                                 fun (a :: CheckedPattern):
+                                   checked_pattern_to_runtime(a))
+        'Pair($first, $second)'
+    | CheckedPatCtor(name, _, _, _, at) when name == #'true || name == #'false:
+        Syntax.make(name == #'true, runtime_context())
+    | CheckedPatCtor(name, args, _, _, at):
+        let [arg_stx, ...] = args.map(
+                               fun (a :: CheckedPattern):
+                                 checked_pattern_to_runtime(a))
+        let constructor = source_id(name, at)
+        '$constructor($arg_stx, ...)'
+    | ~else: error(~who: #'checked_to_runtime, "unknown checked pattern")
+
+  // Reads a checked body back into `Syntax`. Nothing here parses a type,
+  // unifies, or looks up a name -- `check_body` already made every such
+  // decision.
+  fun checked_body_to_runtime(state :: SurfaceState,
+                              body :: CheckedBody) :: Syntax:
+    match body
+    | CheckedBodyExpr(expr):
+        checked_to_runtime(state, expr)
+    | CheckedBodyLet(pat, init, tail, _, _):
+        let pattern_stx = checked_pattern_to_runtime(pat)
+        let value = checked_to_runtime(state, init)
+        let rest = checked_body_to_runtime(state, tail)
+        'block:
+           let $pattern_stx = $value
+           $rest'
+    | CheckedBodyMatch(scrutinee, matrix, _, _):
+        checked_matrix_stx(state, checked_to_runtime(state, scrutinee), matrix)
+    | ~else:
+        error(~who: #'checked_to_runtime, "unknown checked body")
+
+  // A single-scrutinee `CheckedPatternMatrix` -- the shape both
+  // `CheckedMatch` and `CheckedBodyMatch` carry -- renders as an ordinary
+  // `match`.
+  fun checked_matrix_stx(state :: SurfaceState,
+                         scrutinee_stx :: Syntax,
+                         matrix :: CheckedPatternMatrix)
+      :: Syntax:
+    let [clause, ...] = matrix.rows.map(
+                          fun (row :: CheckedMatchRow):
+                            let [pat] = row.patterns
+                            let pattern_stx = checked_pattern_to_runtime(pat)
+                            let result = checked_body_to_runtime(state, row.body)
+                            '$pattern_stx: $result')
+    'match ($scrutinee_stx)
+     | $clause
+     | ...'
+
+  // One row of a multi-clause `CheckedFunction` body -- a parameter list per
+  // row rather than one shared parameter list. Named when rendering a
+  // top-level declaration (every row repeats the same name, which is how
+  // Rhombus groups multiple `fun` clauses under it), anonymous when
+  // rendering a function expression.
+  fun checked_function_row(state :: SurfaceState,
+                           name :: maybe(Syntax),
+                           row :: CheckedMatchRow) :: Syntax:
+    let [pattern_stx, ...] = row.patterns.map(
+                               fun (pat :: CheckedPattern):
+                                 checked_pattern_to_runtime(pat))
+    let body_stx = checked_body_to_runtime(state, row.body)
+    match name
+    | #false: '($pattern_stx, ...): $body_stx'
+    | id :: Syntax: '$id($pattern_stx, ...): $body_stx'
+
+  // Renders a `CheckedFunction`'s parameters and body as `Syntax`: a
+  // multi-clause `fun` when the body is a `CheckedPatternMatrix`, a single
+  // `fun (params): body` (parenthesized when anonymous, so it stays a valid
+  // subexpression) otherwise.
+  fun checked_function_stx(state :: SurfaceState,
+                           params :: List.of(CheckedBinder),
+                           body :: CheckedBody,
+                           name :: maybe(Syntax)) :: Syntax:
+    match body
+    | matrix :: CheckedPatternMatrix:
+        let [row_stx, ...] = matrix.rows.map(
+                               fun (row :: CheckedMatchRow):
+                                 checked_function_row(state, name, row))
+        let form:
+          'fun
+           | $row_stx
+           | ...'
+        match name
+        | #false: '($form)'
+        | _ :: Syntax: form
+    | other:
+        let [param_stx, ...] = params.map(
+                                 fun (binder :: CheckedBinder):
+                                   checked_pattern_to_runtime(binder.pat))
+        let body_stx = checked_body_to_runtime(state, other)
+        match name
+        | #false: '(fun ($param_stx, ...): $body_stx)'
+        | id :: Syntax:
+            'fun $id($param_stx, ...):
+               $body_stx'
+
+  // Reads a closed `CheckedExpr` back into `Syntax` -- purely structural,
+  // since `check_expr` already made every name, type, overload, application,
+  // pattern, and body decision.
+  fun checked_to_runtime(state :: SurfaceState,
+                         checked :: CheckedExpr)
+      :: Syntax:
+    match checked
+    | CheckedLocal(name, _, at): source_id(name, at)
+    | CheckedConstant(name, _, at) when name == #'true:
+        Syntax.make(#true, at)
+    | CheckedConstant(name, _, at) when name == #'false:
+        Syntax.make(#false, at)
+    | CheckedConstant(name, _, at) when name == c_pair:
+        let first = source_id(Symbol.gen("_pair_first"), at)
+        let second = source_id(Symbol.gen("_pair_second"), at)
+        '(fun ($first):
+            fun ($second):
+              Pair($first, $second))'
+    | CheckedConstant(name, _, at):
+        runtime_named_apply(state, name, [], at)
+    | CheckedNumeral(value, _):
+        checked_numeral_stx(value)
+    | CheckedIf(cond, then_branch, else_branch, _, _):
+        let cond_stx = checked_to_runtime(state, cond)
+        let then_stx = checked_to_runtime(state, then_branch)
+        let else_stx = checked_to_runtime(state, else_branch)
+        'if $cond_stx
+         | $then_stx
+         | $else_stx'
+    | CheckedBoolOp(op, args, _):
+        let rendered:
+          args.map(fun (a :: CheckedExpr): checked_to_runtime(state, a))
+        match op
+        | #'conj:
+            let [left, right] = rendered
+            '($(left :~ Syntax)) && ($(right :~ Syntax))'
+        | #'disj:
+            let [left, right] = rendered
+            '($(left :~ Syntax)) || ($(right :~ Syntax))'
+        | #'neg:
+            let [operand] = rendered
+            '! ($(operand :~ Syntax))'
+    | CheckedEq(left, right, _, _):
+        let left_stx = checked_to_runtime(state, left)
+        let right_stx = checked_to_runtime(state, right)
+        '($left_stx) == ($right_stx)'
+    | CheckedApply(head, args, _, at):
+        // `head` renders via `runtime_named_apply` (curry-adapting, taking
+        // the constant's own name) exactly when it is a `CheckedConstant`.
+        // Anything else (a local variable, a more complex expression)
+        // renders `head` itself and applies it directly.
+        let args_stx:
+          args.map(fun (a :: CheckedExpr): checked_to_runtime(state, a))
+        match head
+        | CheckedConstant(name, _, _) when name == c_pair:
+            match args_stx
+            | [first, second]:
+                'Pair($(first :~ Syntax), $(second :~ Syntax))'
+            | [first]:
+                let second = source_id(Symbol.gen("_pair_second"), at)
+                '(fun ($second):
+                    Pair($(first :~ Syntax), $second))'
+            | ~else:
+                error(~who: #'checked_to_runtime,
+                      "pair constructor has unexpected arity")
+        | CheckedConstant(name, _, _):
+            runtime_named_apply(state, name, args_stx, at)
+        | ~else:
+            let head_stx = checked_to_runtime(state, head)
+            let [arg, ...] = args_stx
+            '$head_stx($arg, ...)'
+    | CheckedFunction(params, _, body, _, _):
+        checked_function_stx(state, params, body, #false)
+    | CheckedBlock(body, _, _):
+        checked_body_to_runtime(state, body)
+    | CheckedMatch(scrutinee, matrix, _, _):
+        checked_matrix_stx(state, checked_to_runtime(state, scrutinee), matrix)
+    | ~else:
+        error(~who: #'checked_to_runtime, "unknown checked expression")
+
+  // A function's executable reading is rendered from the one checked tree
+  // the frontend produced for it.
+  fun emit_function(fn :: CheckedFunction, state :: SurfaceState,
+                    name :: Syntax) :: Syntax:
+    parameterize { runtime_context: name }:
+      checked_function_stx(state, fn.params, fn.body, name)
+
+  // -- entry points
+  // ------------------------------------------------------------
+
+  // One member of a datatype declaration group.
+  fun lower_datatype(name :: Syntax, ctors :: List, spec :: DatatypeSpec)
+      :: List.of(Syntax):
+    if spec == native_nat_spec
+    | emit_compact_nat(name, ctors)
+    | [emit_type(name, ctors)]
+
+  fun lower_function(fn :: CheckedFunction, state :: SurfaceState,
+                     name :: Syntax) :: Syntax:
+    emit_function(fn, state, name)

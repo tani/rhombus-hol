@@ -229,6 +229,11 @@ instead published a @emph{description} of the theory and re-admitted each
 theorem on the word of the exporting module's compile would introduce exactly
 such a boundary, forgeable by hand-writing the description.
 
+@bold{A @tt{~sorry} theorem is an axiom.} The @tt{~sorry} proof option admits
+its theorem through @tt{new_axiom} instead of proving it. Nothing hides it: the
+axiom is in the theory's axiom list, and a theory that must be conservative,
+such as the standard library, is tested to have added none.
+
 @section{Where this leaks}
 
 Three honest caveats.

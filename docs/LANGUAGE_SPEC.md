@@ -624,6 +624,7 @@ proof:
   ~disable: [rule, ...]
   ~limit: nonnegative_integer
   ~extensionality: [variable, ...]
+  ~sorry
 ```
 
 A theorem is elaborated as a Boolean HOL term and proved when the theory is built.
@@ -632,8 +633,9 @@ to the global rewrite database merely because it exists. A later proof enables
 it explicitly with `~use`; adding an unrelated theorem must not silently change
 automation.
 
-The `proof:` block is optional. Its options only control proof search; none can
-admit a false proposition. Each option keyword may occur at most once.
+The `proof:` block is optional. Its options other than `~sorry` only control
+proof search; none of them can admit a false proposition. Each option keyword
+may occur at most once.
 Every bracketed list shown above must be nonempty, and its elements retain
 their written order; repeated keywords never concatenate lists.
 
@@ -653,6 +655,10 @@ their written order; repeated keywords never concatenate lists.
 - `~disable:` disables the listed rewrite rules for this proof only.
 - `~skip:` skips the listed named waterfall stages for this proof only.
 - `~limit:` sets the nonnegative proof-step limit.
+- `~sorry` takes no argument. It skips proof search and admits the
+  proposition as a kernel axiom (`new_axiom`), so the theory's axiom list
+  records it. Any other options beside it are ignored, but its `~split:` and
+  `~choose:` expressions are still checked with the statement.
 
 ### 4.6 `notation`
 

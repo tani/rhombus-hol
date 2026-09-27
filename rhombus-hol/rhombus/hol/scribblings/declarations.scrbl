@@ -776,6 +776,7 @@ proof_option = ~induct: [Id, ...]
              | ~disable: [Id, ...]
              | ~limit: nonnegative_integer
              | ~extensionality: [Id, ...]
+             | ~sorry
 }
 
 States a proposition and proves it while the module compiles. The proposition
@@ -817,8 +818,14 @@ is useful when a lemma is too aggressive to leave in the rewriter permanently.
 @rhombus(~skip) names waterfall stages --- @tt{simplify}, @tt{eliminate},
 @tt{fertilize}, @tt{generalize}, @tt{irrelevance}, @tt{induct} --- to skip
 for this proof only; see @secref("prover"). @rhombus(~limit) sets this
-proof's nonnegative search-step ceiling. None of the options change what the
-prover is allowed to conclude, only what it tries.
+proof's nonnegative search-step ceiling. None of these options change what
+the prover is allowed to conclude, only what it tries.
+
+@rhombus(~sorry) is the exception: it skips the proof and admits the
+proposition as a kernel axiom, which is how an unfinished proof lets later
+declarations go on. The axiom stays on record in the theory's axiom list, so a
+theory built with @rhombus(~sorry) is visibly not a conservative extension. The
+other options may stay beside it; they are ignored.
 
 The @rhombus(~extensionality) list names fresh variables for sequential
 function-extensionality steps. All names are consumed in order before

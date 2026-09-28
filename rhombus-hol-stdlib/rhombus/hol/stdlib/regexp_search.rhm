@@ -111,19 +111,40 @@ function regexp_replace_first(r :: Regexp.of(?a),
 // copies one original symbol before continuing, or inserts once and stops at
 // EOF. Replacement symbols are only appended and are never searched.
 //
-// Written without any nested `match` on a computed value ahead of a
-// recursive call (`dfa_find`'s result, the `regexp_match` pair inside
-// it, `nat_sub`'s result, or `unmatched`'s shape) -- see dfa_find's own
-// comment above for why. `RegexpMatch`'s own accessor functions
-// (`regexp_match_start`/`regexp_match_end`, defined above) stand in for
-// destructuring it; `nat_sub(end, start) === zero()` stands in for
-// matching its result; and the empty-match branch takes one element via
-// `list_take`/`list_drop` with a literal count rather than destructuring
-// `unmatched` into `cons(x, rest)`, which sidesteps needing an arbitrary
-// placeholder value of the function's own generic element type `?a` (no
-// such value is available in scope for `option_get_or`'s default,
-// whereas the `RegexpMatch`/`Nat` cases above have a concrete zero-ish
-// default to fall back on).
+// Non-recursive accessors for the pieces `dfa_replace_all_with_fuel`
+// needs, each recomputing `dfa_find(m, input)` rather than having a
+// caller bind it once: a recursive function cannot itself sequence a
+// `let`/`block:` ahead of one of its own recursive calls either (like
+// `match`, this also introduces a binder, confirmed with a minimal
+// reproduction -- scratchpad/termtest/t26 vs t27), so these repeated,
+// individually plain function calls are what `dfa_replace_all_with_fuel`
+// below is restricted to using.
+function dfa_replace_found(m :: DFA.of(?q, ?a), input :: List.of(?a)) :: RegexpMatch:
+  option_get_or(regexp_match(zero(), zero()), dfa_find(m, input))
+
+function dfa_replace_prefix(m :: DFA.of(?q, ?a), input :: List.of(?a)) :: List.of(?a):
+  list_take(regexp_match_start(dfa_replace_found(m, input)), input)
+
+function dfa_replace_unmatched(m :: DFA.of(?q, ?a), input :: List.of(?a)) :: List.of(?a):
+  list_drop(regexp_match_start(dfa_replace_found(m, input)), input)
+
+function dfa_replace_is_empty_match(m :: DFA.of(?q, ?a), input :: List.of(?a)) :: Boolean:
+  let found = dfa_replace_found(m, input)
+  nat_sub(regexp_match_end(found), regexp_match_start(found)) === zero()
+
+// See dfa_find's own comment above: no nested `match` on a computed
+// value (`dfa_find`'s result, the `regexp_match` pair inside it,
+// `nat_sub`'s result, or `unmatched`'s shape) may sit ahead of a
+// recursive call, so the helpers above replace each of those. The
+// empty-match branch takes one element via `list_take`/`list_drop` with
+// a literal count rather than destructuring `unmatched` into `cons(x,
+// rest)`, because unlike `RegexpMatch`/`Nat` above, there is no
+// arbitrary placeholder value of the function's own generic element
+// type `?a` available for `option_get_or`'s default if `unmatched` were
+// accessed via `list_head`/`list_tail` instead. `fuel`'s own decrease
+// (`succ(rest_fuel) -> rest_fuel`, untouched by any of this) is what the
+// termination checker actually verifies; the other argument position
+// does not need to decrease at all.
 function dfa_replace_all_with_fuel(m :: DFA.of(?q, ?a),
                                    replacement :: List.of(?a),
                                    input :: List.of(?a),
@@ -133,28 +154,27 @@ function dfa_replace_all_with_fuel(m :: DFA.of(?q, ?a),
   | succ(rest_fuel):
       if option_is_none(dfa_find(m, input))
       | input
-      | let found = option_get_or(regexp_match(zero(), zero()), dfa_find(m, input))
-        let start = regexp_match_start(found)
-        let end = regexp_match_end(found)
-        let prefix = list_take(start, input)
-        let unmatched = list_drop(start, input)
-        if nat_sub(end, start) === zero()
-        | if list_null(unmatched)
-          | list_append(prefix, replacement)
+      | if dfa_replace_is_empty_match(m, input)
+        | if list_null(dfa_replace_unmatched(m, input))
+          | list_append(dfa_replace_prefix(m, input), replacement)
           | list_append(
-              prefix,
+              dfa_replace_prefix(m, input),
               list_append(
                 replacement,
                 list_append(
-                  list_take(nat_one(), unmatched),
+                  list_take(nat_one(), dfa_replace_unmatched(m, input)),
                   dfa_replace_all_with_fuel(
-                    m, replacement, list_drop(nat_one(), unmatched), rest_fuel))))
+                    m, replacement,
+                    list_drop(nat_one(), dfa_replace_unmatched(m, input)),
+                    rest_fuel))))
         | list_append(
-            prefix,
+            dfa_replace_prefix(m, input),
             list_append(
               replacement,
               dfa_replace_all_with_fuel(
-                m, replacement, list_drop(end, input), rest_fuel)))
+                m, replacement,
+                list_drop(regexp_match_end(dfa_replace_found(m, input)), input),
+                rest_fuel)))
 
 function regexp_replace_all(r :: Regexp.of(?a),
                             replacement :: List.of(?a),

@@ -57,31 +57,35 @@ function regexp_compile_push_sequence(
              stack_values,
              cons(regexp_compile_sequence_operator(), nil())))
   | cons(current_operator, rest):
-      match current_operator
-      | regexp_compile_alternate_operator():
-          some(regexp_compile_stacks(
-                 stack_values,
-                 cons(regexp_compile_sequence_operator(), operators)))
-      | regexp_compile_group_operator():
-          some(regexp_compile_stacks(
-                 stack_values,
-                 cons(regexp_compile_sequence_operator(), operators)))
-      | regexp_compile_sequence_operator():
-          // Written as a boolean test plus a direct accessor call, not a
-          // `match` binding a fresh variable, so the recursive call's
-          // argument is a plain expression rather than sitting under a
-          // binder -- the termination checker refuses any recursive call
-          // that is textually under one, regardless of whether the
-          // argument actually decreases (see
-          // backend/proof/definition/function/termination.rhm's
-          // `call_sites_in`). `rest` alone already makes the recursion
-          // structural; `stack_values`/`reduced` never need to decrease.
-          if option_is_none(regexp_compile_apply_operator(current_operator, stack_values))
-          | none()
-          | regexp_compile_push_sequence(
-              option_get_or(stack_values,
-                            regexp_compile_apply_operator(current_operator, stack_values)),
-              rest)
+      // A two-way `if`/`===` rather than a `match` spanning all three
+      // `RegexpCompileOperator` constructors: the well-founded-recursion
+      // equation derivation cannot discharge a guarded recursive branch
+      // that sits alongside two or more sibling constructor cases in one
+      // `match` (confirmed with a minimal reproduction -- it fails with
+      // "theorem is not an equation" on the disjunction it builds to
+      // cover the non-recursive cases together, regardless of how that
+      // disjunction is spelled at the surface: explicit arms or a
+      // wildcard). Splitting into nested binary tests avoids ever
+      // building that disjunction. Separately: the recursive call itself
+      // is written as a boolean test (`option_is_none`) plus a direct
+      // accessor (`option_get_or`), not a `match` binding a fresh
+      // variable, because the termination checker refuses any recursive
+      // call that is textually under a binder, regardless of whether the
+      // argument actually decreases (see
+      // backend/proof/definition/function/termination.rhm's
+      // `call_sites_in`). `rest` alone already makes the recursion
+      // structural; `stack_values`/the reduced value never need to
+      // decrease.
+      if current_operator === regexp_compile_sequence_operator()
+      | if option_is_none(regexp_compile_apply_operator(current_operator, stack_values))
+        | none()
+        | regexp_compile_push_sequence(
+            option_get_or(stack_values,
+                          regexp_compile_apply_operator(current_operator, stack_values)),
+            rest)
+      | some(regexp_compile_stacks(
+               stack_values,
+               cons(regexp_compile_sequence_operator(), operators)))
 
 function regexp_compile_push_alternate(
     stack_values :: List.of(Regexp.of(Codepoint)),
@@ -92,26 +96,21 @@ function regexp_compile_push_alternate(
              stack_values,
              cons(regexp_compile_alternate_operator(), nil())))
   | cons(current_operator, rest):
-      match current_operator
-      | regexp_compile_group_operator():
-          some(regexp_compile_stacks(
-                 stack_values,
-                 cons(regexp_compile_alternate_operator(), operators)))
-      | regexp_compile_alternate_operator():
-          // See regexp_compile_push_sequence's own comment above.
-          if option_is_none(regexp_compile_apply_operator(current_operator, stack_values))
-          | none()
-          | regexp_compile_push_alternate(
-              option_get_or(stack_values,
-                            regexp_compile_apply_operator(current_operator, stack_values)),
-              rest)
-      | regexp_compile_sequence_operator():
-          if option_is_none(regexp_compile_apply_operator(current_operator, stack_values))
-          | none()
-          | regexp_compile_push_alternate(
-              option_get_or(stack_values,
-                            regexp_compile_apply_operator(current_operator, stack_values)),
-              rest)
+      // See regexp_compile_push_sequence's own comment above (both the
+      // two-way split and the guarded-recursion shape). Here
+      // `alternate_operator` and `sequence_operator` share one identical
+      // recursive body, so the shared branch is the non-`group_operator`
+      // side of the split.
+      if current_operator === regexp_compile_group_operator()
+      | some(regexp_compile_stacks(
+               stack_values,
+               cons(regexp_compile_alternate_operator(), operators)))
+      | if option_is_none(regexp_compile_apply_operator(current_operator, stack_values))
+        | none()
+        | regexp_compile_push_alternate(
+            option_get_or(stack_values,
+                          regexp_compile_apply_operator(current_operator, stack_values)),
+            rest)
 
 function regexp_compile_close_group(
     stack_values :: List.of(Regexp.of(Codepoint)),
@@ -119,24 +118,15 @@ function regexp_compile_close_group(
   match operators
   | nil(): none()
   | cons(current_operator, rest):
-      match current_operator
-      | regexp_compile_group_operator():
-          some(regexp_compile_stacks(stack_values, rest))
-      | regexp_compile_alternate_operator():
-          // See regexp_compile_push_sequence's own comment above.
-          if option_is_none(regexp_compile_apply_operator(current_operator, stack_values))
-          | none()
-          | regexp_compile_close_group(
-              option_get_or(stack_values,
-                            regexp_compile_apply_operator(current_operator, stack_values)),
-              rest)
-      | regexp_compile_sequence_operator():
-          if option_is_none(regexp_compile_apply_operator(current_operator, stack_values))
-          | none()
-          | regexp_compile_close_group(
-              option_get_or(stack_values,
-                            regexp_compile_apply_operator(current_operator, stack_values)),
-              rest)
+      // See regexp_compile_push_sequence's own comment above.
+      if current_operator === regexp_compile_group_operator()
+      | some(regexp_compile_stacks(stack_values, rest))
+      | if option_is_none(regexp_compile_apply_operator(current_operator, stack_values))
+        | none()
+        | regexp_compile_close_group(
+            option_get_or(stack_values,
+                          regexp_compile_apply_operator(current_operator, stack_values)),
+            rest)
 
 function regexp_compile_finish(
     stack_values :: List.of(Regexp.of(Codepoint)),
@@ -148,23 +138,15 @@ function regexp_compile_finish(
       | cons(value, nil()): some(value)
       | cons(_, cons(_, _)): none()
   | cons(current_operator, rest):
-      match current_operator
-      | regexp_compile_group_operator(): none()
-      | regexp_compile_alternate_operator():
-          // See regexp_compile_push_sequence's own comment above.
-          if option_is_none(regexp_compile_apply_operator(current_operator, stack_values))
-          | none()
-          | regexp_compile_finish(
-              option_get_or(stack_values,
-                            regexp_compile_apply_operator(current_operator, stack_values)),
-              rest)
-      | regexp_compile_sequence_operator():
-          if option_is_none(regexp_compile_apply_operator(current_operator, stack_values))
-          | none()
-          | regexp_compile_finish(
-              option_get_or(stack_values,
-                            regexp_compile_apply_operator(current_operator, stack_values)),
-              rest)
+      // See regexp_compile_push_sequence's own comment above.
+      if current_operator === regexp_compile_group_operator()
+      | none()
+      | if option_is_none(regexp_compile_apply_operator(current_operator, stack_values))
+        | none()
+        | regexp_compile_finish(
+            option_get_or(stack_values,
+                          regexp_compile_apply_operator(current_operator, stack_values)),
+            rest)
 
 function regexp_compile_insert_atom(
     atom :: Regexp.of(Codepoint),

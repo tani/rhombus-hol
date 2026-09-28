@@ -207,69 +207,66 @@ function regexp_compile_insert_star(state :: RegexpCompileState) :: Option.of(Re
         some(regexp_compile_state(
                cons(regexp_star(value), rest), operators, #false, #false))
 
+// Every non-escape dispatch case for `regexp_compile_parse`, factored out
+// because it is identical whether or not another codepoint follows --
+// only the escape case (`\`) itself needs to look at the rest of the
+// input. Not recursive, so its `if`/`match` structure is unconstrained
+// by the same-function-recursion restriction described below.
+function regexp_compile_parse_step(
+    current_codepoint :: Codepoint,
+    state :: RegexpCompileState) :: Option.of(RegexpCompileState):
+  let code = codepoint_to_nat(current_codepoint)
+  if code == 124
+  | regexp_compile_insert_alternate(state)
+  | if code == 42
+    | regexp_compile_insert_star(state)
+    | if code == 40
+      | regexp_compile_open_group(state)
+      | if code == 41
+        | regexp_compile_insert_close(state)
+        | if code == 46
+          | regexp_compile_insert_atom(regexp_atom(regexp_compile_wildcard), state)
+          | regexp_compile_insert_atom(
+              regexp_literal(codepoint_equal, current_codepoint), state)
+
 function regexp_compile_parse(
     codepoints :: List.of(Codepoint),
     state :: RegexpCompileState) :: Option.of(RegexpCompileState):
+  // Split into 3 top-level clauses -- rather than one `cons(current,
+  // rest)` clause with a nested `match rest | ...` for the escape case --
+  // because only the function's own single, top-level, whole-body match
+  // is exempt from the kernel's "a recursive call under a binder"
+  // restriction; a `match` written as an ordinary expression inside a
+  // branch is not, even when it matches a plain parameter subterm like
+  // `rest` rather than a computed value (confirmed with a minimal
+  // reproduction -- scratchpad/termtest/t16..t18/t24). Each dispatch
+  // step is a boolean test (`option_is_none`) plus a direct accessor
+  // (`option_get_or`) for the same reason `regexp_compile_push_sequence`
+  // is written that way.
   match codepoints
   | nil(): some(state)
-  | cons(current_codepoint, rest):
-      let code = codepoint_to_nat(current_codepoint)
-      // Each step below is a boolean test (`option_is_none`) plus a
-      // direct accessor (`option_get_or`), not a `match` binding a fresh
-      // `next_state` before recursing -- see
-      // regexp_compile_push_sequence's own comment for why a recursive
-      // call cannot sit under that binder.
-      if code == 92
-      | match rest
-        | nil(): none()
-        | cons(escaped, remaining):
-            if option_is_none(regexp_compile_insert_atom(
-                                 regexp_literal(codepoint_equal, escaped), state))
-            | none()
-            | regexp_compile_parse(
-                remaining,
-                option_get_or(state,
-                              regexp_compile_insert_atom(
-                                regexp_literal(codepoint_equal, escaped), state)))
-      | if code == 124
-        | if option_is_none(regexp_compile_insert_alternate(state))
-          | none()
-          | regexp_compile_parse(
-              rest, option_get_or(state, regexp_compile_insert_alternate(state)))
-        | if code == 42
-          | if option_is_none(regexp_compile_insert_star(state))
-            | none()
-            | regexp_compile_parse(
-                rest, option_get_or(state, regexp_compile_insert_star(state)))
-          | if code == 40
-            | if option_is_none(regexp_compile_open_group(state))
-              | none()
-              | regexp_compile_parse(
-                  rest, option_get_or(state, regexp_compile_open_group(state)))
-            | if code == 41
-              | if option_is_none(regexp_compile_insert_close(state))
-                | none()
-                | regexp_compile_parse(
-                    rest, option_get_or(state, regexp_compile_insert_close(state)))
-              | if code == 46
-                | if option_is_none(regexp_compile_insert_atom(
-                                       regexp_atom(regexp_compile_wildcard), state))
-                  | none()
-                  | regexp_compile_parse(
-                      rest,
-                      option_get_or(state,
-                                    regexp_compile_insert_atom(
-                                      regexp_atom(regexp_compile_wildcard), state)))
-                | if option_is_none(regexp_compile_insert_atom(
-                                       regexp_literal(codepoint_equal, current_codepoint),
-                                       state))
-                  | none()
-                  | regexp_compile_parse(
-                      rest,
-                      option_get_or(state,
-                                    regexp_compile_insert_atom(
-                                      regexp_literal(codepoint_equal, current_codepoint),
-                                      state)))
+  | cons(current_codepoint, nil()):
+      if codepoint_to_nat(current_codepoint) == 92
+      | none()
+      | if option_is_none(regexp_compile_parse_step(current_codepoint, state))
+        | none()
+        | regexp_compile_parse(
+            nil(), option_get_or(state, regexp_compile_parse_step(current_codepoint, state)))
+  | cons(current_codepoint, cons(next_codepoint, remaining)):
+      if codepoint_to_nat(current_codepoint) == 92
+      | if option_is_none(regexp_compile_insert_atom(
+                             regexp_literal(codepoint_equal, next_codepoint), state))
+        | none()
+        | regexp_compile_parse(
+            remaining,
+            option_get_or(state,
+                          regexp_compile_insert_atom(
+                            regexp_literal(codepoint_equal, next_codepoint), state)))
+      | if option_is_none(regexp_compile_parse_step(current_codepoint, state))
+        | none()
+        | regexp_compile_parse(
+            cons(next_codepoint, remaining),
+            option_get_or(state, regexp_compile_parse_step(current_codepoint, state)))
 
 function regexp_compile(source :: String) :: Option.of(Regexp.of(Codepoint)):
   let codepoints = string_to_codepoints(source)

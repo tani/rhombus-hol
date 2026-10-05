@@ -150,9 +150,9 @@ class Translator:
         if k=='alias': return self.pattern(p[1],env)+' as '+ident_safe(env.get(p[2],p[2]))
         if k in ['int','string']: return p[1] if k=='int' else string(p[1])
         if k=='tuple':
-            ps=p[1]; ctor='Pair' if len(ps)==2 else ('Interop.Triple3' if len(ps)==3 and self.bridge else f'HolTuple{len(ps)}')
-            if ctor!='Pair':ctor=self.ident(ctor,env)
-            return ctor+'('+','.join(self.pattern(q,env) for q in ps)+')'
+            ps=p[1]
+            if len(ps)==3 and self.bridge: return 'Interop.Triple3('+','.join(self.pattern(q,env) for q in ps)+')'
+            return self.nested_pair([self.pattern(q,env) for q in ps])
         if k=='construct':
             c,arg=p[1:]
             if c=='[]': return 'PairList []'
@@ -203,12 +203,23 @@ class Translator:
             candidate='port_'+candidate
         self.used_binding_names.add(ident_safe(candidate))
         return candidate
+    def nested_pair(self,parts):
+        # OCaml n-tuples are right-nested pairs.
+        out=parts[-1]
+        for q in reversed(parts[:-1]): out='Pair('+q+','+out+')'
+        return out
     def ordered_constructor(self,ctor,args,env):
         if len(args)<2 or all(pure(a) for a in args):return ctor+'('+','.join(self.expr(a,env) for a in args)+')'
         lines=[];variables={}
         for i in reversed(range(len(args))):
             v=self.fresh();lines.append('let '+v+' = '+self.expr(args[i],env));variables[i]=v
         return block(';\n'.join(lines+[ctor+'('+','.join(variables[i] for i in range(len(args)))+')']))
+    def ordered_tuple(self,args,env):
+        if all(pure(a) for a in args):return self.nested_pair([self.expr(a,env) for a in args])
+        lines=[];variables={}
+        for i in reversed(range(len(args))):
+            v=self.fresh();lines.append('let '+v+' = '+self.expr(args[i],env));variables[i]=v
+        return block(';\n'.join(lines+[self.nested_pair([variables[i] for i in range(len(args))])]))
     def expr(self,e,env):
         k=e[0]
         if k=='id': return self.ident(e[1],env)
@@ -221,10 +232,11 @@ class Translator:
             encoded=json.dumps(self.quotes[key],ensure_ascii=False,separators=(',',':'))
             return self.ident('expand_quote',env)+'('+string(encoded)+')'
         if k=='tuple':
-            es=e[1]; ctor='Pair' if len(es)==2 else ('Interop.triple3' if len(es)==3 and self.bridge else f'HolTuple{len(es)}')
-            if ctor!='Pair':ctor=self.ident(ctor,env)
+            es=e[1]; ctor='Pair' if len(es)==2 else ('Interop.triple3' if len(es)==3 and self.bridge else None)
+            if ctor=='Interop.triple3':ctor=self.ident(ctor,env)
             # Tactic results in the source are the goalstate triple.
             if len(es)==3 and es[2][0]=='fun' and es[0]==['id','null_meta']: ctor=self.ident('GoalState',env)
+            if ctor is None: return self.ordered_tuple(es,env)
             return self.ordered_constructor(ctor,es,env)
         if k=='array': return self.ordered_constructor('Array',e[1],env)
         if k=='construct':

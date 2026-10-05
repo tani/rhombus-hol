@@ -1,0 +1,307 @@
+#lang rhombus/static
+// SPDX-FileCopyrightText: 2026 Masaya Taniguchi
+// SPDX-FileCopyrightText: 1998 University of Cambridge
+// SPDX-FileCopyrightText: 1998-2007 John Harrison
+// SPDX-License-Identifier: 0BSD AND BSD-2-Clause
+//
+// HOL Light tactics.ml compatibility layer.
+//
+// A tactic maps Goal to maybe(Step). A Step already is the LCF validation
+// object HOL Light justification functions encode: it contains subgoals and
+// a function that reconstructs a theorem of the parent from subgoal theorems.
+// Consequently the tactical algebra below composes Step.justify functions and
+// does not introduce a parallel proof system.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/hol_light/drule open
+  rhombus/hol/backend/proof/automation/goal/node open
+  rhombus/hol/backend/proof/automation/goal/trace open
+
+export:
+  Goal
+  Step
+  Tactic
+  FAIL_TAC
+  ALL_TAC
+  ACCEPT_TAC
+  ASSUME_TAC
+  REFL_TAC
+  DISCH_TAC
+  UNDISCH_TAC
+  CONJ_TAC
+  GEN_TAC
+  X_GEN_TAC
+  EXISTS_TAC
+  DISJ1_TAC
+  DISJ2_TAC
+  CONTR_TAC
+  EQ_TAC
+  THEN
+  THENL
+  ORELSE
+  TRY
+  REPEAT
+  EVERY
+  FIRST
+  MAP_EVERY
+  MAP_FIRST
+  REPLICATE_TAC
+  prove
+
+annotation Tactic = Function.of_arity(1)
+
+fun FAIL_TAC(_message :: String):
+  fun (_g :: Goal) :: maybe(Step): #false
+
+fun ALL_TAC(g :: Goal) :: maybe(Step):
+  Step([g], fun (ths :: List.of(Thm)): ths[0], [Assumed(g.concl)])
+
+fun theorem_fits_goal(th :: Thm, g :: Goal) :: Boolean:
+  concl_of(th) == g.concl
+    && (for all (h in hyps_of(th)): g.asms.contains(h))
+
+fun ACCEPT_TAC(th :: Thm):
+  fun (g :: Goal) :: maybe(Step):
+    (if theorem_fits_goal(th, g)
+     | Step([], fun (_ths :: List.of(Thm)): th, [])
+     | #false)
+
+fun ASSUME_TAC(thy :: Theory):
+  fun (g :: Goal) :: maybe(Step):
+    (if g.asms.contains(g.concl)
+     | Step([], fun (_ths :: List.of(Thm)): ASSUME(thy, g.concl), [])
+     | #false)
+
+fun REFL_TAC(thy :: Theory):
+  fun (g :: Goal) :: maybe(Step):
+    match dest_eq(g.concl)
+    | [l, r] when l == r:
+        Step([], fun (_ths :: List.of(Thm)): REFL(thy, l), [])
+    | ~else: #false
+
+fun DISCH_TAC(thy :: Theory):
+  fun (g :: Goal) :: maybe(Step):
+    match dest_imp(g.concl)
+    | #false: #false
+    | [p, q]:
+        let sub = Goal(g.asms ++ [p], q)
+        Step([sub],
+             fun (ths :: List.of(Thm)): DISCH(thy, p, ths[0]),
+             [Assumed(p)])
+
+fun UNDISCH_TAC(thy :: Theory, p :: Term):
+  fun (g :: Goal) :: maybe(Step):
+    cond
+    | !g.asms.contains(p): #false
+    | ~else:
+        let rest = g.asms.filter(~skip: fun (h): h == p)
+        let sub = Goal(rest, mk_imp(p, g.concl))
+        Step([sub],
+             fun (ths :: List.of(Thm)): UNDISCH(thy, ths[0]),
+             [Assumed(p)])
+
+fun CONJ_TAC(thy :: Theory):
+  fun (g :: Goal) :: maybe(Step):
+    match dest_conj(g.concl)
+    | #false: #false
+    | [p, q]:
+        Step([Goal(g.asms, p), Goal(g.asms, q)],
+             fun (ths :: List.of(Thm)): CONJ(thy, ths[0], ths[1]),
+             [Assumed(p), Assumed(q)])
+
+fun X_GEN_TAC(thy :: Theory, x :: FVar):
+  fun (g :: Goal) :: maybe(Step):
+    match dest_forall(g.concl)
+    | #false: #false
+    | [_v, _body]:
+        let (_, abs) = dest_comb(g.concl)
+        let body2 = open_abs(x, abs)
+        let sub = Goal(g.asms, body2)
+        Step([sub],
+             fun (ths :: List.of(Thm)): GEN(thy, x, ths[0]),
+             [Assumed(body2)])
+
+fun GEN_TAC(thy :: Theory):
+  fun (g :: Goal) :: maybe(Step):
+    match dest_forall(g.concl)
+    | #false: #false
+    | [v0, _]:
+        let v = variant(g.asms ++ [g.concl], v0 :~ FVar)
+        X_GEN_TAC(thy, v)(g)
+
+fun EXISTS_TAC(thy :: Theory, witness :: Term):
+  fun (g :: Goal) :: maybe(Step):
+    match dest_exists(g.concl)
+    | #false: #false
+    | [v, body]:
+        let instantiated = inst_fvar([[witness, v :~ FVar]], body)
+        Step([Goal(g.asms, instantiated)],
+             fun (ths :: List.of(Thm)):
+               EXISTS(thy, g.concl, witness, ths[0]),
+             [Witnessed(witness)])
+
+fun DISJ1_TAC(thy :: Theory):
+  fun (g :: Goal) :: maybe(Step):
+    match dest_disj(g.concl)
+    | #false: #false
+    | [p, q]:
+        Step([Goal(g.asms, p)],
+             fun (ths :: List.of(Thm)): DISJ1(thy, ths[0], q),
+             [CaseSplit(p, #true)])
+
+fun DISJ2_TAC(thy :: Theory):
+  fun (g :: Goal) :: maybe(Step):
+    match dest_disj(g.concl)
+    | #false: #false
+    | [p, q]:
+        Step([Goal(g.asms, q)],
+             fun (ths :: List.of(Thm)): DISJ2(thy, p, ths[0]),
+             [CaseSplit(q, #false)])
+
+fun CONTR_TAC(thy :: Theory):
+  fun (g :: Goal) :: maybe(Step):
+    Step([Goal(g.asms, tm_false)],
+         fun (ths :: List.of(Thm)): CONTR(thy, g.concl, ths[0]),
+         [Assumed(tm_false)])
+
+fun EQ_TAC(thy :: Theory):
+  fun (g :: Goal) :: maybe(Step):
+    match dest_eq(g.concl)
+    | [p, q] when type_of(p) == bool:
+        Step([Goal(g.asms, mk_imp(p, q)),
+              Goal(g.asms, mk_imp(q, p))],
+             fun (ths :: List.of(Thm)):
+               IMP_ANTISYM_RULE(thy, ths[0], ths[1]),
+             [Assumed(mk_imp(p, q)), Assumed(mk_imp(q, p))])
+    | ~else: #false
+
+fun split_prefix(xs :: List, n :: NonnegInt) :: values(List, List):
+  recur loop (rest :~ List = xs, k = n, rev :~ List = []):
+    cond
+    | k == 0: values(rev.reverse(), rest)
+    | ~else:
+        match rest
+        | []: error(~who: #'tactic, "justification received too few theorems")
+        | List.cons(x, more): loop(more, k - 1, List.cons(x, rev))
+
+fun compose_step(first :: Step, seconds :: List.of(Step)) :: Step:
+  let subgoals:
+    for values(acc :~ List = []) (s in seconds): acc ++ s.subgoals
+  let events:
+    for values(acc :~ List = []) (s in seconds): acc ++ s.events
+  fun justify(flat :: List.of(Thm)) :: Thm:
+    recur gather (ss :~ List.of(Step) = seconds,
+                  rest :~ List.of(Thm) = flat,
+                  parents_rev :~ List.of(Thm) = []):
+      match ss
+      | []:
+          unless rest.length() == 0
+          | error(~who: #'tactic, "justification received too many theorems")
+          first.justify(parents_rev.reverse())
+      | List.cons(s, more):
+          let (mine, tail) = split_prefix(rest, s.subgoals.length())
+          gather(more, tail, List.cons(s.justify(mine), parents_rev))
+  Step(subgoals, justify, events)
+
+fun THEN(tac1 :: Tactic, tac2 :: Tactic):
+  fun (g :: Goal) :: maybe(Step):
+    match tac1(g)
+    | #false: #false
+    | first :~ Step:
+        let second_steps:
+          for values(acc :~ maybe(List) = []) (sub in first.subgoals):
+            match acc
+            | #false: #false
+            | acc :~ List:
+                match tac2(sub)
+                | #false: #false
+                | s :~ Step: acc ++ [s]
+        match second_steps
+        | #false: #false
+        | ss :~ List: compose_step(first, ss)
+
+fun THENL(tac :: Tactic, tacs :: List.of(Tactic)):
+  fun (g :: Goal) :: maybe(Step):
+    match tac(g)
+    | #false: #false
+    | first :~ Step:
+        unless first.subgoals.length() == tacs.length()
+        | error(~who: #'THENL, "number of tactics does not match subgoals")
+        let seconds:
+          for values(acc :~ maybe(List) = []) (sub in first.subgoals, t in tacs):
+            match acc
+            | #false: #false
+            | acc :~ List:
+                match t(sub)
+                | #false: #false
+                | s :~ Step: acc ++ [s]
+        match seconds
+        | #false: #false
+        | ss :~ List: compose_step(first, ss)
+
+fun ORELSE(tac1 :: Tactic, tac2 :: Tactic):
+  fun (g :: Goal) :: maybe(Step):
+    match tac1(g)
+    | #false: tac2(g)
+    | step: step
+
+fun TRY(tac :: Tactic):
+  ORELSE(tac, ALL_TAC)
+
+fun EVERY(tacs :: List.of(Tactic)):
+  match tacs
+  | []: ALL_TAC
+  | List.cons(t0, rest):
+      for values(acc :~ Tactic = t0) (t in rest): THEN(acc, t)
+
+fun FIRST(tacs :: List.of(Tactic)):
+  fun (g :: Goal) :: maybe(Step):
+    recur loop (rest :~ List.of(Tactic) = tacs):
+      match rest
+      | []: #false
+      | List.cons(t, more):
+          match t(g)
+          | #false: loop(more)
+          | s: s
+
+fun MAP_EVERY(f :: Function.of_arity(1), xs :: List):
+  EVERY(xs.map(fun (x): f(x) :~ Tactic))
+
+fun MAP_FIRST(f :: Function.of_arity(1), xs :: List):
+  FIRST(xs.map(fun (x): f(x) :~ Tactic))
+
+fun REPLICATE_TAC(n :: NonnegInt, tac :: Tactic):
+  EVERY(for List (_i in List.iota(n)): tac)
+
+fun REPEAT(tac :: Tactic):
+  fun repeated(g :: Goal) :: maybe(Step):
+    match tac(g)
+    | #false: ALL_TAC(g)
+    | step :~ Step:
+        cond
+        | step.subgoals.length() == 1
+            && step.subgoals[0].asms == g.asms
+            && step.subgoals[0].concl == g.concl:
+            step
+        | ~else:
+            let seconds:
+              for List (sub in step.subgoals):
+                repeated(sub) :~ Step
+            compose_step(step, seconds)
+  repeated
+
+fun prove(goal :: Goal, tac :: Tactic) :: Thm:
+  fun close(g :: Goal, t :: Tactic) :: Thm:
+    match t(g)
+    | #false:
+        error(~who: #'prove, "tactic failed",
+              error.val(~label: "goal", show(g.concl)))
+    | step :~ Step:
+        let ths:
+          for List (sub in step.subgoals):
+            close(sub, t)
+        step.justify(ths)
+  close(goal, tac)

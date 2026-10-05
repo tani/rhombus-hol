@@ -18,7 +18,7 @@ with their small compatibility/support modules. These are the versions from
 the earlier differential-validation work, which matched the pinned HOL Light
 implementation on 3,914/3,914 generated cases.
 
-The direct port now continues through:
+The direct HOL Light engine port stops at:
 
 ```
 fusion.ml
@@ -32,13 +32,9 @@ itab.ml
 simp.ml
 ```
 
-The next translation targets are:
-
-```
-parser.ml
-preterm.ml
-printer.ml
-```
+This boundary is intentional. HOL Light's `parser.ml`, `preterm.ml`, and
+`printer.ml` are not ported: the frontend above the proof engine will be
+implemented natively with Rhombus macros and syntax facilities.
 
 No Isabelle-generated kernel, waterfall implementation, previous
 Rhombus/HOL frontend, or old multi-package architecture is used.

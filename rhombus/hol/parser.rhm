@@ -1,0 +1,321 @@
+#lang rhombus
+// (c) University of Cambridge 1998; John Harrison 1998-2007.
+// (c) Andrea Gabrielli, Marco Maggesi 2017-2018.
+// Direct string lexer and recursive-descent translation of HOL Light parser.ml.
+import: "compat.rhm" open
+import: "fusion.rhm" open
+import: "basics.rhm" open
+import: "syntax_state.rhm" open
+import: "preterm.rhm" open
+
+export:
+  Noparse
+  Ident
+  Resword
+  lex
+  parse_pretype
+  install_parser
+  delete_parser
+  installed_parsers
+  try_user_parser
+  parse_preterm
+  parse_type
+  parse_term
+
+class Noparse()
+class Lexcode()
+class Ident(text):
+  extends Lexcode
+class Resword(text):
+  extends Lexcode
+
+// HOL Light's default logical parse status.
+parse_as_prefix("~")
+parse_as_binder("\\")
+parse_as_binder("!")
+parse_as_binder("?")
+parse_as_binder("?!")
+parse_as_infix(Pair("==>",Pair(4,"right")))
+parse_as_infix(Pair("\\/",Pair(6,"right")))
+parse_as_infix(Pair("/\\",Pair(8,"right")))
+parse_as_infix(Pair("<=>",Pair(2,"right")))
+parse_as_infix(Pair("=",Pair(12,"right")))
+parse_as_infix(Pair(",",Pair(14,"right")))
+reserve_words(PairList ["//"])
+
+fun chars(s :: String):
+  fun loop(i,acc):
+    if i < 0 | acc | loop(i-1,PairList.cons(s.substring(i,i+1),acc))
+  loop(s.length()-1,PairList [])
+
+fun join_chars(xs): implode(xs)
+
+fun lex(s :: String):
+  def cs = chars(s)
+  fun take_while(p,l,acc):
+    match l
+    | PairList [h, & t] when p(h): take_while(p,t,PairList.cons(h,acc))
+    | _: Pair(plist_rev(acc),l)
+  fun reverse(l): rev_itlist(fun(x): fun(a): PairList.cons(x,a))(l)(PairList [])
+  fun scan_string(l,acc):
+    match l
+    | PairList []: failwith("lex: unterminated string")
+    | PairList ["\"", & t]: Pair("\"" +& join_chars(reverse(acc)),t)
+    | PairList ["\\",c, & t]:
+        def x:
+          cond
+          | c == "n": "\n"
+          | c == "r": "\r"
+          | c == "t": "\t"
+          | c == "b": "\b"
+          | c == "\\": "\\"
+          | c == "\"": "\""
+          | ~else: c
+        scan_string(t,PairList.cons(x,acc))
+    | PairList [h, & t]: scan_string(t,PairList.cons(h,acc))
+  fun token(l):
+    match l
+    | PairList []: Pair(#false,l)
+    | PairList [h, & t] when isspace(h): token(t)
+    | PairList ["/","/", & t]:
+        fun skip(rest):
+          match rest
+          | PairList []: Pair(#false,rest)
+          | PairList ["\n", & more]: token(more)
+          | PairList [_, & more]: skip(more)
+        skip(t)
+    | PairList ["\"", & t]:
+        def Pair(body,rest) = scan_string(t,PairList [])
+        Pair(Ident("\"" +& body),rest)
+    | PairList [h, & t] when isbra(h) || issep(h):
+        Pair((if is_reserved_word(h) | Resword(h) | Ident(h)),t)
+    | PairList [h, & _] when isalnum(h) || h == "_":
+        def Pair(xs,rest) = take_while(fun(c): isalnum(c) || c == "_" || c == "'")(l,PairList [])
+        def w = join_chars(xs)
+        Pair((if is_reserved_word(w) | Resword(w) | Ident(w)),rest)
+    | PairList [h, & _] when issymb(h):
+        def Pair(xs,rest) = take_while(issymb)(l,PairList [])
+        def w = join_chars(xs)
+        Pair((if is_reserved_word(w) | Resword(w) | Ident(w)),rest)
+    | PairList [h, & t]: Pair(Ident(h),t)
+  fun all(l,acc):
+    def Pair(tok,rest) = token(l)
+    if tok | all(rest,PairList.cons(tok,acc)) | reverse(acc)
+  all(cs,PairList [])
+
+fun tok_text(tok):
+  match tok
+  | Ident(s): s
+  | Resword(s): s
+
+fun accept_word(w):
+  fun(ts):
+    match ts
+    | PairList [h, & t] when tok_text(h) == w: Pair(h,t)
+    | _: throw Noparse()
+
+fun accept_ident(ts):
+  match ts
+  | PairList [Ident(s), & t]: Pair(s,t)
+  | _: throw Noparse()
+
+fun numeric_string(s):
+  s.length() > 0 && forall(isnum)(chars(s))
+
+fun pretype_atom(ts):
+  match ts
+  | PairList [Resword("("), & rest]:
+      def Pair(ty,more) = parse_pretype_tokens(rest)
+      def Pair(_,tail) = accept_word(")")(more)
+      Pair(ty,tail)
+  | PairList [Ident(s), & rest]:
+      def ty:
+        try: pretype_of_type(assoc(s)(type_abbrevs()))
+        ~catch Failure(_):
+          if can(get_type_arity)(s) && get_type_arity(s) == 0
+          | Ptycon(s,PairList [])
+          | Utv(s)
+      Pair(ty,rest)
+  | _: throw Noparse()
+
+fun parse_type_constructor_application(ts):
+  def Pair(first,rest) = pretype_atom(ts)
+  // HOL Light permits "A list" style postfix type constructors.
+  match rest
+  | PairList [Ident(c), & more] when can(get_type_arity)(c) && get_type_arity(c) == 1:
+      parse_type_constructor_application(PairList.cons(Ident(c),more))
+      // Preserve direct construction instead of reparsing the consumed atom.
+      // Only unary postfix constructors reach this arm.
+      |> fun(Pair(_,tail)): Pair(Ptycon(c,PairList [first]),tail)
+  | _: Pair(first,rest)
+
+fun parse_powtype(ts):
+  def Pair(left,rest) = pretype_atom(ts)
+  match rest
+  | PairList [Ident("^"), & more]:
+      def Pair(right,tail) = parse_powtype(more)
+      Pair(Ptycon("cart",PairList [left,right]),tail)
+  | _: Pair(left,rest)
+
+fun parse_prodtype(ts):
+  def Pair(left,rest) = parse_powtype(ts)
+  match rest
+  | PairList [Ident("#"), & more]:
+      def Pair(right,tail) = parse_prodtype(more)
+      Pair(Ptycon("prod",PairList [left,right]),tail)
+  | _: Pair(left,rest)
+
+fun parse_sumtype(ts):
+  def Pair(left,rest) = parse_prodtype(ts)
+  match rest
+  | PairList [Ident("+"), & more]:
+      def Pair(right,tail) = parse_sumtype(more)
+      Pair(Ptycon("sum",PairList [left,right]),tail)
+  | _: Pair(left,rest)
+
+fun parse_pretype_tokens(ts):
+  def Pair(left,rest) = parse_sumtype(ts)
+  match rest
+  | PairList [Resword("->"), & more] || PairList [Ident("->"), & more]:
+      def Pair(right,tail) = parse_pretype_tokens(more)
+      Pair(Ptycon("fun",PairList [left,right]),tail)
+  | _: Pair(left,rest)
+
+def parse_pretype = parse_pretype_tokens
+
+def mutable parser_list = PairList []
+fun install_parser(dat): parser_list := PairList.cons(dat,parser_list)
+fun delete_parser(key):
+  parser_list := filter(fun(Pair(k,_)): k != key)(parser_list)
+fun installed_parsers(): parser_list
+fun try_user_parser(ts):
+  tryfind(fun(Pair(_,p)): p(ts))(parser_list)
+
+fun dvar(s): Varp(s,dpty)
+fun papp(f,x): Combp(f,x)
+fun pbin(op,l,r): papp(papp(dvar(op),l),r)
+
+fun parse_atomic(ts):
+  try: try_user_parser(ts)
+  ~catch Failure(_):
+    match ts
+    | PairList [Resword("("), & rest]:
+        // Parenthesized operator names remain variables, as in HOL Light.
+        match rest
+        | PairList [Ident(s),Resword(")"), & tail]:
+            Pair(dvar(s),tail)
+        | _:
+            def Pair(tm,more) = parse_preterm_tokens(rest,0)
+            def Pair(_,tail) = accept_word(")")(more)
+            Pair(tm,tail)
+    | PairList [Resword("if"), & rest]:
+        def Pair(c,r1) = parse_preterm_tokens(rest,0)
+        def Pair(_,r2) = accept_word("then")(r1)
+        def Pair(t,r3) = parse_preterm_tokens(r2,0)
+        def Pair(_,r4) = accept_word("else")(r3)
+        def Pair(e,r5) = parse_preterm_tokens(r4,0)
+        Pair(papp(papp(papp(dvar("COND"),c),t),e),r5)
+    | PairList [Resword("["), & rest]:
+        fun elems(r,acc):
+          match r
+          | PairList [Resword("]"), & tail]:
+              def nil = dvar("NIL")
+              Pair(itlist(fun(x): fun(y): pbin("CONS",x,y))(plist_rev(acc))(nil),tail)
+          | _:
+              def Pair(x,r1) = parse_preterm_tokens(r,0)
+              match r1
+              | PairList [Resword(";"), & r2]: elems(r2,PairList.cons(x,acc))
+              | PairList [Resword("]"), & tail]:
+                  def nil = dvar("NIL")
+                  Pair(itlist(fun(y): fun(z): pbin("CONS",y,z))(plist_rev(PairList.cons(x,acc)))(nil),tail)
+              | _: failwith("closing square bracket of list expected")
+        elems(rest,PairList [])
+    | PairList [Ident(s), & rest]:
+        Pair(dvar(s),rest)
+    | _: throw Noparse()
+
+fun parse_typed_atom(ts):
+  def Pair(tm,rest) = parse_atomic(ts)
+  match rest
+  | PairList [Resword(":"), & more]:
+      def Pair(ty,tail) = parse_pretype_tokens(more)
+      Pair(Typing(tm,ty),tail)
+  | _: Pair(tm,rest)
+
+fun parse_binder(ts):
+  match ts
+  | PairList [Ident(s), & rest] when parses_as_binder(s):
+      fun vars(r,acc):
+        match r
+        | PairList [Resword("."), & tail]:
+            if acc == PairList [] | failwith("variable after binder expected")
+            | block:
+                def Pair(body,more) = parse_preterm_tokens(tail,0)
+                def built:
+                  itlist(
+                    fun(v): fun(b):
+                      if s == "\\" | Absp(v,b) | papp(dvar(s),Absp(v,b))
+                  )(plist_rev(acc))(body)
+                Pair(built,more)
+        | _:
+            def Pair(v,more) = parse_typed_atom(r)
+            vars(more,PairList.cons(v,acc))
+      vars(rest,PairList [])
+  | _: throw Noparse()
+
+fun begins_atom(ts):
+  match ts
+  | PairList [Ident(s), & _]:
+      !can(get_infix_status)(s) && !is_prefix(s)
+  | PairList [Resword("("), & _] || PairList [Resword("if"), & _] || PairList [Resword("["), & _]: #true
+  | _: #false
+
+fun parse_application(ts):
+  def Pair(head,rest):
+    try: parse_binder(ts)
+    ~catch Noparse(): parse_typed_atom(ts)
+  fun loop(acc,r):
+    if begins_atom(r)
+    | try:
+        def Pair(x,more):
+          try: parse_binder(r)
+          ~catch Noparse(): parse_typed_atom(r)
+        loop(Combp(acc,x),more)
+      ~catch Noparse(): Pair(acc,r)
+    | Pair(acc,r)
+  loop(head,rest)
+
+fun parse_prefix(ts):
+  match ts
+  | PairList [Ident(s), & rest] when is_prefix(s):
+      def Pair(x,tail) = parse_prefix(rest)
+      Pair(Combp(dvar(s),x),tail)
+  | _: parse_application(ts)
+
+fun parse_preterm_tokens(ts,min_prec):
+  def Pair(left0,rest0) = parse_prefix(ts)
+  fun loop(left,rest):
+    match rest
+    | PairList [Ident(op), & more] when can(get_infix_status)(op):
+        def Pair(prec,assoc) = get_infix_status(op)
+        if prec < min_prec
+        | Pair(left,rest)
+        | block:
+            def next_min = if assoc == "right" | prec | prec+1
+            def Pair(right,tail) = parse_preterm_tokens(more,next_min)
+            loop(pbin(op,left,right),tail)
+    | _: Pair(left,rest)
+  loop(left0,rest0)
+
+fun parse_preterm(ts):
+  parse_preterm_tokens(ts,0)
+
+fun parse_type(s :: String):
+  def Pair(pty,rest) = parse_pretype_tokens(lex(s))
+  if rest == PairList [] | type_of_pretype(pty) | failwith("Unparsed input following type")
+
+fun parse_term(s :: String):
+  def Pair(ptm,rest) = parse_preterm(lex(s))
+  if rest == PairList []
+  | term_of_preterm(retypecheck(PairList [])(ptm))
+  | failwith("Unparsed input following term")

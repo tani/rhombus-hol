@@ -23,7 +23,7 @@ rhombus/hol/
     compat.rhm
     atoms_map.rhm
     term_hash.rhm
-    hash_runtime.rkt
+    hash_runtime.rhm
   tests/
 
 differential/

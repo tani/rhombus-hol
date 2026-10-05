@@ -1,0 +1,68 @@
+#lang rhombus
+// Copyright 1996 INRIA; based on Xavier Leroy, OCaml 4.14.1 runtime/hash.c.
+// Modified 2026-10-06: HOL data-model subset translated to Rhombus.
+// LGPL-2.1 with OCaml linking exception; see ../../../THIRD_PARTY_LICENSES/OCaml.txt.
+// MurmurHash3 mixing and the original bounded breadth-first traversal.
+// This helper cannot construct kernel values.
+export:
+  block
+  immediate
+  hash_model
+
+class HashBlock(tag,fields)
+class HashImmediate(value)
+def block = HashBlock
+def immediate = HashImmediate
+
+def mask = 0xffffffff
+fun u32(v): v bits.and mask
+fun rotl(v,n): u32((v bits.(<<) n) bits.or (v bits.(>>) (32-n)))
+fun mix(h,d):
+  def d1 = u32(d * 0xcc9e2d51)
+  def d2 = u32(rotl(d1,15) * 0x1b873593)
+  u32(rotl(h bits.xor d2,13) * 5 + 0xe6546b64)
+fun mix_int(h,d):
+  mix(h,u32((d bits.(>>) 32) bits.xor (d bits.(>>) 63) bits.xor d))
+fun mix_string(h,s :: ReadableString):
+  def bs = s.utf8_bytes()
+  def len = bs.length()
+  fun chunks(i,h):
+    cond
+    | i >= len: h bits.xor len
+    | ~else:
+        def end = if i+4 < len | i+4 | len
+        fun word(j,w):
+          if j >= end
+          | w
+          | word(j+1,w bits.or (bs[j] bits.(<<) (8*(j-i))))
+        chunks(i+4,mix(h,word(i,0)))
+  chunks(0,h)
+fun finish(h):
+  def a = u32((h bits.xor (h bits.(>>) 16)) * 0x85ebca6b)
+  def b = u32((a bits.xor (a bits.(>>) 13)) * 0xc2b2ae35)
+  (b bits.xor (b bits.(>>) 16)) bits.and 0x3fffffff
+fun hash_model(obj):
+  def queue = Array.make(100,#false)
+  queue[0] := obj
+  fun loop(rd,wr,num,h):
+    cond
+    | rd == wr || num == 0: finish(h)
+    | ~else:
+        match queue[rd]
+        | HashImmediate(value):
+            loop(rd+1,wr,num-1,mix_int(h,(value bits.(<<) 1) bits.or 1))
+        | s :: ReadableString: loop(rd+1,wr,num-1,mix_string(h,s))
+        | HashBlock(tag,fields :: PairList):
+            def h1 = mix(h,(fields.length() bits.(<<) 10)+tag)
+            fun enqueue(fields,wr):
+              cond
+              | wr == 100: wr
+              | ~else:
+                  match fields
+                  | PairList []: wr
+                  | PairList [f, & rest]:
+                      queue[wr] := f
+                      enqueue(rest,wr+1)
+            loop(rd+1,enqueue(fields,wr),num,h1)
+        | _: error("hash_model: unsupported host value")
+  loop(0,1,10,0)

@@ -1,26 +1,49 @@
 # Rhombus/HOL
 
-A direct Rhombus reimplementation of HOL Light.
+A direct Rhombus reimplementation of the HOL Light proof engine.
 
-This branch intentionally uses a small, single-package codebase and follows
-upstream HOL Light's module order closely.
+The repository is intentionally split at the HOL Light engine/frontend
+boundary. The proof engine follows HOL Light closely; the surface language
+above it will be implemented natively with Rhombus macros.
 
-## Restored validated core
+## Layout
 
-The direct translations completed before the repository restart are included:
+```text
+rhombus/hol/
+  fusion.rhm
+  basics.rhm
+  nets.rhm
+  equal.rhm
+  bool.rhm
+  drule.rhm
+  tactics.rhm
+  itab.rhm
+  simp.rhm
+  private/
+    compat.rhm
+    atoms_map.rhm
+    ordered_map.rhm
+    term_hash.rhm
+    hash_runtime.rkt
+    surface_state.rhm
+  tests/
 
-- `rhombus/hol/fusion.rhm`
-- `rhombus/hol/basics.rhm`
-- `rhombus/hol/nets.rhm`
-- `rhombus/hol/equal.rhm`
+differential/
+  tests/
+  upstream/
 
-with their small compatibility/support modules. These are the versions from
-the earlier differential-validation work, which matched the pinned HOL Light
-implementation on 3,914/3,914 generated cases.
-
-The direct HOL Light engine port stops at:
-
+.github/workflows/
+  ci.yml
+  differential.yml
 ```
+
+The files directly under `rhombus/hol/` correspond to the HOL Light engine
+modules. `private/` contains mechanical support needed to reproduce OCaml/HOL
+Light behavior; it is not part of the intended public API.
+
+The source-to-source port stops at:
+
+```text
 fusion.ml
 basics.ml
 nets.ml
@@ -32,33 +55,40 @@ itab.ml
 simp.ml
 ```
 
-This boundary is intentional. HOL Light's `parser.ml`, `preterm.ml`, and
-`printer.ml` are not ported: the frontend above the proof engine will be
-implemented natively with Rhombus macros and syntax facilities.
+HOL Light's `parser.ml`, `preterm.ml`, and `printer.ml` are deliberately
+not ported. Parsing, elaboration, notation, quotation, and presentation will be
+implemented using Rhombus syntax and macro facilities.
 
-No Isabelle-generated kernel, waterfall implementation, previous
-Rhombus/HOL frontend, or old multi-package architecture is used.
+## Verification
 
-## Build
+The restored `fusion/basics/nets/equal` core was differentially checked
+against the pinned HOL Light implementation on 3,914 generated cases:
 
-```sh
-raco pkg install --auto --batch --no-docs --skip-installed --name rhombus-hol "$PWD"
-raco make rhombus/hol/equal.rhm
-raco test rhombus/hol/tests
-```
+- 1,296 kernel cases
+- 2,618 upper-layer cases
 
-
-## Differential verification
-
-The full differential harness is under `differential/`. It builds an OCaml
-oracle from the pinned HOL Light sources and compares it against the live
-Rhombus implementation.
+The harness is under `differential/`. It imports the live Rhombus
+implementation; there is no duplicate port tree.
 
 ```sh
 python3 differential/tests/run.py
 python3 differential/tests/run_upper.py
 ```
 
-The two suites contain 1,296 kernel cases and 2,618 upper-layer cases,
-respectively. They are intentionally excluded from normal CI; the
-`Differential` GitHub Actions workflow is manual-only.
+The full differential suite is manual-only in GitHub Actions so ordinary CI
+remains fast.
+
+## Build
+
+```sh
+raco pkg install --auto --batch --no-docs --no-setup --skip-installed \
+  --name rhombus-hol "$PWD"
+raco make rhombus/hol/simp.rhm
+raco test rhombus/hol/tests
+```
+
+## Provenance
+
+HOL Light-derived engine code and the two OCaml-derived private support modules
+retain their upstream notices and license terms. See `THIRD_PARTY_NOTICES`
+and `THIRD_PARTY_LICENSES/`.

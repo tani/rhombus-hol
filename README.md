@@ -18,13 +18,23 @@ with their small compatibility/support modules. These are the versions from
 the earlier differential-validation work, which matched the pinned HOL Light
 implementation on 3,914/3,914 generated cases.
 
-The next translation targets are:
+The direct port now continues through:
 
 ```
+fusion.ml
+basics.ml
+nets.ml
+equal.ml
 bool.ml
 drule.ml
 tactics.ml
+itab.ml
 simp.ml
+```
+
+The next translation targets are:
+
+```
 parser.ml
 preterm.ml
 printer.ml

@@ -1,0 +1,2314 @@
+#lang rhombus
+
+// Direct translation of the pinned HOL Light compute.ml.
+
+// ==========================================================================
+// Call-by-value reduction of terms similar to ML computation.
+// Translated from HOL4 computeLib
+//
+// (c) Copyright Alexey Solovyev 2018
+// (c) Copyright Bruno Barras 2000
+//
+// Distributed under the same license as HOL Light.
+// ==========================================================================
+
+// Quotations are expanded offline; every proof is replayed here.
+
+import: "private/compat.rhm" open
+
+import: "private/theory_support.rhm" as Host
+
+export:
+  Compute
+
+import: "private/tuple_bridge.rhm" as Interop
+
+import: "private/type_inference.rhm" as Up_type_inference
+
+import: "fusion.rhm" as Up_fusion
+
+import: "basics.rhm" as Up_basics
+
+import: "nets.rhm" as Up_nets
+
+import: "equal.rhm" as Up_equal
+
+import: "bool.rhm" as Up_bool
+
+import: "drule.rhm" as Up_drule
+
+import: "tactics.rhm" as Up_tactics
+
+import: "itab.rhm" as Up_itab
+
+import: "simp.rhm" as Up_simp
+
+import: "theorems.rhm" as Up_theorems
+
+import: "ind_defs.rhm" as Up_ind_defs
+
+import: "class.rhm" as Up_class
+
+import: "trivia.rhm" as Up_trivia
+
+import: "canon.rhm" as Up_canon
+
+import: "meson.rhm" as Up_meson
+
+import: "firstorder.rhm" as Up_firstorder
+
+import: "metis.rhm" as Up_metis
+
+import: "thecops.rhm" as Up_thecops
+
+import: "quot.rhm" as Up_quot
+
+import: "impconv.rhm" as Up_impconv
+
+import: "pair.rhm" as Up_pair
+
+namespace Compute:«
+  export:«
+    with_flag;
+    RIGHT_BETA;
+    RIGHT_ETA;
+    MK_comb;
+    MK_abs;
+    BODY_CONJUNCTS;
+    rename compute_Compute_ctor_Ztop as Ztop;
+    rename compute_Compute_ctor_Zrator as Zrator;
+    rename compute_Compute_ctor_Zrand as Zrand;
+    rename compute_Compute_ctor_Zabs as Zabs;
+    rename Dead_code as Dead_code;
+    rhs_concl;
+    refl_thm;
+    trans_thm;
+    beta_thm;
+    evaluate;
+    try_eta;
+    push_in_stk;
+    push_skip_stk;
+    push_lam_in_stk;
+    FUNIFY;
+    UNFUNIFY;
+    repeat_on_conj;
+    lazyfy_thm;
+    strictify_thm;
+    eq_intro;
+    rename compute_Compute_ctor_Pvar as Pvar;
+    rename compute_Compute_ctor_Papp as Papp;
+    check_arg_form;
+    rename compute_Compute_ctor_Const as Const;
+    rename compute_Compute_ctor_Neutr as Neutr;
+    rename compute_Compute_ctor_Clos as Clos;
+    rename compute_Compute_ctor_Bv as Bv;
+    rename compute_Compute_ctor_Fv as Fv;
+    rename compute_Compute_ctor_Cst as Cst;
+    rename compute_Compute_ctor_App as App;
+    rename compute_Compute_ctor_Abs as Abs;
+    appl;
+    inst_type_dterm;
+    rename compute_Compute_ctor_Rewrite as Rewrite;
+    rename compute_Compute_ctor_Conv as Conv;
+    rename compute_Compute_ctor_End_db as End_db;
+    rename compute_Compute_ctor_Try as Try;
+    rename compute_Compute_ctor_Need_arg as Need_arg;
+    rename compute_Compute_ctor_Rw as Rw;
+    add_in_db;
+    key_of;
+    is_skip;
+    partition_skip;
+    rename compute_Compute_ctor_Rws as Rws;
+    empty_rws;
+    assoc_clause;
+    add_in_db_upd;
+    set_skip_name;
+    scrub_const;
+    from_term;
+    mk_rewrite;
+    unsuitable;
+    enter_thm;
+    add_thms;
+    add_extern;
+    new_rws;
+    from_list;
+    scrub_thms;
+    rws_of;
+    rename compute_Compute_ctor_Conversion as Conversion;
+    rename compute_Compute_ctor_Rrules as Rrules;
+    deplist;
+    rename No_match as No_match;
+    match_const;
+    match_var;
+    match_list;
+    match_solve;
+    try_rwn;
+    comb_ct;
+    mk_clos;
+    inst_one_var;
+    inst_rw;
+    monitoring;
+    stoppers;
+    reduce_cst;
+    auto_import_definitions;
+    new_compset;
+    listItems;
+    stack_out;
+    initial_state;
+    cbv_wk;
+    cbv_up;
+    strong;
+    strong_up;
+    CBV_CONV;
+    WEAK_CBV_CONV;
+    extern_of_conv;
+    add_conv;
+    set_skip;
+    bool_redns;
+    bool_compset;
+    basic_compset;
+    the_compset;
+    add_funs;
+    add_convs;
+    del_consts;
+    del_funs;
+    EVAL_CONV;
+    EVAL_RULE;
+    EVAL_TAC;
+    same_const;
+    OR;
+    RESTR_EVAL_CONV;
+    RESTR_EVAL_TAC;
+    RESTR_EVAL_RULE
+  »;
+  fun compute_Compute_with_flag(Pair(flag,b)):«
+    (fun(f):«
+      (fun(x):«
+        (block:«
+          let port_tmp_1_fval:«
+            Host.ref_get(flag)
+          »;
+          (block:«
+            let #void:«
+              Host.ref_set(flag)(b)
+            »;
+            (block:«
+              let port_tmp_2_res:«
+                (block:«
+                  try:«
+                    f(x);
+                    ~catch port_tmp_3:«
+                      let port_tmp_4 = port_tmp_3;
+                      match port_tmp_4
+                      | e:«
+                          (block:«
+                            Host.ref_set(flag)(port_tmp_1_fval);
+                            Host.hol_raise(e)
+                          »)
+                      »
+                      | port_tmp_3:«
+                          Host.hol_raise(port_tmp_3)
+                      »
+                    »
+                  »
+                »)
+              »;
+              (block:«
+                Host.ref_set(flag)(port_tmp_1_fval);
+                port_tmp_2_res
+              »)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_RIGHT_BETA(th):«
+    (block:«
+      try:«
+        (block:«
+          let port_tmp_5 = Up_equal.BETA_CONV(Up_equal.rhs(Up_fusion.concl(th)));
+          let port_tmp_6 = th;
+          let port_tmp_7 = Up_fusion.TRANS;
+          port_tmp_7(port_tmp_6)(port_tmp_5)
+        »);
+        ~catch port_tmp_8:«
+          let port_tmp_9 = port_tmp_8;
+          match port_tmp_9
+          | _:«
+              failwith("RIGHT_BETA")
+          »
+          | port_tmp_8:«
+              Host.hol_raise(port_tmp_8)
+          »
+        »
+      »
+    »)
+  »;
+  fun compute_Compute_RIGHT_ETA(thm):«
+    (block:«
+      try:«
+        (block:«
+          let port_tmp_10 = Up_class.ETA_CONV(Up_equal.rhs(Up_fusion.concl(thm)));
+          let port_tmp_11 = thm;
+          let port_tmp_12 = Up_fusion.TRANS;
+          port_tmp_12(port_tmp_11)(port_tmp_10)
+        »);
+        ~catch port_tmp_13:«
+          let port_tmp_14 = port_tmp_13;
+          match port_tmp_14
+          | _:«
+              failwith("RIGHT_ETA")
+          »
+          | port_tmp_13:«
+              Host.hol_raise(port_tmp_13)
+          »
+        »
+      »
+    »)
+  »;
+  fun compute_Compute_MK_comb(th):«
+    (block:«
+      let Pair(port_tmp_15_rator,port_tmp_16_rand):«
+        Up_fusion.dest_comb(Up_equal.rhs(Up_fusion.concl(th)))
+      »;
+      (block:«
+        let port_tmp_17_mka:«
+          (fun(th1):«
+            (fun(th2):«
+              (block:«
+                let port_tmp_18 = Up_fusion.MK_COMB(Pair(th1,th2));
+                let port_tmp_19 = th;
+                let port_tmp_20 = Up_fusion.TRANS;
+                port_tmp_20(port_tmp_19)(port_tmp_18)
+              »)
+            »)
+          »)
+        »;
+        (block:«
+          let port_tmp_21 = port_tmp_17_mka;
+          let port_tmp_22 = Up_fusion.REFL(port_tmp_16_rand);
+          let port_tmp_23 = Up_fusion.REFL(port_tmp_15_rator);
+          Interop.triple3(port_tmp_23,port_tmp_22,port_tmp_21)
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_MK_abs(th):«
+    (block:«
+      let Pair(port_tmp_24_bvar,port_tmp_25_body):«
+        Up_fusion.dest_abs(Up_equal.rhs(Up_fusion.concl(th)))
+      »;
+      (block:«
+        let port_tmp_26 = (fun(th1):«
+          (block:«
+            let port_tmp_27 = Up_fusion.ABS(port_tmp_24_bvar)(th1);
+            let port_tmp_28 = th;
+            let port_tmp_29 = Up_fusion.TRANS;
+            port_tmp_29(port_tmp_28)(port_tmp_27)
+          »)
+        »);
+        let port_tmp_30 = Up_fusion.REFL(port_tmp_25_body);
+        let port_tmp_31 = port_tmp_24_bvar;
+        Interop.triple3(port_tmp_31,port_tmp_30,port_tmp_26)
+      »)
+    »)
+  »;
+  fun compute_Compute_BODY_CONJUNCTS(th):«
+    (block:«
+      if Up_basics.is_forall(Up_fusion.concl(th))
+      | compute_Compute_BODY_CONJUNCTS(Up_bool.SPEC_ALL(th))
+      | (block:«
+        if Up_basics.is_conj(Up_fusion.concl(th))
+        | (block:«
+          let port_tmp_32 = compute_Compute_BODY_CONJUNCTS(Up_bool.CONJUNCT2(th));
+          let port_tmp_33 = compute_Compute_BODY_CONJUNCTS(Up_bool.CONJUNCT1(th));
+          let port_tmp_34 = append;
+          port_tmp_34(port_tmp_33)(port_tmp_32)
+        »)
+        | PairList.cons(th,PairList [])
+      »)
+    »)
+  »;
+  class compute_Compute_ctor_Ztop():«
+    extends Host.HolVariant;
+    override port_view(): Pair(0,Pair(0,PairList []))
+  »;
+  class compute_Compute_ctor_Zrator(field0,field1):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(0,PairList [this.field0,this.field1]))
+  »;
+  class compute_Compute_ctor_Zrand(field0,field1):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(1,PairList [this.field0,this.field1]))
+  »;
+  class compute_Compute_ctor_Zabs(field0,field1):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(2,PairList [this.field0,this.field1]))
+  »;
+  class Dead_code(field0);
+  def compute_Compute_rhs_concl:«
+    o(Up_fusion.rand)(Up_fusion.concl)
+  »;
+  def compute_Compute_refl_thm:«
+    Up_fusion.REFL
+  »;
+  def compute_Compute_trans_thm:«
+    Up_fusion.TRANS
+  »;
+  def compute_Compute_beta_thm:«
+    compute_Compute_RIGHT_BETA
+  »;
+  fun compute_Compute_evaluate(th):«
+    th
+  »;
+  fun compute_Compute_try_eta(thm):«
+    (block:«
+      try:«
+        compute_Compute_RIGHT_ETA(thm);
+        ~catch port_tmp_35:«
+          let port_tmp_36 = port_tmp_35;
+          match port_tmp_36
+          | _:«
+              thm
+          »
+          | port_tmp_35:«
+              Host.hol_raise(port_tmp_35)
+          »
+        »
+      »
+    »)
+  »;
+  fun compute_Compute_push_in_stk(f):«
+    (fun(arg):«
+      (fun(Pair(th,stk)):«
+        (block:«
+          let Interop.Triple3(port_tmp_37_tha,port_tmp_38_thb,port_tmp_39_mka):«
+            compute_Compute_MK_comb(th)
+          »;
+          (block:«
+            let port_tmp_40 = (block:«
+              let port_tmp_41 = stk;
+              let port_tmp_42 = (block:«
+                let port_tmp_43 = (block:«
+                  let port_tmp_44 = f(arg);
+                  let port_tmp_45 = port_tmp_38_thb;
+                  Pair(port_tmp_45,port_tmp_44)
+                »);
+                let port_tmp_46 = port_tmp_39_mka;
+                Pair(port_tmp_46,port_tmp_43)
+              »);
+              compute_Compute_ctor_Zrator(port_tmp_42,port_tmp_41)
+            »);
+            let port_tmp_47 = port_tmp_37_tha;
+            Pair(port_tmp_47,port_tmp_40)
+          »)
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_push_skip_stk(f):«
+    (fun(arg):«
+      (fun(Pair(th,stk)):«
+        (block:«
+          let Interop.Triple3(port_tmp_48_tha,port_tmp_49_thb,port_tmp_50_mka):«
+            compute_Compute_MK_comb(th)
+          »;
+          (block:«
+            let port_tmp_51 = (block:«
+              let port_tmp_52 = stk;
+              let port_tmp_53 = (block:«
+                let port_tmp_54 = (block:«
+                  let port_tmp_55 = f(arg);
+                  let port_tmp_56 = port_tmp_49_thb;
+                  Pair(port_tmp_56,port_tmp_55)
+                »);
+                let port_tmp_57 = #true;
+                let port_tmp_58 = C(port_tmp_50_mka);
+                Interop.triple3(port_tmp_58,port_tmp_57,port_tmp_54)
+              »);
+              compute_Compute_ctor_Zrand(port_tmp_53,port_tmp_52)
+            »);
+            let port_tmp_59 = port_tmp_48_tha;
+            Pair(port_tmp_59,port_tmp_51)
+          »)
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_push_lam_in_stk(Pair(th,stk)):«
+    (block:«
+      let Interop.Triple3(_,port_tmp_60_thb,port_tmp_61_mkl):«
+        compute_Compute_MK_abs(th)
+      »;
+      (block:«
+        let port_tmp_62 = (block:«
+          let port_tmp_63 = stk;
+          let port_tmp_64 = o(compute_Compute_try_eta)(port_tmp_61_mkl);
+          compute_Compute_ctor_Zabs(port_tmp_64,port_tmp_63)
+        »);
+        let port_tmp_65 = port_tmp_60_thb;
+        Pair(port_tmp_65,port_tmp_62)
+      »)
+    »)
+  »;
+  fun compute_Compute_FUNIFY(thm):«
+    (block:«
+      try:«
+        (block:«
+          let port_tmp_66_x:«
+            Up_fusion.rand(Up_equal.lhs(Up_fusion.concl(thm)))
+          »;
+          (block:«
+            let port_tmp_67 = Up_fusion.ABS(port_tmp_66_x)(thm);
+            let port_tmp_68 = Up_equal.RATOR_CONV(Up_equal.RAND_CONV(Up_equal.CHANGED_CONV(Up_simp.PURE_REWRITE_CONV(PairList.cons(Up_class.ETA_AX,PairList [])))));
+            let port_tmp_69 = Up_equal.CONV_RULE;
+            port_tmp_69(port_tmp_68)(port_tmp_67)
+          »)
+        »);
+        ~catch port_tmp_70:«
+          let port_tmp_71 = port_tmp_70;
+          match port_tmp_71
+          | _:«
+              failwith("FUNIFY")
+          »
+          | port_tmp_70:«
+              Host.hol_raise(port_tmp_70)
+          »
+        »
+      »
+    »)
+  »;
+  fun compute_Compute_UNFUNIFY(thm):«
+    (block:«
+      try:«
+        (block:«
+          let Pair(port_tmp_72_lhs,port_tmp_73_rhs):«
+            Up_fusion.dest_eq(Up_fusion.concl(thm))
+          »;
+          (block:«
+            let port_tmp_74_x:«
+              (block:«
+                let port_tmp_75 = fst(Up_fusion.dest_abs(port_tmp_73_rhs));
+                let port_tmp_76 = Up_fusion.frees(port_tmp_72_lhs);
+                let port_tmp_77 = Up_fusion.variant;
+                port_tmp_77(port_tmp_76)(port_tmp_75)
+              »)
+            »;
+            (block:«
+              let port_tmp_78 = Up_equal.AP_THM(thm)(port_tmp_74_x);
+              let port_tmp_79 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+              let port_tmp_80 = Up_equal.CONV_RULE;
+              port_tmp_80(port_tmp_79)(port_tmp_78)
+            »)
+          »)
+        »);
+        ~catch port_tmp_81:«
+          let port_tmp_82 = port_tmp_81;
+          match port_tmp_82
+          | _:«
+              failwith("UNFUNIFY")
+          »
+          | port_tmp_81:«
+              Host.hol_raise(port_tmp_81)
+          »
+        »
+      »
+    »)
+  »;
+  fun compute_Compute_repeat_on_conj(f):«
+    (fun(thm):«
+      (block:«
+        fun port_tmp_83_iter(th):«
+          (block:«
+            try:«
+              port_tmp_83_iter(f(th));
+              ~catch port_tmp_84:«
+                let port_tmp_85 = port_tmp_84;
+                match port_tmp_85
+                | _:«
+                    th
+                »
+                | port_tmp_84:«
+                    Host.hol_raise(port_tmp_84)
+                »
+              »
+            »
+          »)
+        »;
+        (block:«
+          let port_tmp_86 = (block:«
+            let port_tmp_87 = compute_Compute_BODY_CONJUNCTS(thm);
+            let port_tmp_88 = port_tmp_83_iter;
+            let port_tmp_89 = Host.OCamlList.map;
+            port_tmp_89(port_tmp_88)(port_tmp_87)
+          »);
+          let port_tmp_90 = Up_bool.CONJ;
+          let port_tmp_91 = end_itlist;
+          port_tmp_91(port_tmp_90)(port_tmp_86)
+        »)
+      »)
+    »)
+  »;
+  def compute_Compute_lazyfy_thm:«
+    compute_Compute_repeat_on_conj(compute_Compute_FUNIFY)
+  »;
+  def compute_Compute_strictify_thm:«
+    compute_Compute_repeat_on_conj(compute_Compute_UNFUNIFY)
+  »;
+  fun compute_Compute_eq_intro(thm):«
+    (block:«
+      if Up_fusion.is_eq(Up_fusion.concl(thm))
+      | thm
+      | (block:«
+        if Up_basics.is_neg(Up_fusion.concl(thm))
+        | Up_bool.EQF_INTRO(thm)
+        | Up_bool.EQT_INTRO(thm)
+      »)
+    »)
+  »;
+  class compute_Compute_ctor_Pvar(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(0,PairList [this.field0]))
+  »;
+  class compute_Compute_ctor_Papp(field0,field1):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(1,PairList [this.field0,this.field1]))
+  »;
+  fun compute_Compute_check_arg_form(trm):«
+    (block:«
+      fun port_tmp_92_chk(t):«
+        (fun(stk):«
+          (fun(free):«
+            (block:«
+              if Up_fusion.is_comb(t)
+              | (block:«
+                let Pair(port_tmp_93_rator,port_tmp_94_rand):«
+                  Up_fusion.dest_comb(t)
+                »;
+                (block:«
+                  let Pair(port_tmp_95_free_prime,port_tmp_96_pat1):«
+                    port_tmp_92_chk(port_tmp_94_rand)(PairList [])(free)
+                  »;
+                  port_tmp_92_chk(port_tmp_93_rator)(PairList.cons(port_tmp_96_pat1,stk))(port_tmp_95_free_prime)
+                »)
+              »)
+              | (block:«
+                if Up_fusion.is_var(t)
+                | (block:«
+                  if Host.hol_equal(stk)(PairList [])
+                  | (block:«
+                    let port_tmp_97_newi:«
+                      Host.OCamlList.length(free)
+                    »;
+                    (block:«
+                      try:«
+                        (block:«
+                          let port_tmp_98 = compute_Compute_ctor_Pvar((block:«
+                            let port_tmp_99 = 1;
+                            let port_tmp_100 = (block:«
+                              let port_tmp_101 = Host.index(t)(free);
+                              let port_tmp_102 = port_tmp_97_newi;
+                              let port_tmp_103 = Host.hol_sub;
+                              port_tmp_103(port_tmp_102)(port_tmp_101)
+                            »);
+                            let port_tmp_104 = Host.hol_sub;
+                            port_tmp_104(port_tmp_100)(port_tmp_99)
+                          »));
+                          let port_tmp_105 = free;
+                          Pair(port_tmp_105,port_tmp_98)
+                        »);
+                        ~catch port_tmp_106:«
+                          let port_tmp_107 = port_tmp_106;
+                          match port_tmp_107
+                          | _:«
+                              Pair(PairList.cons(t,free),compute_Compute_ctor_Pvar(port_tmp_97_newi))
+                          »
+                          | port_tmp_106:«
+                              Host.hol_raise(port_tmp_106)
+                          »
+                        »
+                      »
+                    »)
+                  »)
+                  | failwith((block:«
+                    let port_tmp_108 = (block:«
+                      let port_tmp_109 = " occurs as a variable on lhs";
+                      let port_tmp_110 = fst(Up_fusion.dest_var(t));
+                      let port_tmp_111 = Host.hol_concat;
+                      port_tmp_111(port_tmp_110)(port_tmp_109)
+                    »);
+                    let port_tmp_112 = "check_arg_form: ";
+                    let port_tmp_113 = Host.hol_concat;
+                    port_tmp_113(port_tmp_112)(port_tmp_108)
+                  »))
+                »)
+                | (block:«
+                  if Up_fusion.is_const(t)
+                  | (block:«
+                    let port_tmp_114 = (block:«
+                      let port_tmp_115 = Host.OCamlList.rev(stk);
+                      let port_tmp_116 = t;
+                      compute_Compute_ctor_Papp(port_tmp_116,port_tmp_115)
+                    »);
+                    let port_tmp_117 = free;
+                    Pair(port_tmp_117,port_tmp_114)
+                  »)
+                  | failwith((block:«
+                    let port_tmp_118 = (block:«
+                      let port_tmp_119 = "`";
+                      let port_tmp_120 = Host.string_of_term(trm);
+                      let port_tmp_121 = Host.hol_concat;
+                      port_tmp_121(port_tmp_120)(port_tmp_119)
+                    »);
+                    let port_tmp_122 = "check_arg_form: lambda abstraction not allowed on lhs: `";
+                    let port_tmp_123 = Host.hol_concat;
+                    port_tmp_123(port_tmp_122)(port_tmp_118)
+                  »))
+                »)
+              »)
+            »)
+          »)
+        »)
+      »;
+      (block:«
+        let port_tmp_124 = port_tmp_92_chk(trm)(PairList [])(PairList []);
+        match port_tmp_124
+        | Pair(fv,compute_Compute_ctor_Papp(head,args)):«
+            (block:«
+              let port_tmp_125 = args;
+              let port_tmp_126 = head;
+              let port_tmp_127 = Host.OCamlList.rev(fv);
+              Interop.triple3(port_tmp_127,port_tmp_126,port_tmp_125)
+            »)
+        »
+        | _:«
+            failwith("check_arg_form: ill-formed lhs")
+        »
+      »)
+    »)
+  »;
+  class compute_Compute_ctor_Const(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(0,PairList [this.field0]))
+  »;
+  class compute_Compute_ctor_Neutr():«
+    extends Host.HolVariant;
+    override port_view(): Pair(0,Pair(0,PairList []))
+  »;
+  class compute_Compute_ctor_Clos(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(1,PairList [this.field0]))
+  »;
+  class compute_Compute_ctor_Bv(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(0,PairList [this.field0]))
+  »;
+  class compute_Compute_ctor_Fv():«
+    extends Host.HolVariant;
+    override port_view(): Pair(0,Pair(0,PairList []))
+  »;
+  class compute_Compute_ctor_Cst(field0,field1):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(1,PairList [this.field0,this.field1]))
+  »;
+  class compute_Compute_ctor_App(field0,field1):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(2,PairList [this.field0,this.field1]))
+  »;
+  class compute_Compute_ctor_Abs(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(3,PairList [this.field0]))
+  »;
+  fun compute_Compute_appl(port_tmp_128):«
+    let port_tmp_129 = port_tmp_128;
+    match port_tmp_129
+    | Pair(compute_Compute_ctor_App(a,l1),arg):«
+        compute_Compute_ctor_App(a,PairList.cons(arg,l1))
+    »
+    | Pair(t,arg):«
+        compute_Compute_ctor_App(t,PairList.cons(arg,PairList []))
+    »
+  »;
+  fun compute_Compute_inst_type_dterm(port_tmp_130):«
+    let port_tmp_131 = port_tmp_130;
+    match port_tmp_131
+    | Pair(PairList [],v):«
+        v
+    »
+    | Pair(tysub,v):«
+        (block:«
+          fun port_tmp_132_tyi_dt(port_tmp_133):«
+            let port_tmp_134 = port_tmp_133;
+            match port_tmp_134
+            | compute_Compute_ctor_Cst(c,dbsk):«
+                (block:«
+                  let port_tmp_135 = dbsk;
+                  let port_tmp_136 = Up_fusion.inst(tysub)(c);
+                  compute_Compute_ctor_Cst(port_tmp_136,port_tmp_135)
+                »)
+            »
+            | compute_Compute_ctor_App(h,l):«
+                (block:«
+                  let port_tmp_137 = map(port_tmp_132_tyi_dt)(l);
+                  let port_tmp_138 = port_tmp_132_tyi_dt(h);
+                  compute_Compute_ctor_App(port_tmp_138,port_tmp_137)
+                »)
+            »
+            | compute_Compute_ctor_Abs(v):«
+                compute_Compute_ctor_Abs(port_tmp_132_tyi_dt(v))
+            »
+            | v:«
+                v
+            »
+          »;
+          port_tmp_132_tyi_dt(v)
+        »)
+    »
+  »;
+  class compute_Compute_ctor_Rewrite(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(0,PairList [this.field0]))
+  »;
+  class compute_Compute_ctor_Conv(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(1,PairList [this.field0]))
+  »;
+  class compute_Compute_ctor_End_db():«
+    extends Host.HolVariant;
+    override port_view(): Pair(0,Pair(0,PairList []))
+  »;
+  class compute_Compute_ctor_Try(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(0,PairList [this.field0]))
+  »;
+  class compute_Compute_ctor_Need_arg(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(1,PairList [this.field0]))
+  »;
+  class compute_Compute_ctor_Rw(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(0,PairList [this.field0]))
+  »;
+  fun compute_Compute_add_in_db(port_tmp_139):«
+    let port_tmp_140 = port_tmp_139;
+    match port_tmp_140
+    | Host.HolTuple4(n,cst,act,compute_Compute_ctor_End_db()):«
+        Host.funpow(n)((fun(a):«
+          compute_Compute_ctor_Need_arg(a)
+        »))(compute_Compute_ctor_Try({"hcst": cst,"rws": act,"tail": compute_Compute_ctor_End_db(),"port_record_order": PairList ["hcst","rws","tail"]}))
+    »
+    | Host.HolTuple4(0,cst,compute_Compute_ctor_Rewrite(nrws) as act,compute_Compute_ctor_Try({"hcst": hcst,"rws": compute_Compute_ctor_Rewrite(rws) as rw,"tail": tail})):«
+        (block:«
+          if Host.hol_equal(cst)(hcst)
+          | compute_Compute_ctor_Try((block:«
+            let port_tmp_141 = tail;
+            let port_tmp_142 = compute_Compute_ctor_Rewrite(append(nrws)(rws));
+            let port_tmp_143 = hcst;
+            {"hcst": port_tmp_143,"rws": port_tmp_142,"tail": port_tmp_141,"port_record_order": PairList ["hcst","rws","tail"]}
+          »))
+          | compute_Compute_ctor_Try((block:«
+            let port_tmp_144 = compute_Compute_add_in_db(Host.HolTuple4(0,cst,act,tail));
+            let port_tmp_145 = rw;
+            let port_tmp_146 = hcst;
+            {"hcst": port_tmp_146,"rws": port_tmp_145,"tail": port_tmp_144,"port_record_order": PairList ["hcst","rws","tail"]}
+          »))
+        »)
+    »
+    | Host.HolTuple4(n,cst,act,compute_Compute_ctor_Try({"hcst": hcst,"rws": rws,"tail": tail})):«
+        compute_Compute_ctor_Try((block:«
+          let port_tmp_147 = compute_Compute_add_in_db(Host.HolTuple4(n,cst,act,tail));
+          let port_tmp_148 = rws;
+          let port_tmp_149 = hcst;
+          {"hcst": port_tmp_149,"rws": port_tmp_148,"tail": port_tmp_147,"port_record_order": PairList ["hcst","rws","tail"]}
+        »))
+    »
+    | Host.HolTuple4(0,cst,act,db):«
+        compute_Compute_ctor_Try({"hcst": cst,"rws": act,"tail": db,"port_record_order": PairList ["hcst","rws","tail"]})
+    »
+    | Host.HolTuple4(n,cst,act,compute_Compute_ctor_Need_arg(tail)):«
+        compute_Compute_ctor_Need_arg(compute_Compute_add_in_db((block:«
+          let port_tmp_150 = tail;
+          let port_tmp_151 = act;
+          let port_tmp_152 = cst;
+          let port_tmp_153 = Host.hol_sub(n)(1);
+          Host.HolTuple4(port_tmp_153,port_tmp_152,port_tmp_151,port_tmp_150)
+        »)))
+    »
+  »;
+  fun compute_Compute_key_of(compute_Compute_ctor_Rw({"cst": cst,"lhs": lhs})):«
+    (block:«
+      let Pair(port_tmp_154_name,_):«
+        Up_fusion.dest_const(cst)
+      »;
+      (block:«
+        let port_tmp_155 = cst;
+        let port_tmp_156 = length(lhs);
+        let port_tmp_157 = port_tmp_154_name;
+        Interop.triple3(port_tmp_157,port_tmp_156,port_tmp_155)
+      »)
+    »)
+  »;
+  fun compute_Compute_is_skip(port_tmp_158):«
+    let port_tmp_159 = port_tmp_158;
+    match port_tmp_159
+    | Pair(_,compute_Compute_ctor_Const({"skip": Host.Some(n),"args": args})):«
+        (block:«
+          let port_tmp_160 = Host.OCamlList.length(args);
+          let port_tmp_161 = n;
+          let port_tmp_162 = Host.hol_le;
+          port_tmp_162(port_tmp_161)(port_tmp_160)
+        »)
+    »
+    | _:«
+        #false
+    »
+  »;
+  fun compute_Compute_partition_skip(skip):«
+    (fun(args):«
+      (block:«
+        let port_tmp_163 = skip;
+        match port_tmp_163
+        | Host.Some(n):«
+            (block:«
+              let port_tmp_164_len:«
+                Host.OCamlList.length(args)
+              »;
+              (block:«
+                if Host.hol_le(n)(port_tmp_164_len)
+                | (block:«
+                  let port_tmp_165 = args;
+                  let port_tmp_166 = Host.hol_sub(port_tmp_164_len)(n);
+                  let port_tmp_167 = Host.chop_list;
+                  port_tmp_167(port_tmp_166)(port_tmp_165)
+                »)
+                | Pair(PairList [],args)
+              »)
+            »)
+        »
+        | Host.None():«
+            Pair(PairList [],args)
+        »
+      »)
+    »)
+  »;
+  class compute_Compute_ctor_Rws(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(0,PairList [this.field0]))
+  »;
+  fun compute_Compute_empty_rws(_):«
+    compute_Compute_ctor_Rws(Host.Hashtbl.create(100))
+  »;
+  fun compute_Compute_assoc_clause(compute_Compute_ctor_Rws(rws)):«
+    (fun(cst):«
+      (block:«
+        try:«
+          Host.Hashtbl.find(rws)(cst);
+          ~catch port_tmp_168:«
+            let port_tmp_169 = port_tmp_168;
+            match port_tmp_169
+            | Host.Not_found():«
+                (block:«
+                  let port_tmp_170_mt:«
+                    Box(Pair(compute_Compute_ctor_End_db(),Host.None()))
+                  »;
+                  (block:«
+                    Host.Hashtbl.add(rws)(cst)(port_tmp_170_mt);
+                    port_tmp_170_mt
+                  »)
+                »)
+            »
+            | port_tmp_168:«
+                Host.hol_raise(port_tmp_168)
+            »
+          »
+        »
+      »)
+    »)
+  »;
+  fun compute_Compute_add_in_db_upd(rws):«
+    (fun(Interop.Triple3(name,arity,hcst)):«
+      (fun(act):«
+        (block:«
+          let Box(Pair(port_tmp_171_db,port_tmp_172_sk)) as port_tmp_173_rl:«
+            compute_Compute_assoc_clause(rws)(name)
+          »;
+          (block:«
+            let port_tmp_174 = (block:«
+              let port_tmp_175 = port_tmp_172_sk;
+              let port_tmp_176 = compute_Compute_add_in_db(Host.HolTuple4(arity,hcst,act,port_tmp_171_db));
+              Pair(port_tmp_176,port_tmp_175)
+            »);
+            let port_tmp_177 = port_tmp_173_rl;
+            let port_tmp_178 = Host.ref_set;
+            port_tmp_178(port_tmp_177)(port_tmp_174)
+          »)
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_set_skip_name(compute_Compute_ctor_Rws(htbl) as rws):«
+    (fun(p):«
+      (fun(sk):«
+        (block:«
+          let Box(Pair(port_tmp_179_db,_)) as port_tmp_180_rl:«
+            compute_Compute_assoc_clause(rws)(p)
+          »;
+          Host.ref_set(port_tmp_180_rl)(Pair(port_tmp_179_db,sk))
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_scrub_const(compute_Compute_ctor_Rws(htbl)):«
+    (fun(c):«
+      (block:«
+        let Pair(port_tmp_181_name,_):«
+          Up_fusion.dest_const(c)
+        »;
+        Host.Hashtbl.remove(htbl)(port_tmp_181_name)
+      »)
+    »)
+  »;
+  fun compute_Compute_from_term(Interop.Triple3(rws,env,t)):«
+    (block:«
+      fun port_tmp_182_down(Interop.Triple3(env,t,c)):«
+        (block:«
+          let port_tmp_184 = t;
+          match port_tmp_184
+          | Up_fusion.Var(_,_):«
+              port_tmp_183_up((block:«
+                let port_tmp_185 = c;
+                let port_tmp_186 = (block:«
+                  try:«
+                    compute_Compute_ctor_Bv(Host.index(t)(env));
+                    ~catch port_tmp_187:«
+                      let port_tmp_188 = port_tmp_187;
+                      match port_tmp_188
+                      | _:«
+                          compute_Compute_ctor_Fv()
+                      »
+                      | port_tmp_187:«
+                          Host.hol_raise(port_tmp_187)
+                      »
+                    »
+                  »
+                »);
+                Pair(port_tmp_186,port_tmp_185)
+              »))
+          »
+          | Up_fusion.Const(name,_):«
+              port_tmp_183_up((block:«
+                let port_tmp_189 = c;
+                let port_tmp_190 = (block:«
+                  let port_tmp_191 = compute_Compute_assoc_clause(rws)(name);
+                  let port_tmp_192 = t;
+                  compute_Compute_ctor_Cst(port_tmp_192,port_tmp_191)
+                »);
+                Pair(port_tmp_190,port_tmp_189)
+              »))
+          »
+          | Up_fusion.Comb(rator,rand):«
+              port_tmp_182_down(Interop.triple3(env,rator,compute_Compute_ctor_Zrator(Pair(env,rand),c)))
+          »
+          | Up_fusion.Abs(bvar,body):«
+              port_tmp_182_down(Interop.triple3(PairList.cons(bvar,env),body,compute_Compute_ctor_Zabs(#void,c)))
+          »
+        »)
+      »;
+      fun port_tmp_183_up(port_tmp_193):«
+        let port_tmp_194 = port_tmp_193;
+        match port_tmp_194
+        | Pair(dt,compute_Compute_ctor_Ztop()):«
+            dt
+        »
+        | Pair(dt,compute_Compute_ctor_Zrator(Pair(env,arg),c)):«
+            port_tmp_182_down(Interop.triple3(env,arg,compute_Compute_ctor_Zrand(dt,c)))
+        »
+        | Pair(dt,compute_Compute_ctor_Zrand(dr,c)):«
+            port_tmp_183_up((block:«
+              let port_tmp_195 = c;
+              let port_tmp_196 = compute_Compute_appl(Pair(dr,dt));
+              Pair(port_tmp_196,port_tmp_195)
+            »))
+        »
+        | Pair(dt,compute_Compute_ctor_Zabs(_,c)):«
+            port_tmp_183_up(Pair(compute_Compute_ctor_Abs(dt),c))
+        »
+      »;
+      port_tmp_182_down(Interop.triple3(env,t,compute_Compute_ctor_Ztop()))
+    »)
+  »;
+  fun compute_Compute_mk_rewrite(rws):«
+    (fun(eq_thm):«
+      (block:«
+        let Pair(port_tmp_197_lhs,port_tmp_198_rhs):«
+          Up_fusion.dest_eq(Up_fusion.concl(eq_thm))
+        »;
+        (block:«
+          let Interop.Triple3(port_tmp_199_fv,port_tmp_200_cst,port_tmp_201_pats):«
+            compute_Compute_check_arg_form(port_tmp_197_lhs)
+          »;
+          (block:«
+            let port_tmp_202_gen_thm:«
+              itlist(Up_bool.GEN)(port_tmp_199_fv)(eq_thm)
+            »;
+            (block:«
+              let port_tmp_203_rhsc:«
+                compute_Compute_from_term((block:«
+                  let port_tmp_204 = port_tmp_198_rhs;
+                  let port_tmp_205 = Host.rev(port_tmp_199_fv);
+                  let port_tmp_206 = rws;
+                  Interop.triple3(port_tmp_206,port_tmp_205,port_tmp_204)
+                »))
+              »;
+              compute_Compute_ctor_Rw((block:«
+                let port_tmp_207 = port_tmp_202_gen_thm;
+                let port_tmp_208 = port_tmp_203_rhsc;
+                let port_tmp_209 = length(port_tmp_199_fv);
+                let port_tmp_210 = port_tmp_201_pats;
+                let port_tmp_211 = port_tmp_200_cst;
+                {"cst": port_tmp_211,"lhs": port_tmp_210,"rhs": port_tmp_208,"npv": port_tmp_209,"thm": port_tmp_207,"port_record_order": PairList ["cst","lhs","npv","rhs","thm"]}
+              »))
+            »)
+          »)
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_unsuitable(th):«
+    (block:«
+      let Pair(port_tmp_212_l,port_tmp_213_r):«
+        Up_fusion.dest_eq(Up_fusion.concl(th))
+      »;
+      (block:«
+        let port_tmp_214 = port_tmp_213_r;
+        let port_tmp_215 = Up_drule.term_match(PairList [])(port_tmp_212_l);
+        let port_tmp_216 = can;
+        port_tmp_216(port_tmp_215)(port_tmp_214)
+      »)
+    »)
+  »;
+  fun compute_Compute_enter_thm(rws):«
+    (fun(thm0):«
+      (block:«
+        let port_tmp_217_thm:«
+          compute_Compute_eq_intro(thm0)
+        »;
+        (block:«
+          if compute_Compute_unsuitable(port_tmp_217_thm)
+          | #void
+          | (block:«
+            let port_tmp_218_rw:«
+              compute_Compute_mk_rewrite(rws)(port_tmp_217_thm)
+            »;
+            (block:«
+              let port_tmp_219 = compute_Compute_ctor_Rewrite(PairList.cons(port_tmp_218_rw,PairList []));
+              let port_tmp_220 = compute_Compute_key_of(port_tmp_218_rw);
+              let port_tmp_221 = rws;
+              let port_tmp_222 = compute_Compute_add_in_db_upd;
+              port_tmp_222(port_tmp_221)(port_tmp_220)(port_tmp_219)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_add_thms(lthm):«
+    (fun(rws):«
+      (block:«
+        let port_tmp_223 = lthm;
+        let port_tmp_224 = (block:«
+          let port_tmp_225 = compute_Compute_BODY_CONJUNCTS;
+          let port_tmp_226 = Host.OCamlList.iter(compute_Compute_enter_thm(rws));
+          let port_tmp_227 = o;
+          port_tmp_227(port_tmp_226)(port_tmp_225)
+        »);
+        let port_tmp_228 = Host.OCamlList.iter;
+        port_tmp_228(port_tmp_224)(port_tmp_223)
+      »)
+    »)
+  »;
+  fun compute_Compute_add_extern(Interop.Triple3(cst,arity,fconv)):«
+    (fun(rws):«
+      (block:«
+        let Pair(port_tmp_229_name,_):«
+          Up_fusion.dest_const(cst)
+        »;
+        compute_Compute_add_in_db_upd(rws)(Interop.triple3(port_tmp_229_name,arity,cst))(compute_Compute_ctor_Conv(fconv))
+      »)
+    »)
+  »;
+  fun compute_Compute_new_rws(_):«
+    (block:«
+      let port_tmp_230_rws:«
+        Host.hol_apply_unit(compute_Compute_empty_rws)
+      »;
+      (block:«
+        compute_Compute_add_thms(PairList.cons(Up_theorems.REFL_CLAUSE,PairList []))(port_tmp_230_rws);
+        port_tmp_230_rws
+      »)
+    »)
+  »;
+  fun compute_Compute_from_list(lthm):«
+    (block:«
+      let port_tmp_231_rws:«
+        Host.hol_apply_unit(compute_Compute_new_rws)
+      »;
+      (block:«
+        compute_Compute_add_thms(lthm)(port_tmp_231_rws);
+        port_tmp_231_rws
+      »)
+    »)
+  »;
+  fun compute_Compute_scrub_thms(lthm):«
+    (fun(rws):«
+      (block:«
+        let port_tmp_232_tmlist:«
+          (block:«
+            let port_tmp_233 = lthm;
+            let port_tmp_234 = (block:«
+              let port_tmp_235 = compute_Compute_BODY_CONJUNCTS;
+              let port_tmp_236 = o(Up_fusion.concl)(hd);
+              let port_tmp_237 = o;
+              port_tmp_237(port_tmp_236)(port_tmp_235)
+            »);
+            let port_tmp_238 = map;
+            port_tmp_238(port_tmp_234)(port_tmp_233)
+          »)
+        »;
+        (block:«
+          let port_tmp_239_clist:«
+            (block:«
+              let port_tmp_240 = port_tmp_232_tmlist;
+              let port_tmp_241 = (block:«
+                let port_tmp_242 = Up_basics.strip_forall;
+                let port_tmp_243 = (block:«
+                  let port_tmp_244 = snd;
+                  let port_tmp_245 = (block:«
+                    let port_tmp_246 = Up_equal.lhs;
+                    let port_tmp_247 = o(fst)(Up_basics.strip_comb);
+                    let port_tmp_248 = o;
+                    port_tmp_248(port_tmp_247)(port_tmp_246)
+                  »);
+                  let port_tmp_249 = o;
+                  port_tmp_249(port_tmp_245)(port_tmp_244)
+                »);
+                let port_tmp_250 = o;
+                port_tmp_250(port_tmp_243)(port_tmp_242)
+              »);
+              let port_tmp_251 = map;
+              port_tmp_251(port_tmp_241)(port_tmp_240)
+            »)
+          »;
+          (block:«
+            let port_tmp_252 = port_tmp_239_clist;
+            let port_tmp_253 = compute_Compute_scrub_const(rws);
+            let port_tmp_254 = Host.OCamlList.iter;
+            port_tmp_254(port_tmp_253)(port_tmp_252)
+          »)
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_rws_of(compute_Compute_ctor_Rws(htbl)):«
+    (block:«
+      let port_tmp_255_dblist:«
+        Host.Hashtbl.fold((fun(_):«
+          (fun(Box(Pair(db,_))):«
+            (fun(r):«
+              PairList.cons(db,r)
+            »)
+          »)
+        »))(htbl)(PairList [])
+      »;
+      (block:«
+        fun port_tmp_256_get_actions(db):«
+          (block:«
+            let port_tmp_257 = db;
+            match port_tmp_257
+            | compute_Compute_ctor_End_db():«
+                PairList []
+            »
+            | compute_Compute_ctor_Need_arg(db_prime):«
+                port_tmp_256_get_actions(db_prime)
+            »
+            | compute_Compute_ctor_Try({"hcst": hcst,"rws": rws,"tail": tail}):«
+                (block:«
+                  let port_tmp_258 = port_tmp_256_get_actions(tail);
+                  let port_tmp_259 = Pair(hcst,rws);
+                  PairList.cons(port_tmp_259,port_tmp_258)
+                »)
+            »
+          »)
+        »;
+        (block:«
+          let port_tmp_260_actionlist:«
+            Host.OCamlList.concat(Host.OCamlList.map(port_tmp_256_get_actions)(port_tmp_255_dblist))
+          »;
+          (block:«
+            let port_tmp_261_dest:«
+              (fun(compute_Compute_ctor_Rw({"thm": thm})):«
+                thm
+              »)
+            »;
+            (block:«
+              let port_tmp_262_dest_action:«
+                (fun(port_tmp_263):«
+                  let port_tmp_264 = port_tmp_263;
+                  match port_tmp_264
+                  | Pair(hcst,compute_Compute_ctor_Rewrite(rws)):«
+                      (block:«
+                        let port_tmp_265 = map(port_tmp_261_dest)(rws);
+                        let port_tmp_266 = hcst;
+                        Pair(port_tmp_266,port_tmp_265)
+                      »)
+                  »
+                  | Pair(hcst,compute_Compute_ctor_Conv(_)):«
+                      Pair(hcst,PairList [])
+                  »
+                »)
+              »;
+              (block:«
+                let port_tmp_267_rwlist:«
+                  Host.OCamlList.map(port_tmp_262_dest_action)(port_tmp_260_actionlist)
+                »;
+                port_tmp_267_rwlist
+              »)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »;
+  class compute_Compute_ctor_Conversion(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(0,PairList [this.field0]))
+  »;
+  class compute_Compute_ctor_Rrules(field0):«
+    extends Host.HolVariant;
+    override port_view(): Pair(1,Pair(1,PairList [this.field0]))
+  »;
+  fun compute_Compute_deplist(compute_Compute_ctor_Rws(htbl)):«
+    (block:«
+      let port_tmp_268_dblist:«
+        Host.Hashtbl.fold((fun(s):«
+          (fun(Box(Pair(db,_))):«
+            (fun(r):«
+              PairList.cons(Pair(s,db),r)
+            »)
+          »)
+        »))(htbl)(PairList [])
+      »;
+      (block:«
+        fun port_tmp_269_get_actions(db):«
+          (block:«
+            let port_tmp_270 = db;
+            match port_tmp_270
+            | compute_Compute_ctor_End_db():«
+                PairList []
+            »
+            | compute_Compute_ctor_Need_arg(db_prime):«
+                port_tmp_269_get_actions(db_prime)
+            »
+            | compute_Compute_ctor_Try({"hcst": hcst,"rws": rws,"tail": tail}):«
+                (block:«
+                  let port_tmp_271 = port_tmp_269_get_actions(tail);
+                  let port_tmp_272 = rws;
+                  PairList.cons(port_tmp_272,port_tmp_271)
+                »)
+            »
+          »)
+        »;
+        (block:«
+          let port_tmp_273_actionlist:«
+            Host.OCamlList.map((fun(Pair(s,db)):«
+              (block:«
+                let port_tmp_274 = port_tmp_269_get_actions(db);
+                let port_tmp_275 = s;
+                Pair(port_tmp_275,port_tmp_274)
+              »)
+            »))(port_tmp_268_dblist)
+          »;
+          (block:«
+            let port_tmp_276_dest:«
+              (fun(compute_Compute_ctor_Rw({"thm": thm})):«
+                thm
+              »)
+            »;
+            (block:«
+              let port_tmp_277_dest_action:«
+                (fun(port_tmp_278):«
+                  let port_tmp_279 = port_tmp_278;
+                  match port_tmp_279
+                  | compute_Compute_ctor_Rewrite(rws):«
+                      compute_Compute_ctor_Rrules(map(port_tmp_276_dest)(rws))
+                  »
+                  | compute_Compute_ctor_Conv(ecnv):«
+                      compute_Compute_ctor_Conversion(ecnv)
+                  »
+                »)
+              »;
+              (block:«
+                let port_tmp_280_rwlist:«
+                  Host.OCamlList.map((fun(Pair(s,act)):«
+                    (block:«
+                      let port_tmp_281 = map(port_tmp_277_dest_action)(act);
+                      let port_tmp_282 = s;
+                      Pair(port_tmp_282,port_tmp_281)
+                    »)
+                  »))(port_tmp_273_actionlist)
+                »;
+                port_tmp_280_rwlist
+              »)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »;
+  class No_match();
+  fun compute_Compute_match_const(Pair(bds,tbds)):«
+    (fun(pc):«
+      (fun(c):«
+        (block:«
+          let Pair(port_tmp_283_name,port_tmp_284_ty):«
+            Up_fusion.dest_const(pc)
+          »;
+          (block:«
+            let Pair(port_tmp_285_name_prime,port_tmp_286_ty_prime):«
+              Up_fusion.dest_const(c)
+            »;
+            (block:«
+              if Host.hol_equal(port_tmp_283_name)(port_tmp_285_name_prime)
+              | (block:«
+                try:«
+                  (block:«
+                    let port_tmp_287 = Up_basics.type_match(port_tmp_284_ty)(port_tmp_286_ty_prime)(tbds);
+                    let port_tmp_288 = bds;
+                    Pair(port_tmp_288,port_tmp_287)
+                  »);
+                  ~catch port_tmp_289:«
+                    let port_tmp_290 = port_tmp_289;
+                    match port_tmp_290
+                    | _:«
+                        Host.hol_raise(No_match())
+                    »
+                    | port_tmp_289:«
+                        Host.hol_raise(port_tmp_289)
+                    »
+                  »
+                »
+              »)
+              | Host.hol_raise(No_match())
+            »)
+          »)
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_match_var(Pair(bds,tbds)):«
+    (fun(var):«
+      (fun(arg):«
+        (block:«
+          let _:«
+            (block:«
+              let port_tmp_291 = Host.hol_array_get(bds)(var);
+              match port_tmp_291
+              | Host.Some(Pair(tm,_)):«
+                  (block:«
+                    if (block:«
+                      let port_tmp_292 = fst(arg);
+                      let port_tmp_293 = tm;
+                      let port_tmp_294 = Up_fusion.aconv;
+                      port_tmp_294(port_tmp_293)(port_tmp_292)
+                    »)
+                    | #void
+                    | Host.hol_raise(No_match())
+                  »)
+              »
+              | Host.None():«
+                  Host.hol_array_set(bds)(var)(Host.Some(arg))
+              »
+            »)
+          »;
+          Pair(bds,tbds)
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_match_list(bds):«
+    (fun(pats):«
+      (fun(args):«
+        (block:«
+          let port_tmp_295 = Pair(pats,args);
+          match port_tmp_295
+          | Pair(PairList [pat, & pats],PairList [arg, & args]):«
+              (block:«
+                let port_tmp_296 = args;
+                let port_tmp_297 = pats;
+                let port_tmp_298 = compute_Compute_match_solve(bds)(pat)(arg);
+                let port_tmp_299 = compute_Compute_match_list;
+                port_tmp_299(port_tmp_298)(port_tmp_297)(port_tmp_296)
+              »)
+          »
+          | Pair(PairList [],PairList []):«
+              bds
+          »
+          | _:«
+              Host.hol_raise(Dead_code("match_list"))
+          »
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_match_solve(bds):«
+    (fun(pat):«
+      (fun(arg):«
+        (block:«
+          let port_tmp_300 = Pair(pat,arg);
+          match port_tmp_300
+          | Pair(compute_Compute_ctor_Pvar(var),arg):«
+              compute_Compute_match_var(bds)(var)(arg)
+          »
+          | Pair(compute_Compute_ctor_Papp(phead,pargs),Pair(_,compute_Compute_ctor_Const({"head": head,"args": args}))):«
+              (block:«
+                if (block:«
+                  let port_tmp_301 = length(args);
+                  let port_tmp_302 = length(pargs);
+                  let port_tmp_303 = Host.hol_equal;
+                  port_tmp_303(port_tmp_302)(port_tmp_301)
+                »)
+                | (block:«
+                  let port_tmp_304 = args;
+                  let port_tmp_305 = pargs;
+                  let port_tmp_306 = compute_Compute_match_const(bds)(phead)(head);
+                  let port_tmp_307 = compute_Compute_match_list;
+                  port_tmp_307(port_tmp_306)(port_tmp_305)(port_tmp_304)
+                »)
+                | Host.hol_raise(No_match())
+              »)
+          »
+          | _:«
+              Host.hol_raise(No_match())
+          »
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_try_rwn(ibds):«
+    (fun(lt):«
+      (block:«
+        fun port_tmp_308_try_rec(port_tmp_309):«
+          let port_tmp_310 = port_tmp_309;
+          match port_tmp_310
+          | PairList []:«
+              Host.hol_raise(No_match())
+          »
+          | PairList [compute_Compute_ctor_Rw({"lhs": lhs,"npv": npv}) as rw, & rwn]:«
+              (block:«
+                let port_tmp_311_env:«
+                  Host.hol_array_make(npv)(Host.None())
+                »;
+                (block:«
+                  try:«
+                    (block:«
+                      let port_tmp_312 = compute_Compute_match_list(Pair(port_tmp_311_env,ibds))(lhs)(lt);
+                      let port_tmp_313 = rw;
+                      {"rule": port_tmp_313,"inst": port_tmp_312,"port_record_order": PairList ["rule","inst"]}
+                    »);
+                    ~catch port_tmp_314:«
+                      let port_tmp_315 = port_tmp_314;
+                      match port_tmp_315
+                      | No_match():«
+                          port_tmp_308_try_rec(rwn)
+                      »
+                      | port_tmp_314:«
+                          Host.hol_raise(port_tmp_314)
+                      »
+                    »
+                  »
+                »)
+              »)
+          »
+        »;
+        port_tmp_308_try_rec
+      »)
+    »)
+  »;
+  fun compute_Compute_comb_ct(cst):«
+    (fun(arg):«
+      (block:«
+        let port_tmp_316 = cst;
+        match port_tmp_316
+        | {"head": head,"args": args,"rws": compute_Compute_ctor_Need_arg(tail),"skip": skip}:«
+            compute_Compute_ctor_Const({"head": head,"args": PairList.cons(arg,args),"rws": tail,"skip": skip,"port_record_order": PairList ["head","args","rws","skip"]})
+        »
+        | {"head": head,"args": args,"rws": compute_Compute_ctor_End_db(),"skip": skip}:«
+            compute_Compute_ctor_Const({"head": head,"args": PairList.cons(arg,args),"rws": compute_Compute_ctor_End_db(),"skip": skip,"port_record_order": PairList ["head","args","rws","skip"]})
+        »
+        | {"rws": compute_Compute_ctor_Try(_)}:«
+            Host.hol_raise(Dead_code("comb_ct: yet rules to try"))
+        »
+      »)
+    »)
+  »;
+  fun compute_Compute_mk_clos(Pair(env,t)):«
+    (block:«
+      let port_tmp_317 = t;
+      match port_tmp_317
+      | compute_Compute_ctor_Cst(hc,Box(Pair(db,b))):«
+          compute_Compute_ctor_Const({"head": hc,"args": PairList [],"rws": db,"skip": b,"port_record_order": PairList ["head","args","rws","skip"]})
+      »
+      | compute_Compute_ctor_Bv(i):«
+          Host.OCamlList.nth(env)(i)
+      »
+      | compute_Compute_ctor_Fv():«
+          compute_Compute_ctor_Neutr()
+      »
+      | _:«
+          compute_Compute_ctor_Clos({"env": env,"term": t,"port_record_order": PairList ["env","term"]})
+      »
+    »)
+  »;
+  fun compute_Compute_inst_one_var(Pair(thm,lv)):«
+    (fun(port_tmp_318):«
+      let port_tmp_319 = port_tmp_318;
+      match port_tmp_319
+      | Host.Some(Pair(tm,v)):«
+          (block:«
+            let port_tmp_320 = PairList.cons(v,lv);
+            let port_tmp_321 = Up_bool.SPEC(tm)(thm);
+            Pair(port_tmp_321,port_tmp_320)
+          »)
+      »
+      | Host.None():«
+          Host.hol_raise(Dead_code("inst_rw"))
+      »
+    »)
+  »;
+  fun compute_Compute_inst_rw(Interop.Triple3(th,monitoring,{"rule": compute_Compute_ctor_Rw({"thm": thm,"rhs": rhs}),"inst": Pair(bds,tysub)})):«
+    (block:«
+      let port_tmp_322_tirhs:«
+        compute_Compute_inst_type_dterm(Pair(tysub,rhs))
+      »;
+      (block:«
+        let port_tmp_323_tithm:«
+          Up_fusion.INST_TYPE(tysub)(thm)
+        »;
+        (block:«
+          let Pair(port_tmp_324_spec_thm,port_tmp_325_venv):«
+            Host.hol_array_fold_left(compute_Compute_inst_one_var)(Pair(port_tmp_323_tithm,PairList []))(bds)
+          »;
+          (block:«
+            let #void:«
+              (block:«
+                if monitoring
+                | Host.print_term(Up_fusion.concl(port_tmp_324_spec_thm))
+                | #void
+              »)
+            »;
+            (block:«
+              let port_tmp_326 = compute_Compute_mk_clos(Pair(port_tmp_325_venv,port_tmp_322_tirhs));
+              let port_tmp_327 = compute_Compute_trans_thm(th)(port_tmp_324_spec_thm);
+              Pair(port_tmp_327,port_tmp_326)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »;
+  def compute_Compute_monitoring:«
+    Box(Host.None())
+  »;
+  def compute_Compute_stoppers:«
+    Box(Host.None())
+  »;
+  fun compute_Compute_reduce_cst(port_tmp_328):«
+    let port_tmp_329 = port_tmp_328;
+    match port_tmp_329
+    | Pair(th,{"head": head,"args": args,"rws": compute_Compute_ctor_Try({"hcst": hcst,"rws": compute_Compute_ctor_Rewrite(rls),"tail": tail}),"skip": skip}):«
+        (block:«
+          try:«
+            (block:«
+              let #void:«
+                (block:«
+                  let port_tmp_330 = Host.ref_get(compute_Compute_stoppers);
+                  match port_tmp_330
+                  | Host.None():«
+                      #void
+                  »
+                  | Host.Some(p):«
+                      (block:«
+                        if p(head)
+                        | Host.hol_raise(No_match())
+                        | #void
+                      »)
+                  »
+                »)
+              »;
+              (block:«
+                let Interop.Triple3(_,_,port_tmp_331_tytheta):«
+                  (block:«
+                    try:«
+                      Up_drule.term_match(PairList [])(hcst)(head);
+                      ~catch port_tmp_332:«
+                        let port_tmp_333 = port_tmp_332;
+                        match port_tmp_333
+                        | _:«
+                            Host.hol_raise(No_match())
+                        »
+                        | port_tmp_332:«
+                            Host.hol_raise(port_tmp_332)
+                        »
+                      »
+                    »
+                  »)
+                »;
+                (block:«
+                  let port_tmp_334_rule_inst:«
+                    compute_Compute_try_rwn(port_tmp_331_tytheta)(args)(rls)
+                  »;
+                  (block:«
+                    let port_tmp_335_mon:«
+                      (block:«
+                        let port_tmp_336 = Host.ref_get(compute_Compute_monitoring);
+                        match port_tmp_336
+                        | Host.None():«
+                            #false
+                        »
+                        | Host.Some(f):«
+                            f(head)
+                        »
+                      »)
+                    »;
+                    (block:«
+                      let port_tmp_337_insted:«
+                        compute_Compute_inst_rw(Interop.triple3(th,port_tmp_335_mon,port_tmp_334_rule_inst))
+                      »;
+                      Pair(#true,port_tmp_337_insted)
+                    »)
+                  »)
+                »)
+              »)
+            »);
+            ~catch port_tmp_338:«
+              let port_tmp_339 = port_tmp_338;
+              match port_tmp_339
+              | No_match():«
+                  compute_Compute_reduce_cst(Pair(th,{"head": head,"args": args,"rws": tail,"skip": skip,"port_record_order": PairList ["head","args","rws","skip"]}))
+              »
+              | port_tmp_338:«
+                  Host.hol_raise(port_tmp_338)
+              »
+            »
+          »
+        »)
+    »
+    | Pair(th,{"head": head,"args": args,"rws": compute_Compute_ctor_Try({"hcst": hcst,"rws": compute_Compute_ctor_Conv(fconv),"tail": tail}),"skip": skip}):«
+        (block:«
+          try:«
+            (block:«
+              let Pair(port_tmp_340_thm,port_tmp_341_ft):«
+                fconv(compute_Compute_rhs_concl(th))
+              »;
+              (block:«
+                let port_tmp_342 = (block:«
+                  let port_tmp_343 = port_tmp_341_ft;
+                  let port_tmp_344 = compute_Compute_trans_thm(th)(port_tmp_340_thm);
+                  Pair(port_tmp_344,port_tmp_343)
+                »);
+                let port_tmp_345 = #true;
+                Pair(port_tmp_345,port_tmp_342)
+              »)
+            »);
+            ~catch port_tmp_346:«
+              let port_tmp_347 = port_tmp_346;
+              match port_tmp_347
+              | _:«
+                  compute_Compute_reduce_cst(Pair(th,{"head": head,"args": args,"rws": tail,"skip": skip,"port_record_order": PairList ["head","args","rws","skip"]}))
+              »
+              | port_tmp_346:«
+                  Host.hol_raise(port_tmp_346)
+              »
+            »
+          »
+        »)
+    »
+    | Pair(th,cst):«
+        Pair(#false,Pair(th,compute_Compute_ctor_Const(cst)))
+    »
+  »;
+  def compute_Compute_auto_import_definitions:«
+    Box(#true)
+  »;
+  def compute_Compute_new_compset:«
+    compute_Compute_from_list
+  »;
+  def compute_Compute_listItems:«
+    compute_Compute_deplist
+  »;
+  fun compute_Compute_stack_out(port_tmp_348):«
+    let port_tmp_349 = port_tmp_348;
+    match port_tmp_349
+    | Pair(th,compute_Compute_ctor_Ztop()):«
+        th
+    »
+    | Pair(th,compute_Compute_ctor_Zrator(Pair(mka,Pair(thb,_)),ctx)):«
+        compute_Compute_stack_out((block:«
+          let port_tmp_350 = ctx;
+          let port_tmp_351 = mka(th)(thb);
+          Pair(port_tmp_351,port_tmp_350)
+        »))
+    »
+    | Pair(th,compute_Compute_ctor_Zrand(Interop.Triple3(mka,_,Pair(tha,_)),ctx)):«
+        compute_Compute_stack_out((block:«
+          let port_tmp_352 = ctx;
+          let port_tmp_353 = mka(tha)(th);
+          Pair(port_tmp_353,port_tmp_352)
+        »))
+    »
+    | Pair(th,compute_Compute_ctor_Zabs(mkl,ctx)):«
+        compute_Compute_stack_out((block:«
+          let port_tmp_354 = ctx;
+          let port_tmp_355 = mkl(th);
+          Pair(port_tmp_355,port_tmp_354)
+        »))
+    »
+  »;
+  fun compute_Compute_initial_state(rws):«
+    (fun(t):«
+      (block:«
+        let port_tmp_356 = compute_Compute_ctor_Ztop();
+        let port_tmp_357 = (block:«
+          let port_tmp_358 = compute_Compute_mk_clos((block:«
+            let port_tmp_359 = compute_Compute_from_term(Interop.triple3(rws,PairList [],t));
+            let port_tmp_360 = PairList [];
+            Pair(port_tmp_360,port_tmp_359)
+          »));
+          let port_tmp_361 = compute_Compute_refl_thm(t);
+          Pair(port_tmp_361,port_tmp_358)
+        »);
+        Pair(port_tmp_357,port_tmp_356)
+      »)
+    »)
+  »;
+  fun compute_Compute_cbv_wk(port_tmp_362):«
+    let port_tmp_363 = port_tmp_362;
+    match port_tmp_363
+    | Pair(Pair(th,compute_Compute_ctor_Clos({"env": env,"term": compute_Compute_ctor_App(a,args)})),stk):«
+        (block:«
+          let Pair(port_tmp_364_tha,port_tmp_365_stka):«
+            (block:«
+              let port_tmp_366 = Pair(th,stk);
+              let port_tmp_367 = args;
+              let port_tmp_368 = compute_Compute_push_in_stk(curry(compute_Compute_mk_clos)(env));
+              let port_tmp_369 = rev_itlist;
+              port_tmp_369(port_tmp_368)(port_tmp_367)(port_tmp_366)
+            »)
+          »;
+          compute_Compute_cbv_wk((block:«
+            let port_tmp_370 = port_tmp_365_stka;
+            let port_tmp_371 = (block:«
+              let port_tmp_372 = compute_Compute_mk_clos(Pair(env,a));
+              let port_tmp_373 = port_tmp_364_tha;
+              Pair(port_tmp_373,port_tmp_372)
+            »);
+            Pair(port_tmp_371,port_tmp_370)
+          »))
+        »)
+    »
+    | Pair(Pair(th,compute_Compute_ctor_Clos({"env": env,"term": compute_Compute_ctor_Abs(body)})),compute_Compute_ctor_Zrator(Pair(mka,Pair(thb,cl)),s_prime)):«
+        compute_Compute_cbv_wk((block:«
+          let port_tmp_374 = s_prime;
+          let port_tmp_375 = (block:«
+            let port_tmp_376 = compute_Compute_mk_clos(Pair(PairList.cons(cl,env),body));
+            let port_tmp_377 = compute_Compute_beta_thm(mka(th)(thb));
+            Pair(port_tmp_377,port_tmp_376)
+          »);
+          Pair(port_tmp_375,port_tmp_374)
+        »))
+    »
+    | Pair(Pair(th,compute_Compute_ctor_Const(cargs)),stk):«
+        (block:«
+          let Pair(port_tmp_378_reduced,port_tmp_379_clos):«
+            compute_Compute_reduce_cst(Pair(th,cargs))
+          »;
+          (block:«
+            if port_tmp_378_reduced
+            | compute_Compute_cbv_wk(Pair(port_tmp_379_clos,stk))
+            | compute_Compute_cbv_up(Pair(port_tmp_379_clos,stk))
+          »)
+        »)
+    »
+    | Pair(clos,stk):«
+        compute_Compute_cbv_up(Pair(clos,stk))
+    »
+  »;
+  fun compute_Compute_cbv_up(port_tmp_380):«
+    let port_tmp_381 = port_tmp_380;
+    match port_tmp_381
+    | Pair(hcl,compute_Compute_ctor_Zrator(Pair(mka,clos),ctx)):«
+        (block:«
+          let port_tmp_382_new_state:«
+            Pair(clos,compute_Compute_ctor_Zrand(Interop.triple3(mka,#false,hcl),ctx))
+          »;
+          (block:«
+            if compute_Compute_is_skip(hcl)
+            | compute_Compute_cbv_up(port_tmp_382_new_state)
+            | compute_Compute_cbv_wk(port_tmp_382_new_state)
+          »)
+        »)
+    »
+    | Pair(Pair(thb,v),compute_Compute_ctor_Zrand(Interop.Triple3(mka,#false,Pair(th,compute_Compute_ctor_Const(cargs))),stk)):«
+        compute_Compute_cbv_wk((block:«
+          let port_tmp_383 = stk;
+          let port_tmp_384 = (block:«
+            let port_tmp_385 = (block:«
+              let port_tmp_386 = (block:«
+                let port_tmp_387 = v;
+                let port_tmp_388 = compute_Compute_rhs_concl(thb);
+                Pair(port_tmp_388,port_tmp_387)
+              »);
+              let port_tmp_389 = cargs;
+              let port_tmp_390 = compute_Compute_comb_ct;
+              port_tmp_390(port_tmp_389)(port_tmp_386)
+            »);
+            let port_tmp_391 = mka(th)(thb);
+            Pair(port_tmp_391,port_tmp_385)
+          »);
+          Pair(port_tmp_384,port_tmp_383)
+        »))
+    »
+    | Pair(Pair(thb,compute_Compute_ctor_Neutr()),compute_Compute_ctor_Zrand(Interop.Triple3(mka,#false,Pair(th,compute_Compute_ctor_Neutr())),stk)):«
+        compute_Compute_cbv_up((block:«
+          let port_tmp_392 = stk;
+          let port_tmp_393 = (block:«
+            let port_tmp_394 = compute_Compute_ctor_Neutr();
+            let port_tmp_395 = mka(th)(thb);
+            Pair(port_tmp_395,port_tmp_394)
+          »);
+          Pair(port_tmp_393,port_tmp_392)
+        »))
+    »
+    | Pair(clos,stk):«
+        Pair(clos,stk)
+    »
+  »;
+  fun compute_Compute_strong(port_tmp_396):«
+    let port_tmp_397 = port_tmp_396;
+    match port_tmp_397
+    | Pair(Pair(th,compute_Compute_ctor_Clos({"env": env,"term": compute_Compute_ctor_Abs(t)})),stk):«
+        (block:«
+          let Pair(port_tmp_398_thb,port_tmp_399_stk_prime):«
+            compute_Compute_push_lam_in_stk(Pair(th,stk))
+          »;
+          compute_Compute_strong(compute_Compute_cbv_wk((block:«
+            let port_tmp_400 = port_tmp_399_stk_prime;
+            let port_tmp_401 = (block:«
+              let port_tmp_402 = compute_Compute_mk_clos(Pair(PairList.cons(compute_Compute_ctor_Neutr(),env),t));
+              let port_tmp_403 = port_tmp_398_thb;
+              Pair(port_tmp_403,port_tmp_402)
+            »);
+            Pair(port_tmp_401,port_tmp_400)
+          »)))
+        »)
+    »
+    | Pair(Pair(_,compute_Compute_ctor_Clos(_)),stk):«
+        Host.hol_raise(Dead_code("strong"))
+    »
+    | Pair(Pair(th,compute_Compute_ctor_Const({"skip": skip,"args": args})),stk):«
+        (block:«
+          let Pair(port_tmp_404_argssk,port_tmp_405_argsrd):«
+            compute_Compute_partition_skip(skip)(args)
+          »;
+          (block:«
+            let Pair(port_tmp_406_th_prime,port_tmp_407_stk_prime):«
+              (block:«
+                let port_tmp_408 = Pair(th,stk);
+                let port_tmp_409 = port_tmp_404_argssk;
+                let port_tmp_410 = compute_Compute_push_skip_stk(snd);
+                let port_tmp_411 = rev_itlist;
+                port_tmp_411(port_tmp_410)(port_tmp_409)(port_tmp_408)
+              »)
+            »;
+            (block:«
+              let Pair(port_tmp_412_th_prime_prime,port_tmp_413_stk_prime_prime):«
+                (block:«
+                  let port_tmp_414 = Pair(port_tmp_406_th_prime,port_tmp_407_stk_prime);
+                  let port_tmp_415 = port_tmp_405_argsrd;
+                  let port_tmp_416 = compute_Compute_push_in_stk(snd);
+                  let port_tmp_417 = rev_itlist;
+                  port_tmp_417(port_tmp_416)(port_tmp_415)(port_tmp_414)
+                »)
+              »;
+              compute_Compute_strong_up(Pair(port_tmp_412_th_prime_prime,port_tmp_413_stk_prime_prime))
+            »)
+          »)
+        »)
+    »
+    | Pair(Pair(th,compute_Compute_ctor_Neutr()),stk):«
+        compute_Compute_strong_up(Pair(th,stk))
+    »
+  »;
+  fun compute_Compute_strong_up(port_tmp_418):«
+    let port_tmp_419 = port_tmp_418;
+    match port_tmp_419
+    | Pair(th,compute_Compute_ctor_Ztop()):«
+        th
+    »
+    | Pair(th,compute_Compute_ctor_Zrand(Interop.Triple3(mka,#false,Pair(tha,compute_Compute_ctor_Neutr())),ctx)):«
+        compute_Compute_strong(compute_Compute_cbv_wk((block:«
+          let port_tmp_420 = ctx;
+          let port_tmp_421 = (block:«
+            let port_tmp_422 = compute_Compute_ctor_Neutr();
+            let port_tmp_423 = mka(tha)(th);
+            Pair(port_tmp_423,port_tmp_422)
+          »);
+          Pair(port_tmp_421,port_tmp_420)
+        »)))
+    »
+    | Pair(th,compute_Compute_ctor_Zrand(Interop.Triple3(mka,#false,clos),ctx)):«
+        Host.hol_raise(Dead_code("strong_up"))
+    »
+    | Pair(th,compute_Compute_ctor_Zrator(Pair(mka,clos),ctx)):«
+        compute_Compute_strong(compute_Compute_cbv_wk(Pair(clos,compute_Compute_ctor_Zrand(Interop.triple3(mka,#true,Pair(th,compute_Compute_ctor_Neutr())),ctx))))
+    »
+    | Pair(th,compute_Compute_ctor_Zrand(Interop.Triple3(mka,#true,Pair(tha,_)),ctx)):«
+        compute_Compute_strong_up((block:«
+          let port_tmp_424 = ctx;
+          let port_tmp_425 = mka(tha)(th);
+          Pair(port_tmp_425,port_tmp_424)
+        »))
+    »
+    | Pair(th,compute_Compute_ctor_Zabs(mkl,ctx)):«
+        compute_Compute_strong_up((block:«
+          let port_tmp_426 = ctx;
+          let port_tmp_427 = mkl(th);
+          Pair(port_tmp_427,port_tmp_426)
+        »))
+    »
+  »;
+  fun compute_Compute_CBV_CONV(rws):«
+    (block:«
+      let port_tmp_428 = compute_Compute_initial_state(rws);
+      let port_tmp_429 = (block:«
+        let port_tmp_430 = compute_Compute_cbv_wk;
+        let port_tmp_431 = o(compute_Compute_evaluate)(compute_Compute_strong);
+        let port_tmp_432 = o;
+        port_tmp_432(port_tmp_431)(port_tmp_430)
+      »);
+      let port_tmp_433 = o;
+      port_tmp_433(port_tmp_429)(port_tmp_428)
+    »)
+  »;
+  fun compute_Compute_WEAK_CBV_CONV(rws):«
+    (block:«
+      let port_tmp_434 = compute_Compute_initial_state(rws);
+      let port_tmp_435 = (block:«
+        let port_tmp_436 = compute_Compute_cbv_wk;
+        let port_tmp_437 = o(compute_Compute_evaluate)((fun(Pair(Pair(th,_),stk)):«
+          compute_Compute_stack_out(Pair(th,stk))
+        »));
+        let port_tmp_438 = o;
+        port_tmp_438(port_tmp_437)(port_tmp_436)
+      »);
+      let port_tmp_439 = o;
+      port_tmp_439(port_tmp_435)(port_tmp_434)
+    »)
+  »;
+  fun compute_Compute_extern_of_conv(rws):«
+    (fun(conv):«
+      (fun(tm):«
+        (block:«
+          let port_tmp_440_thm:«
+            conv(tm)
+          »;
+          (block:«
+            let port_tmp_441 = compute_Compute_mk_clos((block:«
+              let port_tmp_442 = compute_Compute_from_term((block:«
+                let port_tmp_443 = Up_equal.rhs(Up_fusion.concl(port_tmp_440_thm));
+                let port_tmp_444 = PairList [];
+                let port_tmp_445 = rws;
+                Interop.triple3(port_tmp_445,port_tmp_444,port_tmp_443)
+              »));
+              let port_tmp_446 = PairList [];
+              Pair(port_tmp_446,port_tmp_442)
+            »));
+            let port_tmp_447 = port_tmp_440_thm;
+            Pair(port_tmp_447,port_tmp_441)
+          »)
+        »)
+      »)
+    »)
+  »;
+  fun compute_Compute_add_conv(Interop.Triple3(cst,arity,conv)):«
+    (fun(rws):«
+      (block:«
+        let port_tmp_448 = rws;
+        let port_tmp_449 = (block:«
+          let port_tmp_450 = compute_Compute_extern_of_conv(rws)(conv);
+          let port_tmp_451 = arity;
+          let port_tmp_452 = cst;
+          Interop.triple3(port_tmp_452,port_tmp_451,port_tmp_450)
+        »);
+        let port_tmp_453 = compute_Compute_add_extern;
+        port_tmp_453(port_tmp_449)(port_tmp_448)
+      »)
+    »)
+  »;
+  fun compute_Compute_set_skip(compset):«
+    (fun(c):«
+      (fun(opt):«
+        (block:«
+          try:«
+            (block:«
+              let Pair(port_tmp_454_name,_):«
+                Up_fusion.dest_const(c)
+              »;
+              compute_Compute_set_skip_name(compset)(port_tmp_454_name)(opt)
+            »);
+            ~catch port_tmp_455:«
+              let port_tmp_456 = port_tmp_455;
+              match port_tmp_456
+              | _:«
+                  failwith("set_skip")
+              »
+              | port_tmp_455:«
+                  Host.hol_raise(port_tmp_455)
+              »
+            »
+          »
+        »)
+      »)
+    »)
+  »;
+  def compute_Compute_bool_redns:«
+    (block:«
+      let port_tmp_457 = Host.OCamlList.map(compute_Compute_lazyfy_thm)(PairList.cons(Up_class.COND_CLAUSES,PairList.cons(Up_class.COND_ID,PairList.cons(Up_class.NOT_CLAUSES,PairList.cons(Up_theorems.AND_CLAUSES,PairList.cons(Up_theorems.OR_CLAUSES,PairList.cons(Up_theorems.IMP_CLAUSES,PairList.cons(Up_theorems.EQ_CLAUSES,PairList []))))))));
+      let port_tmp_458 = compute_Compute_strictify_thm(Up_pair.LET_DEF);
+      PairList.cons(port_tmp_458,port_tmp_457)
+    »)
+  »;
+  fun compute_Compute_bool_compset(_):«
+    (block:«
+      let port_tmp_459_base:«
+        compute_Compute_from_list(compute_Compute_bool_redns)
+      »;
+      (block:«
+        let #void:«
+          compute_Compute_set_skip(port_tmp_459_base)(Host.expand_quote("[\"Const\",\"COND\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyvar\",\"A\"]]]]]]]]"))(Host.None())
+        »;
+        port_tmp_459_base
+      »)
+    »)
+  »;
+  fun compute_Compute_basic_compset(_):«
+    (block:«
+      let port_tmp_460_basic_rws0:«
+        Host.hol_apply_unit(Up_simp.basic_rewrites)
+      »;
+      (block:«
+        let port_tmp_461_lhs_lambda_rules:«
+          map(Up_bool.SPEC_ALL)(PairList.cons(Up_class.SELECT_REFL,PairList.cons(Up_theorems.FORALL_SIMP,PairList.cons(Up_theorems.EXISTS_SIMP,PairList []))))
+        »;
+        (block:«
+          let port_tmp_462_basic_rws:«
+            Host.OCamlList.filter((fun(th):«
+              Host.hol_not(mem(th)(port_tmp_461_lhs_lambda_rules))
+            »))(port_tmp_460_basic_rws0)
+          »;
+          (block:«
+            let port_tmp_463_cs:«
+              compute_Compute_new_compset(Host.OCamlList.map(compute_Compute_lazyfy_thm)(port_tmp_462_basic_rws))
+            »;
+            (block:«
+              (block:«
+                let port_tmp_464 = Host.hol_apply_unit(Up_simp.basic_convs);
+                let port_tmp_465 = (fun(Pair(_,Pair(pat,the_conv))):«
+                  (block:«
+                    let Pair(port_tmp_466_cst,port_tmp_467_args):«
+                      Up_basics.strip_comb(pat)
+                    »;
+                    (block:«
+                      let port_tmp_468 = port_tmp_463_cs;
+                      let port_tmp_469 = (block:«
+                        let port_tmp_470 = the_conv;
+                        let port_tmp_471 = length(port_tmp_467_args);
+                        let port_tmp_472 = port_tmp_466_cst;
+                        Interop.triple3(port_tmp_472,port_tmp_471,port_tmp_470)
+                      »);
+                      let port_tmp_473 = compute_Compute_add_conv;
+                      port_tmp_473(port_tmp_469)(port_tmp_468)
+                    »)
+                  »)
+                »);
+                let port_tmp_474 = Host.OCamlList.iter;
+                port_tmp_474(port_tmp_465)(port_tmp_464)
+              »);
+              (block:«
+                compute_Compute_add_conv(Interop.triple3(Host.expand_quote("[\"Const\",\"LET\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyvar\",\"B\"]]],[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyvar\",\"B\"]]]]]]"),2,Up_pair.let_CONV))(port_tmp_463_cs);
+                (block:«
+                  compute_Compute_set_skip(port_tmp_463_cs)(Host.expand_quote("[\"Const\",\"COND\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyvar\",\"A\"]]]]]]]]"))(Host.None());
+                  port_tmp_463_cs
+                »)
+              »)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »;
+  def compute_Compute_the_compset:«
+    Host.hol_apply_unit(compute_Compute_bool_compset)
+  »;
+  def compute_Compute_add_funs:«
+    C(compute_Compute_add_thms)(compute_Compute_the_compset)
+  »;
+  def compute_Compute_add_convs:«
+    Host.OCamlList.iter(C(compute_Compute_add_conv)(compute_Compute_the_compset))
+  »;
+  def compute_Compute_del_consts:«
+    Host.OCamlList.iter(compute_Compute_scrub_const(compute_Compute_the_compset))
+  »;
+  def compute_Compute_del_funs:«
+    C(compute_Compute_scrub_thms)(compute_Compute_the_compset)
+  »;
+  def compute_Compute_EVAL_CONV:«
+    compute_Compute_CBV_CONV(compute_Compute_the_compset)
+  »;
+  def compute_Compute_EVAL_RULE:«
+    Up_equal.CONV_RULE(compute_Compute_EVAL_CONV)
+  »;
+  def compute_Compute_EVAL_TAC:«
+    Up_tactics.CONV_TAC(compute_Compute_EVAL_CONV)
+  »;
+  fun compute_Compute_same_const(c1):«
+    (fun(c2):«
+      (block:«
+        let port_tmp_475 = fst(Up_fusion.dest_const(c2));
+        let port_tmp_476 = fst(Up_fusion.dest_const(c1));
+        let port_tmp_477 = Host.hol_equal;
+        port_tmp_477(port_tmp_476)(port_tmp_475)
+      »)
+    »)
+  »;
+  fun compute_Compute_OR(port_tmp_478):«
+    let port_tmp_479 = port_tmp_478;
+    match port_tmp_479
+    | PairList []:«
+        K(#false)
+    »
+    | PairList [x, & PairList []]:«
+        compute_Compute_same_const(x)
+    »
+    | PairList [h, & t]:«
+        (fun(x):«
+          (compute_Compute_same_const(h)(x) || compute_Compute_OR(t)(x))
+        »)
+    »
+  »;
+  fun compute_Compute_RESTR_EVAL_CONV(clist):«
+    (block:«
+      let port_tmp_480 = compute_Compute_EVAL_CONV;
+      let port_tmp_481 = (block:«
+        let port_tmp_482 = Host.Some(compute_Compute_OR(clist));
+        let port_tmp_483 = compute_Compute_stoppers;
+        Pair(port_tmp_483,port_tmp_482)
+      »);
+      let port_tmp_484 = compute_Compute_with_flag;
+      port_tmp_484(port_tmp_481)(port_tmp_480)
+    »)
+  »;
+  def compute_Compute_RESTR_EVAL_TAC:«
+    o(Up_tactics.CONV_TAC)(compute_Compute_RESTR_EVAL_CONV)
+  »;
+  def compute_Compute_RESTR_EVAL_RULE:«
+    o(Up_equal.CONV_RULE)(compute_Compute_RESTR_EVAL_CONV)
+  »;
+  def with_flag = compute_Compute_with_flag;
+  def RIGHT_BETA = compute_Compute_RIGHT_BETA;
+  def RIGHT_ETA = compute_Compute_RIGHT_ETA;
+  def MK_comb = compute_Compute_MK_comb;
+  def MK_abs = compute_Compute_MK_abs;
+  def BODY_CONJUNCTS = compute_Compute_BODY_CONJUNCTS;
+  def rhs_concl = compute_Compute_rhs_concl;
+  def refl_thm = compute_Compute_refl_thm;
+  def trans_thm = compute_Compute_trans_thm;
+  def beta_thm = compute_Compute_beta_thm;
+  def evaluate = compute_Compute_evaluate;
+  def try_eta = compute_Compute_try_eta;
+  def push_in_stk = compute_Compute_push_in_stk;
+  def push_skip_stk = compute_Compute_push_skip_stk;
+  def push_lam_in_stk = compute_Compute_push_lam_in_stk;
+  def FUNIFY = compute_Compute_FUNIFY;
+  def UNFUNIFY = compute_Compute_UNFUNIFY;
+  def repeat_on_conj = compute_Compute_repeat_on_conj;
+  def lazyfy_thm = compute_Compute_lazyfy_thm;
+  def strictify_thm = compute_Compute_strictify_thm;
+  def eq_intro = compute_Compute_eq_intro;
+  def check_arg_form = compute_Compute_check_arg_form;
+  def appl = compute_Compute_appl;
+  def inst_type_dterm = compute_Compute_inst_type_dterm;
+  def add_in_db = compute_Compute_add_in_db;
+  def key_of = compute_Compute_key_of;
+  def is_skip = compute_Compute_is_skip;
+  def partition_skip = compute_Compute_partition_skip;
+  def empty_rws = compute_Compute_empty_rws;
+  def assoc_clause = compute_Compute_assoc_clause;
+  def add_in_db_upd = compute_Compute_add_in_db_upd;
+  def set_skip_name = compute_Compute_set_skip_name;
+  def scrub_const = compute_Compute_scrub_const;
+  def from_term = compute_Compute_from_term;
+  def mk_rewrite = compute_Compute_mk_rewrite;
+  def unsuitable = compute_Compute_unsuitable;
+  def enter_thm = compute_Compute_enter_thm;
+  def add_thms = compute_Compute_add_thms;
+  def add_extern = compute_Compute_add_extern;
+  def new_rws = compute_Compute_new_rws;
+  def from_list = compute_Compute_from_list;
+  def scrub_thms = compute_Compute_scrub_thms;
+  def rws_of = compute_Compute_rws_of;
+  def deplist = compute_Compute_deplist;
+  def match_const = compute_Compute_match_const;
+  def match_var = compute_Compute_match_var;
+  def match_list = compute_Compute_match_list;
+  def match_solve = compute_Compute_match_solve;
+  def try_rwn = compute_Compute_try_rwn;
+  def comb_ct = compute_Compute_comb_ct;
+  def mk_clos = compute_Compute_mk_clos;
+  def inst_one_var = compute_Compute_inst_one_var;
+  def inst_rw = compute_Compute_inst_rw;
+  def monitoring = compute_Compute_monitoring;
+  def stoppers = compute_Compute_stoppers;
+  def reduce_cst = compute_Compute_reduce_cst;
+  def auto_import_definitions = compute_Compute_auto_import_definitions;
+  def new_compset = compute_Compute_new_compset;
+  def listItems = compute_Compute_listItems;
+  def stack_out = compute_Compute_stack_out;
+  def initial_state = compute_Compute_initial_state;
+  def cbv_wk = compute_Compute_cbv_wk;
+  def cbv_up = compute_Compute_cbv_up;
+  def strong = compute_Compute_strong;
+  def strong_up = compute_Compute_strong_up;
+  def CBV_CONV = compute_Compute_CBV_CONV;
+  def WEAK_CBV_CONV = compute_Compute_WEAK_CBV_CONV;
+  def extern_of_conv = compute_Compute_extern_of_conv;
+  def add_conv = compute_Compute_add_conv;
+  def set_skip = compute_Compute_set_skip;
+  def bool_redns = compute_Compute_bool_redns;
+  def bool_compset = compute_Compute_bool_compset;
+  def basic_compset = compute_Compute_basic_compset;
+  def the_compset = compute_Compute_the_compset;
+  def add_funs = compute_Compute_add_funs;
+  def add_convs = compute_Compute_add_convs;
+  def del_consts = compute_Compute_del_consts;
+  def del_funs = compute_Compute_del_funs;
+  def EVAL_CONV = compute_Compute_EVAL_CONV;
+  def EVAL_RULE = compute_Compute_EVAL_RULE;
+  def EVAL_TAC = compute_Compute_EVAL_TAC;
+  def same_const = compute_Compute_same_const;
+  def OR = compute_Compute_OR;
+  def RESTR_EVAL_CONV = compute_Compute_RESTR_EVAL_CONV;
+  def RESTR_EVAL_TAC = compute_Compute_RESTR_EVAL_TAC;
+  def RESTR_EVAL_RULE = compute_Compute_RESTR_EVAL_RULE
+»

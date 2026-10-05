@@ -9,9 +9,18 @@ import:
       #{bitwise-xor}
       #{bitwise-and}
 export:
+  is_undefined
+  mapf
+  foldr
+  tryapplyd
+  undefine
+  combine
+  choose
   undefined
   fpf_define
   foldl
+  applyd
+  apply
 class Empty()
 class Leaf(hash,items)
 class Branch(prefix,bit,left,right)
@@ -56,3 +65,872 @@ fun foldl(f):
       | Empty(): a
       | Leaf(_,l): fl(f,a,l)
       | Branch(_,_,l,r): foldl(f)(foldl(f)(a)(l))(r)
+
+fun applyd(f):
+  fun(d):
+    fun(x):
+      fun apply_listd(l):
+        match l
+        | PairList [Pair(a,b),&t]:
+            let c=compare(x)(a)
+            if c==0 | b | (if c>0 | apply_listd(t) | d(x))
+        | PairList []: d(x)
+      let k=ocaml_term_hash(x)
+      fun look(t):
+        match t
+        | Leaf(h,l): (if h==k | apply_listd(l) | d(x))
+        | Branch(p,b,l,r):
+            if band(#{bitwise-xor}(k,p),b-1)==0
+            | look(if band(k,b)==0 | l | r)
+            | d(x)
+        | _: d(x)
+      look(f)
+fun apply(f): applyd(f)(fun(_): failwith("apply"))
+
+// Additional lib.ml operations, translated from its original compiler AST.
+fun fpf_raise(x): throw x
+fun fpf_equal(x): fun(y): x==y
+fun fpf_unequal(x): fun(y): x!=y
+fun fpf_physical_equal(x): fun(y): x===y
+fun fpf_lt(x): fun(y): x<y
+fun fpf_gt(x): fun(y): x>y
+fun fpf_le(x): fun(y): x<=y
+fun fpf_add(x): fun(y): x+y
+fun fpf_sub(x): fun(y): x-y
+fun fpf_neg(x): -x
+fun fpf_land(x): fun(y): band(x,y)
+fun fpf_lxor(x): fun(y): #{bitwise-xor}(x,y)
+
+
+
+fun fpf_is_undefined(f):«
+  (block:«
+    let port_tmp_1 = f;
+    match port_tmp_1
+    | Empty():«
+        #true
+    »
+    | _:«
+        #false
+    »
+  »)
+»
+
+def fpf_mapf:«
+  (block:«
+    fun port_tmp_2_map_list(f):«
+      (fun(l):«
+        (block:«
+          let port_tmp_3 = l;
+          match port_tmp_3
+          | PairList []:«
+              PairList []
+          »
+          | PairList [Pair(x,y), & t]:«
+              (block:«
+                let port_tmp_4 = port_tmp_2_map_list(f)(t);
+                let port_tmp_5 = (block:«
+                  let port_tmp_6 = f(y);
+                  let port_tmp_7 = x;
+                  Pair(port_tmp_7,port_tmp_6)
+                »);
+                PairList.cons(port_tmp_5,port_tmp_4)
+              »)
+          »
+        »)
+      »)
+    »;
+    (block:«
+      fun port_tmp_8_mapf(f):«
+        (fun(t):«
+          (block:«
+            let port_tmp_9 = t;
+            match port_tmp_9
+            | Empty():«
+                Empty()
+            »
+            | Leaf(h,l):«
+                (block:«
+                  let port_tmp_10 = port_tmp_2_map_list(f)(l);
+                  let port_tmp_11 = h;
+                  Leaf(port_tmp_11,port_tmp_10)
+                »)
+            »
+            | Branch(p,b,l,r):«
+                (block:«
+                  let port_tmp_12 = port_tmp_8_mapf(f)(r);
+                  let port_tmp_13 = port_tmp_8_mapf(f)(l);
+                  let port_tmp_14 = b;
+                  let port_tmp_15 = p;
+                  Branch(port_tmp_15,port_tmp_14,port_tmp_13,port_tmp_12)
+                »)
+            »
+          »)
+        »)
+      »;
+      port_tmp_8_mapf
+    »)
+  »)
+»
+
+def fpf_foldr:«
+  (block:«
+    fun port_tmp_16_foldr_list(f):«
+      (fun(l):«
+        (fun(a):«
+          (block:«
+            let port_tmp_17 = l;
+            match port_tmp_17
+            | PairList []:«
+                a
+            »
+            | PairList [Pair(x,y), & t]:«
+                (block:«
+                  let port_tmp_18 = port_tmp_16_foldr_list(f)(t)(a);
+                  let port_tmp_19 = y;
+                  let port_tmp_20 = x;
+                  let port_tmp_21 = f;
+                  port_tmp_21(port_tmp_20)(port_tmp_19)(port_tmp_18)
+                »)
+            »
+          »)
+        »)
+      »)
+    »;
+    (block:«
+      fun port_tmp_22_foldr(f):«
+        (fun(t):«
+          (fun(a):«
+            (block:«
+              let port_tmp_23 = t;
+              match port_tmp_23
+              | Empty():«
+                  a
+              »
+              | Leaf(h,l):«
+                  port_tmp_16_foldr_list(f)(l)(a)
+              »
+              | Branch(p,b,l,r):«
+                  (block:«
+                    let port_tmp_24 = port_tmp_22_foldr(f)(r)(a);
+                    let port_tmp_25 = l;
+                    let port_tmp_26 = f;
+                    let port_tmp_27 = port_tmp_22_foldr;
+                    port_tmp_27(port_tmp_26)(port_tmp_25)(port_tmp_24)
+                  »)
+              »
+            »)
+          »)
+        »)
+      »;
+      port_tmp_22_foldr
+    »)
+  »)
+»
+
+fun fpf_tryapplyd(f):«
+  (fun(a):«
+    (fun(d):«
+      applyd(f)((fun(x):«
+        d
+      »))(a)
+    »)
+  »)
+»
+
+def fpf_undefine:«
+  (block:«
+    fun port_tmp_28_undefine_list(x):«
+      (fun(l):«
+        (block:«
+          let port_tmp_29 = l;
+          match port_tmp_29
+          | PairList [Pair(a,b) as ab, & t]:«
+              (block:«
+                let port_tmp_30_c:«
+                  compare(x)(a)
+                »;
+                (block:«
+                  if fpf_equal(port_tmp_30_c)(0)
+                  | t
+                  | (block:«
+                    if fpf_lt(port_tmp_30_c)(0)
+                    | l
+                    | (block:«
+                      let port_tmp_31_t_prime:«
+                        port_tmp_28_undefine_list(x)(t)
+                      »;
+                      (block:«
+                        if fpf_physical_equal(port_tmp_31_t_prime)(t)
+                        | l
+                        | PairList.cons(ab,port_tmp_31_t_prime)
+                      »)
+                    »)
+                  »)
+                »)
+              »)
+          »
+          | PairList []:«
+              PairList []
+          »
+        »)
+      »)
+    »;
+    (fun(x):«
+      (block:«
+        let port_tmp_32_k:«
+          ocaml_term_hash(x)
+        »;
+        (block:«
+          fun port_tmp_33_und(t):«
+            (block:«
+              let port_tmp_34 = t;
+              match port_tmp_34
+              | Leaf(h,l):«
+                  if fpf_equal(h)(port_tmp_32_k)
+                  | (block:«
+                    let port_tmp_35_l_prime:«
+                      port_tmp_28_undefine_list(x)(l)
+                    »;
+                    (block:«
+                      if fpf_physical_equal(port_tmp_35_l_prime)(l)
+                      | t
+                      | (block:«
+                        if fpf_equal(port_tmp_35_l_prime)(PairList [])
+                        | Empty()
+                        | Leaf(h,port_tmp_35_l_prime)
+                      »)
+                    »)
+                  »)
+                  | (block:«
+                    let port_tmp_36 = port_tmp_34;
+                    match port_tmp_36
+                    | Branch(p,b,l,r):«
+                        if (block:«
+                          let port_tmp_45 = p;
+                          let port_tmp_46 = (block:«
+                            let port_tmp_47 = fpf_sub(b)(1);
+                            let port_tmp_48 = port_tmp_32_k;
+                            let port_tmp_49 = fpf_land;
+                            port_tmp_49(port_tmp_48)(port_tmp_47)
+                          »);
+                          let port_tmp_50 = fpf_equal;
+                          port_tmp_50(port_tmp_46)(port_tmp_45)
+                        »)
+                        | (block:«
+                          if (block:«
+                            let port_tmp_37 = 0;
+                            let port_tmp_38 = fpf_land(port_tmp_32_k)(b);
+                            let port_tmp_39 = fpf_equal;
+                            port_tmp_39(port_tmp_38)(port_tmp_37)
+                          »)
+                          | (block:«
+                            let port_tmp_40_l_prime:«
+                              port_tmp_33_und(l)
+                            »;
+                            (block:«
+                              if fpf_physical_equal(port_tmp_40_l_prime)(l)
+                              | t
+                              | (block:«
+                                let port_tmp_41 = port_tmp_40_l_prime;
+                                match port_tmp_41
+                                | Empty():«
+                                    r
+                                »
+                                | _:«
+                                    Branch(p,b,port_tmp_40_l_prime,r)
+                                »
+                              »)
+                            »)
+                          »)
+                          | (block:«
+                            let port_tmp_42_r_prime:«
+                              port_tmp_33_und(r)
+                            »;
+                            (block:«
+                              if fpf_physical_equal(port_tmp_42_r_prime)(r)
+                              | t
+                              | (block:«
+                                let port_tmp_43 = port_tmp_42_r_prime;
+                                match port_tmp_43
+                                | Empty():«
+                                    l
+                                »
+                                | _:«
+                                    Branch(p,b,l,port_tmp_42_r_prime)
+                                »
+                              »)
+                            »)
+                          »)
+                        »)
+                        | (block:«
+                          let port_tmp_44 = port_tmp_36;
+                          match port_tmp_44
+                          | _:«
+                              t
+                          »
+                        »)
+                    »
+                    | _:«
+                        t
+                    »
+                  »)
+              »
+              | Branch(p,b,l,r):«
+                  if (block:«
+                    let port_tmp_59 = p;
+                    let port_tmp_60 = (block:«
+                      let port_tmp_61 = fpf_sub(b)(1);
+                      let port_tmp_62 = port_tmp_32_k;
+                      let port_tmp_63 = fpf_land;
+                      port_tmp_63(port_tmp_62)(port_tmp_61)
+                    »);
+                    let port_tmp_64 = fpf_equal;
+                    port_tmp_64(port_tmp_60)(port_tmp_59)
+                  »)
+                  | (block:«
+                    if (block:«
+                      let port_tmp_51 = 0;
+                      let port_tmp_52 = fpf_land(port_tmp_32_k)(b);
+                      let port_tmp_53 = fpf_equal;
+                      port_tmp_53(port_tmp_52)(port_tmp_51)
+                    »)
+                    | (block:«
+                      let port_tmp_54_l_prime:«
+                        port_tmp_33_und(l)
+                      »;
+                      (block:«
+                        if fpf_physical_equal(port_tmp_54_l_prime)(l)
+                        | t
+                        | (block:«
+                          let port_tmp_55 = port_tmp_54_l_prime;
+                          match port_tmp_55
+                          | Empty():«
+                              r
+                          »
+                          | _:«
+                              Branch(p,b,port_tmp_54_l_prime,r)
+                          »
+                        »)
+                      »)
+                    »)
+                    | (block:«
+                      let port_tmp_56_r_prime:«
+                        port_tmp_33_und(r)
+                      »;
+                      (block:«
+                        if fpf_physical_equal(port_tmp_56_r_prime)(r)
+                        | t
+                        | (block:«
+                          let port_tmp_57 = port_tmp_56_r_prime;
+                          match port_tmp_57
+                          | Empty():«
+                              l
+                          »
+                          | _:«
+                              Branch(p,b,l,port_tmp_56_r_prime)
+                          »
+                        »)
+                      »)
+                    »)
+                  »)
+                  | (block:«
+                    let port_tmp_58 = port_tmp_34;
+                    match port_tmp_58
+                    | _:«
+                        t
+                    »
+                  »)
+              »
+              | _:«
+                  t
+              »
+            »)
+          »;
+          port_tmp_33_und
+        »)
+      »)
+    »)
+  »)
+»
+
+def Pair(fpf__op7c__op2d__op3e_,fpf_combine):«
+  (block:«
+    let port_tmp_65_newbranch:«
+      (fun(p1):«
+        (fun(t1):«
+          (fun(p2):«
+            (fun(t2):«
+              (block:«
+                let port_tmp_66_zp:«
+                  fpf_lxor(p1)(p2)
+                »;
+                (block:«
+                  let port_tmp_67_b:«
+                    (block:«
+                      let port_tmp_68 = fpf_neg(port_tmp_66_zp);
+                      let port_tmp_69 = port_tmp_66_zp;
+                      let port_tmp_70 = fpf_land;
+                      port_tmp_70(port_tmp_69)(port_tmp_68)
+                    »)
+                  »;
+                  (block:«
+                    let port_tmp_71_p:«
+                      (block:«
+                        let port_tmp_72 = fpf_sub(port_tmp_67_b)(1);
+                        let port_tmp_73 = p1;
+                        let port_tmp_74 = fpf_land;
+                        port_tmp_74(port_tmp_73)(port_tmp_72)
+                      »)
+                    »;
+                    (block:«
+                      if (block:«
+                        let port_tmp_75 = 0;
+                        let port_tmp_76 = fpf_land(p1)(port_tmp_67_b);
+                        let port_tmp_77 = fpf_equal;
+                        port_tmp_77(port_tmp_76)(port_tmp_75)
+                      »)
+                      | Branch(port_tmp_71_p,port_tmp_67_b,t1,t2)
+                      | Branch(port_tmp_71_p,port_tmp_67_b,t2,t1)
+                    »)
+                  »)
+                »)
+              »)
+            »)
+          »)
+        »)
+      »)
+    »;
+    (block:«
+      fun port_tmp_78_define_list(Pair(x,y) as xy):«
+        (fun(l):«
+          (block:«
+            let port_tmp_80 = l;
+            match port_tmp_80
+            | PairList [Pair(a,b) as ab, & t]:«
+                (block:«
+                  let port_tmp_81_c:«
+                    compare(x)(a)
+                  »;
+                  (block:«
+                    if fpf_equal(port_tmp_81_c)(0)
+                    | PairList.cons(xy,t)
+                    | (block:«
+                      if fpf_lt(port_tmp_81_c)(0)
+                      | PairList.cons(xy,l)
+                      | (block:«
+                        let port_tmp_82 = port_tmp_78_define_list(xy)(t);
+                        let port_tmp_83 = ab;
+                        PairList.cons(port_tmp_83,port_tmp_82)
+                      »)
+                    »)
+                  »)
+                »)
+            »
+            | PairList []:«
+                PairList.cons(xy,PairList [])
+            »
+          »)
+        »)
+      »;
+      fun port_tmp_79_combine_list(op):«
+        (fun(z):«
+          (fun(l1):«
+            (fun(l2):«
+              (block:«
+                let port_tmp_84 = Pair(l1,l2);
+                match port_tmp_84
+                | Pair(PairList [],_):«
+                    l2
+                »
+                | Pair(_,PairList []):«
+                    l1
+                »
+                | Pair(PairList [Pair(x1,y1) as xy1, & t1],PairList [Pair(x2,y2) as xy2, & t2]):«
+                    (block:«
+                      let port_tmp_85_c:«
+                        compare(x1)(x2)
+                      »;
+                      (block:«
+                        if fpf_lt(port_tmp_85_c)(0)
+                        | (block:«
+                          let port_tmp_86 = port_tmp_79_combine_list(op)(z)(t1)(l2);
+                          let port_tmp_87 = xy1;
+                          PairList.cons(port_tmp_87,port_tmp_86)
+                        »)
+                        | (block:«
+                          if fpf_gt(port_tmp_85_c)(0)
+                          | (block:«
+                            let port_tmp_88 = port_tmp_79_combine_list(op)(z)(l1)(t2);
+                            let port_tmp_89 = xy2;
+                            PairList.cons(port_tmp_89,port_tmp_88)
+                          »)
+                          | (block:«
+                            let port_tmp_90_y:«
+                              op(y1)(y2)
+                            »;
+                            let port_tmp_91_l:«
+                              port_tmp_79_combine_list(op)(z)(t1)(t2)
+                            »;
+                            (block:«
+                              if z(port_tmp_90_y)
+                              | port_tmp_91_l
+                              | PairList.cons(Pair(x1,port_tmp_90_y),port_tmp_91_l)
+                            »)
+                          »)
+                        »)
+                      »)
+                    »)
+                »
+              »)
+            »)
+          »)
+        »)
+      »;
+      (block:«
+        let port_tmp_92__op7c__op2d__op3e_:«
+          (fun(x):«
+            (fun(y):«
+              (block:«
+                let port_tmp_93_k:«
+                  ocaml_term_hash(x)
+                »;
+                (block:«
+                  fun port_tmp_94_upd(t):«
+                    (block:«
+                      let port_tmp_95 = t;
+                      match port_tmp_95
+                      | Empty():«
+                          Leaf(port_tmp_93_k,PairList.cons(Pair(x,y),PairList []))
+                      »
+                      | Leaf(h,l):«
+                          (block:«
+                            if fpf_equal(h)(port_tmp_93_k)
+                            | (block:«
+                              let port_tmp_96 = port_tmp_78_define_list(Pair(x,y))(l);
+                              let port_tmp_97 = h;
+                              Leaf(port_tmp_97,port_tmp_96)
+                            »)
+                            | port_tmp_65_newbranch(h)(t)(port_tmp_93_k)(Leaf(port_tmp_93_k,PairList.cons(Pair(x,y),PairList [])))
+                          »)
+                      »
+                      | Branch(p,b,l,r):«
+                          (block:«
+                            if (block:«
+                              let port_tmp_98 = p;
+                              let port_tmp_99 = (block:«
+                                let port_tmp_100 = fpf_sub(b)(1);
+                                let port_tmp_101 = port_tmp_93_k;
+                                let port_tmp_102 = fpf_land;
+                                port_tmp_102(port_tmp_101)(port_tmp_100)
+                              »);
+                              let port_tmp_103 = fpf_unequal;
+                              port_tmp_103(port_tmp_99)(port_tmp_98)
+                            »)
+                            | port_tmp_65_newbranch(p)(t)(port_tmp_93_k)(Leaf(port_tmp_93_k,PairList.cons(Pair(x,y),PairList [])))
+                            | (block:«
+                              if (block:«
+                                let port_tmp_104 = 0;
+                                let port_tmp_105 = fpf_land(port_tmp_93_k)(b);
+                                let port_tmp_106 = fpf_equal;
+                                port_tmp_106(port_tmp_105)(port_tmp_104)
+                              »)
+                              | (block:«
+                                let port_tmp_107 = r;
+                                let port_tmp_108 = port_tmp_94_upd(l);
+                                let port_tmp_109 = b;
+                                let port_tmp_110 = p;
+                                Branch(port_tmp_110,port_tmp_109,port_tmp_108,port_tmp_107)
+                              »)
+                              | (block:«
+                                let port_tmp_111 = port_tmp_94_upd(r);
+                                let port_tmp_112 = l;
+                                let port_tmp_113 = b;
+                                let port_tmp_114 = p;
+                                Branch(port_tmp_114,port_tmp_113,port_tmp_112,port_tmp_111)
+                              »)
+                            »)
+                          »)
+                      »
+                    »)
+                  »;
+                  port_tmp_94_upd
+                »)
+              »)
+            »)
+          »)
+        »;
+        (block:«
+          fun port_tmp_115_combine(op):«
+            (fun(z):«
+              (fun(t1):«
+                (fun(t2):«
+                  (block:«
+                    let port_tmp_116 = Pair(t1,t2);
+                    match port_tmp_116
+                    | Pair(Empty(),_):«
+                        t2
+                    »
+                    | Pair(_,Empty()):«
+                        t1
+                    »
+                    | Pair(Leaf(h1,l1),Leaf(h2,l2)):«
+                        (block:«
+                          if fpf_equal(h1)(h2)
+                          | (block:«
+                            let port_tmp_117_l:«
+                              port_tmp_79_combine_list(op)(z)(l1)(l2)
+                            »;
+                            (block:«
+                              if fpf_equal(port_tmp_117_l)(PairList [])
+                              | Empty()
+                              | Leaf(h1,port_tmp_117_l)
+                            »)
+                          »)
+                          | port_tmp_65_newbranch(h1)(t1)(h2)(t2)
+                        »)
+                    »
+                    | Pair(Leaf(k,lis) as lf,Branch(p,b,l,r) as br):«
+                        (block:«
+                          if (block:«
+                            let port_tmp_118 = p;
+                            let port_tmp_119 = (block:«
+                              let port_tmp_120 = fpf_sub(b)(1);
+                              let port_tmp_121 = k;
+                              let port_tmp_122 = fpf_land;
+                              port_tmp_122(port_tmp_121)(port_tmp_120)
+                            »);
+                            let port_tmp_123 = fpf_equal;
+                            port_tmp_123(port_tmp_119)(port_tmp_118)
+                          »)
+                          | (block:«
+                            if (block:«
+                              let port_tmp_124 = 0;
+                              let port_tmp_125 = fpf_land(k)(b);
+                              let port_tmp_126 = fpf_equal;
+                              port_tmp_126(port_tmp_125)(port_tmp_124)
+                            »)
+                            | (block:«
+                              let port_tmp_127 = port_tmp_115_combine(op)(z)(lf)(l);
+                              match port_tmp_127
+                              | Empty():«
+                                  r
+                              »
+                              | l_prime:«
+                                  Branch(p,b,l_prime,r)
+                              »
+                            »)
+                            | (block:«
+                              let port_tmp_128 = port_tmp_115_combine(op)(z)(lf)(r);
+                              match port_tmp_128
+                              | Empty():«
+                                  l
+                              »
+                              | r_prime:«
+                                  Branch(p,b,l,r_prime)
+                              »
+                            »)
+                          »)
+                          | port_tmp_65_newbranch(k)(lf)(p)(br)
+                        »)
+                    »
+                    | Pair(Branch(p,b,l,r) as br,Leaf(k,lis) as lf):«
+                        (block:«
+                          if (block:«
+                            let port_tmp_129 = p;
+                            let port_tmp_130 = (block:«
+                              let port_tmp_131 = fpf_sub(b)(1);
+                              let port_tmp_132 = k;
+                              let port_tmp_133 = fpf_land;
+                              port_tmp_133(port_tmp_132)(port_tmp_131)
+                            »);
+                            let port_tmp_134 = fpf_equal;
+                            port_tmp_134(port_tmp_130)(port_tmp_129)
+                          »)
+                          | (block:«
+                            if (block:«
+                              let port_tmp_135 = 0;
+                              let port_tmp_136 = fpf_land(k)(b);
+                              let port_tmp_137 = fpf_equal;
+                              port_tmp_137(port_tmp_136)(port_tmp_135)
+                            »)
+                            | (block:«
+                              let port_tmp_138 = port_tmp_115_combine(op)(z)(l)(lf);
+                              match port_tmp_138
+                              | Empty():«
+                                  r
+                              »
+                              | l_prime:«
+                                  Branch(p,b,l_prime,r)
+                              »
+                            »)
+                            | (block:«
+                              let port_tmp_139 = port_tmp_115_combine(op)(z)(r)(lf);
+                              match port_tmp_139
+                              | Empty():«
+                                  l
+                              »
+                              | r_prime:«
+                                  Branch(p,b,l,r_prime)
+                              »
+                            »)
+                          »)
+                          | port_tmp_65_newbranch(p)(br)(k)(lf)
+                        »)
+                    »
+                    | Pair(Branch(p1,b1,l1,r1),Branch(p2,b2,l2,r2)):«
+                        (block:«
+                          if fpf_lt(b1)(b2)
+                          | (block:«
+                            if (block:«
+                              let port_tmp_140 = p1;
+                              let port_tmp_141 = (block:«
+                                let port_tmp_142 = fpf_sub(b1)(1);
+                                let port_tmp_143 = p2;
+                                let port_tmp_144 = fpf_land;
+                                port_tmp_144(port_tmp_143)(port_tmp_142)
+                              »);
+                              let port_tmp_145 = fpf_unequal;
+                              port_tmp_145(port_tmp_141)(port_tmp_140)
+                            »)
+                            | port_tmp_65_newbranch(p1)(t1)(p2)(t2)
+                            | (block:«
+                              if (block:«
+                                let port_tmp_146 = 0;
+                                let port_tmp_147 = fpf_land(p2)(b1);
+                                let port_tmp_148 = fpf_equal;
+                                port_tmp_148(port_tmp_147)(port_tmp_146)
+                              »)
+                              | (block:«
+                                let port_tmp_149 = port_tmp_115_combine(op)(z)(l1)(t2);
+                                match port_tmp_149
+                                | Empty():«
+                                    r1
+                                »
+                                | l:«
+                                    Branch(p1,b1,l,r1)
+                                »
+                              »)
+                              | (block:«
+                                let port_tmp_150 = port_tmp_115_combine(op)(z)(r1)(t2);
+                                match port_tmp_150
+                                | Empty():«
+                                    l1
+                                »
+                                | r:«
+                                    Branch(p1,b1,l1,r)
+                                »
+                              »)
+                            »)
+                          »)
+                          | (block:«
+                            if fpf_lt(b2)(b1)
+                            | (block:«
+                              if (block:«
+                                let port_tmp_151 = p2;
+                                let port_tmp_152 = (block:«
+                                  let port_tmp_153 = fpf_sub(b2)(1);
+                                  let port_tmp_154 = p1;
+                                  let port_tmp_155 = fpf_land;
+                                  port_tmp_155(port_tmp_154)(port_tmp_153)
+                                »);
+                                let port_tmp_156 = fpf_unequal;
+                                port_tmp_156(port_tmp_152)(port_tmp_151)
+                              »)
+                              | port_tmp_65_newbranch(p1)(t1)(p2)(t2)
+                              | (block:«
+                                if (block:«
+                                  let port_tmp_157 = 0;
+                                  let port_tmp_158 = fpf_land(p1)(b2);
+                                  let port_tmp_159 = fpf_equal;
+                                  port_tmp_159(port_tmp_158)(port_tmp_157)
+                                »)
+                                | (block:«
+                                  let port_tmp_160 = port_tmp_115_combine(op)(z)(t1)(l2);
+                                  match port_tmp_160
+                                  | Empty():«
+                                      r2
+                                  »
+                                  | l:«
+                                      Branch(p2,b2,l,r2)
+                                  »
+                                »)
+                                | (block:«
+                                  let port_tmp_161 = port_tmp_115_combine(op)(z)(t1)(r2);
+                                  match port_tmp_161
+                                  | Empty():«
+                                      l2
+                                  »
+                                  | r:«
+                                      Branch(p2,b2,l2,r)
+                                  »
+                                »)
+                              »)
+                            »)
+                            | (block:«
+                              if fpf_equal(p1)(p2)
+                              | (block:«
+                                let port_tmp_164 = (block:«
+                                  let port_tmp_162 = port_tmp_115_combine(op)(z)(r1)(r2);
+                                  let port_tmp_163 = port_tmp_115_combine(op)(z)(l1)(l2);
+                                  Pair(port_tmp_163,port_tmp_162)
+                                »);
+                                match port_tmp_164
+                                | Pair(Empty(),r):«
+                                    r
+                                »
+                                | Pair(l,Empty()):«
+                                    l
+                                »
+                                | Pair(l,r):«
+                                    Branch(p1,b1,l,r)
+                                »
+                              »)
+                              | port_tmp_65_newbranch(p1)(t1)(p2)(t2)
+                            »)
+                          »)
+                        »)
+                    »
+                  »)
+                »)
+              »)
+            »)
+          »;
+          Pair(port_tmp_92__op7c__op2d__op3e_,port_tmp_115_combine)
+        »)
+      »)
+    »)
+  »)
+»
+
+fun fpf_choose(t):«
+  (block:«
+    let port_tmp_165 = t;
+    match port_tmp_165
+    | Empty():«
+        failwith("choose: completely undefined function")
+    »
+    | Leaf(h,l):«
+        hd(l)
+    »
+    | Branch(b,p,t1,t2):«
+        fpf_choose(t1)
+    »
+  »)
+»
+
+def is_undefined = fpf_is_undefined
+
+def mapf = fpf_mapf
+
+def foldr = fpf_foldr
+
+def tryapplyd = fpf_tryapplyd
+
+def undefine = fpf_undefine
+
+def _op7c__op2d__op3e_ = fpf__op7c__op2d__op3e_
+
+def combine = fpf_combine
+
+def choose = fpf_choose

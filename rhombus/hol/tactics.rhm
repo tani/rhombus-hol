@@ -11,6 +11,9 @@ import: "bool.rhm" open
 import: "drule.rhm" open
 
 export:
+  TRANS_TAC
+  ANTS_TAC
+  HYP
   GoalState
   null_inst
   null_meta
@@ -105,6 +108,8 @@ export:
   META_SPEC_TAC
   CHEAT_TAC
   prove
+  TAC_PROOF
+  _FALSITY_
 
 class GoalState(meta, goals, just)
 
@@ -525,12 +530,14 @@ fun GEN_TAC(Pair(asl,w) as g):
     ~catch Failure(_): failwith("GEN_TAC")
 
 fun CHOOSE_TAC(xth):
-  fun(Pair(asl,w) as g):
-    try:
-      let x = fst(dest_exists(concl(xth)))
+  // Fail while constructing the theorem tactic, as in tactics.ml.
+  // REPEAT_TCL relies on this failure to try its continuation.
+  try:
+    let x = fst(dest_exists(concl(xth)))
+    fun(Pair(asl,w) as g):
       let avoids = itlist(fun(Pair(_,th)): fun(a): union(thm_frees(th))(a))(asl)(union(frees(w))(thm_frees(xth)))
       X_CHOOSE_TAC(mk_primed_var(avoids)(x))(xth)(g)
-      ~catch Failure(_): failwith("CHOOSE_TAC")
+    ~catch Failure(_): failwith("CHOOSE_TAC")
 
 fun CONJ_TAC(Pair(asl,w)):
   try:
@@ -587,7 +594,19 @@ fun MATCH_ACCEPT_TAC(th):
   THEN(REPEAT(GEN_TAC))(raw)
 
 fun MATCH_MP_TAC(th):
-  let match_fun = PART_MATCH(o(snd)(dest_imp))(SPEC_ALL(th))
+  let sth:
+    try:
+      let tm = concl(th)
+      let Pair(avs,bod) = strip_forall(tm)
+      let Pair(ant,con) = dest_imp(bod)
+      let th1 = SPECL(avs)(ASSUME(tm))
+      let th2 = UNDISCH(th1)
+      let evs = filter(fun(v): vfree_in(v)(ant) && !vfree_in(v)(con))(avs)
+      let th3 = itlist(SIMPLE_CHOOSE)(evs)(DISCH(tm)(th2))
+      let tm3 = hd(hyp(th3))
+      MP(DISCH(tm)(GEN_ALL(DISCH(tm3)(UNDISCH(th3)))))(th)
+      ~catch Failure(_): failwith("MATCH_MP_TAC: Bad theorem")
+  let match_fun = PART_MATCH(o(snd)(dest_imp))(sth)
   fun(Pair(asl,w)):
     try:
       let xth = match_fun(w)
@@ -704,7 +723,57 @@ fun META_SPEC_TAC(t):
 fun CHEAT_TAC(Pair(_,w) as g): ACCEPT_TAC(mk_thm(Pair(PairList [],w)))(g)
 
 fun prove(Pair(t,tac)):
-  let GoalState(Pair(_,i),gls,just) = VALID(tac)(Pair(PairList [],t))
-  if gls != PairList []
-  | failwith("prove: unsolved goals")
-  | just(i)(PairList [])
+  let th = TAC_PROOF(Pair(Pair(PairList [],t),tac))
+  let Pair(asl,t_prime) = dest_thm(th)
+  cond
+  | asl != PairList []: failwith("prove: additional assumptions in result")
+  | t_prime == t: th
+  | ~else:
+      try:
+        EQ_MP(ALPHA(t_prime)(t))(th)
+        ~catch Failure(_): failwith("prove: justification generated wrong theorem")
+
+fun TAC_PROOF(Pair(Pair(asl,w) as g,tac)):
+  if type_of(w) != bool_ty | failwith("mk_goalstate: Non-boolean goal") | #void
+  let gs = GoalState(null_meta,PairList [g],fun(inst): fun(PairList [th]): INSTANTIATE_ALL(inst)(th))
+  let GoalState(_,sgs,just) = tacsequence(gs)(PairList [tac])
+  if sgs == PairList [] | just(null_inst)(PairList []) | failwith("TAC_PROOF: Unsolved goals")
+
+// Original tactics.ml derived tactics used by the standard theory sequence.
+fun TRANS_TAC(th):
+  let ctm=snd(strip_forall(concl(th)))
+  let Pair(cl,cr)=dest_conj(lhand(ctm))
+  let x=lhand(cl)
+  let y=rand(cl)
+  let z=rand(cr)
+  fun(tm):
+    fun(Pair(asl,w) as gl):
+      let Pair(lop,r)=dest_comb(w)
+      let Pair(_op,l)=dest_comb(lop)
+      let ilist=itlist2(type_match)(map(type_of)(PairList [x,y,z]))(map(type_of)(PairList [l,tm,r]))(PairList [])
+      let th_prime=INST_TYPE(ilist)(th)
+      THEN(MATCH_MP_TAC(th_prime))(EXISTS_TAC(tm))(gl)
+def ANTS_TAC:
+  let p=mk_var(Pair("p",bool_ty))
+  let q=mk_var(Pair("q",bool_ty))
+  let r=mk_var(Pair("r",bool_ty))
+  let tm1=mk_conj(Pair(p,mk_imp(Pair(q,r))))
+  let tm2=mk_imp(Pair(p,q))
+  let Pair(th1,th2)=CONJ_PAIR(ASSUME(tm1))
+  let th=itlist(DISCH)(PairList [tm1,tm2])(MP(th2)(MP(ASSUME(tm2))(th1)))
+  THEN(MATCH_MP_TAC(th))(CONJ_TAC)
+import: "private/theory_support.rhm" as Support
+def HYP:
+  fun ident(src):
+    match src
+    | PairList [Support.Ident(s),&rest]:
+        if Support.isalnum(s) | Pair(s,rest) | throw Support.Noparse()
+    | _: throw Support.Noparse()
+  let parse_using=Support.many(ident)
+  fun HYP_LIST(tac):
+    fun(l):
+      rev_itlist(fun(s): fun(k): fun(l): USE_THEN(s)(fun(th): k(PairList.cons(th,l))))(l)(tac)
+  fun(tac):
+    fun(s):
+      let Pair(l,rest)=Support.fix("Using pattern")(parse_using)(Support.lex(explode(s)))
+      if rest==PairList [] | HYP_LIST(tac)(l) | failwith("Invalid using pattern")

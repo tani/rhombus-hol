@@ -1,11 +1,21 @@
 #lang rhombus
-// (c) University of Cambridge 1998; John Harrison 1998-2007.
-// Direct translation of HOL Light bool.ml, with quotations expanded into
-// explicit term constructors until parser/preterm.rhm are available.
+
+// Direct translation of the pinned HOL Light bool.ml.
+
+// =========================================================================
+// Boolean theory including (intuitionistic) defs of logical connectives.
+//
+// John Harrison, University of Cambridge Computer Laboratory
+//
+// (c) Copyright, University of Cambridge 1998
+// (c) Copyright, John Harrison 1998-2007
+// =========================================================================
+
+// Quotations are expanded offline; every proof is replayed here.
+
 import: "private/compat.rhm" open
-import: "fusion.rhm" open
-import: "basics.rhm" open
-import: "equal.rhm" open
+
+import: "private/theory_support.rhm" as Host
 
 export:
   is_iff
@@ -73,446 +83,2644 @@ export:
   EXISTS_UNIQUE_DEF
   mk_uexists
   EXISTENCE
-
-fun is_iff(tm):
-  match tm
-  | Comb(Comb(Const("=",Tyapp("fun",PairList [Tyapp("bool",PairList []),_])),_),_): #true
-  | _: #false
-
-fun dest_iff(tm):
-  match tm
-  | Comb(Comb(Const("=",Tyapp("fun",PairList [Tyapp("bool",PairList []),_])),l),r): Pair(l,r)
-  | _: failwith("dest_iff")
-
-def mk_iff:
-  let eq_tm = inst(PairList [Pair(bool_ty,aty)])(mk_const(Pair("=",PairList [])))
-  fun(Pair(l,r)): mk_comb(Pair(mk_comb(Pair(eq_tm,l)),r))
-
-fun PINST(tyin):
-  fun(tmin):
-    let tmin1:
-      map(fun(Pair(s,v)): Pair(inst(tyin)(s),inst(tyin)(v)))(tmin)
-    fun(th):
-      try:
-        INST(tmin1)(INST_TYPE(tyin)(th))
-        ~catch Failure(_): failwith("PINST")
-
-fun PROVE_HYP(ath):
-  fun(bth):
-    if exists(aconv(concl(ath)))(hyp(bth))
-    | EQ_MP(DEDUCT_ANTISYM_RULE(ath)(bth))(ath)
-    | bth
-
-def p_bool = mk_var(Pair("p",bool_ty))
-def q_bool = mk_var(Pair("q",bool_ty))
-def r_bool = mk_var(Pair("r",bool_ty))
-
-def T_DEF:
-  let t = mk_var(Pair("T",bool_ty))
-  let id = mk_abs(Pair(p_bool,p_bool))
-  new_basic_definition(mk_eq(Pair(t,mk_eq(Pair(id,id)))))
-
-def tm_true = lhs(concl(T_DEF))
-def TRUTH:
-  let id = mk_abs(Pair(p_bool,p_bool))
-  EQ_MP(SYM(T_DEF))(REFL(id))
-
-fun EQT_ELIM(th):
-  try:
-    EQ_MP(SYM(th))(TRUTH)
-    ~catch Failure(_): failwith("EQT_ELIM")
-
-fun EQT_INTRO(th): DEDUCT_ANTISYM_RULE(th)(TRUTH)
-
-def bool_bin_ty = mk_fun_ty(bool_ty)(mk_fun_ty(bool_ty)(bool_ty))
-
-def AND_DEF:
-  let op = mk_var(Pair("/\\",bool_bin_ty))
-  let f = mk_var(Pair("f",bool_bin_ty))
-  let fpq = mk_comb(Pair(mk_comb(Pair(f,p_bool)),q_bool))
-  let ftt = mk_comb(Pair(mk_comb(Pair(f,tm_true)),tm_true))
-  let body = mk_eq(Pair(mk_abs(Pair(f,fpq)),mk_abs(Pair(f,ftt))))
-  new_basic_definition(
-    mk_eq(Pair(op,mk_abs(Pair(p_bool,mk_abs(Pair(q_bool,body)))))))
-
-def mk_conj = mk_binary("/\\")
-def list_mk_conj = end_itlist(curry(mk_conj))
-
-fun unfold_def(defth):
-  fun(args):
-    fun loop(rest,th):
-      match rest
-      | PairList []: th
-      | PairList [a, & more]:
-          let applied = AP_THM(th)(a)
-          let reduced:
-            try:
-              BETA_RULE(applied)
-              ~catch Failure(_): applied
-          loop(more,reduced)
-    loop(args,defth)
-
-fun CONJ(th1):
-  fun(th2):
-    let p = concl(th1)
-    let q = concl(th2)
-    let ufd = unfold_def(AND_DEF)(PairList [p,q])
-    let target = rhs(concl(ufd))
-    let Pair(labs,_) = dest_eq(target)
-    let Pair(f,_) = dest_abs(labs)
-    let e1 = EQT_INTRO(th1)
-    let e2 = EQT_INTRO(th2)
-    let bodyeq = MK_COMB(Pair(AP_TERM(f)(e1),e2))
-    let absth = ABS(f)(bodyeq)
-    EQ_MP(SYM(ufd))(absth)
-
-fun project_conj(first):
-  fun(th):
-    try:
-      let Pair(p,q) = dest_conj(concl(th))
-      let ufd = unfold_def(AND_DEF)(PairList [p,q])
-      let eqth = EQ_MP(ufd)(th)
-      let a = mk_var(Pair("a",bool_ty))
-      let b = mk_var(Pair("b",bool_ty))
-      let sel = mk_abs(Pair(a,mk_abs(Pair(b,(if first | a | b)))))
-      EQT_ELIM(BETA_RULE(AP_THM(eqth)(sel)))
-      ~catch Failure(_):
-        failwith(if first | "CONJUNCT1" | "CONJUNCT2")
-
-def CONJUNCT1 = project_conj(#true)
-def CONJUNCT2 = project_conj(#false)
-fun CONJ_PAIR(th):
-  try:
-    Pair(CONJUNCT1(th),CONJUNCT2(th))
-    ~catch Failure(_): failwith("CONJ_PAIR: Not a conjunction")
-def CONJUNCTS = striplist(CONJ_PAIR)
-
-def IMP_DEF:
-  let op = mk_var(Pair("==>",bool_bin_ty))
-  let body = mk_iff(Pair(mk_conj(Pair(p_bool,q_bool)),p_bool))
-  new_basic_definition(
-    mk_eq(Pair(op,mk_abs(Pair(p_bool,mk_abs(Pair(q_bool,body)))))))
-
-def mk_imp = mk_binary("==>")
-
-fun MP(ith):
-  fun(th):
-    try:
-      let Pair(p,q) = dest_imp(concl(ith))
-      cond
-      | !aconv(p)(concl(th)): failwith("MP: theorems do not agree")
-      | ~else:
-          let eqth = EQ_MP(unfold_def(IMP_DEF)(PairList [p,q]))(ith)
-          CONJUNCT2(EQ_MP(SYM(eqth))(th))
-      ~catch Failure(_): failwith("MP: theorems do not agree")
-
-fun DISCH(a):
-  fun(th):
-    let th1 = CONJ(ASSUME(a))(th)
-    let th2 = CONJUNCT1(ASSUME(concl(th1)))
-    let th3 = DEDUCT_ANTISYM_RULE(th1)(th2)
-    let unfold = unfold_def(IMP_DEF)(PairList [a,concl(th)])
-    EQ_MP(SYM(unfold))(th3)
-
-fun DISCH_ALL(th):
-  try:
-    DISCH_ALL(DISCH(hd(hyp(th)))(th))
-    ~catch Failure(_): th
-
-fun UNDISCH(th):
-  try:
-    let Pair(p,_) = dest_imp(concl(th))
-    MP(th)(ASSUME(p))
-    ~catch Failure(_): failwith("UNDISCH")
-
-fun UNDISCH_ALL(th):
-  if is_imp(concl(th)) | UNDISCH_ALL(UNDISCH(th)) | th
-
-fun IMP_ANTISYM_RULE(th1):
-  fun(th2):
-    try:
-      let Pair(p,q) = dest_imp(concl(th1))
-      let Pair(q1,p1) = dest_imp(concl(th2))
-      if !aconv(p)(p1) || !aconv(q)(q1)
-      | failwith("IMP_ANTISYM_RULE")
-      | SYM(DEDUCT_ANTISYM_RULE(UNDISCH(th1))(UNDISCH(th2)))
-      ~catch Failure(_): failwith("IMP_ANTISYM_RULE")
-
-fun ADD_ASSUM(tm): fun(th): MP(DISCH(tm)(th))(ASSUME(tm))
-
-fun EQ_IMP_RULE(th):
-  try:
-    let Pair(p,q) = dest_iff(concl(th))
-    Pair(DISCH(p)(EQ_MP(th)(ASSUME(p))),
-         DISCH(q)(EQ_MP(SYM(th))(ASSUME(q))))
-    ~catch Failure(_): failwith("EQ_IMP_RULE")
-
-fun IMP_TRANS(th1):
-  fun(th2):
-    try:
-      let Pair(p,q) = dest_imp(concl(th1))
-      let Pair(q1,r) = dest_imp(concl(th2))
-      if !aconv(q)(q1)
-      | failwith("IMP_TRANS")
-      | DISCH(p)(MP(th2)(UNDISCH(th1)))
-      ~catch Failure(_): failwith("IMP_TRANS")
-
-def predA = mk_fun_ty(aty)(bool_ty)
-
-def FORALL_DEF:
-  let op = mk_var(Pair("!",mk_fun_ty(predA)(bool_ty)))
-  let P = mk_var(Pair("P",predA))
-  let x = mk_var(Pair("x",aty))
-  let body = mk_eq(Pair(P,mk_abs(Pair(x,tm_true))))
-  new_basic_definition(mk_eq(Pair(op,mk_abs(Pair(P,body)))))
-
-def mk_forall = mk_binder("!")
-fun list_mk_forall(Pair(vs,bod)): itlist(curry(mk_forall))(vs)(bod)
-
-fun unfold_forall(pred):
-  let Pair(dom,_) = dest_fun_ty(type_of(pred))
-  unfold_def(INST_TYPE(PairList [Pair(dom,aty)])(FORALL_DEF))(PairList [pred])
-
-fun SPEC(tm):
-  fun(th):
-    try:
-      let Pair(v,body) = dest_forall(concl(th))
-      if type_of(v) != type_of(tm)
-      | failwith("SPEC")
-      | block:
-          let pred = mk_abs(Pair(v,body))
-          let eqth = EQ_MP(unfold_forall(pred))(th)
-          let app = AP_THM(eqth)(tm)
-          EQT_ELIM(BETA_RULE(app))
-      ~catch Failure(_): failwith("SPEC")
-
-fun SPECL(tms): fun(th): rev_itlist(SPEC)(tms)(th)
-fun SPEC_VAR(th):
-  let Pair(v,_) = dest_forall(concl(th))
-  let v1 = variant(thm_frees(th))(v)
-  Pair(v1,SPEC(v1)(th))
-fun SPEC_ALL(th):
-  if is_forall(concl(th)) | SPEC_ALL(snd(SPEC_VAR(th))) | th
-
-fun ISPEC(t):
-  fun(th):
-    try:
-      let Pair(x,_) = dest_forall(concl(th))
-      let tyins = type_match(snd(dest_var(x)))(type_of(t))(PairList [])
-      SPEC(t)(INST_TYPE(tyins)(th))
-      ~catch Failure(_): failwith("ISPEC")
-
-fun take(n,l):
-  if n == 0 | PairList [] | PairList.cons(hd(l),take(n-1,tl(l)))
-
-fun ISPECL(tms):
-  fun(th):
-    try:
-      if tms == PairList []
-      | th
-      | block:
-          let Pair(avs,_) = strip_forall(concl(th))
-          let vs = take(length(tms),avs)
-          let tyins = itlist2(fun(v): fun(t): type_match(type_of(v))(type_of(t)))(vs)(tms)(PairList [])
-          SPECL(tms)(INST_TYPE(tyins)(th))
-      ~catch Failure(_): failwith("ISPECL")
-
-fun GEN(x):
-  fun(th):
-    try:
-      let pred = mk_abs(Pair(x,concl(th)))
-      let ufd = unfold_forall(pred)
-      let absth = ABS(x)(EQT_INTRO(th))
-      EQ_MP(SYM(ufd))(absth)
-      ~catch Failure(_): failwith("GEN")
-
-def GENL = itlist(GEN)
-fun GEN_ALL(th):
-  let Pair(asl,c) = dest_thm(th)
-  let vars = subtract(frees(c))(freesl(asl))
-  GENL(vars)(th)
-
-def EXISTS_DEF:
-  let op = mk_var(Pair("?",mk_fun_ty(predA)(bool_ty)))
-  let P = mk_var(Pair("P",predA))
-  let x = mk_var(Pair("x",aty))
-  let q = mk_var(Pair("q",bool_ty))
-  let Px = mk_comb(Pair(P,x))
-  let inner = mk_forall(Pair(x,mk_imp(Pair(Px,q))))
-  let body = mk_forall(Pair(q,mk_imp(Pair(inner,q))))
-  new_basic_definition(mk_eq(Pair(op,mk_abs(Pair(P,body)))))
-
-def mk_exists = mk_binder("?")
-fun list_mk_exists(Pair(vs,bod)): itlist(curry(mk_exists))(vs)(bod)
-
-fun unfold_exists(pred):
-  let Pair(dom,_) = dest_fun_ty(type_of(pred))
-  unfold_def(INST_TYPE(PairList [Pair(dom,aty)])(EXISTS_DEF))(PairList [pred])
-
-fun EXISTS(Pair(etm,stm)):
-  fun(th):
-    try:
-      let Pair(v,body) = dest_exists(etm)
-      let expected = vsubst(PairList [Pair(stm,v)])(body)
-      if !aconv(expected)(concl(th))
-      | failwith("EXISTS")
-      | block:
-          let pred = mk_abs(Pair(v,body))
-          let unfolded = rhs(concl(unfold_exists(pred)))
-          let Pair(qv,_) = dest_forall(unfolded)
-          let inner = mk_forall(Pair(v,mk_imp(Pair(mk_comb(Pair(pred,v)),qv))))
-          let a = ASSUME(inner)
-          let spec = BETA_RULE(SPEC(stm)(a))
-          let got = MP(spec)(BETA_RULE(th))
-          let closed = GEN(qv)(DISCH(inner)(got))
-          EQ_MP(SYM(unfold_exists(pred)))(closed)
-      ~catch Failure(_): failwith("EXISTS")
-
-fun SIMPLE_EXISTS(v): fun(th): EXISTS(Pair(mk_exists(Pair(v,concl(th))),v))(th)
-
-fun CHOOSE(Pair(v,th1)):
-  fun(th2):
-    try:
-      let Pair(bv,body) = dest_exists(concl(th1))
-      let instbody = vsubst(PairList [Pair(v,bv)])(body)
-      if vfree_in(v)(concl(th2))
-      | failwith("CHOOSE")
-      | block:
-          let bad = exists(fun(h): !aconv(h)(instbody) && vfree_in(v)(h))(hyp(th2))
-          if bad
-          | failwith("CHOOSE")
-          | block:
-              let pred = mk_abs(Pair(bv,body))
-              let eqth = EQ_MP(unfold_exists(pred))(th1)
-              let r = concl(th2)
-              let step = GEN(v)(DISCH(instbody)(th2))
-              let want = SPEC(r)(eqth)
-              MP(want)(step)
-      ~catch Failure(_): failwith("CHOOSE")
-
-fun SIMPLE_CHOOSE(v):
-  fun(th): CHOOSE(Pair(v,ASSUME(mk_exists(Pair(v,hd(hyp(th)))))))(th)
-
-def OR_DEF:
-  let op = mk_var(Pair("\\/",bool_bin_ty))
-  let body = mk_forall(Pair(r_bool,mk_imp(Pair(mk_imp(Pair(p_bool,r_bool)),mk_imp(Pair(mk_imp(Pair(q_bool,r_bool)),r_bool))))))
-  new_basic_definition(
-    mk_eq(Pair(op,mk_abs(Pair(p_bool,mk_abs(Pair(q_bool,body)))))))
-
-def mk_disj = mk_binary("\\/")
-def list_mk_disj = end_itlist(curry(mk_disj))
-
-fun DISJ1(th):
-  fun(tm):
-    let p = concl(th)
-    let q = tm
-    let ufd = unfold_def(OR_DEF)(PairList [p,q])
-    let Pair(rv,_) = dest_forall(rhs(concl(ufd)))
-    let got = MP(ASSUME(mk_imp(Pair(p,rv))))(th)
-    let closed = GEN(rv)(DISCH(mk_imp(Pair(p,rv)))(DISCH(mk_imp(Pair(q,rv)))(got)))
-    EQ_MP(SYM(ufd))(closed)
-
-fun DISJ2(tm):
-  fun(th):
-    let p = tm
-    let q = concl(th)
-    let ufd = unfold_def(OR_DEF)(PairList [p,q])
-    let Pair(rv,_) = dest_forall(rhs(concl(ufd)))
-    let got = MP(ASSUME(mk_imp(Pair(q,rv))))(th)
-    let closed = GEN(rv)(DISCH(mk_imp(Pair(p,rv)))(DISCH(mk_imp(Pair(q,rv)))(got)))
-    EQ_MP(SYM(ufd))(closed)
-
-fun DISJ_CASES(th0):
-  fun(th1):
-    fun(th2):
-      try:
-        let Pair(p,q) = dest_disj(concl(th0))
-        if !aconv(concl(th1))(concl(th2))
-        | failwith("DISJ_CASES")
-        | block:
-            let eqth = EQ_MP(unfold_def(OR_DEF)(PairList [p,q]))(th0)
-            let inst = SPEC(concl(th1))(eqth)
-            MP(MP(inst)(DISCH(p)(th1)))(DISCH(q)(th2))
-        ~catch Failure(_): failwith("DISJ_CASES")
-
-fun SIMPLE_DISJ_CASES(th1):
-  fun(th2):
-    DISJ_CASES(ASSUME(mk_disj(Pair(hd(hyp(th1)),hd(hyp(th2))))))(th1)(th2)
-
-def F_DEF:
-  let f = mk_var(Pair("F",bool_ty))
-  new_basic_definition(mk_eq(Pair(f,mk_forall(Pair(p_bool,p_bool)))))
-def tm_false = lhs(concl(F_DEF))
-
-def NOT_DEF:
-  let op = mk_var(Pair("~",mk_fun_ty(bool_ty)(bool_ty)))
-  new_basic_definition(
-    mk_eq(Pair(op,mk_abs(Pair(p_bool,mk_imp(Pair(p_bool,tm_false)))))))
-
-def neg_tm = lhs(concl(NOT_DEF))
-fun mk_neg(tm):
-  try:
-    mk_comb(Pair(neg_tm,tm))
-    ~catch Failure(_): failwith("mk_neg")
-
-fun NOT_ELIM(th):
-  try:
-    let p = dest_neg(concl(th))
-    EQ_MP(unfold_def(NOT_DEF)(PairList [p]))(th)
-    ~catch Failure(_): failwith("NOT_ELIM")
-
-fun NOT_INTRO(th):
-  try:
-    let Pair(p,f) = dest_imp(concl(th))
-    if !aconv(f)(tm_false)
-    | failwith("NOT_INTRO")
-    | EQ_MP(SYM(unfold_def(NOT_DEF)(PairList [p])))(th)
-    ~catch Failure(_): failwith("NOT_INTRO")
-
-fun CONTR(tm):
-  fun(th):
-    if !aconv(concl(th))(tm_false)
-    | failwith("CONTR")
-    | SPEC(tm)(EQ_MP(F_DEF)(th))
-
-fun EQF_INTRO(th):
-  try:
-    let p = dest_neg(concl(th))
-    let a = UNDISCH(NOT_ELIM(th))
-    let b = CONTR(p)(ASSUME(tm_false))
-    SYM(DEDUCT_ANTISYM_RULE(a)(b))
-    ~catch Failure(_): failwith("EQF_INTRO")
-
-fun EQF_ELIM(th):
-  try:
-    let Pair(p,f) = dest_eq(concl(th))
-    if !aconv(f)(tm_false)
-    | failwith("EQF_ELIM")
-    | NOT_INTRO(DISCH(p)(EQ_MP(th)(ASSUME(p))))
-    ~catch Failure(_): failwith("EQF_ELIM")
-
-def EXISTS_UNIQUE_DEF:
-  let op = mk_var(Pair("?!",mk_fun_ty(predA)(bool_ty)))
-  let P = mk_var(Pair("P",predA))
-  let x = mk_var(Pair("x",aty))
-  let y = mk_var(Pair("y",aty))
-  let Px = mk_comb(Pair(P,x))
-  let Py = mk_comb(Pair(P,y))
-  let uniq = mk_forall(Pair(x,mk_forall(Pair(y,mk_imp(Pair(mk_conj(Pair(Px,Py)),mk_eq(Pair(x,y))))))))
-  let body = mk_conj(Pair(mk_exists(Pair(x,Px)),uniq))
-  new_basic_definition(mk_eq(Pair(op,mk_abs(Pair(P,body)))))
-
-def mk_uexists = mk_binder("?!")
-
-fun EXISTENCE(th):
-  try:
-    let Pair(v,body) = dest_uexists(concl(th))
-    let pred = mk_abs(Pair(v,body))
-    let Pair(dom,_) = dest_fun_ty(type_of(pred))
-    let defth = INST_TYPE(PairList [Pair(dom,aty)])(EXISTS_UNIQUE_DEF)
-    CONJUNCT1(EQ_MP(unfold_def(defth)(PairList [pred]))(th))
-    ~catch Failure(_): failwith("EXISTENCE")
-
-// Parser/interface side effects from bool.ml are intentionally deferred to
-// parser.rhm/preterm.rhm. The logical definitions and derived rules above are
-// complete independently of surface syntax.
+  set_verbose_symbols
+  unset_verbose_symbols
+
+import: "fusion.rhm" as Up_fusion
+
+import: "basics.rhm" as Up_basics
+
+import: "equal.rhm" as Up_equal
+
+Host.parse_as_prefix("~")
+
+Host.parse_as_binder("\\")
+
+Host.parse_as_binder("!")
+
+Host.parse_as_binder("?")
+
+Host.parse_as_binder("?!")
+
+Host.parse_as_infix(Pair("==>",Pair(4,"right")))
+
+Host.parse_as_infix(Pair("\\/",Pair(6,"right")))
+
+Host.parse_as_infix(Pair("/\\",Pair(8,"right")))
+
+Host.parse_as_infix(Pair("<=>",Pair(2,"right")))
+
+Host.override_interface(Pair("<=>",Host.expand_quote("[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]]")))
+
+Host.parse_as_infix(Pair("=",Pair(12,"right")))
+
+fun bool_is_iff(tm):«
+  (block:«
+    let port_tmp_1 = tm;
+    match port_tmp_1
+    | Up_fusion.Comb(Up_fusion.Comb(Up_fusion.Const("=",Up_fusion.Tyapp("fun",PairList [Up_fusion.Tyapp("bool",PairList []), & PairList [_, & PairList []]])),l),r):«
+        #true
+    »
+    | _:«
+        #false
+    »
+  »)
+»
+
+fun bool_dest_iff(tm):«
+  (block:«
+    let port_tmp_2 = tm;
+    match port_tmp_2
+    | Up_fusion.Comb(Up_fusion.Comb(Up_fusion.Const("=",Up_fusion.Tyapp("fun",PairList [Up_fusion.Tyapp("bool",PairList []), & PairList [_, & PairList []]])),l),r):«
+        Pair(l,r)
+    »
+    | _:«
+        failwith("dest_iff")
+    »
+  »)
+»
+
+def bool_mk_iff:«
+  (block:«
+    let port_tmp_3_eq_tm:«
+      Host.expand_quote("[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]]")
+    »;
+    (fun(Pair(l,r)):«
+      Up_fusion.mk_comb((block:«
+        let port_tmp_4 = r;
+        let port_tmp_5 = Up_fusion.mk_comb(Pair(port_tmp_3_eq_tm,l));
+        Pair(port_tmp_5,port_tmp_4)
+      »))
+    »)
+  »)
+»
+
+fun bool_PINST(tyin):«
+  (fun(tmin):«
+    (block:«
+      let port_tmp_6_iterm_fn:«
+        Up_fusion.INST((block:«
+          let port_tmp_7 = tmin;
+          let port_tmp_8 = (block:«
+            let port_tmp_9 = Up_fusion.inst(tyin);
+            let port_tmp_10 = I;
+            let port_tmp_11 = Host.F_F;
+            port_tmp_11(port_tmp_10)(port_tmp_9)
+          »);
+          let port_tmp_12 = map;
+          port_tmp_12(port_tmp_8)(port_tmp_7)
+        »))
+      »;
+      let port_tmp_13_itype_fn:«
+        Up_fusion.INST_TYPE(tyin)
+      »;
+      (fun(th):«
+        (block:«
+          try:«
+            port_tmp_6_iterm_fn(port_tmp_13_itype_fn(th));
+            ~catch port_tmp_14:«
+              let port_tmp_15 = port_tmp_14;
+              match port_tmp_15
+              | Failure(_):«
+                  failwith("PINST")
+              »
+              | port_tmp_14:«
+                  Host.hol_raise(port_tmp_14)
+              »
+            »
+          »
+        »)
+      »)
+    »)
+  »)
+»
+
+fun bool_PROVE_HYP(ath):«
+  (fun(bth):«
+    (block:«
+      if (block:«
+        let port_tmp_16 = Up_fusion.hyp(bth);
+        let port_tmp_17 = Up_fusion.aconv(Up_fusion.concl(ath));
+        let port_tmp_18 = exists;
+        port_tmp_18(port_tmp_17)(port_tmp_16)
+      »)
+      | (block:«
+        let port_tmp_19 = ath;
+        let port_tmp_20 = Up_fusion.DEDUCT_ANTISYM_RULE(ath)(bth);
+        let port_tmp_21 = Up_fusion.EQ_MP;
+        port_tmp_21(port_tmp_20)(port_tmp_19)
+      »)
+      | bth
+    »)
+  »)
+»
+
+def bool_T_DEF:«
+  Up_fusion.new_basic_definition(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"T\",[\"Tyapp\",\"bool\",[]]]],[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Abs\",[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]],[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]]],[\"Abs\",[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]],[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]]]]"))
+»
+
+def bool_TRUTH:«
+  (block:«
+    let port_tmp_22 = Up_fusion.REFL(Host.expand_quote("[\"Abs\",[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]],[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]]"));
+    let port_tmp_23 = Up_equal.SYM(bool_T_DEF);
+    let port_tmp_24 = Up_fusion.EQ_MP;
+    port_tmp_24(port_tmp_23)(port_tmp_22)
+  »)
+»
+
+fun bool_EQT_ELIM(th):«
+  (block:«
+    try:«
+      (block:«
+        let port_tmp_25 = bool_TRUTH;
+        let port_tmp_26 = Up_equal.SYM(th);
+        let port_tmp_27 = Up_fusion.EQ_MP;
+        port_tmp_27(port_tmp_26)(port_tmp_25)
+      »);
+      ~catch port_tmp_28:«
+        let port_tmp_29 = port_tmp_28;
+        match port_tmp_29
+        | Failure(_):«
+            failwith("EQT_ELIM")
+        »
+        | port_tmp_28:«
+            Host.hol_raise(port_tmp_28)
+        »
+      »
+    »
+  »)
+»
+
+def bool_EQT_INTRO:«
+  (block:«
+    let port_tmp_30_t:«
+      Host.expand_quote("[\"Var\",\"t\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_31_pth:«
+        (block:«
+          let port_tmp_32_th1:«
+            (block:«
+              let port_tmp_33 = bool_TRUTH;
+              let port_tmp_34 = Up_fusion.ASSUME(port_tmp_30_t);
+              let port_tmp_35 = Up_fusion.DEDUCT_ANTISYM_RULE;
+              port_tmp_35(port_tmp_34)(port_tmp_33)
+            »)
+          »;
+          (block:«
+            let port_tmp_36_th2:«
+              bool_EQT_ELIM(Up_fusion.ASSUME(Up_fusion.concl(port_tmp_32_th1)))
+            »;
+            Up_fusion.DEDUCT_ANTISYM_RULE(port_tmp_36_th2)(port_tmp_32_th1)
+          »)
+        »)
+      »;
+      (fun(th):«
+        (block:«
+          let port_tmp_37 = th;
+          let port_tmp_38 = (block:«
+            let port_tmp_39 = port_tmp_31_pth;
+            let port_tmp_40 = (block:«
+              let port_tmp_41 = PairList [];
+              let port_tmp_42 = (block:«
+                let port_tmp_43 = port_tmp_30_t;
+                let port_tmp_44 = Up_fusion.concl(th);
+                Pair(port_tmp_44,port_tmp_43)
+              »);
+              PairList.cons(port_tmp_42,port_tmp_41)
+            »);
+            let port_tmp_45 = Up_fusion.INST;
+            port_tmp_45(port_tmp_40)(port_tmp_39)
+          »);
+          let port_tmp_46 = Up_fusion.EQ_MP;
+          port_tmp_46(port_tmp_38)(port_tmp_37)
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_AND_DEF:«
+  Up_fusion.new_basic_definition(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"/\\\\\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]]],[\"Abs\",[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]],[\"Abs\",[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]],[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Abs\",[\"Var\",\"f\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Comb\",[\"Var\",\"f\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]]]],[\"Abs\",[\"Var\",\"f\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Comb\",[\"Var\",\"f\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Const\",\"T\",[\"Tyapp\",\"bool\",[]]]],[\"Const\",\"T\",[\"Tyapp\",\"bool\",[]]]]]]]]]"))
+»
+
+def bool_mk_conj:«
+  Up_basics.mk_binary("/\\")
+»
+
+def bool_list_mk_conj:«
+  end_itlist(curry(bool_mk_conj))
+»
+
+def bool_CONJ:«
+  (block:«
+    let port_tmp_47_f:«
+      Host.expand_quote("[\"Var\",\"f\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]]")
+    »;
+    let port_tmp_48_p:«
+      Host.expand_quote("[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    let port_tmp_49_q:«
+      Host.expand_quote("[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_50_pth1:«
+        (block:«
+          let port_tmp_51_th1:«
+            (block:«
+              let port_tmp_52 = Up_equal.AP_THM(bool_AND_DEF)(port_tmp_48_p);
+              let port_tmp_53 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+              let port_tmp_54 = Up_equal.CONV_RULE;
+              port_tmp_54(port_tmp_53)(port_tmp_52)
+            »)
+          »;
+          (block:«
+            let port_tmp_55_th2:«
+              (block:«
+                let port_tmp_56 = Up_equal.AP_THM(port_tmp_51_th1)(port_tmp_49_q);
+                let port_tmp_57 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+                let port_tmp_58 = Up_equal.CONV_RULE;
+                port_tmp_58(port_tmp_57)(port_tmp_56)
+              »)
+            »;
+            (block:«
+              let port_tmp_59_th3:«
+                (block:«
+                  let port_tmp_60 = Up_fusion.ASSUME(bool_mk_conj(Pair(port_tmp_48_p,port_tmp_49_q)));
+                  let port_tmp_61 = port_tmp_55_th2;
+                  let port_tmp_62 = Up_fusion.EQ_MP;
+                  port_tmp_62(port_tmp_61)(port_tmp_60)
+                »)
+              »;
+              bool_EQT_ELIM(Up_equal.BETA_RULE(Up_equal.AP_THM(port_tmp_59_th3)(Host.expand_quote("[\"Abs\",[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]],[\"Abs\",[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]],[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]]]"))))
+            »)
+          »)
+        »)
+      »;
+      let port_tmp_63_pth2:«
+        (block:«
+          let port_tmp_64_pth:«
+            Up_fusion.ASSUME(port_tmp_48_p)
+          »;
+          let port_tmp_65_qth:«
+            Up_fusion.ASSUME(port_tmp_49_q)
+          »;
+          (block:«
+            let port_tmp_66_th1:«
+              Up_fusion.MK_COMB((block:«
+                let port_tmp_67 = bool_EQT_INTRO(port_tmp_65_qth);
+                let port_tmp_68 = (block:«
+                  let port_tmp_69 = bool_EQT_INTRO(port_tmp_64_pth);
+                  let port_tmp_70 = port_tmp_47_f;
+                  let port_tmp_71 = Up_equal.AP_TERM;
+                  port_tmp_71(port_tmp_70)(port_tmp_69)
+                »);
+                Pair(port_tmp_68,port_tmp_67)
+              »))
+            »;
+            (block:«
+              let port_tmp_72_th2:«
+                Up_fusion.ABS(port_tmp_47_f)(port_tmp_66_th1)
+              »;
+              (block:«
+                let port_tmp_73_th3:«
+                  Up_equal.BETA_RULE((block:«
+                    let port_tmp_74 = port_tmp_49_q;
+                    let port_tmp_75 = Up_equal.AP_THM(bool_AND_DEF)(port_tmp_48_p);
+                    let port_tmp_76 = Up_equal.AP_THM;
+                    port_tmp_76(port_tmp_75)(port_tmp_74)
+                  »))
+                »;
+                (block:«
+                  let port_tmp_77 = port_tmp_72_th2;
+                  let port_tmp_78 = Up_equal.SYM(port_tmp_73_th3);
+                  let port_tmp_79 = Up_fusion.EQ_MP;
+                  port_tmp_79(port_tmp_78)(port_tmp_77)
+                »)
+              »)
+            »)
+          »)
+        »)
+      »;
+      (block:«
+        let port_tmp_80_pth:«
+          Up_fusion.DEDUCT_ANTISYM_RULE(port_tmp_50_pth1)(port_tmp_63_pth2)
+        »;
+        (fun(th1):«
+          (fun(th2):«
+            (block:«
+              let port_tmp_81_th:«
+                (block:«
+                  let port_tmp_82 = port_tmp_80_pth;
+                  let port_tmp_83 = (block:«
+                    let port_tmp_84 = (block:«
+                      let port_tmp_85 = PairList [];
+                      let port_tmp_86 = (block:«
+                        let port_tmp_87 = port_tmp_49_q;
+                        let port_tmp_88 = Up_fusion.concl(th2);
+                        Pair(port_tmp_88,port_tmp_87)
+                      »);
+                      PairList.cons(port_tmp_86,port_tmp_85)
+                    »);
+                    let port_tmp_89 = (block:«
+                      let port_tmp_90 = port_tmp_48_p;
+                      let port_tmp_91 = Up_fusion.concl(th1);
+                      Pair(port_tmp_91,port_tmp_90)
+                    »);
+                    PairList.cons(port_tmp_89,port_tmp_84)
+                  »);
+                  let port_tmp_92 = Up_fusion.INST;
+                  port_tmp_92(port_tmp_83)(port_tmp_82)
+                »)
+              »;
+              (block:«
+                let port_tmp_93 = th2;
+                let port_tmp_94 = (block:«
+                  let port_tmp_95 = th1;
+                  let port_tmp_96 = Up_fusion.DEDUCT_ANTISYM_RULE(th1)(port_tmp_81_th);
+                  let port_tmp_97 = Up_fusion.EQ_MP;
+                  port_tmp_97(port_tmp_96)(port_tmp_95)
+                »);
+                let port_tmp_98 = Up_fusion.EQ_MP;
+                port_tmp_98(port_tmp_94)(port_tmp_93)
+              »)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_CONJUNCT1:«
+  (block:«
+    let port_tmp_99_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    let port_tmp_100_Q:«
+      Host.expand_quote("[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_101_pth:«
+        (block:«
+          let port_tmp_102_th1:«
+            (block:«
+              let port_tmp_103 = Up_equal.AP_THM(bool_AND_DEF)(port_tmp_99_P);
+              let port_tmp_104 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+              let port_tmp_105 = Up_equal.CONV_RULE;
+              port_tmp_105(port_tmp_104)(port_tmp_103)
+            »)
+          »;
+          (block:«
+            let port_tmp_106_th2:«
+              (block:«
+                let port_tmp_107 = Up_equal.AP_THM(port_tmp_102_th1)(port_tmp_100_Q);
+                let port_tmp_108 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+                let port_tmp_109 = Up_equal.CONV_RULE;
+                port_tmp_109(port_tmp_108)(port_tmp_107)
+              »)
+            »;
+            (block:«
+              let port_tmp_110_th3:«
+                (block:«
+                  let port_tmp_111 = Up_fusion.ASSUME(bool_mk_conj(Pair(port_tmp_99_P,port_tmp_100_Q)));
+                  let port_tmp_112 = port_tmp_106_th2;
+                  let port_tmp_113 = Up_fusion.EQ_MP;
+                  port_tmp_113(port_tmp_112)(port_tmp_111)
+                »)
+              »;
+              bool_EQT_ELIM(Up_equal.BETA_RULE(Up_equal.AP_THM(port_tmp_110_th3)(Host.expand_quote("[\"Abs\",[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]],[\"Abs\",[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]],[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]]]"))))
+            »)
+          »)
+        »)
+      »;
+      (fun(th):«
+        (block:«
+          try:«
+            (block:«
+              let Pair(port_tmp_114_l,port_tmp_115_r):«
+                Up_basics.dest_conj(Up_fusion.concl(th))
+              »;
+              (block:«
+                let port_tmp_116 = th;
+                let port_tmp_117 = (block:«
+                  let port_tmp_118 = Up_fusion.INST(PairList.cons(Pair(port_tmp_114_l,port_tmp_99_P),PairList.cons(Pair(port_tmp_115_r,port_tmp_100_Q),PairList [])))(port_tmp_101_pth);
+                  let port_tmp_119 = th;
+                  let port_tmp_120 = Up_fusion.DEDUCT_ANTISYM_RULE;
+                  port_tmp_120(port_tmp_119)(port_tmp_118)
+                »);
+                let port_tmp_121 = Up_fusion.EQ_MP;
+                port_tmp_121(port_tmp_117)(port_tmp_116)
+              »)
+            »);
+            ~catch port_tmp_122:«
+              let port_tmp_123 = port_tmp_122;
+              match port_tmp_123
+              | Failure(_):«
+                  failwith("CONJUNCT1")
+              »
+              | port_tmp_122:«
+                  Host.hol_raise(port_tmp_122)
+              »
+            »
+          »
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_CONJUNCT2:«
+  (block:«
+    let port_tmp_124_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    let port_tmp_125_Q:«
+      Host.expand_quote("[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_126_pth:«
+        (block:«
+          let port_tmp_127_th1:«
+            (block:«
+              let port_tmp_128 = Up_equal.AP_THM(bool_AND_DEF)(port_tmp_124_P);
+              let port_tmp_129 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+              let port_tmp_130 = Up_equal.CONV_RULE;
+              port_tmp_130(port_tmp_129)(port_tmp_128)
+            »)
+          »;
+          (block:«
+            let port_tmp_131_th2:«
+              (block:«
+                let port_tmp_132 = Up_equal.AP_THM(port_tmp_127_th1)(port_tmp_125_Q);
+                let port_tmp_133 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+                let port_tmp_134 = Up_equal.CONV_RULE;
+                port_tmp_134(port_tmp_133)(port_tmp_132)
+              »)
+            »;
+            (block:«
+              let port_tmp_135_th3:«
+                (block:«
+                  let port_tmp_136 = Up_fusion.ASSUME(bool_mk_conj(Pair(port_tmp_124_P,port_tmp_125_Q)));
+                  let port_tmp_137 = port_tmp_131_th2;
+                  let port_tmp_138 = Up_fusion.EQ_MP;
+                  port_tmp_138(port_tmp_137)(port_tmp_136)
+                »)
+              »;
+              bool_EQT_ELIM(Up_equal.BETA_RULE(Up_equal.AP_THM(port_tmp_135_th3)(Host.expand_quote("[\"Abs\",[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]],[\"Abs\",[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]],[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]]]"))))
+            »)
+          »)
+        »)
+      »;
+      (fun(th):«
+        (block:«
+          try:«
+            (block:«
+              let Pair(port_tmp_139_l,port_tmp_140_r):«
+                Up_basics.dest_conj(Up_fusion.concl(th))
+              »;
+              (block:«
+                let port_tmp_141 = th;
+                let port_tmp_142 = (block:«
+                  let port_tmp_143 = Up_fusion.INST(PairList.cons(Pair(port_tmp_139_l,port_tmp_124_P),PairList.cons(Pair(port_tmp_140_r,port_tmp_125_Q),PairList [])))(port_tmp_126_pth);
+                  let port_tmp_144 = th;
+                  let port_tmp_145 = Up_fusion.DEDUCT_ANTISYM_RULE;
+                  port_tmp_145(port_tmp_144)(port_tmp_143)
+                »);
+                let port_tmp_146 = Up_fusion.EQ_MP;
+                port_tmp_146(port_tmp_142)(port_tmp_141)
+              »)
+            »);
+            ~catch port_tmp_147:«
+              let port_tmp_148 = port_tmp_147;
+              match port_tmp_148
+              | Failure(_):«
+                  failwith("CONJUNCT2")
+              »
+              | port_tmp_147:«
+                  Host.hol_raise(port_tmp_147)
+              »
+            »
+          »
+        »)
+      »)
+    »)
+  »)
+»
+
+fun bool_CONJ_PAIR(th):«
+  (block:«
+    try:«
+      (block:«
+        let port_tmp_149 = bool_CONJUNCT2(th);
+        let port_tmp_150 = bool_CONJUNCT1(th);
+        Pair(port_tmp_150,port_tmp_149)
+      »);
+      ~catch port_tmp_151:«
+        let port_tmp_152 = port_tmp_151;
+        match port_tmp_152
+        | Failure(_):«
+            failwith("CONJ_PAIR: Not a conjunction")
+        »
+        | port_tmp_151:«
+            Host.hol_raise(port_tmp_151)
+        »
+      »
+    »
+  »)
+»
+
+def bool_CONJUNCTS:«
+  striplist(bool_CONJ_PAIR)
+»
+
+def bool_IMP_DEF:«
+  Up_fusion.new_basic_definition(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]]],[\"Abs\",[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]],[\"Abs\",[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]],[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Comb\",[\"Const\",\"/\\\\\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]]],[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]]]]]"))
+»
+
+def bool_mk_imp:«
+  Up_basics.mk_binary("==>")
+»
+
+def bool_MP:«
+  (block:«
+    let port_tmp_153_p:«
+      Host.expand_quote("[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    let port_tmp_154_q:«
+      Host.expand_quote("[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_155_pth:«
+        (block:«
+          let port_tmp_156_th1:«
+            Up_equal.BETA_RULE((block:«
+              let port_tmp_157 = port_tmp_154_q;
+              let port_tmp_158 = Up_equal.AP_THM(bool_IMP_DEF)(port_tmp_153_p);
+              let port_tmp_159 = Up_equal.AP_THM;
+              port_tmp_159(port_tmp_158)(port_tmp_157)
+            »))
+          »;
+          let port_tmp_160_th2:«
+            (block:«
+              let port_tmp_161 = Up_fusion.ASSUME(port_tmp_154_q);
+              let port_tmp_162 = Up_fusion.ASSUME(port_tmp_153_p);
+              let port_tmp_163 = bool_CONJ;
+              port_tmp_163(port_tmp_162)(port_tmp_161)
+            »)
+          »;
+          let port_tmp_164_th3:«
+            bool_CONJUNCT1(Up_fusion.ASSUME(bool_mk_conj(Pair(port_tmp_153_p,port_tmp_154_q))))
+          »;
+          (block:«
+            let port_tmp_165 = Up_fusion.DEDUCT_ANTISYM_RULE(port_tmp_160_th2)(port_tmp_164_th3);
+            let port_tmp_166 = Up_equal.SYM(port_tmp_156_th1);
+            let port_tmp_167 = Up_fusion.EQ_MP;
+            port_tmp_167(port_tmp_166)(port_tmp_165)
+          »)
+        »)
+      »;
+      let port_tmp_168_qth:«
+        (block:«
+          let port_tmp_169_th1:«
+            Up_equal.BETA_RULE((block:«
+              let port_tmp_170 = port_tmp_154_q;
+              let port_tmp_171 = Up_equal.AP_THM(bool_IMP_DEF)(port_tmp_153_p);
+              let port_tmp_172 = Up_equal.AP_THM;
+              port_tmp_172(port_tmp_171)(port_tmp_170)
+            »))
+          »;
+          (block:«
+            let port_tmp_173_th2:«
+              (block:«
+                let port_tmp_174 = Up_fusion.ASSUME(bool_mk_imp(Pair(port_tmp_153_p,port_tmp_154_q)));
+                let port_tmp_175 = port_tmp_169_th1;
+                let port_tmp_176 = Up_fusion.EQ_MP;
+                port_tmp_176(port_tmp_175)(port_tmp_174)
+              »)
+            »;
+            bool_CONJUNCT2((block:«
+              let port_tmp_177 = Up_fusion.ASSUME(port_tmp_153_p);
+              let port_tmp_178 = Up_equal.SYM(port_tmp_173_th2);
+              let port_tmp_179 = Up_fusion.EQ_MP;
+              port_tmp_179(port_tmp_178)(port_tmp_177)
+            »))
+          »)
+        »)
+      »;
+      (block:«
+        let port_tmp_180_rth:«
+          Up_fusion.DEDUCT_ANTISYM_RULE(port_tmp_155_pth)(port_tmp_168_qth)
+        »;
+        (fun(ith):«
+          (fun(th):«
+            (block:«
+              let Pair(port_tmp_181_ant,port_tmp_182_con):«
+                Up_basics.dest_imp(Up_fusion.concl(ith))
+              »;
+              (block:«
+                if (block:«
+                  let port_tmp_183 = Up_fusion.concl(th);
+                  let port_tmp_184 = port_tmp_181_ant;
+                  let port_tmp_185 = Up_fusion.aconv;
+                  port_tmp_185(port_tmp_184)(port_tmp_183)
+                »)
+                | (block:«
+                  let port_tmp_186 = ith;
+                  let port_tmp_187 = (block:«
+                    let port_tmp_188 = th;
+                    let port_tmp_189 = (block:«
+                      let port_tmp_190 = Up_fusion.INST(PairList.cons(Pair(port_tmp_181_ant,port_tmp_153_p),PairList.cons(Pair(port_tmp_182_con,port_tmp_154_q),PairList [])))(port_tmp_180_rth);
+                      let port_tmp_191 = th;
+                      let port_tmp_192 = Up_fusion.DEDUCT_ANTISYM_RULE;
+                      port_tmp_192(port_tmp_191)(port_tmp_190)
+                    »);
+                    let port_tmp_193 = Up_fusion.EQ_MP;
+                    port_tmp_193(port_tmp_189)(port_tmp_188)
+                  »);
+                  let port_tmp_194 = Up_fusion.EQ_MP;
+                  port_tmp_194(port_tmp_187)(port_tmp_186)
+                »)
+                | failwith("MP: theorems do not agree")
+              »)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_DISCH:«
+  (block:«
+    let port_tmp_195_p:«
+      Host.expand_quote("[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    let port_tmp_196_q:«
+      Host.expand_quote("[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_197_pth:«
+        Up_equal.SYM(Up_equal.BETA_RULE((block:«
+          let port_tmp_198 = port_tmp_196_q;
+          let port_tmp_199 = Up_equal.AP_THM(bool_IMP_DEF)(port_tmp_195_p);
+          let port_tmp_200 = Up_equal.AP_THM;
+          port_tmp_200(port_tmp_199)(port_tmp_198)
+        »)))
+      »;
+      (fun(a):«
+        (fun(th):«
+          (block:«
+            let port_tmp_201_th1:«
+              (block:«
+                let port_tmp_202 = th;
+                let port_tmp_203 = Up_fusion.ASSUME(a);
+                let port_tmp_204 = bool_CONJ;
+                port_tmp_204(port_tmp_203)(port_tmp_202)
+              »)
+            »;
+            (block:«
+              let port_tmp_205_th2:«
+                bool_CONJUNCT1(Up_fusion.ASSUME(Up_fusion.concl(port_tmp_201_th1)))
+              »;
+              (block:«
+                let port_tmp_206_th3:«
+                  Up_fusion.DEDUCT_ANTISYM_RULE(port_tmp_201_th1)(port_tmp_205_th2)
+                »;
+                (block:«
+                  let port_tmp_207_th4:«
+                    (block:«
+                      let port_tmp_208 = port_tmp_197_pth;
+                      let port_tmp_209 = (block:«
+                        let port_tmp_210 = (block:«
+                          let port_tmp_211 = PairList [];
+                          let port_tmp_212 = (block:«
+                            let port_tmp_213 = port_tmp_196_q;
+                            let port_tmp_214 = Up_fusion.concl(th);
+                            Pair(port_tmp_214,port_tmp_213)
+                          »);
+                          PairList.cons(port_tmp_212,port_tmp_211)
+                        »);
+                        let port_tmp_215 = Pair(a,port_tmp_195_p);
+                        PairList.cons(port_tmp_215,port_tmp_210)
+                      »);
+                      let port_tmp_216 = Up_fusion.INST;
+                      port_tmp_216(port_tmp_209)(port_tmp_208)
+                    »)
+                  »;
+                  Up_fusion.EQ_MP(port_tmp_207_th4)(port_tmp_206_th3)
+                »)
+              »)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+fun bool_DISCH_ALL(th):«
+  (block:«
+    try:«
+      bool_DISCH_ALL((block:«
+        let port_tmp_217 = th;
+        let port_tmp_218 = hd(Up_fusion.hyp(th));
+        let port_tmp_219 = bool_DISCH;
+        port_tmp_219(port_tmp_218)(port_tmp_217)
+      »));
+      ~catch port_tmp_220:«
+        let port_tmp_221 = port_tmp_220;
+        match port_tmp_221
+        | Failure(_):«
+            th
+        »
+        | port_tmp_220:«
+            Host.hol_raise(port_tmp_220)
+        »
+      »
+    »
+  »)
+»
+
+fun bool_UNDISCH(th):«
+  (block:«
+    try:«
+      (block:«
+        let port_tmp_222 = Up_fusion.ASSUME(Up_fusion.rand(Up_fusion.rator(Up_fusion.concl(th))));
+        let port_tmp_223 = th;
+        let port_tmp_224 = bool_MP;
+        port_tmp_224(port_tmp_223)(port_tmp_222)
+      »);
+      ~catch port_tmp_225:«
+        let port_tmp_226 = port_tmp_225;
+        match port_tmp_226
+        | Failure(_):«
+            failwith("UNDISCH")
+        »
+        | port_tmp_225:«
+            Host.hol_raise(port_tmp_225)
+        »
+      »
+    »
+  »)
+»
+
+fun bool_UNDISCH_ALL(th):«
+  (block:«
+    if Up_basics.is_imp(Up_fusion.concl(th))
+    | bool_UNDISCH_ALL(bool_UNDISCH(th))
+    | th
+  »)
+»
+
+def bool_IMP_ANTISYM_RULE:«
+  (block:«
+    let port_tmp_227_p:«
+      Host.expand_quote("[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    let port_tmp_228_q:«
+      Host.expand_quote("[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    let port_tmp_229_imp_tm:«
+      Host.expand_quote("[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]]")
+    »;
+    (block:«
+      let port_tmp_230_pq:«
+        bool_mk_imp(Pair(port_tmp_227_p,port_tmp_228_q))
+      »;
+      let port_tmp_231_qp:«
+        bool_mk_imp(Pair(port_tmp_228_q,port_tmp_227_p))
+      »;
+      (block:«
+        let Pair(port_tmp_232_pth1,port_tmp_233_pth2):«
+          bool_CONJ_PAIR(Up_fusion.ASSUME(bool_mk_conj(Pair(port_tmp_230_pq,port_tmp_231_qp))))
+        »;
+        (block:«
+          let port_tmp_234_pth3:«
+            (block:«
+              let port_tmp_235 = bool_UNDISCH(port_tmp_232_pth1);
+              let port_tmp_236 = bool_UNDISCH(port_tmp_233_pth2);
+              let port_tmp_237 = Up_fusion.DEDUCT_ANTISYM_RULE;
+              port_tmp_237(port_tmp_236)(port_tmp_235)
+            »)
+          »;
+          (block:«
+            let port_tmp_238_pth4:«
+              bool_DISCH_ALL(Up_fusion.ASSUME(port_tmp_228_q))
+            »;
+            let port_tmp_239_pth5:«
+              Up_fusion.ASSUME(Up_fusion.mk_eq(Pair(port_tmp_227_p,port_tmp_228_q)))
+            »;
+            (block:«
+              let port_tmp_240_pth6:«
+                (block:«
+                  let port_tmp_241 = (block:«
+                    let port_tmp_242 = port_tmp_238_pth4;
+                    let port_tmp_243 = Up_equal.SYM((block:«
+                      let port_tmp_244 = port_tmp_239_pth5;
+                      let port_tmp_245 = Up_fusion.mk_comb(Pair(port_tmp_229_imp_tm,port_tmp_228_q));
+                      let port_tmp_246 = Up_equal.AP_TERM;
+                      port_tmp_246(port_tmp_245)(port_tmp_244)
+                    »));
+                    let port_tmp_247 = Up_fusion.EQ_MP;
+                    port_tmp_247(port_tmp_243)(port_tmp_242)
+                  »);
+                  let port_tmp_248 = (block:«
+                    let port_tmp_249 = port_tmp_238_pth4;
+                    let port_tmp_250 = Up_equal.SYM((block:«
+                      let port_tmp_251 = port_tmp_228_q;
+                      let port_tmp_252 = Up_equal.AP_TERM(port_tmp_229_imp_tm)(port_tmp_239_pth5);
+                      let port_tmp_253 = Up_equal.AP_THM;
+                      port_tmp_253(port_tmp_252)(port_tmp_251)
+                    »));
+                    let port_tmp_254 = Up_fusion.EQ_MP;
+                    port_tmp_254(port_tmp_250)(port_tmp_249)
+                  »);
+                  let port_tmp_255 = bool_CONJ;
+                  port_tmp_255(port_tmp_248)(port_tmp_241)
+                »)
+              »;
+              (block:«
+                let port_tmp_256_pth:«
+                  Up_fusion.DEDUCT_ANTISYM_RULE(port_tmp_240_pth6)(port_tmp_234_pth3)
+                »;
+                (fun(th1):«
+                  (fun(th2):«
+                    (block:«
+                      let Pair(port_tmp_257_p1,port_tmp_258_q1):«
+                        Up_basics.dest_imp(Up_fusion.concl(th1))
+                      »;
+                      (block:«
+                        let port_tmp_259 = bool_CONJ(th1)(th2);
+                        let port_tmp_260 = Up_fusion.INST(PairList.cons(Pair(port_tmp_257_p1,port_tmp_227_p),PairList.cons(Pair(port_tmp_258_q1,port_tmp_228_q),PairList [])))(port_tmp_256_pth);
+                        let port_tmp_261 = Up_fusion.EQ_MP;
+                        port_tmp_261(port_tmp_260)(port_tmp_259)
+                      »)
+                    »)
+                  »)
+                »)
+              »)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+fun bool_ADD_ASSUM(tm):«
+  (fun(th):«
+    (block:«
+      let port_tmp_262 = Up_fusion.ASSUME(tm);
+      let port_tmp_263 = bool_DISCH(tm)(th);
+      let port_tmp_264 = bool_MP;
+      port_tmp_264(port_tmp_263)(port_tmp_262)
+    »)
+  »)
+»
+
+def bool_EQ_IMP_RULE:«
+  (block:«
+    let port_tmp_265_peq:«
+      Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]]")
+    »;
+    (block:«
+      let Pair(port_tmp_266_p,port_tmp_267_q):«
+        bool_dest_iff(port_tmp_265_peq)
+      »;
+      (block:«
+        let port_tmp_268_pth1:«
+          (block:«
+            let port_tmp_269 = (block:«
+              let port_tmp_270 = (block:«
+                let port_tmp_271 = Up_fusion.ASSUME(port_tmp_266_p);
+                let port_tmp_272 = Up_fusion.ASSUME(port_tmp_265_peq);
+                let port_tmp_273 = Up_fusion.EQ_MP;
+                port_tmp_273(port_tmp_272)(port_tmp_271)
+              »);
+              let port_tmp_274 = port_tmp_266_p;
+              let port_tmp_275 = bool_DISCH;
+              port_tmp_275(port_tmp_274)(port_tmp_270)
+            »);
+            let port_tmp_276 = port_tmp_265_peq;
+            let port_tmp_277 = bool_DISCH;
+            port_tmp_277(port_tmp_276)(port_tmp_269)
+          »)
+        »;
+        let port_tmp_278_pth2:«
+          (block:«
+            let port_tmp_279 = (block:«
+              let port_tmp_280 = (block:«
+                let port_tmp_281 = Up_fusion.ASSUME(port_tmp_267_q);
+                let port_tmp_282 = Up_equal.SYM(Up_fusion.ASSUME(port_tmp_265_peq));
+                let port_tmp_283 = Up_fusion.EQ_MP;
+                port_tmp_283(port_tmp_282)(port_tmp_281)
+              »);
+              let port_tmp_284 = port_tmp_267_q;
+              let port_tmp_285 = bool_DISCH;
+              port_tmp_285(port_tmp_284)(port_tmp_280)
+            »);
+            let port_tmp_286 = port_tmp_265_peq;
+            let port_tmp_287 = bool_DISCH;
+            port_tmp_287(port_tmp_286)(port_tmp_279)
+          »)
+        »;
+        (fun(th):«
+          (block:«
+            let Pair(port_tmp_288_l,port_tmp_289_r):«
+              bool_dest_iff(Up_fusion.concl(th))
+            »;
+            (block:«
+              let port_tmp_290 = (block:«
+                let port_tmp_291 = th;
+                let port_tmp_292 = Up_fusion.INST(PairList.cons(Pair(port_tmp_288_l,port_tmp_266_p),PairList.cons(Pair(port_tmp_289_r,port_tmp_267_q),PairList [])))(port_tmp_278_pth2);
+                let port_tmp_293 = bool_MP;
+                port_tmp_293(port_tmp_292)(port_tmp_291)
+              »);
+              let port_tmp_294 = (block:«
+                let port_tmp_295 = th;
+                let port_tmp_296 = Up_fusion.INST(PairList.cons(Pair(port_tmp_288_l,port_tmp_266_p),PairList.cons(Pair(port_tmp_289_r,port_tmp_267_q),PairList [])))(port_tmp_268_pth1);
+                let port_tmp_297 = bool_MP;
+                port_tmp_297(port_tmp_296)(port_tmp_295)
+              »);
+              Pair(port_tmp_294,port_tmp_290)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_IMP_TRANS:«
+  (block:«
+    let port_tmp_298_pq:«
+      Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]]")
+    »;
+    let port_tmp_299_qr:«
+      Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"r\",[\"Tyapp\",\"bool\",[]]]]")
+    »;
+    (block:«
+      let Pair(port_tmp_300_p,port_tmp_301_q):«
+        Up_basics.dest_imp(port_tmp_298_pq)
+      »;
+      let port_tmp_302_r:«
+        Up_fusion.rand(port_tmp_299_qr)
+      »;
+      (block:«
+        let port_tmp_303_pth:«
+          (block:«
+            let port_tmp_304 = (block:«
+              let port_tmp_305 = (block:«
+                let port_tmp_306 = Up_fusion.ASSUME(port_tmp_300_p);
+                let port_tmp_307 = Up_fusion.ASSUME(port_tmp_298_pq);
+                let port_tmp_308 = bool_MP;
+                port_tmp_308(port_tmp_307)(port_tmp_306)
+              »);
+              let port_tmp_309 = Up_fusion.ASSUME(port_tmp_299_qr);
+              let port_tmp_310 = bool_MP;
+              port_tmp_310(port_tmp_309)(port_tmp_305)
+            »);
+            let port_tmp_311 = PairList.cons(port_tmp_298_pq,PairList.cons(port_tmp_299_qr,PairList.cons(port_tmp_300_p,PairList [])));
+            let port_tmp_312 = bool_DISCH;
+            let port_tmp_313 = itlist;
+            port_tmp_313(port_tmp_312)(port_tmp_311)(port_tmp_304)
+          »)
+        »;
+        (fun(th1):«
+          (fun(th2):«
+            (block:«
+              let Pair(port_tmp_314_x,port_tmp_315_y):«
+                Up_basics.dest_imp(Up_fusion.concl(th1))
+              »;
+              let Pair(port_tmp_316_y_prime,port_tmp_317_z):«
+                Up_basics.dest_imp(Up_fusion.concl(th2))
+              »;
+              (block:«
+                if Host.hol_unequal(port_tmp_315_y)(port_tmp_316_y_prime)
+                | failwith("IMP_TRANS")
+                | (block:«
+                  let port_tmp_318 = th2;
+                  let port_tmp_319 = (block:«
+                    let port_tmp_320 = th1;
+                    let port_tmp_321 = Up_fusion.INST(PairList.cons(Pair(port_tmp_314_x,port_tmp_300_p),PairList.cons(Pair(port_tmp_315_y,port_tmp_301_q),PairList.cons(Pair(port_tmp_317_z,port_tmp_302_r),PairList []))))(port_tmp_303_pth);
+                    let port_tmp_322 = bool_MP;
+                    port_tmp_322(port_tmp_321)(port_tmp_320)
+                  »);
+                  let port_tmp_323 = bool_MP;
+                  port_tmp_323(port_tmp_319)(port_tmp_318)
+                »)
+              »)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_FORALL_DEF:«
+  Up_fusion.new_basic_definition(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]],[\"Abs\",[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]],[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]]],[\"Abs\",[\"Var\",\"x\",[\"Tyvar\",\"A\"]],[\"Const\",\"T\",[\"Tyapp\",\"bool\",[]]]]]]]"))
+»
+
+def bool_mk_forall:«
+  Up_basics.mk_binder("!")
+»
+
+fun bool_list_mk_forall(Pair(vs,bod)):«
+  (block:«
+    let port_tmp_324 = bod;
+    let port_tmp_325 = vs;
+    let port_tmp_326 = curry(bool_mk_forall);
+    let port_tmp_327 = itlist;
+    port_tmp_327(port_tmp_326)(port_tmp_325)(port_tmp_324)
+  »)
+»
+
+def bool_SPEC:«
+  (block:«
+    let port_tmp_328_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]]")
+    »;
+    let port_tmp_329_x:«
+      Host.expand_quote("[\"Var\",\"x\",[\"Tyvar\",\"A\"]]")
+    »;
+    (block:«
+      let port_tmp_330_pth:«
+        (block:«
+          let port_tmp_331_th1:«
+            (block:«
+              let port_tmp_332 = Up_fusion.ASSUME(Host.expand_quote("[\"Comb\",[\"Const\",\"!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]],[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]]]"));
+              let port_tmp_333 = Up_equal.AP_THM(bool_FORALL_DEF)(Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]]"));
+              let port_tmp_334 = Up_fusion.EQ_MP;
+              port_tmp_334(port_tmp_333)(port_tmp_332)
+            »)
+          »;
+          (block:«
+            let port_tmp_335_th2:«
+              (block:«
+                let port_tmp_336 = Host.expand_quote("[\"Var\",\"x\",[\"Tyvar\",\"A\"]]");
+                let port_tmp_337 = Up_equal.CONV_RULE(Up_equal.BETA_CONV)(port_tmp_331_th1);
+                let port_tmp_338 = Up_equal.AP_THM;
+                port_tmp_338(port_tmp_337)(port_tmp_336)
+              »)
+            »;
+            (block:«
+              let port_tmp_339_th3:«
+                (block:«
+                  let port_tmp_340 = port_tmp_335_th2;
+                  let port_tmp_341 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+                  let port_tmp_342 = Up_equal.CONV_RULE;
+                  port_tmp_342(port_tmp_341)(port_tmp_340)
+                »)
+              »;
+              bool_DISCH_ALL(bool_EQT_ELIM(port_tmp_339_th3))
+            »)
+          »)
+        »)
+      »;
+      (fun(tm):«
+        (fun(th):«
+          (block:«
+            try:«
+              (block:«
+                let port_tmp_343_abs:«
+                  Up_fusion.rand(Up_fusion.concl(th))
+                »;
+                (block:«
+                  let port_tmp_344 = (block:«
+                    let port_tmp_345 = th;
+                    let port_tmp_346 = (block:«
+                      let port_tmp_347 = port_tmp_330_pth;
+                      let port_tmp_348 = PairList.cons(Pair(port_tmp_343_abs,port_tmp_328_P),PairList.cons(Pair(tm,port_tmp_329_x),PairList []));
+                      let port_tmp_349 = (block:«
+                        let port_tmp_350 = PairList [];
+                        let port_tmp_351 = (block:«
+                          let port_tmp_352 = Up_fusion.aty;
+                          let port_tmp_353 = snd(Up_fusion.dest_var(Up_basics.bndvar(port_tmp_343_abs)));
+                          Pair(port_tmp_353,port_tmp_352)
+                        »);
+                        PairList.cons(port_tmp_351,port_tmp_350)
+                      »);
+                      let port_tmp_354 = bool_PINST;
+                      port_tmp_354(port_tmp_349)(port_tmp_348)(port_tmp_347)
+                    »);
+                    let port_tmp_355 = bool_MP;
+                    port_tmp_355(port_tmp_346)(port_tmp_345)
+                  »);
+                  let port_tmp_356 = Up_equal.BETA_CONV;
+                  let port_tmp_357 = Up_equal.CONV_RULE;
+                  port_tmp_357(port_tmp_356)(port_tmp_344)
+                »)
+              »);
+              ~catch port_tmp_358:«
+                let port_tmp_359 = port_tmp_358;
+                match port_tmp_359
+                | Failure(_):«
+                    failwith("SPEC")
+                »
+                | port_tmp_358:«
+                    Host.hol_raise(port_tmp_358)
+                »
+              »
+            »
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+fun bool_SPECL(tms):«
+  (fun(th):«
+    (block:«
+      try:«
+        rev_itlist(bool_SPEC)(tms)(th);
+        ~catch port_tmp_360:«
+          let port_tmp_361 = port_tmp_360;
+          match port_tmp_361
+          | Failure(_):«
+              failwith("SPECL")
+          »
+          | port_tmp_360:«
+              Host.hol_raise(port_tmp_360)
+          »
+        »
+      »
+    »)
+  »)
+»
+
+fun bool_SPEC_VAR(th):«
+  (block:«
+    let port_tmp_362_bv:«
+      (block:«
+        let port_tmp_363 = Up_basics.bndvar(Up_fusion.rand(Up_fusion.concl(th)));
+        let port_tmp_364 = Up_basics.thm_frees(th);
+        let port_tmp_365 = Up_fusion.variant;
+        port_tmp_365(port_tmp_364)(port_tmp_363)
+      »)
+    »;
+    (block:«
+      let port_tmp_366 = bool_SPEC(port_tmp_362_bv)(th);
+      let port_tmp_367 = port_tmp_362_bv;
+      Pair(port_tmp_367,port_tmp_366)
+    »)
+  »)
+»
+
+fun bool_SPEC_ALL(th):«
+  (block:«
+    if Up_basics.is_forall(Up_fusion.concl(th))
+    | bool_SPEC_ALL(snd(bool_SPEC_VAR(th)))
+    | th
+  »)
+»
+
+fun bool_ISPEC(t):«
+  (fun(th):«
+    (block:«
+      let Pair(port_tmp_368_x,_):«
+        (block:«
+          try:«
+            Up_basics.dest_forall(Up_fusion.concl(th));
+            ~catch port_tmp_369:«
+              let port_tmp_370 = port_tmp_369;
+              match port_tmp_370
+              | Failure(_):«
+                  failwith("ISPEC: input theorem not universally quantified")
+              »
+              | port_tmp_369:«
+                  Host.hol_raise(port_tmp_369)
+              »
+            »
+          »
+        »)
+      »;
+      (block:«
+        let port_tmp_371_tyins:«
+          (block:«
+            try:«
+              (block:«
+                let port_tmp_372 = PairList [];
+                let port_tmp_373 = Up_fusion.type_of(t);
+                let port_tmp_374 = snd(Up_fusion.dest_var(port_tmp_368_x));
+                let port_tmp_375 = Up_basics.type_match;
+                port_tmp_375(port_tmp_374)(port_tmp_373)(port_tmp_372)
+              »);
+              ~catch port_tmp_376:«
+                let port_tmp_377 = port_tmp_376;
+                match port_tmp_377
+                | Failure(_):«
+                    failwith("ISPEC can't type-instantiate input theorem")
+                »
+                | port_tmp_376:«
+                    Host.hol_raise(port_tmp_376)
+                »
+              »
+            »
+          »)
+        »;
+        (block:«
+          try:«
+            (block:«
+              let port_tmp_378 = Up_fusion.INST_TYPE(port_tmp_371_tyins)(th);
+              let port_tmp_379 = t;
+              let port_tmp_380 = bool_SPEC;
+              port_tmp_380(port_tmp_379)(port_tmp_378)
+            »);
+            ~catch port_tmp_381:«
+              let port_tmp_382 = port_tmp_381;
+              match port_tmp_382
+              | Failure(_):«
+                  failwith("ISPEC: type variable(s) free in assumptions")
+              »
+              | port_tmp_381:«
+                  Host.hol_raise(port_tmp_381)
+              »
+            »
+          »
+        »)
+      »)
+    »)
+  »)
+»
+
+fun bool_ISPECL(tms):«
+  (fun(th):«
+    (block:«
+      try:«
+        (block:«
+          if Host.hol_equal(tms)(PairList [])
+          | th
+          | (block:«
+            let port_tmp_383_avs:«
+              fst((block:«
+                let port_tmp_384 = fst(Up_basics.strip_forall(Up_fusion.concl(th)));
+                let port_tmp_385 = length(tms);
+                let port_tmp_386 = Host.chop_list;
+                port_tmp_386(port_tmp_385)(port_tmp_384)
+              »))
+            »;
+            (block:«
+              let port_tmp_387_tyins:«
+                (block:«
+                  let port_tmp_388 = PairList [];
+                  let port_tmp_389 = map(Up_fusion.type_of)(tms);
+                  let port_tmp_390 = (block:«
+                    let port_tmp_391 = port_tmp_383_avs;
+                    let port_tmp_392 = o(snd)(Up_fusion.dest_var);
+                    let port_tmp_393 = map;
+                    port_tmp_393(port_tmp_392)(port_tmp_391)
+                  »);
+                  let port_tmp_394 = Up_basics.type_match;
+                  let port_tmp_395 = itlist2;
+                  port_tmp_395(port_tmp_394)(port_tmp_390)(port_tmp_389)(port_tmp_388)
+                »)
+              »;
+              (block:«
+                let port_tmp_396 = Up_fusion.INST_TYPE(port_tmp_387_tyins)(th);
+                let port_tmp_397 = tms;
+                let port_tmp_398 = bool_SPECL;
+                port_tmp_398(port_tmp_397)(port_tmp_396)
+              »)
+            »)
+          »)
+        »);
+        ~catch port_tmp_399:«
+          let port_tmp_400 = port_tmp_399;
+          match port_tmp_400
+          | Failure(_):«
+              failwith("ISPECL")
+          »
+          | port_tmp_399:«
+              Host.hol_raise(port_tmp_399)
+          »
+        »
+      »
+    »)
+  »)
+»
+
+def bool_GEN:«
+  (block:«
+    let port_tmp_401_pth:«
+      Up_equal.SYM((block:«
+        let port_tmp_402 = Up_equal.AP_THM(bool_FORALL_DEF)(Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]]"));
+        let port_tmp_403 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+        let port_tmp_404 = Up_equal.CONV_RULE;
+        port_tmp_404(port_tmp_403)(port_tmp_402)
+      »))
+    »;
+    (fun(x):«
+      (block:«
+        let port_tmp_405_qth:«
+          (block:«
+            let port_tmp_406 = port_tmp_401_pth;
+            let port_tmp_407 = (block:«
+              let port_tmp_408 = PairList [];
+              let port_tmp_409 = (block:«
+                let port_tmp_410 = Up_fusion.aty;
+                let port_tmp_411 = snd(Up_fusion.dest_var(x));
+                Pair(port_tmp_411,port_tmp_410)
+              »);
+              PairList.cons(port_tmp_409,port_tmp_408)
+            »);
+            let port_tmp_412 = Up_fusion.INST_TYPE;
+            port_tmp_412(port_tmp_407)(port_tmp_406)
+          »)
+        »;
+        (block:«
+          let port_tmp_413_ptm:«
+            Up_fusion.rand(Up_fusion.rand(Up_fusion.concl(port_tmp_405_qth)))
+          »;
+          (fun(th):«
+            (block:«
+              let port_tmp_414_th_prime:«
+                (block:«
+                  let port_tmp_415 = bool_EQT_INTRO(th);
+                  let port_tmp_416 = x;
+                  let port_tmp_417 = Up_fusion.ABS;
+                  port_tmp_417(port_tmp_416)(port_tmp_415)
+                »)
+              »;
+              (block:«
+                let port_tmp_418_phi:«
+                  Up_equal.lhand(Up_fusion.concl(port_tmp_414_th_prime))
+                »;
+                (block:«
+                  let port_tmp_419_rth:«
+                    Up_fusion.INST(PairList.cons(Pair(port_tmp_418_phi,port_tmp_413_ptm),PairList []))(port_tmp_405_qth)
+                  »;
+                  Up_fusion.EQ_MP(port_tmp_419_rth)(port_tmp_414_th_prime)
+                »)
+              »)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_GENL:«
+  itlist(bool_GEN)
+»
+
+fun bool_GEN_ALL(th):«
+  (block:«
+    let Pair(port_tmp_420_asl,port_tmp_421_c):«
+      Up_fusion.dest_thm(th)
+    »;
+    (block:«
+      let port_tmp_422_vars:«
+        (block:«
+          let port_tmp_423 = Up_fusion.freesl(port_tmp_420_asl);
+          let port_tmp_424 = Up_fusion.frees(port_tmp_421_c);
+          let port_tmp_425 = subtract;
+          port_tmp_425(port_tmp_424)(port_tmp_423)
+        »)
+      »;
+      bool_GENL(port_tmp_422_vars)(th)
+    »)
+  »)
+»
+
+def bool_EXISTS_DEF:«
+  Up_fusion.new_basic_definition(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"?\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]],[\"Abs\",[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]],[\"Comb\",[\"Const\",\"!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]],[\"Abs\",[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]],[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Const\",\"!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]],[\"Abs\",[\"Var\",\"x\",[\"Tyvar\",\"A\"]],[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]],[\"Var\",\"x\",[\"Tyvar\",\"A\"]]]],[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]]]]]]"))
+»
+
+def bool_mk_exists:«
+  Up_basics.mk_binder("?")
+»
+
+fun bool_list_mk_exists(Pair(vs,bod)):«
+  (block:«
+    let port_tmp_426 = bod;
+    let port_tmp_427 = vs;
+    let port_tmp_428 = curry(bool_mk_exists);
+    let port_tmp_429 = itlist;
+    port_tmp_429(port_tmp_428)(port_tmp_427)(port_tmp_426)
+  »)
+»
+
+def bool_EXISTS:«
+  (block:«
+    let port_tmp_430_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]]")
+    »;
+    let port_tmp_431_x:«
+      Host.expand_quote("[\"Var\",\"x\",[\"Tyvar\",\"A\"]]")
+    »;
+    (block:«
+      let port_tmp_432_pth:«
+        (block:«
+          let port_tmp_433_th1:«
+            (block:«
+              let port_tmp_434 = Up_equal.AP_THM(bool_EXISTS_DEF)(port_tmp_430_P);
+              let port_tmp_435 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+              let port_tmp_436 = Up_equal.CONV_RULE;
+              port_tmp_436(port_tmp_435)(port_tmp_434)
+            »)
+          »;
+          (block:«
+            let port_tmp_437_th2:«
+              (block:«
+                let port_tmp_438 = Up_fusion.ASSUME(Host.expand_quote("[\"Comb\",[\"Const\",\"!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]],[\"Abs\",[\"Var\",\"x\",[\"Tyvar\",\"A\"]],[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]],[\"Var\",\"x\",[\"Tyvar\",\"A\"]]]],[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]]]]"));
+                let port_tmp_439 = Host.expand_quote("[\"Var\",\"x\",[\"Tyvar\",\"A\"]]");
+                let port_tmp_440 = bool_SPEC;
+                port_tmp_440(port_tmp_439)(port_tmp_438)
+              »)
+            »;
+            (block:«
+              let port_tmp_441_th3:«
+                (block:«
+                  let port_tmp_442 = (block:«
+                    let port_tmp_443 = Up_fusion.ASSUME(Host.expand_quote("[\"Comb\",[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]],[\"Var\",\"x\",[\"Tyvar\",\"A\"]]]"));
+                    let port_tmp_444 = port_tmp_437_th2;
+                    let port_tmp_445 = bool_MP;
+                    port_tmp_445(port_tmp_444)(port_tmp_443)
+                  »);
+                  let port_tmp_446 = Host.expand_quote("[\"Comb\",[\"Const\",\"!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]],[\"Abs\",[\"Var\",\"x\",[\"Tyvar\",\"A\"]],[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]],[\"Var\",\"x\",[\"Tyvar\",\"A\"]]]],[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]]]]");
+                  let port_tmp_447 = bool_DISCH;
+                  port_tmp_447(port_tmp_446)(port_tmp_442)
+                »)
+              »;
+              (block:«
+                let port_tmp_448 = bool_GEN(Host.expand_quote("[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]"))(port_tmp_441_th3);
+                let port_tmp_449 = Up_equal.SYM(port_tmp_433_th1);
+                let port_tmp_450 = Up_fusion.EQ_MP;
+                port_tmp_450(port_tmp_449)(port_tmp_448)
+              »)
+            »)
+          »)
+        »)
+      »;
+      (fun(Pair(etm,stm)):«
+        (fun(th):«
+          (block:«
+            try:«
+              (block:«
+                let Pair(port_tmp_451_qf,port_tmp_452_abs):«
+                  Up_fusion.dest_comb(etm)
+                »;
+                (block:«
+                  let port_tmp_453_bth:«
+                    Up_equal.BETA_CONV(Up_fusion.mk_comb(Pair(port_tmp_452_abs,stm)))
+                  »;
+                  (block:«
+                    let port_tmp_454_cth:«
+                      (block:«
+                        let port_tmp_455 = port_tmp_432_pth;
+                        let port_tmp_456 = PairList.cons(Pair(port_tmp_452_abs,port_tmp_430_P),PairList.cons(Pair(stm,port_tmp_431_x),PairList []));
+                        let port_tmp_457 = (block:«
+                          let port_tmp_458 = PairList [];
+                          let port_tmp_459 = (block:«
+                            let port_tmp_460 = Up_fusion.aty;
+                            let port_tmp_461 = Up_fusion.type_of(stm);
+                            Pair(port_tmp_461,port_tmp_460)
+                          »);
+                          PairList.cons(port_tmp_459,port_tmp_458)
+                        »);
+                        let port_tmp_462 = bool_PINST;
+                        port_tmp_462(port_tmp_457)(port_tmp_456)(port_tmp_455)
+                      »)
+                    »;
+                    (block:«
+                      let port_tmp_463 = port_tmp_454_cth;
+                      let port_tmp_464 = (block:«
+                        let port_tmp_465 = th;
+                        let port_tmp_466 = Up_equal.SYM(port_tmp_453_bth);
+                        let port_tmp_467 = Up_fusion.EQ_MP;
+                        port_tmp_467(port_tmp_466)(port_tmp_465)
+                      »);
+                      let port_tmp_468 = bool_PROVE_HYP;
+                      port_tmp_468(port_tmp_464)(port_tmp_463)
+                    »)
+                  »)
+                »)
+              »);
+              ~catch port_tmp_469:«
+                let port_tmp_470 = port_tmp_469;
+                match port_tmp_470
+                | Failure(_):«
+                    failwith("EXISTS")
+                »
+                | port_tmp_469:«
+                    Host.hol_raise(port_tmp_469)
+                »
+              »
+            »
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+fun bool_SIMPLE_EXISTS(v):«
+  (fun(th):«
+    (block:«
+      let port_tmp_471 = th;
+      let port_tmp_472 = (block:«
+        let port_tmp_473 = v;
+        let port_tmp_474 = bool_mk_exists((block:«
+          let port_tmp_475 = Up_fusion.concl(th);
+          let port_tmp_476 = v;
+          Pair(port_tmp_476,port_tmp_475)
+        »));
+        Pair(port_tmp_474,port_tmp_473)
+      »);
+      let port_tmp_477 = bool_EXISTS;
+      port_tmp_477(port_tmp_472)(port_tmp_471)
+    »)
+  »)
+»
+
+def bool_CHOOSE:«
+  (block:«
+    let port_tmp_478_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]]")
+    »;
+    let port_tmp_479_Q:«
+      Host.expand_quote("[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_480_pth:«
+        (block:«
+          let port_tmp_481_th1:«
+            (block:«
+              let port_tmp_482 = Up_equal.AP_THM(bool_EXISTS_DEF)(port_tmp_478_P);
+              let port_tmp_483 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+              let port_tmp_484 = Up_equal.CONV_RULE;
+              port_tmp_484(port_tmp_483)(port_tmp_482)
+            »)
+          »;
+          (block:«
+            let port_tmp_485_th2:«
+              (block:«
+                let port_tmp_486 = bool_UNDISCH(fst(bool_EQ_IMP_RULE(port_tmp_481_th1)));
+                let port_tmp_487 = Host.expand_quote("[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]");
+                let port_tmp_488 = bool_SPEC;
+                port_tmp_488(port_tmp_487)(port_tmp_486)
+              »)
+            »;
+            bool_DISCH_ALL((block:«
+              let port_tmp_489 = bool_UNDISCH(port_tmp_485_th2);
+              let port_tmp_490 = Host.expand_quote("[\"Comb\",[\"Const\",\"?\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]],[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]]]");
+              let port_tmp_491 = bool_DISCH;
+              port_tmp_491(port_tmp_490)(port_tmp_489)
+            »))
+          »)
+        »)
+      »;
+      (fun(Pair(v,th1)):«
+        (fun(th2):«
+          (block:«
+            try:«
+              (block:«
+                let port_tmp_492_abs:«
+                  Up_fusion.rand(Up_fusion.concl(th1))
+                »;
+                (block:«
+                  let Pair(port_tmp_493_bv,port_tmp_494_bod):«
+                    Up_fusion.dest_abs(port_tmp_492_abs)
+                  »;
+                  (block:«
+                    let port_tmp_495_cmb:«
+                      Up_fusion.mk_comb(Pair(port_tmp_492_abs,v))
+                    »;
+                    (block:«
+                      let port_tmp_496_pat:«
+                        Up_fusion.vsubst(PairList.cons(Pair(v,port_tmp_493_bv),PairList []))(port_tmp_494_bod)
+                      »;
+                      (block:«
+                        let port_tmp_497_th3:«
+                          (block:«
+                            let port_tmp_498 = Up_fusion.ASSUME(port_tmp_495_cmb);
+                            let port_tmp_499 = Up_equal.BETA_CONV;
+                            let port_tmp_500 = Up_equal.CONV_RULE;
+                            port_tmp_500(port_tmp_499)(port_tmp_498)
+                          »)
+                        »;
+                        (block:«
+                          let port_tmp_501_th4:«
+                            (block:«
+                              let port_tmp_502 = (block:«
+                                let port_tmp_503 = (block:«
+                                  let port_tmp_504 = port_tmp_497_th3;
+                                  let port_tmp_505 = bool_DISCH(port_tmp_496_pat)(th2);
+                                  let port_tmp_506 = bool_MP;
+                                  port_tmp_506(port_tmp_505)(port_tmp_504)
+                                »);
+                                let port_tmp_507 = port_tmp_495_cmb;
+                                let port_tmp_508 = bool_DISCH;
+                                port_tmp_508(port_tmp_507)(port_tmp_503)
+                              »);
+                              let port_tmp_509 = v;
+                              let port_tmp_510 = bool_GEN;
+                              port_tmp_510(port_tmp_509)(port_tmp_502)
+                            »)
+                          »;
+                          (block:«
+                            let port_tmp_511_th5:«
+                              (block:«
+                                let port_tmp_512 = port_tmp_480_pth;
+                                let port_tmp_513 = (block:«
+                                  let port_tmp_514 = (block:«
+                                    let port_tmp_515 = PairList [];
+                                    let port_tmp_516 = (block:«
+                                      let port_tmp_517 = port_tmp_479_Q;
+                                      let port_tmp_518 = Up_fusion.concl(th2);
+                                      Pair(port_tmp_518,port_tmp_517)
+                                    »);
+                                    PairList.cons(port_tmp_516,port_tmp_515)
+                                  »);
+                                  let port_tmp_519 = Pair(port_tmp_492_abs,port_tmp_478_P);
+                                  PairList.cons(port_tmp_519,port_tmp_514)
+                                »);
+                                let port_tmp_520 = (block:«
+                                  let port_tmp_521 = PairList [];
+                                  let port_tmp_522 = (block:«
+                                    let port_tmp_523 = Up_fusion.aty;
+                                    let port_tmp_524 = snd(Up_fusion.dest_var(v));
+                                    Pair(port_tmp_524,port_tmp_523)
+                                  »);
+                                  PairList.cons(port_tmp_522,port_tmp_521)
+                                »);
+                                let port_tmp_525 = bool_PINST;
+                                port_tmp_525(port_tmp_520)(port_tmp_513)(port_tmp_512)
+                              »)
+                            »;
+                            (block:«
+                              let port_tmp_526 = th1;
+                              let port_tmp_527 = bool_MP(port_tmp_511_th5)(port_tmp_501_th4);
+                              let port_tmp_528 = bool_MP;
+                              port_tmp_528(port_tmp_527)(port_tmp_526)
+                            »)
+                          »)
+                        »)
+                      »)
+                    »)
+                  »)
+                »)
+              »);
+              ~catch port_tmp_529:«
+                let port_tmp_530 = port_tmp_529;
+                match port_tmp_530
+                | Failure(_):«
+                    failwith("CHOOSE")
+                »
+                | port_tmp_529:«
+                    Host.hol_raise(port_tmp_529)
+                »
+              »
+            »
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+fun bool_SIMPLE_CHOOSE(v):«
+  (fun(th):«
+    (block:«
+      let port_tmp_531 = th;
+      let port_tmp_532 = (block:«
+        let port_tmp_533 = Up_fusion.ASSUME(bool_mk_exists((block:«
+          let port_tmp_534 = hd(Up_fusion.hyp(th));
+          let port_tmp_535 = v;
+          Pair(port_tmp_535,port_tmp_534)
+        »)));
+        let port_tmp_536 = v;
+        Pair(port_tmp_536,port_tmp_533)
+      »);
+      let port_tmp_537 = bool_CHOOSE;
+      port_tmp_537(port_tmp_532)(port_tmp_531)
+    »)
+  »)
+»
+
+def bool_OR_DEF:«
+  Up_fusion.new_basic_definition(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"\\\\/\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]]],[\"Abs\",[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]],[\"Abs\",[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]],[\"Comb\",[\"Const\",\"!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]],[\"Abs\",[\"Var\",\"r\",[\"Tyapp\",\"bool\",[]]],[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"r\",[\"Tyapp\",\"bool\",[]]]]],[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"q\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"r\",[\"Tyapp\",\"bool\",[]]]]],[\"Var\",\"r\",[\"Tyapp\",\"bool\",[]]]]]]]]]]"))
+»
+
+def bool_mk_disj:«
+  Up_basics.mk_binary("\\/")
+»
+
+def bool_list_mk_disj:«
+  end_itlist(curry(bool_mk_disj))
+»
+
+def bool_DISJ1:«
+  (block:«
+    let port_tmp_538_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    let port_tmp_539_Q:«
+      Host.expand_quote("[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_540_pth:«
+        (block:«
+          let port_tmp_541_th1:«
+            (block:«
+              let port_tmp_542 = Up_equal.AP_THM(bool_OR_DEF)(Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]"));
+              let port_tmp_543 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+              let port_tmp_544 = Up_equal.CONV_RULE;
+              port_tmp_544(port_tmp_543)(port_tmp_542)
+            »)
+          »;
+          (block:«
+            let port_tmp_545_th2:«
+              (block:«
+                let port_tmp_546 = Up_equal.AP_THM(port_tmp_541_th1)(Host.expand_quote("[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]"));
+                let port_tmp_547 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+                let port_tmp_548 = Up_equal.CONV_RULE;
+                port_tmp_548(port_tmp_547)(port_tmp_546)
+              »)
+            »;
+            (block:«
+              let port_tmp_549_th3:«
+                (block:«
+                  let port_tmp_550 = Up_fusion.ASSUME(Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]"));
+                  let port_tmp_551 = Up_fusion.ASSUME(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"t\",[\"Tyapp\",\"bool\",[]]]]"));
+                  let port_tmp_552 = bool_MP;
+                  port_tmp_552(port_tmp_551)(port_tmp_550)
+                »)
+              »;
+              (block:«
+                let port_tmp_553_th4:«
+                  (block:«
+                    let port_tmp_554 = (block:«
+                      let port_tmp_555 = bool_DISCH(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"t\",[\"Tyapp\",\"bool\",[]]]]"))(port_tmp_549_th3);
+                      let port_tmp_556 = Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"t\",[\"Tyapp\",\"bool\",[]]]]");
+                      let port_tmp_557 = bool_DISCH;
+                      port_tmp_557(port_tmp_556)(port_tmp_555)
+                    »);
+                    let port_tmp_558 = Host.expand_quote("[\"Var\",\"t\",[\"Tyapp\",\"bool\",[]]]");
+                    let port_tmp_559 = bool_GEN;
+                    port_tmp_559(port_tmp_558)(port_tmp_554)
+                  »)
+                »;
+                (block:«
+                  let port_tmp_560 = port_tmp_553_th4;
+                  let port_tmp_561 = Up_equal.SYM(port_tmp_545_th2);
+                  let port_tmp_562 = Up_fusion.EQ_MP;
+                  port_tmp_562(port_tmp_561)(port_tmp_560)
+                »)
+              »)
+            »)
+          »)
+        »)
+      »;
+      (fun(th):«
+        (fun(tm):«
+          (block:«
+            try:«
+              (block:«
+                let port_tmp_563 = th;
+                let port_tmp_564 = (block:«
+                  let port_tmp_565 = (block:«
+                    let port_tmp_566 = port_tmp_540_pth;
+                    let port_tmp_567 = (block:«
+                      let port_tmp_568 = PairList.cons(Pair(tm,port_tmp_539_Q),PairList []);
+                      let port_tmp_569 = (block:«
+                        let port_tmp_570 = port_tmp_538_P;
+                        let port_tmp_571 = Up_fusion.concl(th);
+                        Pair(port_tmp_571,port_tmp_570)
+                      »);
+                      PairList.cons(port_tmp_569,port_tmp_568)
+                    »);
+                    let port_tmp_572 = Up_fusion.INST;
+                    port_tmp_572(port_tmp_567)(port_tmp_566)
+                  »);
+                  let port_tmp_573 = th;
+                  let port_tmp_574 = Up_fusion.DEDUCT_ANTISYM_RULE;
+                  port_tmp_574(port_tmp_573)(port_tmp_565)
+                »);
+                let port_tmp_575 = Up_fusion.EQ_MP;
+                port_tmp_575(port_tmp_564)(port_tmp_563)
+              »);
+              ~catch port_tmp_576:«
+                let port_tmp_577 = port_tmp_576;
+                match port_tmp_577
+                | Failure(_):«
+                    failwith("DISJ1")
+                »
+                | port_tmp_576:«
+                    Host.hol_raise(port_tmp_576)
+                »
+              »
+            »
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_DISJ2:«
+  (block:«
+    let port_tmp_578_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    let port_tmp_579_Q:«
+      Host.expand_quote("[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_580_pth:«
+        (block:«
+          let port_tmp_581_th1:«
+            (block:«
+              let port_tmp_582 = Up_equal.AP_THM(bool_OR_DEF)(Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]"));
+              let port_tmp_583 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+              let port_tmp_584 = Up_equal.CONV_RULE;
+              port_tmp_584(port_tmp_583)(port_tmp_582)
+            »)
+          »;
+          (block:«
+            let port_tmp_585_th2:«
+              (block:«
+                let port_tmp_586 = Up_equal.AP_THM(port_tmp_581_th1)(Host.expand_quote("[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]"));
+                let port_tmp_587 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+                let port_tmp_588 = Up_equal.CONV_RULE;
+                port_tmp_588(port_tmp_587)(port_tmp_586)
+              »)
+            »;
+            (block:«
+              let port_tmp_589_th3:«
+                (block:«
+                  let port_tmp_590 = Up_fusion.ASSUME(Host.expand_quote("[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]"));
+                  let port_tmp_591 = Up_fusion.ASSUME(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"t\",[\"Tyapp\",\"bool\",[]]]]"));
+                  let port_tmp_592 = bool_MP;
+                  port_tmp_592(port_tmp_591)(port_tmp_590)
+                »)
+              »;
+              (block:«
+                let port_tmp_593_th4:«
+                  (block:«
+                    let port_tmp_594 = (block:«
+                      let port_tmp_595 = bool_DISCH(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"t\",[\"Tyapp\",\"bool\",[]]]]"))(port_tmp_589_th3);
+                      let port_tmp_596 = Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"t\",[\"Tyapp\",\"bool\",[]]]]");
+                      let port_tmp_597 = bool_DISCH;
+                      port_tmp_597(port_tmp_596)(port_tmp_595)
+                    »);
+                    let port_tmp_598 = Host.expand_quote("[\"Var\",\"t\",[\"Tyapp\",\"bool\",[]]]");
+                    let port_tmp_599 = bool_GEN;
+                    port_tmp_599(port_tmp_598)(port_tmp_594)
+                  »)
+                »;
+                (block:«
+                  let port_tmp_600 = port_tmp_593_th4;
+                  let port_tmp_601 = Up_equal.SYM(port_tmp_585_th2);
+                  let port_tmp_602 = Up_fusion.EQ_MP;
+                  port_tmp_602(port_tmp_601)(port_tmp_600)
+                »)
+              »)
+            »)
+          »)
+        »)
+      »;
+      (fun(tm):«
+        (fun(th):«
+          (block:«
+            try:«
+              (block:«
+                let port_tmp_603 = th;
+                let port_tmp_604 = (block:«
+                  let port_tmp_605 = (block:«
+                    let port_tmp_606 = port_tmp_580_pth;
+                    let port_tmp_607 = (block:«
+                      let port_tmp_608 = (block:«
+                        let port_tmp_609 = PairList [];
+                        let port_tmp_610 = (block:«
+                          let port_tmp_611 = port_tmp_579_Q;
+                          let port_tmp_612 = Up_fusion.concl(th);
+                          Pair(port_tmp_612,port_tmp_611)
+                        »);
+                        PairList.cons(port_tmp_610,port_tmp_609)
+                      »);
+                      let port_tmp_613 = Pair(tm,port_tmp_578_P);
+                      PairList.cons(port_tmp_613,port_tmp_608)
+                    »);
+                    let port_tmp_614 = Up_fusion.INST;
+                    port_tmp_614(port_tmp_607)(port_tmp_606)
+                  »);
+                  let port_tmp_615 = th;
+                  let port_tmp_616 = Up_fusion.DEDUCT_ANTISYM_RULE;
+                  port_tmp_616(port_tmp_615)(port_tmp_605)
+                »);
+                let port_tmp_617 = Up_fusion.EQ_MP;
+                port_tmp_617(port_tmp_604)(port_tmp_603)
+              »);
+              ~catch port_tmp_618:«
+                let port_tmp_619 = port_tmp_618;
+                match port_tmp_619
+                | Failure(_):«
+                    failwith("DISJ2")
+                »
+                | port_tmp_618:«
+                    Host.hol_raise(port_tmp_618)
+                »
+              »
+            »
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_DISJ_CASES:«
+  (block:«
+    let port_tmp_620_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    let port_tmp_621_Q:«
+      Host.expand_quote("[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    let port_tmp_622_R:«
+      Host.expand_quote("[\"Var\",\"R\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_623_pth:«
+        (block:«
+          let port_tmp_624_th1:«
+            (block:«
+              let port_tmp_625 = Up_equal.AP_THM(bool_OR_DEF)(Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]"));
+              let port_tmp_626 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+              let port_tmp_627 = Up_equal.CONV_RULE;
+              port_tmp_627(port_tmp_626)(port_tmp_625)
+            »)
+          »;
+          (block:«
+            let port_tmp_628_th2:«
+              (block:«
+                let port_tmp_629 = Up_equal.AP_THM(port_tmp_624_th1)(Host.expand_quote("[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]"));
+                let port_tmp_630 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+                let port_tmp_631 = Up_equal.CONV_RULE;
+                port_tmp_631(port_tmp_630)(port_tmp_629)
+              »)
+            »;
+            (block:«
+              let port_tmp_632_th3:«
+                (block:«
+                  let port_tmp_633 = (block:«
+                    let port_tmp_634 = Up_fusion.ASSUME(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"\\\\/\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]],[\"Var\",\"Q\",[\"Tyapp\",\"bool\",[]]]]"));
+                    let port_tmp_635 = port_tmp_628_th2;
+                    let port_tmp_636 = Up_fusion.EQ_MP;
+                    port_tmp_636(port_tmp_635)(port_tmp_634)
+                  »);
+                  let port_tmp_637 = Host.expand_quote("[\"Var\",\"R\",[\"Tyapp\",\"bool\",[]]]");
+                  let port_tmp_638 = bool_SPEC;
+                  port_tmp_638(port_tmp_637)(port_tmp_633)
+                »)
+              »;
+              bool_UNDISCH(bool_UNDISCH(port_tmp_632_th3))
+            »)
+          »)
+        »)
+      »;
+      (fun(th0):«
+        (fun(th1):«
+          (fun(th2):«
+            (block:«
+              try:«
+                (block:«
+                  let port_tmp_639_c1:«
+                    Up_fusion.concl(th1)
+                  »;
+                  let port_tmp_640_c2:«
+                    Up_fusion.concl(th2)
+                  »;
+                  (block:«
+                    if Host.hol_not(Up_fusion.aconv(port_tmp_639_c1)(port_tmp_640_c2))
+                    | failwith("DISJ_CASES")
+                    | (block:«
+                      let Pair(port_tmp_641_l,port_tmp_642_r):«
+                        Up_basics.dest_disj(Up_fusion.concl(th0))
+                      »;
+                      (block:«
+                        let port_tmp_643_th:«
+                          Up_fusion.INST(PairList.cons(Pair(port_tmp_641_l,port_tmp_620_P),PairList.cons(Pair(port_tmp_642_r,port_tmp_621_Q),PairList.cons(Pair(port_tmp_639_c1,port_tmp_622_R),PairList []))))(port_tmp_623_pth)
+                        »;
+                        (block:«
+                          let port_tmp_644 = (block:«
+                            let port_tmp_645 = (block:«
+                              let port_tmp_646 = th0;
+                              let port_tmp_647 = Up_fusion.DEDUCT_ANTISYM_RULE(th0)(port_tmp_643_th);
+                              let port_tmp_648 = Up_fusion.EQ_MP;
+                              port_tmp_648(port_tmp_647)(port_tmp_646)
+                            »);
+                            let port_tmp_649 = bool_DISCH(port_tmp_641_l)(th1);
+                            let port_tmp_650 = bool_PROVE_HYP;
+                            port_tmp_650(port_tmp_649)(port_tmp_645)
+                          »);
+                          let port_tmp_651 = bool_DISCH(port_tmp_642_r)(th2);
+                          let port_tmp_652 = bool_PROVE_HYP;
+                          port_tmp_652(port_tmp_651)(port_tmp_644)
+                        »)
+                      »)
+                    »)
+                  »)
+                »);
+                ~catch port_tmp_653:«
+                  let port_tmp_654 = port_tmp_653;
+                  match port_tmp_654
+                  | Failure(_):«
+                      failwith("DISJ_CASES")
+                  »
+                  | port_tmp_653:«
+                      Host.hol_raise(port_tmp_653)
+                  »
+                »
+              »
+            »)
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+fun bool_SIMPLE_DISJ_CASES(th1):«
+  (fun(th2):«
+    (block:«
+      let port_tmp_655 = th2;
+      let port_tmp_656 = th1;
+      let port_tmp_657 = Up_fusion.ASSUME(bool_mk_disj((block:«
+        let port_tmp_658 = hd(Up_fusion.hyp(th2));
+        let port_tmp_659 = hd(Up_fusion.hyp(th1));
+        Pair(port_tmp_659,port_tmp_658)
+      »)));
+      let port_tmp_660 = bool_DISJ_CASES;
+      port_tmp_660(port_tmp_657)(port_tmp_656)(port_tmp_655)
+    »)
+  »)
+»
+
+def bool_F_DEF:«
+  Up_fusion.new_basic_definition(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"F\",[\"Tyapp\",\"bool\",[]]]],[\"Comb\",[\"Const\",\"!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]],[\"Abs\",[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]],[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]]]]"))
+»
+
+def bool_NOT_DEF:«
+  Up_fusion.new_basic_definition(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"~\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]],[\"Abs\",[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]],[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"p\",[\"Tyapp\",\"bool\",[]]]],[\"Const\",\"F\",[\"Tyapp\",\"bool\",[]]]]]]"))
+»
+
+def bool_mk_neg:«
+  (block:«
+    let port_tmp_661_neg_tm:«
+      Host.expand_quote("[\"Const\",\"~\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]")
+    »;
+    (fun(tm):«
+      (block:«
+        try:«
+          Up_fusion.mk_comb(Pair(port_tmp_661_neg_tm,tm));
+          ~catch port_tmp_662:«
+            let port_tmp_663 = port_tmp_662;
+            match port_tmp_663
+            | Failure(_):«
+                failwith("mk_neg")
+            »
+            | port_tmp_662:«
+                Host.hol_raise(port_tmp_662)
+            »
+          »
+        »
+      »)
+    »)
+  »)
+»
+
+def bool_NOT_ELIM:«
+  (block:«
+    let port_tmp_664_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_665_pth:«
+        (block:«
+          let port_tmp_666 = Up_equal.AP_THM(bool_NOT_DEF)(port_tmp_664_P);
+          let port_tmp_667 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+          let port_tmp_668 = Up_equal.CONV_RULE;
+          port_tmp_668(port_tmp_667)(port_tmp_666)
+        »)
+      »;
+      (fun(th):«
+        (block:«
+          try:«
+            (block:«
+              let port_tmp_669 = th;
+              let port_tmp_670 = (block:«
+                let port_tmp_671 = port_tmp_665_pth;
+                let port_tmp_672 = (block:«
+                  let port_tmp_673 = PairList [];
+                  let port_tmp_674 = (block:«
+                    let port_tmp_675 = port_tmp_664_P;
+                    let port_tmp_676 = Up_fusion.rand(Up_fusion.concl(th));
+                    Pair(port_tmp_676,port_tmp_675)
+                  »);
+                  PairList.cons(port_tmp_674,port_tmp_673)
+                »);
+                let port_tmp_677 = Up_fusion.INST;
+                port_tmp_677(port_tmp_672)(port_tmp_671)
+              »);
+              let port_tmp_678 = Up_fusion.EQ_MP;
+              port_tmp_678(port_tmp_670)(port_tmp_669)
+            »);
+            ~catch port_tmp_679:«
+              let port_tmp_680 = port_tmp_679;
+              match port_tmp_680
+              | Failure(_):«
+                  failwith("NOT_ELIM")
+              »
+              | port_tmp_679:«
+                  Host.hol_raise(port_tmp_679)
+              »
+            »
+          »
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_NOT_INTRO:«
+  (block:«
+    let port_tmp_681_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_682_pth:«
+        Up_equal.SYM((block:«
+          let port_tmp_683 = Up_equal.AP_THM(bool_NOT_DEF)(port_tmp_681_P);
+          let port_tmp_684 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+          let port_tmp_685 = Up_equal.CONV_RULE;
+          port_tmp_685(port_tmp_684)(port_tmp_683)
+        »))
+      »;
+      (fun(th):«
+        (block:«
+          try:«
+            (block:«
+              let port_tmp_686 = th;
+              let port_tmp_687 = (block:«
+                let port_tmp_688 = port_tmp_682_pth;
+                let port_tmp_689 = (block:«
+                  let port_tmp_690 = PairList [];
+                  let port_tmp_691 = (block:«
+                    let port_tmp_692 = port_tmp_681_P;
+                    let port_tmp_693 = Up_fusion.rand(Up_fusion.rator(Up_fusion.concl(th)));
+                    Pair(port_tmp_693,port_tmp_692)
+                  »);
+                  PairList.cons(port_tmp_691,port_tmp_690)
+                »);
+                let port_tmp_694 = Up_fusion.INST;
+                port_tmp_694(port_tmp_689)(port_tmp_688)
+              »);
+              let port_tmp_695 = Up_fusion.EQ_MP;
+              port_tmp_695(port_tmp_687)(port_tmp_686)
+            »);
+            ~catch port_tmp_696:«
+              let port_tmp_697 = port_tmp_696;
+              match port_tmp_697
+              | Failure(_):«
+                  failwith("NOT_INTRO")
+              »
+              | port_tmp_696:«
+                  Host.hol_raise(port_tmp_696)
+              »
+            »
+          »
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_EQF_INTRO:«
+  (block:«
+    let port_tmp_698_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_699_pth:«
+        (block:«
+          let port_tmp_700_th1:«
+            bool_NOT_ELIM(Up_fusion.ASSUME(Host.expand_quote("[\"Comb\",[\"Const\",\"~\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]],[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]]")))
+          »;
+          let port_tmp_701_th2:«
+            (block:«
+              let port_tmp_702 = (block:«
+                let port_tmp_703 = (block:«
+                  let port_tmp_704 = Up_fusion.ASSUME(Host.expand_quote("[\"Const\",\"F\",[\"Tyapp\",\"bool\",[]]]"));
+                  let port_tmp_705 = bool_F_DEF;
+                  let port_tmp_706 = Up_fusion.EQ_MP;
+                  port_tmp_706(port_tmp_705)(port_tmp_704)
+                »);
+                let port_tmp_707 = port_tmp_698_P;
+                let port_tmp_708 = bool_SPEC;
+                port_tmp_708(port_tmp_707)(port_tmp_703)
+              »);
+              let port_tmp_709 = Host.expand_quote("[\"Const\",\"F\",[\"Tyapp\",\"bool\",[]]]");
+              let port_tmp_710 = bool_DISCH;
+              port_tmp_710(port_tmp_709)(port_tmp_702)
+            »)
+          »;
+          bool_DISCH_ALL(bool_IMP_ANTISYM_RULE(port_tmp_700_th1)(port_tmp_701_th2))
+        »)
+      »;
+      (fun(th):«
+        (block:«
+          try:«
+            (block:«
+              let port_tmp_711 = th;
+              let port_tmp_712 = (block:«
+                let port_tmp_713 = port_tmp_699_pth;
+                let port_tmp_714 = (block:«
+                  let port_tmp_715 = PairList [];
+                  let port_tmp_716 = (block:«
+                    let port_tmp_717 = port_tmp_698_P;
+                    let port_tmp_718 = Up_fusion.rand(Up_fusion.concl(th));
+                    Pair(port_tmp_718,port_tmp_717)
+                  »);
+                  PairList.cons(port_tmp_716,port_tmp_715)
+                »);
+                let port_tmp_719 = Up_fusion.INST;
+                port_tmp_719(port_tmp_714)(port_tmp_713)
+              »);
+              let port_tmp_720 = bool_MP;
+              port_tmp_720(port_tmp_712)(port_tmp_711)
+            »);
+            ~catch port_tmp_721:«
+              let port_tmp_722 = port_tmp_721;
+              match port_tmp_722
+              | Failure(_):«
+                  failwith("EQF_INTRO")
+              »
+              | port_tmp_721:«
+                  Host.hol_raise(port_tmp_721)
+              »
+            »
+          »
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_EQF_ELIM:«
+  (block:«
+    let port_tmp_723_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_724_pth:«
+        (block:«
+          let port_tmp_725_th1:«
+            (block:«
+              let port_tmp_726 = Up_fusion.ASSUME(Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]"));
+              let port_tmp_727 = Up_fusion.ASSUME(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]],[\"Const\",\"F\",[\"Tyapp\",\"bool\",[]]]]"));
+              let port_tmp_728 = Up_fusion.EQ_MP;
+              port_tmp_728(port_tmp_727)(port_tmp_726)
+            »)
+          »;
+          (block:«
+            let port_tmp_729_th2:«
+              (block:«
+                let port_tmp_730 = (block:«
+                  let port_tmp_731 = Up_fusion.EQ_MP(bool_F_DEF)(port_tmp_725_th1);
+                  let port_tmp_732 = Host.expand_quote("[\"Const\",\"F\",[\"Tyapp\",\"bool\",[]]]");
+                  let port_tmp_733 = bool_SPEC;
+                  port_tmp_733(port_tmp_732)(port_tmp_731)
+                »);
+                let port_tmp_734 = port_tmp_723_P;
+                let port_tmp_735 = bool_DISCH;
+                port_tmp_735(port_tmp_734)(port_tmp_730)
+              »)
+            »;
+            bool_DISCH_ALL(bool_NOT_INTRO(port_tmp_729_th2))
+          »)
+        »)
+      »;
+      (fun(th):«
+        (block:«
+          try:«
+            (block:«
+              let port_tmp_736 = th;
+              let port_tmp_737 = (block:«
+                let port_tmp_738 = port_tmp_724_pth;
+                let port_tmp_739 = (block:«
+                  let port_tmp_740 = PairList [];
+                  let port_tmp_741 = (block:«
+                    let port_tmp_742 = port_tmp_723_P;
+                    let port_tmp_743 = Up_fusion.rand(Up_fusion.rator(Up_fusion.concl(th)));
+                    Pair(port_tmp_743,port_tmp_742)
+                  »);
+                  PairList.cons(port_tmp_741,port_tmp_740)
+                »);
+                let port_tmp_744 = Up_fusion.INST;
+                port_tmp_744(port_tmp_739)(port_tmp_738)
+              »);
+              let port_tmp_745 = bool_MP;
+              port_tmp_745(port_tmp_737)(port_tmp_736)
+            »);
+            ~catch port_tmp_746:«
+              let port_tmp_747 = port_tmp_746;
+              match port_tmp_747
+              | Failure(_):«
+                  failwith("EQF_ELIM")
+              »
+              | port_tmp_746:«
+                  Host.hol_raise(port_tmp_746)
+              »
+            »
+          »
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_CONTR:«
+  (block:«
+    let port_tmp_748_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    let port_tmp_749_f_tm:«
+      Host.expand_quote("[\"Const\",\"F\",[\"Tyapp\",\"bool\",[]]]")
+    »;
+    (block:«
+      let port_tmp_750_pth:«
+        (block:«
+          let port_tmp_751 = (block:«
+            let port_tmp_752 = Up_fusion.ASSUME(Host.expand_quote("[\"Const\",\"F\",[\"Tyapp\",\"bool\",[]]]"));
+            let port_tmp_753 = bool_F_DEF;
+            let port_tmp_754 = Up_fusion.EQ_MP;
+            port_tmp_754(port_tmp_753)(port_tmp_752)
+          »);
+          let port_tmp_755 = port_tmp_748_P;
+          let port_tmp_756 = bool_SPEC;
+          port_tmp_756(port_tmp_755)(port_tmp_751)
+        »)
+      »;
+      (fun(tm):«
+        (fun(th):«
+          (block:«
+            if (block:«
+              let port_tmp_757 = port_tmp_749_f_tm;
+              let port_tmp_758 = Up_fusion.concl(th);
+              let port_tmp_759 = Host.hol_unequal;
+              port_tmp_759(port_tmp_758)(port_tmp_757)
+            »)
+            | failwith("CONTR")
+            | (block:«
+              let port_tmp_760 = th;
+              let port_tmp_761 = (block:«
+                let port_tmp_762 = Up_fusion.INST(PairList.cons(Pair(tm,port_tmp_748_P),PairList []))(port_tmp_750_pth);
+                let port_tmp_763 = th;
+                let port_tmp_764 = Up_fusion.DEDUCT_ANTISYM_RULE;
+                port_tmp_764(port_tmp_763)(port_tmp_762)
+              »);
+              let port_tmp_765 = Up_fusion.EQ_MP;
+              port_tmp_765(port_tmp_761)(port_tmp_760)
+            »)
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+def bool_EXISTS_UNIQUE_DEF:«
+  Up_fusion.new_basic_definition(Host.expand_quote("[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"?!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]],[\"Abs\",[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]],[\"Comb\",[\"Comb\",[\"Const\",\"/\\\\\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Const\",\"?\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]],[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Const\",\"!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]],[\"Abs\",[\"Var\",\"x\",[\"Tyvar\",\"A\"]],[\"Comb\",[\"Const\",\"!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]],[\"Abs\",[\"Var\",\"y\",[\"Tyvar\",\"A\"]],[\"Comb\",[\"Comb\",[\"Const\",\"==>\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Comb\",[\"Const\",\"/\\\\\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"fun\",[[\"Tyapp\",\"bool\",[]],[\"Tyapp\",\"bool\",[]]]]]]],[\"Comb\",[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]],[\"Var\",\"x\",[\"Tyvar\",\"A\"]]]],[\"Comb\",[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]],[\"Var\",\"y\",[\"Tyvar\",\"A\"]]]]],[\"Comb\",[\"Comb\",[\"Const\",\"=\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]]]],[\"Var\",\"x\",[\"Tyvar\",\"A\"]]],[\"Var\",\"y\",[\"Tyvar\",\"A\"]]]]]]]]]]]"))
+»
+
+def bool_mk_uexists:«
+  Up_basics.mk_binder("?!")
+»
+
+def bool_EXISTENCE:«
+  (block:«
+    let port_tmp_766_P:«
+      Host.expand_quote("[\"Var\",\"P\",[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]]]")
+    »;
+    (block:«
+      let port_tmp_767_pth:«
+        (block:«
+          let port_tmp_768_th1:«
+            (block:«
+              let port_tmp_769 = Up_equal.AP_THM(bool_EXISTS_UNIQUE_DEF)(port_tmp_766_P);
+              let port_tmp_770 = Up_equal.RAND_CONV(Up_equal.BETA_CONV);
+              let port_tmp_771 = Up_equal.CONV_RULE;
+              port_tmp_771(port_tmp_770)(port_tmp_769)
+            »)
+          »;
+          (block:«
+            let port_tmp_772_th2:«
+              bool_UNDISCH(fst(bool_EQ_IMP_RULE(port_tmp_768_th1)))
+            »;
+            bool_DISCH_ALL(bool_CONJUNCT1(port_tmp_772_th2))
+          »)
+        »)
+      »;
+      (fun(th):«
+        (block:«
+          try:«
+            (block:«
+              let port_tmp_773_abs:«
+                Up_fusion.rand(Up_fusion.concl(th))
+              »;
+              (block:«
+                let port_tmp_774_ty:«
+                  snd(Up_fusion.dest_var(Up_basics.bndvar(port_tmp_773_abs)))
+                »;
+                (block:«
+                  let port_tmp_775 = th;
+                  let port_tmp_776 = bool_PINST(PairList.cons(Pair(port_tmp_774_ty,Up_fusion.aty),PairList []))(PairList.cons(Pair(port_tmp_773_abs,port_tmp_766_P),PairList []))(port_tmp_767_pth);
+                  let port_tmp_777 = bool_MP;
+                  port_tmp_777(port_tmp_776)(port_tmp_775)
+                »)
+              »)
+            »);
+            ~catch port_tmp_778:«
+              let port_tmp_779 = port_tmp_778;
+              match port_tmp_779
+              | Failure(_):«
+                  failwith("EXISTENCE")
+              »
+              | port_tmp_778:«
+                  Host.hol_raise(port_tmp_778)
+              »
+            »
+          »
+        »)
+      »)
+    »)
+  »)
+»
+
+fun bool_set_verbose_symbols(_):«
+  (block:«
+    Host.do_list(Host.parse_as_binder)(PairList.cons("forall",PairList.cons("exists",PairList.cons("existsunique",PairList []))));
+    (block:«
+      Host.override_interface(Pair("true",Host.expand_quote("[\"Const\",\"T\",[\"Tyapp\",\"bool\",[]]]")));
+      (block:«
+        Host.override_interface(Pair("false",Host.expand_quote("[\"Const\",\"F\",[\"Tyapp\",\"bool\",[]]]")));
+        (block:«
+          Host.override_interface(Pair("forall",Host.expand_quote("[\"Const\",\"!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]")));
+          (block:«
+            Host.override_interface(Pair("exists",Host.expand_quote("[\"Const\",\"?\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]")));
+            Host.override_interface(Pair("existsunique",Host.expand_quote("[\"Const\",\"?!\",[\"Tyapp\",\"fun\",[[\"Tyapp\",\"fun\",[[\"Tyvar\",\"A\"],[\"Tyapp\",\"bool\",[]]]],[\"Tyapp\",\"bool\",[]]]]]")))
+          »)
+        »)
+      »)
+    »)
+  »)
+»
+
+fun bool_unset_verbose_symbols(_):«
+  (block:«
+    Host.do_list(Host.unparse_as_binder)(PairList.cons("forall",PairList.cons("exists",PairList.cons("existsunique",PairList []))));
+    Host.do_list(Host.remove_interface)(PairList.cons("true",PairList.cons("false",PairList.cons("forall",PairList.cons("exists",PairList.cons("existsunique",PairList []))))))
+  »)
+»
+
+Host.hol_apply_unit(bool_set_verbose_symbols)
+
+def is_iff = bool_is_iff
+
+def dest_iff = bool_dest_iff
+
+def mk_iff = bool_mk_iff
+
+def PINST = bool_PINST
+
+def PROVE_HYP = bool_PROVE_HYP
+
+def T_DEF = bool_T_DEF
+
+def TRUTH = bool_TRUTH
+
+def EQT_ELIM = bool_EQT_ELIM
+
+def EQT_INTRO = bool_EQT_INTRO
+
+def AND_DEF = bool_AND_DEF
+
+def mk_conj = bool_mk_conj
+
+def list_mk_conj = bool_list_mk_conj
+
+def CONJ = bool_CONJ
+
+def CONJUNCT1 = bool_CONJUNCT1
+
+def CONJUNCT2 = bool_CONJUNCT2
+
+def CONJ_PAIR = bool_CONJ_PAIR
+
+def CONJUNCTS = bool_CONJUNCTS
+
+def IMP_DEF = bool_IMP_DEF
+
+def mk_imp = bool_mk_imp
+
+def MP = bool_MP
+
+def DISCH = bool_DISCH
+
+def DISCH_ALL = bool_DISCH_ALL
+
+def UNDISCH = bool_UNDISCH
+
+def UNDISCH_ALL = bool_UNDISCH_ALL
+
+def IMP_ANTISYM_RULE = bool_IMP_ANTISYM_RULE
+
+def ADD_ASSUM = bool_ADD_ASSUM
+
+def EQ_IMP_RULE = bool_EQ_IMP_RULE
+
+def IMP_TRANS = bool_IMP_TRANS
+
+def FORALL_DEF = bool_FORALL_DEF
+
+def mk_forall = bool_mk_forall
+
+def list_mk_forall = bool_list_mk_forall
+
+def SPEC = bool_SPEC
+
+def SPECL = bool_SPECL
+
+def SPEC_VAR = bool_SPEC_VAR
+
+def SPEC_ALL = bool_SPEC_ALL
+
+def ISPEC = bool_ISPEC
+
+def ISPECL = bool_ISPECL
+
+def GEN = bool_GEN
+
+def GENL = bool_GENL
+
+def GEN_ALL = bool_GEN_ALL
+
+def EXISTS_DEF = bool_EXISTS_DEF
+
+def mk_exists = bool_mk_exists
+
+def list_mk_exists = bool_list_mk_exists
+
+def EXISTS = bool_EXISTS
+
+def SIMPLE_EXISTS = bool_SIMPLE_EXISTS
+
+def CHOOSE = bool_CHOOSE
+
+def SIMPLE_CHOOSE = bool_SIMPLE_CHOOSE
+
+def OR_DEF = bool_OR_DEF
+
+def mk_disj = bool_mk_disj
+
+def list_mk_disj = bool_list_mk_disj
+
+def DISJ1 = bool_DISJ1
+
+def DISJ2 = bool_DISJ2
+
+def DISJ_CASES = bool_DISJ_CASES
+
+def SIMPLE_DISJ_CASES = bool_SIMPLE_DISJ_CASES
+
+def F_DEF = bool_F_DEF
+
+def NOT_DEF = bool_NOT_DEF
+
+def mk_neg = bool_mk_neg
+
+def NOT_ELIM = bool_NOT_ELIM
+
+def NOT_INTRO = bool_NOT_INTRO
+
+def EQF_INTRO = bool_EQF_INTRO
+
+def EQF_ELIM = bool_EQF_ELIM
+
+def CONTR = bool_CONTR
+
+def EXISTS_UNIQUE_DEF = bool_EXISTS_UNIQUE_DEF
+
+def mk_uexists = bool_mk_uexists
+
+def EXISTENCE = bool_EXISTENCE
+
+def set_verbose_symbols = bool_set_verbose_symbols
+
+def unset_verbose_symbols = bool_unset_verbose_symbols

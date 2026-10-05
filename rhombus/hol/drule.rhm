@@ -456,6 +456,23 @@ fun term_type_unify(tm1):
         let tty = type_of(inst(tyinsts)(t))
         let new = type_unify(sty)(tty)(PairList [])
         append(new)(map(fun(Pair(ty,v)): Pair(type_subst(new)(ty),v))(tyinsts))
+      fun augment1(sofar):
+        fun(Pair(s,x)):
+          let s_prime = subst(sofar)(s)
+          if vfree_in(x)(s_prime) && s != x
+          | failwith("term_unify: augment1")
+          | Pair(s_prime,x)
+      fun raw_augment(p,Pair(tmins,tyins)):
+        Pair(PairList.cons(p,map(augment1(PairList [p]))(tmins)),tyins)
+      fun augment(Pair(t,v),Pair(tmins,tyins)):
+        let tmins_prime = map(fun(Pair(t,v)): Pair(inst(tyins)(t),inst(tyins)(v)))(tmins)
+        let t_prime = inst(tyins)(vsubst(tmins_prime)(t))
+        let v_prime = inst(tyins)(v)
+        let sofar_prime = Pair(tmins_prime,tyins)
+        cond
+        | t_prime == v_prime: sofar_prime
+        | vfree_in(v_prime)(t_prime): failwith("term_unify: augment_insts")
+        | ~else: raw_augment(Pair(t_prime,v_prime),sofar_prime)
       fun unify(a,b,tmins,tyins):
         if a == b
         | Pair(tmins,tyins)
@@ -463,18 +480,12 @@ fun term_type_unify(tm1):
           | try:
               unify(rev_assoc(a)(tmins),b,tmins,tyins)
               ~catch Failure("find"):
-                let tys = augment_types(Pair(a,b),tyins)
-                let aa = inst(tys)(a)
-                let bb = inst(tys)(vsubst(map(fun(Pair(t,v)): Pair(inst(tys)(t),inst(tys)(v)))(tmins))(b))
-                Pair(raw_augment_insts(Pair(bb,aa))(map(fun(Pair(t,v)): Pair(inst(tys)(t),inst(tys)(v)))(tmins)),tys)
+                augment(Pair(b,a),Pair(tmins,augment_types(Pair(a,b),tyins)))
           | if is_var(b)
             | try:
                 unify(a,rev_assoc(b)(tmins),tmins,tyins)
                 ~catch Failure("find"):
-                  let tys = augment_types(Pair(a,b),tyins)
-                  let aa = inst(tys)(vsubst(map(fun(Pair(t,v)): Pair(inst(tys)(t),inst(tys)(v)))(tmins))(a))
-                  let bb = inst(tys)(b)
-                  Pair(raw_augment_insts(Pair(aa,bb))(map(fun(Pair(t,v)): Pair(inst(tys)(t),inst(tys)(v)))(tmins)),tys)
+                  augment(Pair(a,b),Pair(tmins,augment_types(Pair(a,b),tyins)))
             | if is_abs(a)
               | block:
                   let Pair(va,ba) = dest_abs(a)
@@ -601,26 +612,31 @@ fun MATCH_MP(ith):
       MP(match_fun(concl(th)))(th)
       ~catch Failure(_): failwith("MATCH_MP: No match")
 
+fun BETA_CONVS(n):
+  if n == 1
+  | TRY_CONV(BETA_CONV)
+  | THENC(RATOR_CONV(BETA_CONVS(n-1)))(TRY_CONV(BETA_CONV))
+
 fun BETA_VAR(v):
   fun(tm):
     if is_abs(tm)
     | block:
         let Pair(bv,bod) = dest_abs(tm)
-        if v == bv | failwith("unchanged") | ABS_CONV(BETA_VAR(v))(tm)
+        if v == bv | failwith("unchanged") | ABS_CONV(BETA_VAR(v)(bod))
     | block:
         let Pair(op,args) = strip_comb(tm)
         if args == PairList []
         | failwith("unchanged")
         | if op == v
-          | beta_n(length(args))(tm)
+          | BETA_CONVS(length(args))
           | block:
               let Pair(l,r) = dest_comb(tm)
               try:
                 let lc = BETA_VAR(v)(l)
                 try:
-                  COMB2_CONV(lc)(BETA_VAR(v)(r))(tm)
-                  ~catch Failure(_): RATOR_CONV(lc)(tm)
-                ~catch Failure(_): RAND_CONV(BETA_VAR(v))(tm)
+                  COMB2_CONV(lc)(BETA_VAR(v)(r))
+                  ~catch Failure(_): RATOR_CONV(lc)
+                ~catch Failure(_): RAND_CONV(BETA_VAR(v)(r))
 
 fun GINST(th):
   let fvs = subtract(frees(concl(th)))(freesl(hyp(th)))

@@ -1,0 +1,45 @@
+#lang rhombus
+// Offline-inferred literal ASTs, materialized through public constructors.
+// This reads typed constructor data, not HOL text or recorded theorems.
+import: "compat.rhm" open
+import: "../fusion.rhm" as Kernel
+import: "../basics.rhm" as Basics
+import:
+  lib("json/main.rkt") open:
+    only: #{string->jsexpr}
+import:
+  lib("racket/base.rkt") open:
+    only:
+      #{string?}
+      #{string->immutable-string}
+export: expand_quote
+fun immutable_ast(value):
+  if #{string?}(value)
+  | #{string->immutable-string}(value)
+  | match value
+    | PairList [ & items]: map(immutable_ast)(items)
+    | _: failwith("invalid offline quotation data")
+fun expand_type(ast):
+  match ast
+  | PairList ["Tyvar",name]: Kernel.mk_vartype(name)
+  | PairList ["Tyapp",name,args]: Kernel.mk_type(Pair(name,map(expand_type)(args)))
+  | _: failwith("invalid offline type quotation")
+fun expand_term(ast):
+  match ast
+  | PairList ["Var",name,ty]: Kernel.mk_var(Pair(name,expand_type(ty)))
+  | PairList ["Const",name,ty]: Basics.mk_mconst(Pair(name,expand_type(ty)))
+  | PairList ["Comb",left,right]:
+      let r=expand_term(right)
+      let l=expand_term(left)
+      Kernel.mk_comb(Pair(l,r))
+  | PairList ["Abs",variable,body]:
+      let b=expand_term(body)
+      let v=expand_term(variable)
+      Kernel.mk_abs(Pair(v,b))
+  | _: failwith("invalid offline term quotation")
+fun expand_quote(encoded):
+  let ast=immutable_ast(#{string->jsexpr}(encoded))
+  match ast
+  | PairList ["Tyvar",_]: expand_type(ast)
+  | PairList ["Tyapp",_,_]: expand_type(ast)
+  | _: expand_term(ast)

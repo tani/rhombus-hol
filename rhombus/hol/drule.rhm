@@ -1,0 +1,649 @@
+#lang rhombus
+// (c) University of Cambridge 1998; John Harrison 1998-2007.
+// (c) Michael Faerber 2018.
+// Direct translation of HOL Light drule.ml.
+import: "compat.rhm" open
+import: "fusion.rhm" open
+import: "basics.rhm" open
+import: "equal.rhm" open
+import: "bool.rhm" open
+import: "nets.rhm" open
+
+export:
+  Instantiation
+  mk_thm
+  MK_CONJ
+  MK_DISJ
+  MK_FORALL
+  MK_EXISTS
+  MP_CONV
+  BETAS_CONV
+  instantiate
+  INSTANTIATE
+  INSTANTIATE_ALL
+  term_match
+  term_unify
+  type_unify
+  term_type_unify
+  deep_alpha
+  PART_MATCH
+  GEN_PART_MATCH
+  MATCH_MP
+  HIGHER_REWRITE_CONV
+  new_definition
+
+class Instantiation(bcs, tmin, tyin)
+
+fun plist_rev(l):
+  rev_itlist(fun(x): fun(acc): PairList.cons(x,acc))(l)(PairList [])
+
+fun intersect(l1):
+  fun(l2): filter(fun(x): mem(x)(l2))(l1)
+
+fun repeat(f):
+  fun(x):
+    try: repeat(f)(f(x))
+    ~catch Failure(_): x
+
+fun funpow(n):
+  fun(f):
+    fun(x):
+      if n <= 0 | x | funpow(n-1)(f)(f(x))
+
+fun map2(f):
+  fun(l1):
+    fun(l2):
+      match Pair(l1,l2)
+      | Pair(PairList [],PairList []): PairList []
+      | Pair(PairList [h1, & t1],PairList [h2, & t2]):
+          PairList.cons(f(h1)(h2),map2(f)(t1)(t2))
+      | _: failwith("map2")
+
+fun remove_first(p):
+  fun(l):
+    match l
+    | PairList []: failwith("remove")
+    | PairList [h, & t]:
+        if p(h)
+        | Pair(h,t)
+        | block:
+            def Pair(found,rest) = remove_first(p)(t)
+            Pair(found,PairList.cons(h,rest))
+
+fun name_of(tm):
+  try: fst(dest_var(tm))
+  ~catch Failure(_): fst(dest_const(tm))
+
+// Last recourse, exactly as HOL Light: create an implication axiom and
+// immediately discharge it back to the requested sequent.
+fun mk_thm(Pair(asl,c)):
+  def ax = new_axiom(itlist(curry(mk_imp))(plist_rev(asl))(c))
+  rev_itlist(fun(t): fun(th): MP(th)(ASSUME(t)))(plist_rev(asl))(ax)
+
+def andtm = mk_const(Pair("/\\",PairList []))
+fun MK_CONJ(eq1): fun(eq2): MK_COMB(Pair(AP_TERM(andtm)(eq1),eq2))
+
+def ortm = mk_const(Pair("\\/",PairList []))
+fun MK_DISJ(eq1): fun(eq2): MK_COMB(Pair(AP_TERM(ortm)(eq1),eq2))
+
+def forall_tm = mk_const(Pair("!",PairList []))
+fun MK_FORALL(v):
+  fun(th): AP_TERM(inst(PairList [Pair(type_of(v),aty)])(forall_tm))(ABS(v)(th))
+
+def exists_tm = mk_const(Pair("?",PairList []))
+fun MK_EXISTS(v):
+  fun(th): AP_TERM(inst(PairList [Pair(type_of(v),aty)])(exists_tm))(ABS(v)(th))
+
+fun MP_CONV(cnv):
+  fun(th):
+    def Pair(l,_) = dest_imp(concl(th))
+    def ath = cnv(l)
+    try: MP(th)(EQT_ELIM(ath))
+    ~catch Failure(_): MP(th)(ath)
+
+fun BETAS_CONV(tm):
+  match tm
+  | Comb(Abs(_,_),_): BETA_CONV(tm)
+  | Comb(Comb(_,_),_): THENC(RATOR_CONV(BETAS_CONV))(BETA_CONV)(tm)
+  | _: failwith("BETAS_CONV")
+
+fun beta_n(n):
+  fun(tm):
+    if n == 1
+    | TRY_CONV(BETA_CONV)(tm)
+    | THENC(RATOR_CONV(beta_n(n-1)))(TRY_CONV(BETA_CONV))(tm)
+
+fun term_beta_n(n,tm):
+  fun peel(k,args,t):
+    if k == 0 | Pair(args,t) | peel(k-1,PairList.cons(rand(t),args),rator(t))
+  def Pair(args,lam) = peel(n,PairList [],tm)
+  rev_itlist(
+    fun(a): fun(l):
+      def Pair(v,b) = dest_abs(l)
+      vsubst(PairList [Pair(a,v)])(b)
+  )(args)(lam)
+
+fun ho_betas_term(bcs):
+  fun(pat):
+    fun(tm):
+      if is_var(pat) || is_const(pat)
+      | fail()
+      | try:
+          def Pair(bv,bod) = dest_abs(tm)
+          mk_abs(Pair(bv,ho_betas_term(bcs)(body(pat))(bod)))
+        ~catch Failure(_):
+          def Pair(hop,args) = strip_comb(pat)
+          try:
+            def n = rev_assoc(hop)(bcs)
+            if length(args) == n | term_beta_n(n,tm) | fail()
+          ~catch Failure(_):
+            def Pair(lpat,rpat) = dest_comb(pat)
+            def Pair(ltm,rtm) = dest_comb(tm)
+            try:
+              def lth = ho_betas_term(bcs)(lpat)(ltm)
+              try: mk_comb(Pair(lth,ho_betas_term(bcs)(rpat)(rtm)))
+              ~catch Failure(_): mk_comb(Pair(lth,rtm))
+            ~catch Failure(_):
+              mk_comb(Pair(ltm,ho_betas_term(bcs)(rpat)(rtm)))
+
+fun instantiate(i :: Instantiation):
+  fun(tm):
+    def itm = if i.tyin == PairList [] | tm | inst(i.tyin)(tm)
+    if i.tmin == PairList []
+    | itm
+    | block:
+        def ttm = vsubst(i.tmin)(itm)
+        if i.bcs == PairList []
+        | ttm
+        | try: ho_betas_term(i.bcs)(itm)(ttm)
+          ~catch Failure(_): ttm
+
+fun HO_BETAS(bcs):
+  fun(pat):
+    fun(tm):
+      if is_var(pat) || is_const(pat)
+      | fail()
+      | try:
+          def Pair(bv,bod) = dest_abs(tm)
+          ABS(bv)(HO_BETAS(bcs)(body(pat))(bod))
+        ~catch Failure(_):
+          def Pair(hop,args) = strip_comb(pat)
+          try:
+            def n = rev_assoc(hop)(bcs)
+            if length(args) == n | beta_n(n)(tm) | fail()
+          ~catch Failure(_):
+            def Pair(lpat,rpat) = dest_comb(pat)
+            def Pair(ltm,rtm) = dest_comb(tm)
+            try:
+              def lth = HO_BETAS(bcs)(lpat)(ltm)
+              try: MK_COMB(Pair(lth,HO_BETAS(bcs)(rpat)(rtm)))
+              ~catch Failure(_): AP_THM(lth)(rtm)
+            ~catch Failure(_):
+              AP_TERM(ltm)(HO_BETAS(bcs)(rpat)(rtm))
+
+fun INSTANTIATE(i :: Instantiation):
+  fun(th):
+    def ith = if i.tyin == PairList [] | th | INST_TYPE(i.tyin)(th)
+    if i.tmin == PairList []
+    | ith
+    | block:
+        def tth = INST(i.tmin)(ith)
+        if hyp(tth) != hyp(th)
+        | failwith("INSTANTIATE: term or type var free in assumptions")
+        | if i.bcs == PairList []
+          | tth
+          | try:
+              EQ_MP(HO_BETAS(i.bcs)(concl(ith))(concl(tth)))(tth)
+            ~catch Failure(_): tth
+
+fun INSTANTIATE_ALL(i :: Instantiation):
+  fun(th):
+    if i.tmin == PairList [] && i.tyin == PairList []
+    | th
+    | block:
+        def hs = hyp(th)
+        if hs == PairList []
+        | INSTANTIATE(i)(th)
+        | block:
+            def Pair(tyrel,tyirrel):
+              if i.tyin == PairList []
+              | Pair(PairList [],hs)
+              | block:
+                  def tvs = itlist(fun(Pair(_,v)): fun(acc): union(tyvars(v))(acc))(i.tyin)(PairList [])
+                  partition(fun(tm): intersect(tvs)(type_vars_in_term(tm)) != PairList [])(hs)
+            def Pair(tmrel,_):
+              if i.tmin == PairList []
+              | Pair(PairList [],tyirrel)
+              | block:
+                  def vs = itlist(fun(Pair(_,v)): fun(acc): union(frees(v))(acc))(i.tmin)(PairList [])
+                  partition(fun(tm): intersect(vs)(frees(tm)) != PairList [])(tyirrel)
+            def rhyps = union(tyrel)(tmrel)
+            funpow(length(rhyps))(UNDISCH)(
+              INSTANTIATE(i)(rev_itlist(DISCH)(rhyps)(th)))
+
+fun safe_inserta(Pair(y,x) :: Pair):
+  fun(l):
+    try:
+      def z = rev_assoc(x)(l)
+      if aconv(y)(z) | l | failwith("safe_inserta")
+    ~catch Failure("find"): PairList.cons(Pair(y,x),l)
+
+fun safe_insert(Pair(y,x) :: Pair):
+  fun(l):
+    try:
+      def z = rev_assoc(x)(l)
+      if compare(y)(z) == 0 | l | failwith("safe_insert")
+    ~catch Failure("find"): PairList.cons(Pair(y,x),l)
+
+def dummy_name = fst(dest_var(genvar(aty)))
+fun mk_dummy(ty): mk_var(Pair(dummy_name,ty))
+
+class HOM(env,ctm,vtm)
+
+fun term_pmatch(lconsts):
+  fun(env):
+    fun(vtm):
+      fun(ctm):
+        fun(Pair(insts,homs)):
+          match Pair(vtm,ctm)
+          | Pair(Var(_,_),_):
+              try:
+                def ctm1 = rev_assoc(vtm)(env)
+                if compare(ctm1)(ctm) == 0
+                | Pair(insts,homs)
+                | failwith("term_pmatch")
+              ~catch Failure("find"):
+                if mem(vtm)(lconsts)
+                | if compare(ctm)(vtm) == 0
+                  | Pair(insts,homs)
+                  | failwith("term_pmatch: can't instantiate local constant")
+                | Pair(safe_inserta(Pair(ctm,vtm))(insts),homs)
+          | Pair(Const(vname,vty),Const(cname,cty)):
+              if vname != cname
+              | failwith("term_pmatch")
+              | if vty == cty
+                | Pair(insts,homs)
+                | Pair(safe_insert(Pair(mk_dummy(cty),mk_dummy(vty)))(insts),homs)
+          | Pair(Abs(vv,vbod),Abs(cv,cbod)):
+              def insts1 = safe_insert(
+                Pair(mk_dummy(snd(dest_var(cv))),mk_dummy(snd(dest_var(vv)))))(insts)
+              term_pmatch(lconsts)(PairList.cons(Pair(cv,vv),env))(vbod)(cbod)(Pair(insts1,homs))
+          | _:
+              def vhop = repeat(rator)(vtm)
+              if is_var(vhop) && !mem(vhop)(lconsts) && !can(rev_assoc(vhop))(env)
+              | block:
+                  def vty = type_of(vtm)
+                  def cty = type_of(ctm)
+                  def insts1 = if vty == cty | insts | safe_insert(Pair(mk_dummy(cty),mk_dummy(vty)))(insts)
+                  Pair(insts1,PairList.cons(HOM(env,ctm,vtm),homs))
+              | block:
+                  def Pair(lv,rv) = dest_comb(vtm)
+                  def Pair(lc,rc) = dest_comb(ctm)
+                  def sofar = term_pmatch(lconsts)(env)(lv)(lc)(Pair(insts,homs))
+                  term_pmatch(lconsts)(env)(rv)(rc)(sofar)
+
+fun get_type_insts(insts):
+  itlist(
+    fun(Pair(t,x)): fun(acc):
+      type_match(snd(dest_var(x)))(type_of(t))(acc)
+  )(insts)(PairList [])
+
+fun separate_insts(insts):
+  def Pair(realinsts,patterns) = partition(o(is_var)(snd))(insts)
+  def betacounts:
+    itlist(
+      fun(Pair(_,p)): fun(acc):
+        def Pair(hop,args) = strip_comb(p)
+        try: safe_insert(Pair(length(args),hop))(acc)
+        ~catch Failure(_): acc
+    )(patterns)(PairList [])
+  def tyins = get_type_insts(realinsts)
+  def tmins:
+    mapfilter(
+      fun(Pair(t,x)):
+        def Pair(xn,xty) = dest_var(x)
+        def x1 = mk_var(Pair(xn,type_subst(tyins)(xty)))
+        if compare(t)(x1) == 0 | fail() | Pair(t,x1)
+    )(realinsts)
+  Instantiation(betacounts,tmins,tyins)
+
+fun term_homatch(lconsts):
+  fun(tyins):
+    fun(Pair(insts,homs)):
+      match homs
+      | PairList []: insts
+      | PairList [HOM(env,ctm,vtm), & rest]:
+          if is_var(vtm)
+          | if compare(ctm)(vtm) == 0
+            | term_homatch(lconsts)(tyins)(Pair(insts,rest))
+            | block:
+                def newtyins = safe_insert(Pair(type_of(ctm),snd(dest_var(vtm))))(tyins)
+                term_homatch(lconsts)(newtyins)(Pair(PairList.cons(Pair(ctm,vtm),insts),rest))
+          | block:
+              def Pair(vhop,vargs) = strip_comb(vtm)
+              def afvs = freesl(vargs)
+              def inst_fn = inst(tyins)
+              try:
+                def tmins:
+                  map(
+                    fun(a):
+                      Pair(
+                        try: rev_assoc(a)(env)
+                        ~catch Failure(_):
+                          try: rev_assoc(a)(insts)
+                          ~catch Failure(_): if mem(a)(lconsts) | a | fail(),
+                        inst_fn(a))
+                  )(afvs)
+                def pats0 = map(inst_fn)(vargs)
+                def pats = map(vsubst(tmins))(pats0)
+                def vhop1 = inst_fn(vhop)
+                def ni:
+                  def Pair(chop,cargs) = strip_comb(ctm)
+                  if cargs == pats
+                  | if compare(chop)(vhop) == 0 | insts | safe_inserta(Pair(chop,vhop))(insts)
+                  | block:
+                      def ginsts = map(fun(p): Pair((if is_var(p) | p | genvar(type_of(p))),p))(pats)
+                      def ctm1 = subst(ginsts)(ctm)
+                      def gvs = map(fst)(ginsts)
+                      def abstm = list_mk_abs(Pair(gvs,ctm1))
+                      def vinsts = safe_inserta(Pair(abstm,vhop))(insts)
+                      PairList.cons(Pair(ctm1,list_mk_comb(Pair(vhop1,gvs))),vinsts)
+                term_homatch(lconsts)(tyins)(Pair(ni,rest))
+              ~catch Failure(_):
+                def Pair(lc,rc) = dest_comb(ctm)
+                def Pair(lv,rv) = dest_comb(vtm)
+                def pm = term_pmatch(lconsts)(env)(rv)(rc)(
+                           Pair(insts,PairList.cons(HOM(env,lc,lv),rest)))
+                term_homatch(lconsts)(get_type_insts(fst(pm)))(pm)
+
+fun term_match(lconsts):
+  fun(vtm):
+    fun(ctm):
+      def pm = term_pmatch(lconsts)(PairList [])(vtm)(ctm)(Pair(PairList [],PairList []))
+      def tyins = get_type_insts(fst(pm))
+      separate_insts(term_homatch(lconsts)(tyins)(pm))
+
+fun augment1_terms(sofar):
+  fun(Pair(s,x)):
+    def s1 = subst(sofar)(s)
+    if vfree_in(x)(s1) && s1 != x | failwith("term_unify: augment1") | Pair(s1,x)
+
+fun raw_augment_insts(p):
+  fun(insts): PairList.cons(p,map(augment1_terms(PairList [p]))(insts))
+
+fun augment_insts(Pair(t,v)):
+  fun(insts):
+    def t1 = vsubst(insts)(t)
+    if t1 == v | insts
+    | if vfree_in(v)(t1) | failwith("augment_insts") | raw_augment_insts(Pair(t1,v))(insts)
+
+fun term_unify(vars):
+  fun(tm1):
+    fun(tm2):
+      fun unify(a,b,sofar):
+        if a == b
+        | sofar
+        | if is_var(a) && mem(a)(vars)
+          | try: unify(rev_assoc(a)(sofar),b,sofar)
+            ~catch Failure("find"): augment_insts(Pair(b,a))(sofar)
+          | if is_var(b) && mem(b)(vars)
+            | try: unify(a,rev_assoc(b)(sofar),sofar)
+              ~catch Failure("find"): augment_insts(Pair(a,b))(sofar)
+            | if is_abs(a)
+              | block:
+                  def Pair(va,ba) = dest_abs(a)
+                  def Pair(vb,bb) = dest_abs(b)
+                  unify(ba,subst(PairList [Pair(va,vb)])(bb),sofar)
+              | block:
+                  def Pair(l1,r1) = dest_comb(a)
+                  def Pair(l2,r2) = dest_comb(b)
+                  unify(l1,l2,unify(r1,r2,sofar))
+      Instantiation(PairList [],unify(tm1,tm2,PairList []),PairList [])
+
+fun augment1_types(sofar):
+  fun(Pair(s,x)):
+    def s1 = type_subst(sofar)(s)
+    if occurs_in(x)(s1) && s1 != x | failwith("type_unify: augment1") | Pair(s1,x)
+
+fun raw_augment_tyinsts(p):
+  fun(insts): PairList.cons(p,map(augment1_types(PairList [p]))(insts))
+
+fun augment_ty(Pair(ty,v)):
+  fun(insts):
+    def ty1 = type_subst(insts)(ty)
+    if ty1 == v | insts
+    | if occurs_in(v)(ty1) | failwith("type_unify: augment_insts") | raw_augment_tyinsts(Pair(ty1,v))(insts)
+
+fun type_unify(ty1):
+  fun(ty2):
+    fun(sofar):
+      if ty1 == ty2
+      | sofar
+      | if is_vartype(ty1)
+        | try: type_unify(rev_assoc(ty1)(sofar))(ty2)(sofar)
+          ~catch Failure("find"): augment_ty(Pair(ty2,ty1))(sofar)
+        | if is_vartype(ty2)
+          | try: type_unify(ty1)(rev_assoc(ty2)(sofar))(sofar)
+            ~catch Failure("find"): augment_ty(Pair(ty1,ty2))(sofar)
+          | block:
+              def Pair(l1,r1) = dest_type(ty1)
+              def Pair(l2,r2) = dest_type(ty2)
+              if l1 == l2 | itlist2(type_unify)(r1)(r2)(sofar) | failwith("unify_type")
+
+fun term_type_unify(tm1):
+  fun(tm2):
+    fun(i :: Instantiation):
+      fun augment_types(Pair(s,t),tyinsts):
+        def sty = type_of(inst(tyinsts)(s))
+        def tty = type_of(inst(tyinsts)(t))
+        def new = type_unify(sty)(tty)(PairList [])
+        append(new)(map(fun(Pair(ty,v)): Pair(type_subst(new)(ty),v))(tyinsts))
+      fun unify(a,b,tmins,tyins):
+        if a == b
+        | Pair(tmins,tyins)
+        | if is_var(a)
+          | try: unify(rev_assoc(a)(tmins),b,tmins,tyins)
+            ~catch Failure("find"):
+              def tys = augment_types(Pair(a,b),tyins)
+              def aa = inst(tys)(a)
+              def bb = inst(tys)(vsubst(map(fun(Pair(t,v)): Pair(inst(tys)(t),inst(tys)(v)))(tmins))(b))
+              Pair(raw_augment_insts(Pair(bb,aa))(map(fun(Pair(t,v)): Pair(inst(tys)(t),inst(tys)(v)))(tmins)),tys)
+          | if is_var(b)
+            | try: unify(a,rev_assoc(b)(tmins),tmins,tyins)
+              ~catch Failure("find"):
+                def tys = augment_types(Pair(a,b),tyins)
+                def aa = inst(tys)(vsubst(map(fun(Pair(t,v)): Pair(inst(tys)(t),inst(tys)(v)))(tmins))(a))
+                def bb = inst(tys)(b)
+                Pair(raw_augment_insts(Pair(aa,bb))(map(fun(Pair(t,v)): Pair(inst(tys)(t),inst(tys)(v)))(tmins)),tys)
+            | if is_abs(a)
+              | block:
+                  def Pair(va,ba) = dest_abs(a)
+                  def Pair(vb,bb) = dest_abs(b)
+                  unify(ba,subst(PairList [Pair(va,vb)])(bb),tmins,tyins)
+              | if is_const(a)
+                | if name_of(a) != name_of(b) | failwith("term_unify")
+                  | Pair(tmins,augment_types(Pair(a,b),tyins))
+                | block:
+                    def Pair(l1,r1) = dest_comb(a)
+                    def Pair(l2,r2) = dest_comb(b)
+                    def Pair(ts1,ys1) = unify(r1,r2,tmins,tyins)
+                    unify(l1,l2,ts1,ys1)
+      def Pair(tmins,tyins) = unify(tm1,tm2,i.tmin,i.tyin)
+      Instantiation(i.bcs,tmins,tyins)
+
+fun deep_alpha(env):
+  fun(tm):
+    if env == PairList []
+    | tm
+    | try:
+        def Pair(v,bod) = dest_abs(tm)
+        def Pair(vn,vty) = dest_var(v)
+        try:
+          def Pair(Pair(vn1,_),newenv) = remove_first(fun(Pair(_,x)): x == vn)(env)
+          def v1 = mk_var(Pair(vn1,vty))
+          def tm1:
+            try: alpha(v1)(tm)
+            ~catch Failure(_):
+              try:
+                def vv = variant(frees(tm))(v1)
+                alpha(vv)(tm)
+              ~catch Failure(_): tm
+          def Pair(iv,ib) = dest_abs(tm1)
+          mk_abs(Pair(iv,deep_alpha(newenv)(ib)))
+        ~catch Failure(_): mk_abs(Pair(v,deep_alpha(env)(bod)))
+      ~catch Failure(_):
+        try:
+          def Pair(l,r) = dest_comb(tm)
+          mk_comb(Pair(deep_alpha(env)(l),deep_alpha(env)(r)))
+        ~catch Failure(_): tm
+
+fun match_bvs(t1):
+  fun(t2):
+    fun(acc):
+      try:
+        def Pair(v1,b1) = dest_abs(t1)
+        def Pair(v2,b2) = dest_abs(t2)
+        def n1 = fst(dest_var(v1))
+        def n2 = fst(dest_var(v2))
+        match_bvs(b1)(b2)(if n1 == n2 | acc | insert(Pair(n1,n2))(acc))
+      ~catch Failure(_):
+        try:
+          def Pair(l1,r1) = dest_comb(t1)
+          def Pair(l2,r2) = dest_comb(t2)
+          match_bvs(l1)(l2)(match_bvs(r1)(r2)(acc))
+        ~catch Failure(_): acc
+
+fun PART_MATCH(partfn):
+  fun(th):
+    def sth = SPEC_ALL(th)
+    def bod = concl(sth)
+    def pbod = partfn(bod)
+    def lconsts = intersect(frees(concl(th)))(freesl(hyp(th)))
+    fun(tm):
+      def bvms = match_bvs(tm)(pbod)(PairList [])
+      def abod = deep_alpha(bvms)(bod)
+      def ath = EQ_MP(ALPHA(bod)(abod))(sth)
+      def insts = term_match(lconsts)(partfn(abod))(tm)
+      def fth = INSTANTIATE(insts)(ath)
+      if hyp(fth) != hyp(ath)
+      | failwith("PART_MATCH: instantiated hyps")
+      | block:
+          def tm1 = partfn(concl(fth))
+          if compare(tm1)(tm) == 0
+          | fth
+          | try: SUBS(PairList [ALPHA(tm1)(tm)])(fth)
+            ~catch Failure(_): failwith("PART_MATCH: Sanity check failure")
+
+fun GEN_PART_MATCH(partfn):
+  fun(th):
+    def sth = SPEC_ALL(th)
+    def bod = concl(sth)
+    def pbod = partfn(bod)
+    def lconsts = intersect(frees(concl(th)))(freesl(hyp(th)))
+    def fvs = subtract(subtract(frees(bod))(frees(pbod)))(lconsts)
+    fun(tm):
+      def bvms = match_bvs(tm)(pbod)(PairList [])
+      def abod = deep_alpha(bvms)(bod)
+      def ath = EQ_MP(ALPHA(bod)(abod))(sth)
+      def insts = term_match(lconsts)(partfn(abod))(tm)
+      def eth = INSTANTIATE(insts)(GENL(fvs)(ath))
+      def fth = itlist(fun(v): fun(x): snd(SPEC_VAR(x)))(fvs)(eth)
+      if hyp(fth) != hyp(ath)
+      | failwith("PART_MATCH: instantiated hyps")
+      | block:
+          def tm1 = partfn(concl(fth))
+          if compare(tm1)(tm) == 0
+          | fth
+          | try: SUBS(PairList [ALPHA(tm1)(tm)])(fth)
+            ~catch Failure(_): failwith("PART_MATCH: Sanity check failure")
+
+fun MATCH_MP(ith):
+  def sth:
+    try:
+      def tm = concl(ith)
+      def Pair(avs,bod) = strip_forall(tm)
+      def Pair(ant,_) = dest_imp(bod)
+      def Pair(svs,pvs) = partition(fun(v): vfree_in(v)(ant))(avs)
+      if pvs == PairList []
+      | ith
+      | block:
+          def th1 = SPECL(avs)(ASSUME(tm))
+          def th2 = GENL(svs)(DISCH(ant)(GENL(pvs)(UNDISCH(th1))))
+          MP(DISCH(tm)(th2))(ith)
+    ~catch Failure(_): failwith("MATCH_MP: Not an implication")
+  def match_fun = PART_MATCH(o(fst)(dest_imp))(sth)
+  fun(th):
+    try: MP(match_fun(concl(th)))(th)
+    ~catch Failure(_): failwith("MATCH_MP: No match")
+
+fun BETA_VAR(v):
+  fun(tm):
+    if is_abs(tm)
+    | block:
+        def Pair(bv,bod) = dest_abs(tm)
+        if v == bv | failwith("unchanged") | ABS_CONV(BETA_VAR(v))(tm)
+    | block:
+        def Pair(op,args) = strip_comb(tm)
+        if args == PairList []
+        | failwith("unchanged")
+        | if op == v
+          | beta_n(length(args))(tm)
+          | block:
+              def Pair(l,r) = dest_comb(tm)
+              try:
+                def lc = BETA_VAR(v)(l)
+                try: COMB2_CONV(lc)(BETA_VAR(v)(r))(tm)
+                ~catch Failure(_): RATOR_CONV(lc)(tm)
+              ~catch Failure(_): RAND_CONV(BETA_VAR(v))(tm)
+
+fun GINST(th):
+  def fvs = subtract(frees(concl(th)))(freesl(hyp(th)))
+  def gvs = map(o(genvar)(type_of))(fvs)
+  INST(zip(gvs)(fvs))(th)
+
+fun HIGHER_REWRITE_CONV(ths):
+  def thl = map(o(GINST)(SPEC_ALL))(ths)
+  def concs = map(concl)(thl)
+  def lefts = map(lhs)(concs)
+  def pairs = map(dest_comb)(lefts)
+  def Pair(preds,pats) = unzip(pairs)
+  def beta_fns = map2(BETA_VAR)(preds)(concs)
+  def ass_list = zip(pats)(zip(preds)(zip(thl)(beta_fns)))
+  def mnet = itlist(fun(p): fun(n): enter(PairList [])(Pair(p,p))(n))(pats)(empty_net)
+  fun(top):
+    fun(tm):
+      fun look_fn(t):
+        mapfilter(fun(p): if can(term_match(PairList [])(p))(t) | p | fail())(lookup(t)(mnet))
+      fun pred(t): look_fn(t) != PairList [] && free_in(t)(tm)
+      def stm:
+        if top
+        | find_term(pred)(tm)
+        | hd(sort(free_in)(find_terms(pred)(tm)))
+      def pat = hd(look_fn(stm))
+      def mi = term_match(PairList [])(pat)(stm)
+      def Pair(predtm,Pair(th,beta_fn)) = assoc(pat)(ass_list)
+      def gv = genvar(type_of(stm))
+      def abs = mk_abs(Pair(gv,subst(PairList [Pair(gv,stm)])(tm)))
+      def mi0 = term_match(PairList [])(predtm)(abs)
+      CONV_RULE(beta_fn)(
+        INST(mi.tmin)(INST(mi0.tmin)(INST_TYPE(mi0.tyin)(th))))
+
+fun new_definition(tm):
+  def Pair(avs,bod) = strip_forall(tm)
+  def Pair(l,r):
+    try: dest_eq(bod)
+    ~catch Failure(_): failwith("new_definition: Not an equation")
+  def Pair(lv,largs) = strip_comb(l)
+  def rtm:
+    try: list_mk_abs(Pair(largs,r))
+    ~catch Failure(_): failwith("new_definition: Non-variable in LHS pattern")
+  def defn = mk_eq(Pair(lv,rtm))
+  def th1 = new_basic_definition(defn)
+  def th2:
+    rev_itlist(
+      fun(arg): fun(th):
+        def ith = AP_THM(th)(arg)
+        TRANS(ith)(BETA_CONV(rand(concl(ith))))
+    )(largs)(th1)
+  def rvs = filter(fun(v): !mem(v)(avs))(largs)
+  itlist(GEN)(rvs)(itlist(GEN)(avs)(th2))

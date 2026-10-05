@@ -1,0 +1,518 @@
+#lang rhombus
+// (c) University of Cambridge 1998; John Harrison 1998-2007.
+// Direct translation of HOL Light bool.ml, with quotations expanded into
+// explicit term constructors until parser/preterm.rhm are available.
+import: "private/compat.rhm" open
+import: "fusion.rhm" open
+import: "basics.rhm" open
+import: "equal.rhm" open
+
+export:
+  is_iff
+  dest_iff
+  mk_iff
+  PINST
+  PROVE_HYP
+  T_DEF
+  TRUTH
+  EQT_ELIM
+  EQT_INTRO
+  AND_DEF
+  mk_conj
+  list_mk_conj
+  CONJ
+  CONJUNCT1
+  CONJUNCT2
+  CONJ_PAIR
+  CONJUNCTS
+  IMP_DEF
+  mk_imp
+  MP
+  DISCH
+  DISCH_ALL
+  UNDISCH
+  UNDISCH_ALL
+  IMP_ANTISYM_RULE
+  ADD_ASSUM
+  EQ_IMP_RULE
+  IMP_TRANS
+  FORALL_DEF
+  mk_forall
+  list_mk_forall
+  SPEC
+  SPECL
+  SPEC_VAR
+  SPEC_ALL
+  ISPEC
+  ISPECL
+  GEN
+  GENL
+  GEN_ALL
+  EXISTS_DEF
+  mk_exists
+  list_mk_exists
+  EXISTS
+  SIMPLE_EXISTS
+  CHOOSE
+  SIMPLE_CHOOSE
+  OR_DEF
+  mk_disj
+  list_mk_disj
+  DISJ1
+  DISJ2
+  DISJ_CASES
+  SIMPLE_DISJ_CASES
+  F_DEF
+  NOT_DEF
+  mk_neg
+  NOT_ELIM
+  NOT_INTRO
+  EQF_INTRO
+  EQF_ELIM
+  CONTR
+  EXISTS_UNIQUE_DEF
+  mk_uexists
+  EXISTENCE
+
+fun is_iff(tm):
+  match tm
+  | Comb(Comb(Const("=",Tyapp("fun",PairList [Tyapp("bool",PairList []),_])),_),_): #true
+  | _: #false
+
+fun dest_iff(tm):
+  match tm
+  | Comb(Comb(Const("=",Tyapp("fun",PairList [Tyapp("bool",PairList []),_])),l),r): Pair(l,r)
+  | _: failwith("dest_iff")
+
+def mk_iff:
+  def eq_tm = inst(PairList [Pair(bool_ty,aty)])(mk_const(Pair("=",PairList [])))
+  fun(Pair(l,r)): mk_comb(Pair(mk_comb(Pair(eq_tm,l)),r))
+
+fun PINST(tyin):
+  fun(tmin):
+    def tmin1:
+      map(fun(Pair(s,v)): Pair(inst(tyin)(s),inst(tyin)(v)))(tmin)
+    fun(th):
+      try:
+        INST(tmin1)(INST_TYPE(tyin)(th))
+        ~catch Failure(_): failwith("PINST")
+
+fun PROVE_HYP(ath):
+  fun(bth):
+    if exists(aconv(concl(ath)))(hyp(bth))
+    | EQ_MP(DEDUCT_ANTISYM_RULE(ath)(bth))(ath)
+    | bth
+
+def p_bool = mk_var(Pair("p",bool_ty))
+def q_bool = mk_var(Pair("q",bool_ty))
+def r_bool = mk_var(Pair("r",bool_ty))
+
+def T_DEF:
+  def t = mk_var(Pair("T",bool_ty))
+  def id = mk_abs(Pair(p_bool,p_bool))
+  new_basic_definition(mk_eq(Pair(t,mk_eq(Pair(id,id)))))
+
+def tm_true = lhs(concl(T_DEF))
+def TRUTH:
+  def id = mk_abs(Pair(p_bool,p_bool))
+  EQ_MP(SYM(T_DEF))(REFL(id))
+
+fun EQT_ELIM(th):
+  try:
+    EQ_MP(SYM(th))(TRUTH)
+    ~catch Failure(_): failwith("EQT_ELIM")
+
+fun EQT_INTRO(th): DEDUCT_ANTISYM_RULE(th)(TRUTH)
+
+def bool_bin_ty = mk_fun_ty(bool_ty)(mk_fun_ty(bool_ty)(bool_ty))
+
+def AND_DEF:
+  def op = mk_var(Pair("/\\",bool_bin_ty))
+  def f = mk_var(Pair("f",bool_bin_ty))
+  def fpq = mk_comb(Pair(mk_comb(Pair(f,p_bool)),q_bool))
+  def ftt = mk_comb(Pair(mk_comb(Pair(f,tm_true)),tm_true))
+  def body = mk_eq(Pair(mk_abs(Pair(f,fpq)),mk_abs(Pair(f,ftt))))
+  new_basic_definition(
+    mk_eq(Pair(op,mk_abs(Pair(p_bool,mk_abs(Pair(q_bool,body)))))))
+
+def mk_conj = mk_binary("/\\")
+def list_mk_conj = end_itlist(curry(mk_conj))
+
+fun unfold_def(defth):
+  fun(args):
+    fun loop(rest,th):
+      match rest
+      | PairList []: th
+      | PairList [a, & more]:
+          def applied = AP_THM(th)(a)
+          def reduced:
+            try:
+              BETA_RULE(applied)
+              ~catch Failure(_): applied
+          loop(more,reduced)
+    loop(args,defth)
+
+fun CONJ(th1):
+  fun(th2):
+    def p = concl(th1)
+    def q = concl(th2)
+    def ufd = unfold_def(AND_DEF)(PairList [p,q])
+    def target = rhs(concl(ufd))
+    def Pair(labs,_) = dest_eq(target)
+    def Pair(f,_) = dest_abs(labs)
+    def e1 = EQT_INTRO(th1)
+    def e2 = EQT_INTRO(th2)
+    def bodyeq = MK_COMB(Pair(AP_TERM(f)(e1),e2))
+    def absth = ABS(f)(bodyeq)
+    EQ_MP(SYM(ufd))(absth)
+
+fun project_conj(first):
+  fun(th):
+    try:
+      def Pair(p,q) = dest_conj(concl(th))
+      def ufd = unfold_def(AND_DEF)(PairList [p,q])
+      def eqth = EQ_MP(ufd)(th)
+      def a = mk_var(Pair("a",bool_ty))
+      def b = mk_var(Pair("b",bool_ty))
+      def sel = mk_abs(Pair(a,mk_abs(Pair(b,(if first | a | b)))))
+      EQT_ELIM(BETA_RULE(AP_THM(eqth)(sel)))
+      ~catch Failure(_):
+        failwith(if first | "CONJUNCT1" | "CONJUNCT2")
+
+def CONJUNCT1 = project_conj(#true)
+def CONJUNCT2 = project_conj(#false)
+fun CONJ_PAIR(th):
+  try:
+    Pair(CONJUNCT1(th),CONJUNCT2(th))
+    ~catch Failure(_): failwith("CONJ_PAIR: Not a conjunction")
+def CONJUNCTS = striplist(CONJ_PAIR)
+
+def IMP_DEF:
+  def op = mk_var(Pair("==>",bool_bin_ty))
+  def body = mk_iff(Pair(mk_conj(Pair(p_bool,q_bool)),p_bool))
+  new_basic_definition(
+    mk_eq(Pair(op,mk_abs(Pair(p_bool,mk_abs(Pair(q_bool,body)))))))
+
+def mk_imp = mk_binary("==>")
+
+fun MP(ith):
+  fun(th):
+    try:
+      def Pair(p,q) = dest_imp(concl(ith))
+      cond
+      | !aconv(p)(concl(th)): failwith("MP: theorems do not agree")
+      | ~else:
+          def eqth = EQ_MP(unfold_def(IMP_DEF)(PairList [p,q]))(ith)
+          CONJUNCT2(EQ_MP(SYM(eqth))(th))
+      ~catch Failure(_): failwith("MP: theorems do not agree")
+
+fun DISCH(a):
+  fun(th):
+    def th1 = CONJ(ASSUME(a))(th)
+    def th2 = CONJUNCT1(ASSUME(concl(th1)))
+    def th3 = DEDUCT_ANTISYM_RULE(th1)(th2)
+    def unfold = unfold_def(IMP_DEF)(PairList [a,concl(th)])
+    EQ_MP(SYM(unfold))(th3)
+
+fun DISCH_ALL(th):
+  try:
+    DISCH_ALL(DISCH(hd(hyp(th)))(th))
+    ~catch Failure(_): th
+
+fun UNDISCH(th):
+  try:
+    def Pair(p,_) = dest_imp(concl(th))
+    MP(th)(ASSUME(p))
+    ~catch Failure(_): failwith("UNDISCH")
+
+fun UNDISCH_ALL(th):
+  if is_imp(concl(th)) | UNDISCH_ALL(UNDISCH(th)) | th
+
+fun IMP_ANTISYM_RULE(th1):
+  fun(th2):
+    try:
+      def Pair(p,q) = dest_imp(concl(th1))
+      def Pair(q1,p1) = dest_imp(concl(th2))
+      if !aconv(p)(p1) || !aconv(q)(q1)
+      | failwith("IMP_ANTISYM_RULE")
+      | SYM(DEDUCT_ANTISYM_RULE(UNDISCH(th1))(UNDISCH(th2)))
+      ~catch Failure(_): failwith("IMP_ANTISYM_RULE")
+
+fun ADD_ASSUM(tm): fun(th): MP(DISCH(tm)(th))(ASSUME(tm))
+
+fun EQ_IMP_RULE(th):
+  try:
+    def Pair(p,q) = dest_iff(concl(th))
+    Pair(DISCH(p)(EQ_MP(th)(ASSUME(p))),
+         DISCH(q)(EQ_MP(SYM(th))(ASSUME(q))))
+    ~catch Failure(_): failwith("EQ_IMP_RULE")
+
+fun IMP_TRANS(th1):
+  fun(th2):
+    try:
+      def Pair(p,q) = dest_imp(concl(th1))
+      def Pair(q1,r) = dest_imp(concl(th2))
+      if !aconv(q)(q1)
+      | failwith("IMP_TRANS")
+      | DISCH(p)(MP(th2)(UNDISCH(th1)))
+      ~catch Failure(_): failwith("IMP_TRANS")
+
+def predA = mk_fun_ty(aty)(bool_ty)
+
+def FORALL_DEF:
+  def op = mk_var(Pair("!",mk_fun_ty(predA)(bool_ty)))
+  def P = mk_var(Pair("P",predA))
+  def x = mk_var(Pair("x",aty))
+  def body = mk_eq(Pair(P,mk_abs(Pair(x,tm_true))))
+  new_basic_definition(mk_eq(Pair(op,mk_abs(Pair(P,body)))))
+
+def mk_forall = mk_binder("!")
+fun list_mk_forall(Pair(vs,bod)): itlist(curry(mk_forall))(vs)(bod)
+
+fun unfold_forall(pred):
+  def Pair(dom,_) = dest_fun_ty(type_of(pred))
+  unfold_def(INST_TYPE(PairList [Pair(dom,aty)])(FORALL_DEF))(PairList [pred])
+
+fun SPEC(tm):
+  fun(th):
+    try:
+      def Pair(v,body) = dest_forall(concl(th))
+      if type_of(v) != type_of(tm)
+      | failwith("SPEC")
+      | block:
+          def pred = mk_abs(Pair(v,body))
+          def eqth = EQ_MP(unfold_forall(pred))(th)
+          def app = AP_THM(eqth)(tm)
+          EQT_ELIM(BETA_RULE(app))
+      ~catch Failure(_): failwith("SPEC")
+
+fun SPECL(tms): fun(th): rev_itlist(SPEC)(tms)(th)
+fun SPEC_VAR(th):
+  def Pair(v,_) = dest_forall(concl(th))
+  def v1 = variant(thm_frees(th))(v)
+  Pair(v1,SPEC(v1)(th))
+fun SPEC_ALL(th):
+  if is_forall(concl(th)) | SPEC_ALL(snd(SPEC_VAR(th))) | th
+
+fun ISPEC(t):
+  fun(th):
+    try:
+      def Pair(x,_) = dest_forall(concl(th))
+      def tyins = type_match(snd(dest_var(x)))(type_of(t))(PairList [])
+      SPEC(t)(INST_TYPE(tyins)(th))
+      ~catch Failure(_): failwith("ISPEC")
+
+fun take(n,l):
+  if n == 0 | PairList [] | PairList.cons(hd(l),take(n-1,tl(l)))
+
+fun ISPECL(tms):
+  fun(th):
+    try:
+      if tms == PairList []
+      | th
+      | block:
+          def Pair(avs,_) = strip_forall(concl(th))
+          def vs = take(length(tms),avs)
+          def tyins = itlist2(fun(v): fun(t): type_match(type_of(v))(type_of(t)))(vs)(tms)(PairList [])
+          SPECL(tms)(INST_TYPE(tyins)(th))
+      ~catch Failure(_): failwith("ISPECL")
+
+fun GEN(x):
+  fun(th):
+    try:
+      def pred = mk_abs(Pair(x,concl(th)))
+      def ufd = unfold_forall(pred)
+      def absth = ABS(x)(EQT_INTRO(th))
+      EQ_MP(SYM(ufd))(absth)
+      ~catch Failure(_): failwith("GEN")
+
+def GENL = itlist(GEN)
+fun GEN_ALL(th):
+  def Pair(asl,c) = dest_thm(th)
+  def vars = subtract(frees(c))(freesl(asl))
+  GENL(vars)(th)
+
+def EXISTS_DEF:
+  def op = mk_var(Pair("?",mk_fun_ty(predA)(bool_ty)))
+  def P = mk_var(Pair("P",predA))
+  def x = mk_var(Pair("x",aty))
+  def q = mk_var(Pair("q",bool_ty))
+  def Px = mk_comb(Pair(P,x))
+  def inner = mk_forall(Pair(x,mk_imp(Pair(Px,q))))
+  def body = mk_forall(Pair(q,mk_imp(Pair(inner,q))))
+  new_basic_definition(mk_eq(Pair(op,mk_abs(Pair(P,body)))))
+
+def mk_exists = mk_binder("?")
+fun list_mk_exists(Pair(vs,bod)): itlist(curry(mk_exists))(vs)(bod)
+
+fun unfold_exists(pred):
+  def Pair(dom,_) = dest_fun_ty(type_of(pred))
+  unfold_def(INST_TYPE(PairList [Pair(dom,aty)])(EXISTS_DEF))(PairList [pred])
+
+fun EXISTS(Pair(etm,stm)):
+  fun(th):
+    try:
+      def Pair(v,body) = dest_exists(etm)
+      def expected = vsubst(PairList [Pair(stm,v)])(body)
+      if !aconv(expected)(concl(th))
+      | failwith("EXISTS")
+      | block:
+          def pred = mk_abs(Pair(v,body))
+          def unfolded = rhs(concl(unfold_exists(pred)))
+          def Pair(qv,_) = dest_forall(unfolded)
+          def inner = mk_forall(Pair(v,mk_imp(Pair(mk_comb(Pair(pred,v)),qv))))
+          def a = ASSUME(inner)
+          def spec = BETA_RULE(SPEC(stm)(a))
+          def got = MP(spec)(BETA_RULE(th))
+          def closed = GEN(qv)(DISCH(inner)(got))
+          EQ_MP(SYM(unfold_exists(pred)))(closed)
+      ~catch Failure(_): failwith("EXISTS")
+
+fun SIMPLE_EXISTS(v): fun(th): EXISTS(Pair(mk_exists(Pair(v,concl(th))),v))(th)
+
+fun CHOOSE(Pair(v,th1)):
+  fun(th2):
+    try:
+      def Pair(bv,body) = dest_exists(concl(th1))
+      def instbody = vsubst(PairList [Pair(v,bv)])(body)
+      if vfree_in(v)(concl(th2))
+      | failwith("CHOOSE")
+      | block:
+          def bad = exists(fun(h): !aconv(h)(instbody) && vfree_in(v)(h))(hyp(th2))
+          if bad
+          | failwith("CHOOSE")
+          | block:
+              def pred = mk_abs(Pair(bv,body))
+              def eqth = EQ_MP(unfold_exists(pred))(th1)
+              def r = concl(th2)
+              def step = GEN(v)(DISCH(instbody)(th2))
+              def want = SPEC(r)(eqth)
+              MP(want)(step)
+      ~catch Failure(_): failwith("CHOOSE")
+
+fun SIMPLE_CHOOSE(v):
+  fun(th): CHOOSE(Pair(v,ASSUME(mk_exists(Pair(v,hd(hyp(th)))))))(th)
+
+def OR_DEF:
+  def op = mk_var(Pair("\\/",bool_bin_ty))
+  def body = mk_forall(Pair(r_bool,mk_imp(Pair(mk_imp(Pair(p_bool,r_bool)),mk_imp(Pair(mk_imp(Pair(q_bool,r_bool)),r_bool))))))
+  new_basic_definition(
+    mk_eq(Pair(op,mk_abs(Pair(p_bool,mk_abs(Pair(q_bool,body)))))))
+
+def mk_disj = mk_binary("\\/")
+def list_mk_disj = end_itlist(curry(mk_disj))
+
+fun DISJ1(th):
+  fun(tm):
+    def p = concl(th)
+    def q = tm
+    def ufd = unfold_def(OR_DEF)(PairList [p,q])
+    def Pair(rv,_) = dest_forall(rhs(concl(ufd)))
+    def got = MP(ASSUME(mk_imp(Pair(p,rv))))(th)
+    def closed = GEN(rv)(DISCH(mk_imp(Pair(p,rv)))(DISCH(mk_imp(Pair(q,rv)))(got)))
+    EQ_MP(SYM(ufd))(closed)
+
+fun DISJ2(tm):
+  fun(th):
+    def p = tm
+    def q = concl(th)
+    def ufd = unfold_def(OR_DEF)(PairList [p,q])
+    def Pair(rv,_) = dest_forall(rhs(concl(ufd)))
+    def got = MP(ASSUME(mk_imp(Pair(q,rv))))(th)
+    def closed = GEN(rv)(DISCH(mk_imp(Pair(p,rv)))(DISCH(mk_imp(Pair(q,rv)))(got)))
+    EQ_MP(SYM(ufd))(closed)
+
+fun DISJ_CASES(th0):
+  fun(th1):
+    fun(th2):
+      try:
+        def Pair(p,q) = dest_disj(concl(th0))
+        if !aconv(concl(th1))(concl(th2))
+        | failwith("DISJ_CASES")
+        | block:
+            def eqth = EQ_MP(unfold_def(OR_DEF)(PairList [p,q]))(th0)
+            def inst = SPEC(concl(th1))(eqth)
+            MP(MP(inst)(DISCH(p)(th1)))(DISCH(q)(th2))
+        ~catch Failure(_): failwith("DISJ_CASES")
+
+fun SIMPLE_DISJ_CASES(th1):
+  fun(th2):
+    DISJ_CASES(ASSUME(mk_disj(Pair(hd(hyp(th1)),hd(hyp(th2))))))(th1)(th2)
+
+def F_DEF:
+  def f = mk_var(Pair("F",bool_ty))
+  new_basic_definition(mk_eq(Pair(f,mk_forall(Pair(p_bool,p_bool)))))
+def tm_false = lhs(concl(F_DEF))
+
+def NOT_DEF:
+  def op = mk_var(Pair("~",mk_fun_ty(bool_ty)(bool_ty)))
+  new_basic_definition(
+    mk_eq(Pair(op,mk_abs(Pair(p_bool,mk_imp(Pair(p_bool,tm_false)))))))
+
+def neg_tm = lhs(concl(NOT_DEF))
+fun mk_neg(tm):
+  try:
+    mk_comb(Pair(neg_tm,tm))
+    ~catch Failure(_): failwith("mk_neg")
+
+fun NOT_ELIM(th):
+  try:
+    def p = dest_neg(concl(th))
+    EQ_MP(unfold_def(NOT_DEF)(PairList [p]))(th)
+    ~catch Failure(_): failwith("NOT_ELIM")
+
+fun NOT_INTRO(th):
+  try:
+    def Pair(p,f) = dest_imp(concl(th))
+    if !aconv(f)(tm_false)
+    | failwith("NOT_INTRO")
+    | EQ_MP(SYM(unfold_def(NOT_DEF)(PairList [p])))(th)
+    ~catch Failure(_): failwith("NOT_INTRO")
+
+fun CONTR(tm):
+  fun(th):
+    if !aconv(concl(th))(tm_false)
+    | failwith("CONTR")
+    | SPEC(tm)(EQ_MP(F_DEF)(th))
+
+fun EQF_INTRO(th):
+  try:
+    def p = dest_neg(concl(th))
+    def a = UNDISCH(NOT_ELIM(th))
+    def b = CONTR(p)(ASSUME(tm_false))
+    SYM(DEDUCT_ANTISYM_RULE(a)(b))
+    ~catch Failure(_): failwith("EQF_INTRO")
+
+fun EQF_ELIM(th):
+  try:
+    def Pair(p,f) = dest_eq(concl(th))
+    if !aconv(f)(tm_false)
+    | failwith("EQF_ELIM")
+    | NOT_INTRO(DISCH(p)(EQ_MP(th)(ASSUME(p))))
+    ~catch Failure(_): failwith("EQF_ELIM")
+
+def EXISTS_UNIQUE_DEF:
+  def op = mk_var(Pair("?!",mk_fun_ty(predA)(bool_ty)))
+  def P = mk_var(Pair("P",predA))
+  def x = mk_var(Pair("x",aty))
+  def y = mk_var(Pair("y",aty))
+  def Px = mk_comb(Pair(P,x))
+  def Py = mk_comb(Pair(P,y))
+  def uniq = mk_forall(Pair(x,mk_forall(Pair(y,mk_imp(Pair(mk_conj(Pair(Px,Py)),mk_eq(Pair(x,y))))))))
+  def body = mk_conj(Pair(mk_exists(Pair(x,Px)),uniq))
+  new_basic_definition(mk_eq(Pair(op,mk_abs(Pair(P,body)))))
+
+def mk_uexists = mk_binder("?!")
+
+fun EXISTENCE(th):
+  try:
+    def Pair(v,body) = dest_uexists(concl(th))
+    def pred = mk_abs(Pair(v,body))
+    def Pair(dom,_) = dest_fun_ty(type_of(pred))
+    def defth = INST_TYPE(PairList [Pair(dom,aty)])(EXISTS_UNIQUE_DEF)
+    CONJUNCT1(EQ_MP(unfold_def(defth)(PairList [pred]))(th))
+    ~catch Failure(_): failwith("EXISTENCE")
+
+// Parser/interface side effects from bool.ml are intentionally deferred to
+// parser.rhm/preterm.rhm. The logical definitions and derived rules above are
+// complete independently of surface syntax.

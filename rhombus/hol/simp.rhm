@@ -1,0 +1,479 @@
+#lang rhombus
+// (c) University of Cambridge 1998; John Harrison 1998-2007.
+// Direct translation of HOL Light simp.ml.
+import: "private/compat.rhm" open
+import: "fusion.rhm" open
+import: "basics.rhm" open
+import: "nets.rhm" open
+import: "equal.rhm" open
+import: "bool.rhm" open
+import: "drule.rhm" open
+import: "tactics.rhm" open
+import: "itab.rhm" open
+
+export:
+  REWR_CONV
+  IMP_REWR_CONV
+  ORDERED_REWR_CONV
+  ORDERED_IMP_REWR_CONV
+  term_order
+  net_of_thm
+  net_of_conv
+  net_of_cong
+  mk_rewrites
+  REWRITES_CONV
+  Prover
+  mk_prover
+  augment
+  apply_prover
+  Simpset
+  basic_prover
+  ss_of_thms
+  ss_of_conv
+  ss_of_congs
+  ss_of_prover
+  ss_of_provers
+  ss_of_maker
+  AUGMENT_SIMPSET
+  ONCE_DEPTH_SQCONV
+  DEPTH_SQCONV
+  REDEPTH_SQCONV
+  TOP_DEPTH_SQCONV
+  TOP_SWEEP_SQCONV
+  set_basic_rewrites
+  extend_basic_rewrites
+  basic_rewrites
+  set_basic_convs
+  extend_basic_convs
+  basic_convs
+  basic_net
+  set_basic_congs
+  extend_basic_congs
+  basic_congs
+  GENERAL_REWRITE_CONV
+  GEN_REWRITE_CONV
+  PURE_REWRITE_CONV
+  REWRITE_CONV
+  PURE_ONCE_REWRITE_CONV
+  ONCE_REWRITE_CONV
+  GEN_REWRITE_RULE
+  PURE_REWRITE_RULE
+  REWRITE_RULE
+  PURE_ONCE_REWRITE_RULE
+  ONCE_REWRITE_RULE
+  PURE_ASM_REWRITE_RULE
+  ASM_REWRITE_RULE
+  PURE_ONCE_ASM_REWRITE_RULE
+  ONCE_ASM_REWRITE_RULE
+  GEN_REWRITE_TAC
+  PURE_REWRITE_TAC
+  REWRITE_TAC
+  PURE_ONCE_REWRITE_TAC
+  ONCE_REWRITE_TAC
+  PURE_ASM_REWRITE_TAC
+  ASM_REWRITE_TAC
+  PURE_ONCE_ASM_REWRITE_TAC
+  ONCE_ASM_REWRITE_TAC
+  GEN_SIMPLIFY_CONV
+  ONCE_SIMPLIFY_CONV
+  SIMPLIFY_CONV
+  empty_ss
+  basic_ss
+  SIMP_CONV
+  PURE_SIMP_CONV
+  ONCE_SIMP_CONV
+  SIMP_RULE
+  PURE_SIMP_RULE
+  ONCE_SIMP_RULE
+  SIMP_TAC
+  PURE_SIMP_TAC
+  ONCE_SIMP_TAC
+  ASM_SIMP_TAC
+  PURE_ASM_SIMP_TAC
+  ONCE_ASM_SIMP_TAC
+  ABBREV_TAC
+
+def REWR_CONV = PART_MATCH(lhs)
+def IMP_REWR_CONV = PART_MATCH(o(lhs)(o(snd)(dest_imp)))
+
+fun ORDERED_REWR_CONV(ord):
+  fun(th):
+    def basic = REWR_CONV(th)
+    fun(tm):
+      def thm = basic(tm)
+      def Pair(l,r) = dest_eq(concl(thm))
+      if ord(l)(r) | thm | failwith("ORDERED_REWR_CONV: wrong orientation")
+
+fun ORDERED_IMP_REWR_CONV(ord):
+  fun(th):
+    def basic = IMP_REWR_CONV(th)
+    fun(tm):
+      def thm = basic(tm)
+      def Pair(l,r) = dest_eq(rand(concl(thm)))
+      if ord(l)(r) | thm | failwith("ORDERED_IMP_REWR_CONV: wrong orientation")
+
+fun lexify(ord):
+  fun(l1):
+    fun(l2):
+      if l1 == PairList [] | #false | (if l2 == PairList [] | #true | ord(hd(l1))(hd(l2)) || (hd(l1) == hd(l2) && lexify(ord)(tl(l1))(tl(l2))))
+
+fun dyn_order(top):
+  fun(tm1):
+    fun(tm2):
+      def Pair(f1,args1) = strip_comb(tm1)
+      def Pair(f2,args2) = strip_comb(tm2)
+      if f1 == f2 | lexify(dyn_order(f1))(args1)(args2) | (if f2 == top | #false | (if f1 == top | #true | compare(f1)(f2) > 0))
+
+def term_order = dyn_order(lhs(concl(T_DEF)))
+
+fun net_of_thm(rep):
+  fun(th):
+    def tm = concl(th)
+    def lconsts = freesl(hyp(th))
+    fun matchable(a): fun(b): can(term_match(lconsts)(a))(b)
+    match tm
+    | Comb(Comb(Const("=",_),l),r):
+        if rep && free_in(l)(r) | enter(lconsts)(Pair(l,Pair(1,REWR_CONV(EQT_INTRO(th))))) | (if rep && matchable(l)(r) && matchable(r)(l) | enter(lconsts)(Pair(l,Pair(1,ORDERED_REWR_CONV(term_order)(th)))) | enter(lconsts)(Pair(l,Pair(1,REWR_CONV(th)))))
+    | Comb(Comb(_,t),Comb(Comb(Const("=",_),l),r)):
+        if rep && free_in(l)(r)
+        | block:
+            def th1 = DISCH(t)(EQT_INTRO(UNDISCH(th)))
+            enter(lconsts)(Pair(l,Pair(3,IMP_REWR_CONV(th1))))
+        | (if rep && matchable(l)(r) && matchable(r)(l) | enter(lconsts)(Pair(l,Pair(3,ORDERED_IMP_REWR_CONV(term_order)(th)))) | enter(lconsts)(Pair(l,Pair(3,IMP_REWR_CONV(th)))))
+    | _: failwith("net_of_thm")
+
+fun net_of_conv(tm):
+  fun(conv):
+    fun(sofar): enter(PairList [])(Pair(tm,Pair(2,conv)))(sofar)
+
+fun repeat_imp(tm,n):
+  try:
+    repeat_imp(snd(dest_imp(tm)),n+1)
+    ~catch Failure(_): Pair(tm,n)
+
+fun funpow(n):
+  fun(f):
+    fun(x): if n <= 0 | x | funpow(n-1)(f)(f(x))
+
+fun net_of_cong(th):
+  fun(sofar):
+    def Pair(conc,n) = repeat_imp(concl(th),0)
+    cond
+    | n == 0: failwith("net_of_cong: Non-implicational congruence")
+    | ~else:
+        def pat = lhs(conc)
+        def conv = GEN_PART_MATCH(o(lhand)(funpow(n)(rand)))(th)
+        enter(PairList [])(Pair(pat,Pair(4,conv)))(sofar)
+
+fun mk_rewrites(cf):
+  fun(th):
+    fun(sofar):
+      fun split(oldhyps,t,acc):
+        def tm = concl(t)
+        cond
+        | is_forall(tm): split(oldhyps,SPEC_ALL(t),acc)
+        | is_conj(tm): split(oldhyps,CONJUNCT1(t),split(oldhyps,CONJUNCT2(t),acc))
+        | is_imp(tm) && cf: split(oldhyps,UNDISCH(t),acc)
+        | is_eq(tm):
+            if cf && subtract(hyp(t))(oldhyps) != PairList []
+            | block:
+                def conds = subtract(hyp(t))(oldhyps)
+                def jth = itlist(DISCH)(conds)(t)
+                PairList.cons(jth,acc)
+            | PairList.cons(t,acc)
+        | is_neg(tm):
+            def ths = split(oldhyps,EQF_INTRO(t),acc)
+            if is_eq(rand(tm)) | split(oldhyps,EQF_INTRO(GSYM(t)),ths) | ths
+        | ~else: split(oldhyps,EQT_INTRO(t),acc)
+      split(hyp(th),th,sofar)
+
+fun REWRITES_CONV(net):
+  fun(tm):
+    try:
+      tryfind(fun(Pair(_,cnv)): cnv(tm))(lookup(tm)(net))
+      ~catch Failure(_): failwith("REWRITES_CONV")
+
+class Prover(conv,augmentor)
+fun mk_prover(applicator):
+  fun(augmentor):
+    fun build(state):
+      Prover(applicator(state),fun(thms): build(augmentor(state)(thms)))
+    build
+fun augment(Prover(_,aug)): fun(thms): aug(thms)
+fun apply_prover(Prover(conv,_)): fun(tm): conv(tm)
+
+class Simpset(net,prover,provers,rewmaker)
+
+fun basic_prover(strat):
+  fun(ss :: Simpset):
+    fun(lev):
+      fun(tm):
+        def sth:
+          try:
+            strat(ss)(lev)(tm)
+            ~catch Failure(_): REFL(tm)
+        try:
+          EQT_ELIM(sth)
+          ~catch Failure(_):
+            def tth = tryfind(fun(pr): apply_prover(pr)(rand(concl(sth))))(ss.provers)
+            EQ_MP(SYM(sth))(tth)
+
+fun ss_of_thms(thms):
+  fun(ss :: Simpset):
+    def cthms = itlist(ss.rewmaker)(thms)(PairList [])
+    def net1 = itlist(net_of_thm(#true))(cthms)(ss.net)
+    Simpset(net1,ss.prover,ss.provers,ss.rewmaker)
+
+fun ss_of_conv(keytm):
+  fun(conv):
+    fun(ss :: Simpset):
+      Simpset(net_of_conv(keytm)(conv)(ss.net),ss.prover,ss.provers,ss.rewmaker)
+
+fun ss_of_congs(thms):
+  fun(ss :: Simpset):
+    Simpset(itlist(net_of_cong)(thms)(ss.net),ss.prover,ss.provers,ss.rewmaker)
+
+fun ss_of_prover(newprover):
+  fun(ss :: Simpset): Simpset(ss.net,newprover,ss.provers,ss.rewmaker)
+fun ss_of_provers(newprovers):
+  fun(ss :: Simpset): Simpset(ss.net,ss.prover,append(newprovers)(ss.provers),ss.rewmaker)
+fun ss_of_maker(newmaker):
+  fun(ss :: Simpset): Simpset(ss.net,ss.prover,ss.provers,newmaker)
+
+fun AUGMENT_SIMPSET(cth):
+  fun(ss :: Simpset):
+    def provers1 = map(fun(p): augment(p)(PairList [cth]))(ss.provers)
+    def cthms = ss.rewmaker(cth)(PairList [])
+    def net1 = itlist(net_of_thm(#true))(cthms)(ss.net)
+    Simpset(net1,ss.prover,provers1,ss.rewmaker)
+
+fun IMP_REWRITES_CONV(strat):
+  fun(ss :: Simpset):
+    fun(lev):
+      fun(pconvs):
+        fun(tm):
+          tryfind(
+            fun(Pair(n,cnv)):
+              cond
+              | n >= 4: fail()
+              | ~else:
+                  def th = cnv(tm)
+                  def etm = concl(th)
+                  if is_eq(etm) | th | (if lev <= 0 | failwith("IMP_REWRITES_CONV: Too deep") | MP(th)(ss.prover(strat)(ss)(lev-1)(lhand(etm))))
+          )(pconvs)
+
+fun GEN_SUB_CONV(strat):
+  fun(ss :: Simpset):
+    fun(lev):
+      fun(pconvs):
+        fun(tm):
+          try:
+            tryfind(
+              fun(Pair(n,cnv)):
+                cond
+                | n < 4: fail()
+                | ~else:
+                    def th = cnv(tm)
+                    // Congruence rules are recursively discharged below.
+                    fun run(tth):
+                      if is_imp(concl(tth))
+                      | block:
+                          def subtm = lhand(concl(tth))
+                          def Pair(avs,bod) = strip_forall(subtm)
+                          def eth:
+                            try:
+                              strat(ss)(lev)(lhs(bod))
+                              ~catch Failure(_): REFL(lhs(bod))
+                          run(MP(tth)(GENL(avs)(eth)))
+                      | tth
+                    run(th)
+            )(pconvs)
+            ~catch Failure(_):
+              if is_comb(tm)
+              | block:
+                  def Pair(l,r) = dest_comb(tm)
+                  try:
+                    def th1 = strat(ss)(lev)(l)
+                    try:
+                      MK_COMB(Pair(th1,strat(ss)(lev)(r)))
+                      ~catch Failure(_): AP_THM(th1)(r)
+                    ~catch Failure(_): AP_TERM(l)(strat(ss)(lev)(r))
+              | block:
+                  if is_abs(tm) | ABS_CONV(fun(x): strat(ss)(lev)(x))(tm) | failwith("GEN_SUB_CONV")
+
+fun ONCE_DEPTH_SQCONV(ss :: Simpset):
+  fun(lev):
+    fun(tm):
+      def pconvs = lookup(tm)(ss.net)
+      try:
+        IMP_REWRITES_CONV(ONCE_DEPTH_SQCONV)(ss)(lev)(pconvs)(tm)
+        ~catch Failure(_): GEN_SUB_CONV(ONCE_DEPTH_SQCONV)(ss)(lev)(pconvs)(tm)
+
+fun DEPTH_SQCONV(ss :: Simpset):
+  fun(lev):
+    fun(tm):
+      def pconvs = lookup(tm)(ss.net)
+      try:
+        def th1 = GEN_SUB_CONV(DEPTH_SQCONV)(ss)(lev)(pconvs)(tm)
+        def tm1 = rand(concl(th1))
+        try:
+          TRANS(th1)(IMP_REWRITES_CONV(DEPTH_SQCONV)(ss)(lev)(lookup(tm1)(ss.net))(tm1))
+          ~catch Failure(_): th1
+        ~catch Failure(_): IMP_REWRITES_CONV(DEPTH_SQCONV)(ss)(lev)(pconvs)(tm)
+
+fun REDEPTH_SQCONV(ss :: Simpset):
+  fun(lev):
+    fun(tm):
+      def pconvs = lookup(tm)(ss.net)
+      def th:
+        try:
+          def th1 = GEN_SUB_CONV(REDEPTH_SQCONV)(ss)(lev)(pconvs)(tm)
+          def tm1 = rand(concl(th1))
+          try:
+            TRANS(th1)(IMP_REWRITES_CONV(REDEPTH_SQCONV)(ss)(lev)(lookup(tm1)(ss.net))(tm1))
+            ~catch Failure(_): th1
+          ~catch Failure(_): IMP_REWRITES_CONV(REDEPTH_SQCONV)(ss)(lev)(pconvs)(tm)
+      try:
+        TRANS(th)(REDEPTH_SQCONV(ss)(lev)(rand(concl(th))))
+        ~catch Failure(_): th
+
+fun TOP_DEPTH_SQCONV(ss :: Simpset):
+  fun(lev):
+    fun(tm):
+      def pconvs = lookup(tm)(ss.net)
+      def th1:
+        try:
+          IMP_REWRITES_CONV(TOP_DEPTH_SQCONV)(ss)(lev)(pconvs)(tm)
+          ~catch Failure(_): GEN_SUB_CONV(TOP_DEPTH_SQCONV)(ss)(lev)(pconvs)(tm)
+      try:
+        TRANS(th1)(TOP_DEPTH_SQCONV(ss)(lev)(rand(concl(th1))))
+        ~catch Failure(_): th1
+
+fun TOP_SWEEP_SQCONV(ss :: Simpset):
+  fun(lev):
+    fun(tm):
+      def pconvs = lookup(tm)(ss.net)
+      try:
+        def th1 = IMP_REWRITES_CONV(TOP_SWEEP_SQCONV)(ss)(lev)(pconvs)(tm)
+        try:
+          TRANS(th1)(TOP_SWEEP_SQCONV(ss)(lev)(rand(concl(th1))))
+          ~catch Failure(_): th1
+        ~catch Failure(_): GEN_SUB_CONV(TOP_SWEEP_SQCONV)(ss)(lev)(pconvs)(tm)
+
+def mutable rewrites = PairList []
+def mutable conversions = PairList []
+def mutable conv_net = empty_net
+def mutable congs = PairList []
+
+fun rehash_convnet():
+  conv_net := itlist(net_of_thm(#true))(rewrites)(
+    itlist(fun(Pair(_,Pair(pat,cnv))): fun(n): net_of_conv(pat)(cnv)(n))(conversions)(empty_net))
+
+fun set_basic_rewrites(thl):
+  rewrites := itlist(mk_rewrites(#false))(thl)(PairList [])
+  rehash_convnet()
+fun extend_basic_rewrites(thl):
+  rewrites := append(itlist(mk_rewrites(#false))(thl)(PairList []))(rewrites)
+  rehash_convnet()
+fun basic_rewrites(): rewrites
+fun set_basic_convs(cnvs):
+  conversions := cnvs
+  rehash_convnet()
+fun extend_basic_convs(Pair(name,patcong)):
+  def rest = filter(fun(Pair(name1,_)): name1 != name)(conversions)
+  conversions := PairList.cons(Pair(name,patcong),rest)
+  rehash_convnet()
+fun basic_convs(): conversions
+fun basic_net(): conv_net
+
+fun set_basic_congs(thl): congs := thl
+fun extend_basic_congs(thl):
+  for(t in thl):
+    cond
+    | !exists(fun(x): equals_thm(t)(x))(congs):
+        congs := PairList.cons(t,congs)
+    | ~else: #void
+fun basic_congs(): congs
+
+fun GENERAL_REWRITE_CONV(rep):
+  fun(cnvl):
+    fun(builtin_net):
+      fun(thl):
+        def canon = itlist(mk_rewrites(#false))(thl)(PairList [])
+        def final_net = itlist(net_of_thm(rep))(canon)(builtin_net)
+        cnvl(REWRITES_CONV(final_net))
+
+fun GEN_REWRITE_CONV(cnvl): fun(thl): GENERAL_REWRITE_CONV(#false)(cnvl)(empty_net)(thl)
+fun PURE_REWRITE_CONV(thl): GENERAL_REWRITE_CONV(#true)(TOP_DEPTH_CONV)(empty_net)(thl)
+fun REWRITE_CONV(thl): GENERAL_REWRITE_CONV(#true)(TOP_DEPTH_CONV)(basic_net())(thl)
+fun PURE_ONCE_REWRITE_CONV(thl): GENERAL_REWRITE_CONV(#false)(ONCE_DEPTH_CONV)(empty_net)(thl)
+fun ONCE_REWRITE_CONV(thl): GENERAL_REWRITE_CONV(#false)(ONCE_DEPTH_CONV)(basic_net())(thl)
+
+fun GEN_REWRITE_RULE(cnvl): fun(thl): CONV_RULE(GEN_REWRITE_CONV(cnvl)(thl))
+fun PURE_REWRITE_RULE(thl): CONV_RULE(PURE_REWRITE_CONV(thl))
+fun REWRITE_RULE(thl): CONV_RULE(REWRITE_CONV(thl))
+fun PURE_ONCE_REWRITE_RULE(thl): CONV_RULE(PURE_ONCE_REWRITE_CONV(thl))
+fun ONCE_REWRITE_RULE(thl): CONV_RULE(ONCE_REWRITE_CONV(thl))
+
+fun PURE_ASM_REWRITE_RULE(thl):
+  fun(th): PURE_REWRITE_RULE(append(map(ASSUME)(hyp(th)))(thl))(th)
+fun ASM_REWRITE_RULE(thl):
+  fun(th): REWRITE_RULE(append(map(ASSUME)(hyp(th)))(thl))(th)
+fun PURE_ONCE_ASM_REWRITE_RULE(thl):
+  fun(th): PURE_ONCE_REWRITE_RULE(append(map(ASSUME)(hyp(th)))(thl))(th)
+fun ONCE_ASM_REWRITE_RULE(thl):
+  fun(th): ONCE_REWRITE_RULE(append(map(ASSUME)(hyp(th)))(thl))(th)
+
+fun GEN_REWRITE_TAC(cnvl): fun(thl): CONV_TAC(GEN_REWRITE_CONV(cnvl)(thl))
+fun PURE_REWRITE_TAC(thl): CONV_TAC(PURE_REWRITE_CONV(thl))
+fun REWRITE_TAC(thl): CONV_TAC(REWRITE_CONV(thl))
+fun PURE_ONCE_REWRITE_TAC(thl): CONV_TAC(PURE_ONCE_REWRITE_CONV(thl))
+fun ONCE_REWRITE_TAC(thl): CONV_TAC(ONCE_REWRITE_CONV(thl))
+def PURE_ASM_REWRITE_TAC = ASM(PURE_REWRITE_TAC)
+def ASM_REWRITE_TAC = ASM(REWRITE_TAC)
+def PURE_ONCE_ASM_REWRITE_TAC = ASM(PURE_ONCE_REWRITE_TAC)
+def ONCE_ASM_REWRITE_TAC = ASM(ONCE_REWRITE_TAC)
+
+fun GEN_SIMPLIFY_CONV(strat):
+  fun(ss):
+    fun(lev):
+      fun(thl):
+        def ss1 = itlist(AUGMENT_SIMPSET)(thl)(ss)
+        TRY_CONV(strat(ss1)(lev))
+fun ONCE_SIMPLIFY_CONV(ss): GEN_SIMPLIFY_CONV(ONCE_DEPTH_SQCONV)(ss)(1)
+fun SIMPLIFY_CONV(ss): GEN_SIMPLIFY_CONV(TOP_DEPTH_SQCONV)(ss)(3)
+
+def empty_ss = Simpset(empty_net,basic_prover,PairList [],mk_rewrites(#true))
+fun basic_ss(thl):
+  def rewmaker = mk_rewrites(#true)
+  def cthms = itlist(rewmaker)(thl)(PairList [])
+  def net1 = itlist(net_of_thm(#true))(cthms)(basic_net())
+  def net2 = itlist(net_of_cong)(basic_congs())(net1)
+  Simpset(net2,basic_prover,PairList [],rewmaker)
+
+fun SIMP_CONV(thl): SIMPLIFY_CONV(basic_ss(PairList []))(thl)
+fun PURE_SIMP_CONV(thl): SIMPLIFY_CONV(empty_ss)(thl)
+fun ONCE_SIMP_CONV(thl): ONCE_SIMPLIFY_CONV(basic_ss(PairList []))(thl)
+fun SIMP_RULE(thl): CONV_RULE(SIMP_CONV(thl))
+fun PURE_SIMP_RULE(thl): CONV_RULE(PURE_SIMP_CONV(thl))
+fun ONCE_SIMP_RULE(thl): CONV_RULE(ONCE_SIMP_CONV(thl))
+fun SIMP_TAC(thl): CONV_TAC(SIMP_CONV(thl))
+fun PURE_SIMP_TAC(thl): CONV_TAC(PURE_SIMP_CONV(thl))
+fun ONCE_SIMP_TAC(thl): CONV_TAC(ONCE_SIMP_CONV(thl))
+def ASM_SIMP_TAC = ASM(SIMP_TAC)
+def PURE_ASM_SIMP_TAC = ASM(PURE_SIMP_TAC)
+def ONCE_ASM_SIMP_TAC = ASM(ONCE_SIMP_TAC)
+
+fun ABBREV_TAC(tm):
+  def Pair(cvs,t) = dest_eq(tm)
+  def Pair(v,vs) = strip_comb(cvs)
+  def rs = list_mk_abs(Pair(vs,t))
+  def eq = mk_eq(Pair(rs,v))
+  def th1 = itlist(
+    fun(x): fun(th): CONV_RULE(LAND_CONV(BETA_CONV))(AP_THM(th)(x))
+  )(rev_itlist(fun(x): fun(a): PairList.cons(x,a))(vs)(PairList []))(ASSUME(eq))
+  def th2 = SIMPLE_CHOOSE(v)(SIMPLE_EXISTS(v)(GENL(vs)(th1)))
+  def th3 = PROVE_HYP(EXISTS(Pair(mk_exists(Pair(v,eq)),rs))(REFL(rs)))(th2)
+  CHOOSE_THEN(
+    fun(th): THEN(RULE_ASSUM_TAC(PURE_ONCE_REWRITE_RULE(PairList [th])))(
+      THEN(PURE_ONCE_REWRITE_TAC(PairList [th]))(ASSUME_TAC(th))))(th3)

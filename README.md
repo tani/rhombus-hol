@@ -1,88 +1,107 @@
 # Rhombus/HOL
 
-Rhombus/HOL is an LCF-style higher-order-logic theorem prover embedded in
-Rhombus, with a machine-checked Isabelle/HOL kernel behind it: the `#lang
-rhombus/hol` surface language, its derived prover, and a proved standard
-library all sit on top of that kernel.
+A direct Rhombus reimplementation of the HOL Light proof engine.
 
-## Packages
+The repository is intentionally split at the HOL Light engine/frontend
+boundary. The proof engine follows HOL Light closely; the surface language
+above it will be implemented natively with Rhombus macros.
 
-- `rhombus-hol-kernel` — the LCF kernel: the whole trust boundary, generated
-  from and checked against `isabelle-hol-kernel`.
-- `isabelle-hol-kernel` — the Isabelle/HOL formalization the kernel is
-  generated from and checked against.
-- `rhombus-hol-prover` — the derived layer built over the kernel: tactics, conversions, and the `#lang rhombus/hol` language
-  surface (frontend elaboration, the waterfall proof procedure, recursive
-  function and datatype definition).
-  Its modules under `rhombus/hol/` follow the pipeline:
-  - `frontend/parser` — declaration shapes and HOL expression syntax into
-    theory-independent Core values;
-  - `frontend/checker` — typing and name resolution: each declaration is
-    checked once, and both backends consume the closed result;
-  - `backend/code` — lowering checked terms to executable Rhombus;
-  - `backend/proof` — lowering checked terms into kernel terms, the
-    definition principles, the derived logic, and proof automation;
-  - `module.rhm` — the declaration macros that connect the stages.
-- `rhombus-hol-stdlib` — a proved standard library built on the prover.
-- `rhombus-hol` — the top-level package: `#lang rhombus/hol` itself, the
-  test suite, and the documentation.
+## Layout
 
-## Building
+```text
+rhombus/hol/
+  fusion.rhm
+  basics.rhm
+  nets.rhm
+  equal.rhm
+  bool.rhm
+  drule.rhm
+  tactics.rhm
+  itab.rhm
+  simp.rhm
+  private/
+    compat.rhm
+    atoms_map.rhm
+    term_hash.rhm
+    hash_runtime.rkt
+  tests/
 
-```sh
-raco pkg install --auto --link \
-  ./rhombus-hol-kernel ./rhombus-hol-prover \
-  ./rhombus-hol-stdlib ./rhombus-hol
-raco make rhombus-hol-prover/rhombus/hol.rkt
+differential/
+  tests/
+  upstream/
+
+.github/workflows/
+  ci.yml
+  differential.yml
 ```
 
-## Testing
+The files directly under `rhombus/hol/` correspond to the HOL Light engine
+modules. `private/` contains mechanical support needed to reproduce OCaml/HOL
+Light behavior; it is not part of the intended public API.
 
-```sh
-raco test --jobs 4 rhombus-hol/rhombus/hol/tests
+The source-to-source port stops at:
+
+```text
+fusion.ml
+basics.ml
+nets.ml
+equal.ml
+bool.ml
+drule.ml
+tactics.ml
+itab.ml
+simp.ml
 ```
 
-The test tree mirrors the prover's layout (`frontend/`, `backend/`), with
-`module/` holding end-to-end tests of whole declarations, and `kernel/`,
-`stdlib/`, and `spec/` covering the other packages and the
-language specification.
+HOL Light's `parser.ml`, `preterm.ml`, and `printer.ml` are deliberately
+not ported. Parsing, elaboration, notation, quotation, and presentation will be
+implemented using Rhombus syntax and macro facilities.
 
-## Formal kernel generation
+## Verification
 
-`rhombus-hol-kernel/rhombus/hol/kernel/generated.rhm` is generated from the
-Isabelle definitions and has a versioned ABI with the handwritten façade.
-Regenerate it, including the Isabelle session build, with:
+The engine differential harness checks the pinned HOL Light implementation on
+3,912 cases (1,296 kernel and 2,616 upper-layer cases), including 164 OCaml hash
+compatibility cases. The `atoms` implementation preserves HOL Light's exact
+list order through its original Patricia-map insertion/fold and OCaml hashing.
+The common engine suite has 3,748 cases when `HOL_ENGINE_ONLY=1` is set.
+Removed frontend operations are outside this engine boundary.
+
+The harness is under `differential/`. It imports the live Rhombus
+implementation; there is no duplicate port tree.
 
 ```sh
-./isabelle-hol-kernel/tools/export-kernel.sh
+python3 differential/tests/run.py
+python3 differential/tests/run_upper.py
 ```
 
-CI runs the same entry point with `--check`; that mode fails unless the
-committed artifact exactly matches the Isabelle export.
+The full differential suite is manual-only in GitHub Actions so ordinary CI
+remains fast.
 
-## Documentation
+## Build
 
-[`docs/LANGUAGE_SPEC.md`](docs/LANGUAGE_SPEC.md) is the normative specification
-for the `#lang rhombus/hol` surface language: the language layer, the logical
-effect of declarations, and the required trust and execution boundaries.
+```sh
+raco pkg install --auto --batch --no-docs --no-setup --skip-installed \
+  --name rhombus-hol "$PWD"
+raco make rhombus/hol/simp.rhm
+raco test rhombus/hol/tests
+```
 
-The published documentation is built from this branch:
+## Provenance
 
-- [Rhombus/HOL manual](https://tani.github.io/rhombus-hol/rhombus-hol/index.html)
-- [Isabelle/HOL kernel verification](https://tani.github.io/rhombus-hol/isabelle/Unsorted/Rhombus_HOL_Kernel/index.html)
-- [Verification audit theory](https://tani.github.io/rhombus-hol/isabelle/Unsorted/Rhombus_HOL_Kernel/verification/Rhombus_HOL_Audit.html)
+HOL Light-derived engine code and the OCaml-derived hash support retain their
+upstream notices and license terms. See `THIRD_PARTY_NOTICES` and
+`THIRD_PARTY_LICENSES/`.
 
-GitHub Actions regenerates these pages; the Isabelle presentation contains
-the checked source, definitions, theorem statements, proof text, and links
-into the imported HOL and HOL-ZF sessions.
+## Local private-core benchmark
 
-## License
+```sh
+python3 benchmarks/private_core.py /path/to/baseline /path/to/experiment
+```
 
-`LICENSE` contains the 0BSD terms for original Rhombus/HOL material.
-[`REUSE.toml`](REUSE.toml) is the authoritative per-file copyright and SPDX
-license map. [`THIRD_PARTY_NOTICES`](THIRD_PARTY_NOTICES) records exact
-source-derived scopes separately from design references and generated assets;
-[`LICENSES/`](LICENSES/) contains canonical SPDX terms, while
-[`THIRD_PARTY_LICENSES/`](THIRD_PARTY_LICENSES/) retains audited upstream
-notices and exact revisions. Package-local copies keep independently
-distributable archives self-contained.
+Apply the same current differential harness to both checkouts first. The runner
+measures three cold `equal.rhm` compiles, both complete differential harnesses,
+and three compiled warm runs of each generated probe. It records elapsed time,
+child maximum RSS, exit status, and exact differential mismatches.
+See `benchmarks/results.json` for the historical comparison before the
+`atoms` compatibility restoration. Those timings describe the fully reduced
+variant and are not measurements of the current partially restored variant.

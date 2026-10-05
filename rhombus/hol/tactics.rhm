@@ -1,0 +1,710 @@
+#lang rhombus
+// (c) University of Cambridge 1998; John Harrison 1998-2007.
+// (c) Marco Maggesi 2012.
+// Direct translation of the proof-state and tactic core of HOL Light tactics.ml.
+// Printing/interactive goalstack commands are deferred until printer.rhm.
+import: "private/compat.rhm" open
+import: "fusion.rhm" open
+import: "basics.rhm" open
+import: "equal.rhm" open
+import: "bool.rhm" open
+import: "drule.rhm" open
+
+export:
+  GoalState
+  null_inst
+  null_meta
+  equals_goal
+  inst_goal
+  compose_insts
+  VALID
+  THEN
+  THENL
+  ORELSE
+  FAIL_TAC
+  NO_TAC
+  ALL_TAC
+  TRY
+  REPEAT
+  EVERY
+  FIRST
+  MAP_EVERY
+  MAP_FIRST
+  CHANGED_TAC
+  REPLICATE_TAC
+  THEN_TCL
+  ORELSE_TCL
+  REPEAT_TCL
+  REPEAT_GTCL
+  ALL_THEN
+  NO_THEN
+  EVERY_TCL
+  FIRST_TCL
+  LABEL_TAC
+  ASSUME_TAC
+  FIND_ASSUM
+  POP_ASSUM
+  ASSUM_LIST
+  POP_ASSUM_LIST
+  EVERY_ASSUM
+  FIRST_ASSUM
+  RULE_ASSUM_TAC
+  USE_THEN
+  REMOVE_THEN
+  ASM
+  ACCEPT_TAC
+  CONV_TAC
+  REFL_TAC
+  ABS_TAC
+  MK_COMB_TAC
+  AP_TERM_TAC
+  AP_THM_TAC
+  BINOP_TAC
+  SUBST1_TAC
+  SUBST_ALL_TAC
+  BETA_TAC
+  SUBST_VAR_TAC
+  DISCH_TAC
+  MP_TAC
+  EQ_TAC
+  UNDISCH_TAC
+  SPEC_TAC
+  X_GEN_TAC
+  X_CHOOSE_TAC
+  EXISTS_TAC
+  GEN_TAC
+  CHOOSE_TAC
+  CONJ_TAC
+  DISJ1_TAC
+  DISJ2_TAC
+  DISJ_CASES_TAC
+  CONTR_TAC
+  MATCH_ACCEPT_TAC
+  MATCH_MP_TAC
+  CONJUNCTS_THEN2
+  CONJUNCTS_THEN
+  DISJ_CASES_THEN2
+  DISJ_CASES_THEN
+  DISCH_THEN
+  X_CHOOSE_THEN
+  CHOOSE_THEN
+  STRIP_THM_THEN
+  ANTE_RES_THEN
+  IMP_RES_THEN
+  STRIP_ASSUME_TAC
+  STRUCT_CASES_THEN
+  STRUCT_CASES_TAC
+  STRIP_GOAL_THEN
+  STRIP_TAC
+  UNDISCH_THEN
+  FIRST_X_ASSUM
+  SUBGOAL_THEN
+  FREEZE_THEN
+  X_META_EXISTS_TAC
+  META_EXISTS_TAC
+  META_SPEC_TAC
+  CHEAT_TAC
+  prove
+
+class GoalState(meta, goals, just)
+
+def null_inst = Instantiation(PairList [],PairList [],PairList [])
+def null_meta = Pair(PairList [],null_inst)
+
+fun plist_rev(l): rev_itlist(fun(x): fun(a): PairList.cons(x,a))(l)(PairList [])
+fun replicate(x):
+  fun(n): if n <= 0 | PairList [] | PairList.cons(x,replicate(x)(n-1))
+
+fun chop_list(n):
+  fun(l):
+    if n <= 0
+    | Pair(PairList [],l)
+    | match l
+      | PairList [h, & t]:
+          def Pair(a,b) = chop_list(n-1)(t)
+          Pair(PairList.cons(h,a),b)
+      | _: failwith("chop_list")
+
+fun forall2(p):
+  fun(a):
+    fun(b):
+      match Pair(a,b)
+      | Pair(PairList [],PairList []): #true
+      | Pair(PairList [x, & xs],PairList [y, & ys]): p(x)(y) && forall2(p)(xs)(ys)
+      | _: #false
+
+fun equals_goal(Pair(a,w)):
+  fun(Pair(a1,w1)):
+    forall2(fun(Pair(s,th)): fun(Pair(s1,th1)): s == s1 && equals_thm(th)(th1))(a)(a1)
+      && w == w1
+
+fun inst_goal(i :: Instantiation):
+  fun(Pair(thms,w)):
+    Pair(map(fun(Pair(s,th)): Pair(s,INSTANTIATE_ALL(i)(th)))(thms),
+         instantiate(i)(w))
+
+fun compose_insts(i1 :: Instantiation):
+  fun(i2 :: Instantiation):
+    def tmin = map(
+      fun(Pair(t,v)): Pair(instantiate(i2)(t),inst(i2.tyin)(v))
+    )(i1.tmin)
+    def tyin = map(
+      fun(Pair(t,v)): Pair(type_subst(i2.tyin)(t),v)
+    )(i1.tyin)
+    def tmin2 = filter(fun(Pair(_,x)): !can(rev_assoc(x))(tmin))(i2.tmin)
+    def tyin2 = filter(fun(Pair(_,a)): !can(rev_assoc(a))(tyin))(i2.tyin)
+    Instantiation(append(i1.bcs)(i2.bcs),append(tmin)(tmin2),append(tyin)(tyin2))
+
+def falsity_var = mk_var(Pair("_FALSITY_",bool_ty))
+def _FALSITY_ = new_definition(mk_eq(Pair(falsity_var,lhs(concl(F_DEF)))))
+def falsity_tm = lhs(concl(_FALSITY_))
+
+fun mk_fthm(Pair(asl,c)):
+  def pth = UNDISCH(fst(EQ_IMP_RULE(_FALSITY_)))
+  def qth = ASSUME(falsity_tm)
+  PROVE_HYP(qth)(
+    itlist(ADD_ASSUM)(plist_rev(asl))(CONTR(c)(pth)))
+
+fun fake_thm(Pair(asl,w)):
+  def asms = itlist(fun(Pair(_,th)): fun(a): union(hyp(th))(a))(asl)(PairList [])
+  mk_fthm(Pair(asms,w))
+
+fun VALID(tac):
+  fun(Pair(asl,w) as g):
+    def res = tac(g)
+    def GoalState(Pair(mvs,i),gls,just) = res
+    def ths = map(fake_thm)(gls)
+    def Pair(asl1,w1) = dest_thm(just(null_inst)(ths))
+    def Pair(asl2,w2) = inst_goal(i)(g)
+    def maxasms:
+      itlist(fun(Pair(_,th)): fun(a): union(insert(concl(th))(hyp(th)))(a))(asl2)(PairList [])
+    if aconv(w1)(w2)
+       && forall(fun(t): exists(aconv(t))(maxasms))(subtract(asl1)(PairList [falsity_tm]))
+    | res
+    | failwith("VALID: Invalid tactic")
+
+fun propagate_empty(_i):
+  fun(ths): if ths == PairList [] | PairList [] | failwith("propagate_empty")
+
+fun propagate_thm(th):
+  fun(i):
+    fun(ths): if ths == PairList [] | INSTANTIATE_ALL(i)(th) | failwith("propagate_thm")
+
+fun compose_justs(n,just1,just2,insts2):
+  fun(i):
+    fun(ths):
+      def Pair(ths1,ths2) = chop_list(n)(ths)
+      PairList.cons(just1(compose_insts(insts2)(i))(ths1),just2(i)(ths2))
+
+fun seqapply(tacs):
+  fun(goals):
+    match Pair(tacs,goals)
+    | Pair(PairList [],PairList []):
+        GoalState(null_meta,PairList [],propagate_empty)
+    | Pair(PairList [tac, & ts],PairList [goal, & gs]):
+        def GoalState(Pair(mvs1,insts1),gls1,just1) = tac(goal)
+        def goals1 = map(inst_goal(insts1))(gs)
+        def GoalState(Pair(mvs2,insts2),gls2,just2) = seqapply(ts)(goals1)
+        GoalState(
+          Pair(union(mvs1)(mvs2),compose_insts(insts1)(insts2)),
+          append(map(inst_goal(insts2))(gls1))(gls2),
+          compose_justs(length(gls1),just1,just2,insts2))
+    | _: failwith("seqapply: Length mismatch")
+
+fun tacsequence(gstate :: GoalState):
+  fun(tacl):
+    def GoalState(Pair(mvs1,insts1),gls1,just1) = gstate
+    def GoalState(Pair(mvs2,insts2),gls2,just2) = seqapply(tacl)(gls1)
+    fun jst(i): fun(ths): just1(compose_insts(insts2)(i))(just2(i)(ths))
+    def just = if gls2 == PairList [] | propagate_thm(jst(null_inst)(PairList [])) | jst
+    GoalState(Pair(union(mvs1)(mvs2),compose_insts(insts1)(insts2)),gls2,just)
+
+fun THEN(tac1):
+  fun(tac2):
+    fun(g):
+      def GoalState(_,gls,_) as gs = tac1(g)
+      tacsequence(gs)(replicate(tac2)(length(gls)))
+
+fun THENL(tac1):
+  fun(tacl):
+    fun(g):
+      def GoalState(_,gls,_) as gs = tac1(g)
+      if gls == PairList [] | tacsequence(gs)(PairList []) | tacsequence(gs)(tacl)
+
+fun ORELSE(tac1):
+  fun(tac2):
+    fun(g):
+      try:
+        tac1(g)
+        ~catch Failure(_): tac2(g)
+
+fun FAIL_TAC(tok): fun(_g): failwith(tok)
+def NO_TAC = FAIL_TAC("NO_TAC")
+fun ALL_TAC(g): GoalState(null_meta,PairList [g],fun(_i): fun(PairList [th]): th)
+fun TRY(tac): ORELSE(tac)(ALL_TAC)
+fun REPEAT(tac):
+  fun(g): ORELSE(THEN(tac)(REPEAT(tac)))(ALL_TAC)(g)
+fun EVERY(tacl): itlist(fun(t1): fun(t2): THEN(t1)(t2))(tacl)(ALL_TAC)
+fun FIRST(tacl): fun(g): end_itlist(fun(t1): fun(t2): ORELSE(t1)(t2))(tacl)(g)
+fun MAP_EVERY(tacf): fun(lst): EVERY(map(tacf)(lst))
+fun MAP_FIRST(tacf): fun(lst): FIRST(map(tacf)(lst))
+fun CHANGED_TAC(tac):
+  fun(g):
+    def GoalState(meta,gls,_) as gs = tac(g)
+    if meta == null_meta && length(gls) == 1 && equals_goal(hd(gls))(g)
+    | failwith("CHANGED_TAC")
+    | gs
+fun REPLICATE_TAC(n): fun(tac): if n <= 0 | ALL_TAC | THEN(tac)(REPLICATE_TAC(n-1)(tac))
+
+fun THEN_TCL(ttcl1): fun(ttcl2): fun(ttac): ttcl1(ttcl2(ttac))
+fun ORELSE_TCL(ttcl1):
+  fun(ttcl2):
+    fun(ttac):
+      fun(th):
+        try:
+          ttcl1(ttac)(th)
+          ~catch Failure(_): ttcl2(ttac)(th)
+fun REPEAT_TCL(ttcl):
+  fun(ttac):
+    fun(th): ORELSE_TCL(THEN_TCL(ttcl)(REPEAT_TCL(ttcl)))(I)(ttac)(th)
+fun REPEAT_GTCL(ttcl):
+  fun(ttac):
+    fun(th):
+      fun(g):
+        try:
+          ttcl(REPEAT_GTCL(ttcl)(ttac))(th)(g)
+          ~catch Failure(_): ttac(th)(g)
+def ALL_THEN = I
+fun NO_THEN(_ttac): fun(_th): failwith("NO_THEN")
+fun EVERY_TCL(xs): itlist(fun(a): fun(b): THEN_TCL(a)(b))(xs)(ALL_THEN)
+fun FIRST_TCL(xs): end_itlist(fun(a): fun(b): ORELSE_TCL(a)(b))(xs)
+
+fun LABEL_TAC(s):
+  fun(thm):
+    fun(Pair(asl,w)):
+      GoalState(null_meta,PairList [Pair(PairList.cons(Pair(s,thm),asl),w)], fun(i): fun(PairList [th]): PROVE_HYP(INSTANTIATE_ALL(i)(thm))(th))
+def ASSUME_TAC = LABEL_TAC("")
+
+fun FIND_ASSUM(ttac):
+  fun(t):
+    fun(Pair(asl,w) as g):
+      ttac(snd(find(fun(Pair(_,th)): concl(th) == t)(asl)))(g)
+fun POP_ASSUM(ttac):
+  fun(g):
+    match g
+    | Pair(PairList [Pair(_,th), & asl],w): ttac(th)(Pair(asl,w))
+    | _: failwith("POP_ASSUM: No assumption to pop")
+fun ASSUM_LIST(aslfun):
+  fun(Pair(asl,w) as g): aslfun(map(snd)(asl))(g)
+fun POP_ASSUM_LIST(aslfun):
+  fun(Pair(asl,w)): aslfun(map(snd)(asl))(Pair(PairList [],w))
+fun EVERY_ASSUM(ttac): ASSUM_LIST(MAP_EVERY(ttac))
+fun FIRST_ASSUM(ttac):
+  fun(Pair(asl,_) as g): tryfind(fun(Pair(_,th)): ttac(th)(g))(asl)
+fun RULE_ASSUM_TAC(rule):
+  fun(Pair(asl,_) as g):
+    THEN(POP_ASSUM_LIST(K(ALL_TAC)))(
+      MAP_EVERY(fun(Pair(s,th)): LABEL_TAC(s)(rule(th)))(plist_rev(asl)))(g)
+
+fun USE_THEN(s):
+  fun(ttac):
+    fun(Pair(asl,_) as g):
+      try:
+        ttac(assoc(s)(asl))(g)
+        ~catch Failure(_): failwith("USE_TAC: didn't find assumption " +& s)
+
+fun remove_label(s,l):
+  match l
+  | PairList []: failwith("REMOVE_THEN")
+  | PairList [Pair(n,th) as h, & t]:
+      if n == s
+      | Pair(th,t)
+      | block:
+          def Pair(found,rest) = remove_label(s,t)
+          Pair(found,PairList.cons(h,rest))
+
+fun REMOVE_THEN(s):
+  fun(ttac):
+    fun(Pair(asl,w)):
+      def Pair(th,asl1) = remove_label(s,asl)
+      ttac(th)(Pair(asl1,w))
+
+fun ASM(tltac):
+  fun(ths):
+    fun(Pair(asl,_) as g): tltac(append(map(snd)(asl))(ths))(g)
+
+fun ACCEPT_TAC(th):
+  fun(Pair(_,w)):
+    if aconv(concl(th))(w)
+    | GoalState(null_meta,PairList [],propagate_thm(th))
+    | failwith("ACCEPT_TAC")
+
+fun CONV_TAC(conv):
+  fun(Pair(asl,w) as g):
+    def th = conv(w)
+    def tm = concl(th)
+    if aconv(tm)(w)
+    | ACCEPT_TAC(th)(g)
+    | block:
+        def Pair(l,r) = dest_eq(tm)
+        if !aconv(l)(w)
+        | failwith("CONV_TAC: bad equation")
+        | if aconv(r)(lhs(concl(T_DEF)))
+          | ACCEPT_TAC(EQT_ELIM(th))(g)
+          | block:
+              def th1 = SYM(th)
+              GoalState(
+                null_meta,PairList [Pair(asl,r)],
+                fun(i):
+                  fun(PairList [sth]):
+                    EQ_MP(INSTANTIATE_ALL(i)(th1))(sth))
+
+fun REFL_TAC(Pair(_,w) as g):
+  try:
+    ACCEPT_TAC(REFL(rand(w)))(g)
+    ~catch Failure(_): failwith("REFL_TAC")
+
+fun ABS_TAC(Pair(asl,w)):
+  try:
+    def Pair(l,r) = dest_eq(w)
+    def Pair(lv,lb) = dest_abs(l)
+    def Pair(rv,rb) = dest_abs(r)
+    def avoids = itlist(fun(Pair(_,th)): fun(a): union(thm_frees(th))(a))(asl)(frees(w))
+    def v = mk_primed_var(avoids)(lv)
+    def goal = mk_eq(Pair(vsubst(PairList [Pair(v,lv)])(lb),vsubst(PairList [Pair(v,rv)])(rb)))
+    GoalState(
+      null_meta,PairList [Pair(asl,goal)],
+      fun(i):
+        fun(PairList [th]):
+          def ath = ABS(v)(th)
+          EQ_MP(ALPHA(concl(ath))(instantiate(i)(w)))(ath))
+    ~catch Failure(_): failwith("ABS_TAC")
+
+fun MK_COMB_TAC(Pair(asl,gl)):
+  try:
+    def Pair(l,r) = dest_eq(gl)
+    def Pair(f,x) = dest_comb(l)
+    def Pair(g,y) = dest_comb(r)
+    GoalState(
+      null_meta,PairList [Pair(asl,mk_eq(Pair(f,g))),Pair(asl,mk_eq(Pair(x,y)))],
+      fun(_i): fun(PairList [th1,th2]): MK_COMB(Pair(th1,th2)))
+    ~catch Failure(_): failwith("MK_COMB_TAC")
+
+def AP_TERM_TAC = THENL(MK_COMB_TAC)(PairList [REFL_TAC,ALL_TAC])
+def AP_THM_TAC = THENL(MK_COMB_TAC)(PairList [ALL_TAC,REFL_TAC])
+def BINOP_TAC = THENL(MK_COMB_TAC)(PairList [AP_TERM_TAC,ALL_TAC])
+fun SUBST1_TAC(th): CONV_TAC(SUBS_CONV(PairList [th]))
+fun SUBST_ALL_TAC(rth): THEN(SUBST1_TAC(rth))(RULE_ASSUM_TAC(SUBS(PairList [rth])))
+def BETA_TAC = CONV_TAC(REDEPTH_CONV(BETA_CONV))
+
+fun SUBST_VAR_TAC(th):
+  try:
+    def Pair(asl,eq) = dest_thm(th)
+    def Pair(l,r) = dest_eq(eq)
+    cond
+    | aconv(l)(r): ALL_TAC
+    | !subset(frees(eq))(freesl(asl)): fail()
+    | (is_const(l) || is_var(l)) && !free_in(l)(r): SUBST_ALL_TAC(th)
+    | (is_const(r) || is_var(r)) && !free_in(r)(l): SUBST_ALL_TAC(SYM(th))
+    | ~else: fail()
+    ~catch Failure(_): failwith("SUBST_VAR_TAC")
+
+def f_tm = lhs(concl(F_DEF))
+fun DISCH_TAC(Pair(asl,w)):
+  try:
+    def Pair(ant,c) = dest_imp(w)
+    def th1 = ASSUME(ant)
+    GoalState(
+      null_meta,PairList [Pair(PairList.cons(Pair("",th1),asl),c)],
+      fun(i): fun(PairList [th]): DISCH(instantiate(i)(ant))(th))
+    ~catch Failure(_):
+      try:
+        def ant = dest_neg(w)
+        def th1 = ASSUME(ant)
+        GoalState(
+          null_meta,PairList [Pair(PairList.cons(Pair("",th1),asl),f_tm)],
+          fun(i): fun(PairList [th]): NOT_INTRO(DISCH(instantiate(i)(ant))(th)))
+        ~catch Failure(_): failwith("DISCH_TAC")
+
+fun MP_TAC(thm):
+  fun(Pair(asl,w)):
+    GoalState(
+      null_meta,PairList [Pair(asl,mk_imp(Pair(concl(thm),w)))],
+      fun(i): fun(PairList [th]): MP(th)(INSTANTIATE_ALL(i)(thm)))
+
+fun EQ_TAC(Pair(asl,w)):
+  try:
+    def Pair(l,r) = dest_eq(w)
+    GoalState(
+      null_meta,
+      PairList [Pair(asl,mk_imp(Pair(l,r))),Pair(asl,mk_imp(Pair(r,l)))],
+      fun(_i): fun(PairList [th1,th2]): IMP_ANTISYM_RULE(th1)(th2))
+    ~catch Failure(_): failwith("EQ_TAC")
+
+fun UNDISCH_TAC(tm):
+  fun(Pair(asl,w)):
+    def Pair(thm,asl1):
+      fun loop(l):
+        match l
+        | PairList []: failwith("UNDISCH_TAC")
+        | PairList [Pair(_,asm) as h, & t]:
+            if aconv(concl(asm))(tm)
+            | Pair(asm,t)
+            | block:
+                def Pair(x,rest) = loop(t)
+                Pair(x,PairList.cons(h,rest))
+      loop(asl)
+    GoalState(
+      null_meta,PairList [Pair(asl1,mk_imp(Pair(tm,w)))],
+      fun(i): fun(PairList [th]): MP(th)(INSTANTIATE_ALL(i)(thm)))
+
+fun SPEC_TAC(Pair(t,x)):
+  fun(Pair(asl,w)):
+    try:
+      GoalState(
+        null_meta,PairList [Pair(asl,mk_forall(Pair(x,subst(PairList [Pair(x,t)])(w))))],
+        fun(i): fun(PairList [th]): SPEC(instantiate(i)(t))(th))
+      ~catch Failure(_): failwith("SPEC_TAC")
+
+fun X_GEN_TAC(x1):
+  if !is_var(x1)
+  | failwith("X_GEN_TAC: not a variable")
+  | fun(Pair(asl,w)):
+      def Pair(x,bod):
+        try:
+          dest_forall(w)
+          ~catch Failure(_): failwith("X_GEN_TAC: Not universally quantified")
+      if type_of(x) != type_of(x1)
+      | failwith("X_GEN_TAC: wrong type")
+      | block:
+          def avoids = itlist(fun(Pair(_,th)): fun(a): union(thm_frees(th))(a))(asl)(frees(w))
+          if mem(x1)(avoids)
+          | failwith("X_GEN_TAC: invalid variable")
+          | block:
+              def afn = CONV_RULE(GEN_ALPHA_CONV(x))
+              GoalState(
+                null_meta,PairList [Pair(asl,vsubst(PairList [Pair(x1,x)])(bod))],
+                fun(_i): fun(PairList [th]): afn(GEN(x1)(th)))
+
+fun X_CHOOSE_TAC(x1):
+  fun(xth):
+    def Pair(x,bod):
+      try:
+        dest_exists(concl(xth))
+        ~catch Failure(_): failwith("X_CHOOSE_TAC: not existential")
+    if type_of(x) != type_of(x1)
+    | failwith("X_CHOOSE_TAC: wrong type")
+    | block:
+        def pat = vsubst(PairList [Pair(x1,x)])(bod)
+        def xth1 = ASSUME(pat)
+        fun(Pair(asl,w)):
+          def avoids = itlist(fun(Pair(_,th)): fun(a): union(thm_frees(th))(a))(asl)(union(frees(w))(thm_frees(xth)))
+          if mem(x1)(avoids)
+          | failwith("X_CHOOSE_TAC: invalid variable")
+          | GoalState(
+              null_meta,PairList [Pair(PairList.cons(Pair("",xth1),asl),w)],
+              fun(i): fun(PairList [th]): CHOOSE(Pair(x1,INSTANTIATE_ALL(i)(xth)))(th))
+
+fun EXISTS_TAC(t):
+  fun(Pair(asl,w)):
+    def Pair(v,bod):
+      try:
+        dest_exists(w)
+        ~catch Failure(_): failwith("EXISTS_TAC: Goal not existentially quantified")
+    if type_of(v) != type_of(t)
+    | failwith("EXISTS_TAC: wrong type")
+    | GoalState(
+        null_meta,PairList [Pair(asl,vsubst(PairList [Pair(t,v)])(bod))],
+        fun(i): fun(PairList [th]): EXISTS(Pair(instantiate(i)(w),instantiate(i)(t)))(th))
+
+fun GEN_TAC(Pair(asl,w) as g):
+  try:
+    def x = fst(dest_forall(w))
+    def avoids = itlist(fun(Pair(_,th)): fun(a): union(thm_frees(th))(a))(asl)(frees(w))
+    X_GEN_TAC(mk_primed_var(avoids)(x))(g)
+    ~catch Failure(_): failwith("GEN_TAC")
+
+fun CHOOSE_TAC(xth):
+  fun(Pair(asl,w) as g):
+    try:
+      def x = fst(dest_exists(concl(xth)))
+      def avoids = itlist(fun(Pair(_,th)): fun(a): union(thm_frees(th))(a))(asl)(union(frees(w))(thm_frees(xth)))
+      X_CHOOSE_TAC(mk_primed_var(avoids)(x))(xth)(g)
+      ~catch Failure(_): failwith("CHOOSE_TAC")
+
+fun CONJ_TAC(Pair(asl,w)):
+  try:
+    def Pair(l,r) = dest_conj(w)
+    GoalState(
+      null_meta,PairList [Pair(asl,l),Pair(asl,r)],
+      fun(_i): fun(PairList [th1,th2]): CONJ(th1)(th2))
+    ~catch Failure(_): failwith("CONJ_TAC")
+
+fun DISJ1_TAC(Pair(asl,w)):
+  try:
+    def Pair(l,r) = dest_disj(w)
+    GoalState(
+      null_meta,PairList [Pair(asl,l)],
+      fun(i): fun(PairList [th]): DISJ1(th)(instantiate(i)(r)))
+    ~catch Failure(_): failwith("DISJ1_TAC")
+
+fun DISJ2_TAC(Pair(asl,w)):
+  try:
+    def Pair(l,r) = dest_disj(w)
+    GoalState(
+      null_meta,PairList [Pair(asl,r)],
+      fun(i): fun(PairList [th]): DISJ2(instantiate(i)(l))(th))
+    ~catch Failure(_): failwith("DISJ2_TAC")
+
+fun DISJ_CASES_TAC(dth):
+  def Pair(l,r):
+    try:
+      dest_disj(concl(dth))
+      ~catch Failure(_): failwith("DISJ_CASES_TAC")
+  def thl = ASSUME(l)
+  def thr = ASSUME(r)
+  fun(Pair(asl,w)):
+    GoalState(
+      null_meta,
+      PairList [Pair(PairList.cons(Pair("",thl),asl),w),
+                Pair(PairList.cons(Pair("",thr),asl),w)],
+      fun(i): fun(PairList [th1,th2]): DISJ_CASES(INSTANTIATE_ALL(i)(dth))(th1)(th2))
+
+fun CONTR_TAC(cth):
+  fun(Pair(_,w)):
+    try:
+      def th = CONTR(w)(cth)
+      GoalState(null_meta,PairList [],propagate_thm(th))
+      ~catch Failure(_): failwith("CONTR_TAC")
+
+fun MATCH_ACCEPT_TAC(th):
+  def raw:
+    fun(Pair(_,w)):
+      try:
+        def ith = PART_MATCH(I)(th)(w)
+        GoalState(null_meta,PairList [],propagate_thm(ith))
+        ~catch Failure(_): failwith("ACCEPT_TAC")
+  THEN(REPEAT(GEN_TAC))(raw)
+
+fun MATCH_MP_TAC(th):
+  def match_fun = PART_MATCH(o(snd)(dest_imp))(SPEC_ALL(th))
+  fun(Pair(asl,w)):
+    try:
+      def xth = match_fun(w)
+      def lant = fst(dest_imp(concl(xth)))
+      GoalState(
+        null_meta,PairList [Pair(asl,lant)],
+        fun(i): fun(PairList [sth]): MP(INSTANTIATE_ALL(i)(xth))(sth))
+      ~catch Failure(_): failwith("MATCH_MP_TAC: No match")
+
+fun CONJUNCTS_THEN2(ttac1):
+  fun(ttac2):
+    fun(cth):
+      def Pair(c1,c2) = dest_conj(concl(cth))
+      fun(gl):
+        def GoalState(meta,gls,jfn):
+          THEN(ttac1(ASSUME(c1)))(ttac2(ASSUME(c2)))(gl)
+        GoalState(
+          meta,gls,
+          fun(i):
+            fun(ths):
+              def Pair(th1,th2) = CONJ_PAIR(INSTANTIATE_ALL(i)(cth))
+              PROVE_HYP(th1)(PROVE_HYP(th2)(jfn(i)(ths))))
+def CONJUNCTS_THEN = W(CONJUNCTS_THEN2)
+fun DISJ_CASES_THEN2(ttac1):
+  fun(ttac2):
+    fun(cth): THENL(DISJ_CASES_TAC(cth))(PairList [POP_ASSUM(ttac1),POP_ASSUM(ttac2)])
+def DISJ_CASES_THEN = W(DISJ_CASES_THEN2)
+fun DISCH_THEN(ttac): THEN(DISCH_TAC)(POP_ASSUM(ttac))
+fun X_CHOOSE_THEN(x): fun(ttac): fun(th): THEN(X_CHOOSE_TAC(x)(th))(POP_ASSUM(ttac))
+fun CHOOSE_THEN(ttac): fun(th): THEN(CHOOSE_TAC(th))(POP_ASSUM(ttac))
+def STRIP_THM_THEN = FIRST_TCL(PairList [CONJUNCTS_THEN,DISJ_CASES_THEN,CHOOSE_THEN])
+
+fun ANTE_RES_THEN(ttac):
+  fun(ante):
+    ASSUM_LIST(
+      fun(asl):
+        def tacs = mapfilter(fun(imp): ttac(MATCH_MP(imp)(ante)))(asl)
+        if tacs == PairList [] | failwith("IMP_RES_THEN") | EVERY(tacs))
+
+fun IMP_RES_THEN(ttac):
+  fun(imp):
+    ASSUM_LIST(
+      fun(asl):
+        def tacs = mapfilter(fun(ante): ttac(MATCH_MP(imp)(ante)))(asl)
+        if tacs == PairList [] | failwith("IMP_RES_THEN") | EVERY(tacs))
+
+fun STRIP_ASSUME_TAC(gth):
+  def tm = concl(gth)
+  fun DISCARD_TAC(th):
+    fun(Pair(asl,_) as g):
+      if exists(fun(Pair(_,a)): aconv(concl(a))(concl(th)))(asl)
+      | ALL_TAC(g)
+      | failwith("DISCARD_TAC")
+  REPEAT_TCL(STRIP_THM_THEN)(
+    fun(th): FIRST(PairList [CONTR_TAC(th),ACCEPT_TAC(th),DISCARD_TAC(th),ASSUME_TAC(th)]))(gth)
+
+fun STRUCT_CASES_THEN(ttac): REPEAT_TCL(STRIP_THM_THEN)(ttac)
+def STRUCT_CASES_TAC = STRUCT_CASES_THEN(fun(th): ORELSE(SUBST1_TAC(th))(ASSUME_TAC(th)))
+fun STRIP_GOAL_THEN(ttac): FIRST(PairList [GEN_TAC,CONJ_TAC,DISCH_THEN(ttac)])
+fun STRIP_TAC(g):
+  try:
+    STRIP_GOAL_THEN(STRIP_ASSUME_TAC)(g)
+    ~catch Failure(_): failwith("STRIP_TAC")
+
+fun UNDISCH_THEN(tm):
+  fun(ttac):
+    fun(Pair(asl,w)):
+      // Rebuild with the matching theorem first; its label is irrelevant.
+      def Pair(th,asl1) = remove_label("",PairList.cons(Pair("",snd(find(fun(Pair(_,x)): aconv(concl(x))(tm))(asl))),filter(fun(Pair(_,x)): !aconv(concl(x))(tm))(asl)))
+      ttac(th)(Pair(asl1,w))
+
+fun FIRST_X_ASSUM(ttac):
+  FIRST_ASSUM(fun(th): UNDISCH_THEN(concl(th))(ttac))
+
+fun SUBGOAL_THEN(wa):
+  fun(ttac):
+    fun(Pair(asl,w)):
+      def GoalState(meta,gls,just) = ttac(ASSUME(wa))(Pair(asl,w))
+      GoalState(
+        meta,PairList.cons(Pair(asl,wa),gls),
+        fun(i): fun(l): PROVE_HYP(hd(l))(just(i)(tl(l))))
+
+fun FREEZE_THEN(ttac):
+  fun(th):
+    fun(Pair(asl,w)):
+      def GoalState(meta,gls,just) = ttac(ASSUME(concl(th)))(Pair(asl,w))
+      GoalState(meta,gls,fun(i): fun(l): PROVE_HYP(th)(just(i)(l)))
+
+fun X_META_EXISTS_TAC(t):
+  fun(Pair(asl,w)):
+    try:
+      if !is_var(t) | fail() | #void
+      def Pair(v,bod) = dest_exists(w)
+      GoalState(
+        Pair(PairList [t],null_inst),
+        PairList [Pair(asl,vsubst(PairList [Pair(t,v)])(bod))],
+        fun(i): fun(PairList [th]): EXISTS(Pair(instantiate(i)(w),instantiate(i)(t)))(th))
+      ~catch Failure(_): failwith("X_META_EXISTS_TAC")
+
+fun META_EXISTS_TAC(Pair(asl,w) as gl):
+  def v = fst(dest_exists(w))
+  def avoids = itlist(fun(Pair(_,th)): fun(a): union(frees(concl(th)))(a))(asl)(frees(w))
+  X_META_EXISTS_TAC(mk_primed_var(avoids)(v))(gl)
+
+fun META_SPEC_TAC(t):
+  fun(thm):
+    fun(Pair(asl,w)):
+      def sth = SPEC(t)(thm)
+      GoalState(
+        Pair(PairList [t],null_inst),
+        PairList [Pair(PairList.cons(Pair("",sth),asl),w)],
+        fun(i): fun(PairList [th]): PROVE_HYP(SPEC(instantiate(i)(t))(thm))(th))
+
+fun CHEAT_TAC(Pair(_,w) as g): ACCEPT_TAC(mk_thm(Pair(PairList [],w)))(g)
+
+fun prove(Pair(t,tac)):
+  def GoalState(Pair(_,i),gls,just) = VALID(tac)(Pair(PairList [],t))
+  if gls != PairList []
+  | failwith("prove: unsolved goals")
+  | just(i)(PairList [])

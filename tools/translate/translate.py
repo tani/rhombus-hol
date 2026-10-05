@@ -66,6 +66,15 @@ def ident_safe(s):
     if s in ['values','def','cond']:s='hol_'+s
     return ''.join(c if c.isalnum() or c in '_.' else '_op'+format(ord(c),'x')+'_' for c in s)
 def string(s): return json.dumps(s,ensure_ascii=False)
+def support_names():
+    names=set(OPS.values())|{'fun','let','def','if','match','block','try','for','class','import','export','when','unless','cond','values',
+        'abs','math','println','print','to_string','compare','error','begin','use','is_a','as','in','with','else','then','do','and','or','not',
+        'List','Map','Array','Set','String','Int','Box','Pair','PairList'}
+    for f in ['compat','theory_support','type_inference']:
+        t=(ROOT/'rhombus/hol/private'/(f+'.rhm')).read_text()
+        names|=set(re.findall(r"^(?:def|fun|class)\s+([A-Za-z_][\w']*)",t,re.M))|set(re.findall(r"^  ([A-Za-z_][\w']*)$",t,re.M))
+    return names
+SUPPORT=support_names()
 def source_notice(module):
     path=ROOT/'differential/upstream'/f'{module}.ml'
     if not path.exists():return '// See the bundled upstream source for copyright notices.'
@@ -180,7 +189,11 @@ class Translator:
             return 'fun'+((' '+ident_safe(name)) if name else '')+'('+v+'):«\n'+ind(self.match(v,[(pattern,None,body)],new))+'\n»'
         params='_' if pattern==['construct','()',None] else self.pattern(pattern,new)
         return 'fun'+((' '+ident_safe(name)) if name else '')+'('+params+'):«\n'+ind(self.expr(body,new))+'\n»'
-    def binding(self,p,e,env,top=False,recursive=False):
+    def local_name(self,s,natural):
+        # Keep OCaml's own name when no other binding can be captured by it.
+        if natural and s not in SUPPORT and not s.startswith('port_'):return ident_safe(s)
+        return self.fresh()+'_'+ident_safe(s)
+    def binding(self,p,e,env,top=False,recursive=False,single=False):
         ns=names(p); new=env.copy()
         for s in ns:
             base=self.module+'_'+s
@@ -189,7 +202,7 @@ class Translator:
                 else:
                     self.versions[s]=self.versions.get(s,0)+1
                     new[s]=self.internal_binding(s,self.versions[s])
-            else:new[s]=env[s] if recursive else self.fresh()+'_'+ident_safe(s)
+            else:new[s]=env[s] if recursive else self.local_name(s,single)
         scope=new if recursive else env
         if p[0]=='var' and e[0] in ['fun','function'] and (top or recursive):
             if e[0]=='fun':return self.function(e[1],e[2],scope,new[p[1]]),new
@@ -204,11 +217,13 @@ class Translator:
         self.used_binding_names.add(ident_safe(candidate))
         return candidate
     def ordered_constructor(self,ctor,args,env):
-        if len(args)<2 or all(pure(a) for a in args):return ctor+'('+','.join(self.expr(a,env) for a in args)+')'
+        # Only effectful arguments need a binding to keep OCaml's right-to-left order.
+        if sum(not pure(a) for a in args)<2:return ctor+'('+','.join(self.expr(a,env) for a in args)+')'
         lines=[];variables={}
         for i in reversed(range(len(args))):
+            if pure(args[i]):continue
             v=self.fresh();lines.append('let '+v+' = '+self.expr(args[i],env));variables[i]=v
-        return block(';\n'.join(lines+[ctor+'('+','.join(variables[i] for i in range(len(args)))+')']))
+        return block(';\n'.join(lines+[ctor+'('+','.join(variables[i] if i in variables else self.expr(args[i],env) for i in range(len(args)))+')']))
     def expr(self,e,env):
         k=e[0]
         if k=='id': return self.ident(e[1],env)
@@ -250,10 +265,15 @@ class Translator:
             if f[0]=='id' and f[1] in ['&&','||'] and len(args)==2:
                 return '('+self.expr(args[0],env)+' '+f[1]+' '+self.expr(args[1],env)+')'
             lines=[];captured={}
-            if (len(args)>1 and any(not pure(a) for a in args)) or (not pure(f) and any(not pure(a) for a in args)):
-                for i in reversed(range(len(args))):
+            impure=[i for i,a in enumerate(args) if not pure(a)]
+            if len(impure)>1 or (not pure(f) and impure):
+                for i in reversed(impure):
                     v=self.fresh();lines.append('let '+v+' = '+self.expr(args[i],env));captured[i]=v
-                fn=self.fresh();lines.append('let '+fn+' = '+self.expr(f,env));s=fn
+                if pure(f):
+                    s=self.expr(f,env)
+                    if f[0] not in ['id','apply']: s='('+s+')'
+                else:
+                    fn=self.fresh();lines.append('let '+fn+' = '+self.expr(f,env));s=fn
             else:
                 s=self.expr(f,env)
                 if f[0] not in ['id','apply']: s='('+s+')'
@@ -279,10 +299,10 @@ class Translator:
             _,r,bs,body=e; lines=[]; new=env.copy()
             if r=='rec':
                 for p,_ in bs:
-                    for s in names(p): new[s]=self.fresh()+'_'+ident_safe(s)
+                    for s in names(p): new[s]=self.local_name(s,len(bs)==1)
             base_env=env.copy()
             for p,b in bs:
-                line,bound=self.binding(p,b,new if r=='rec' else base_env,recursive=r=='rec'); lines.append(line)
+                line,bound=self.binding(p,b,new if r=='rec' else base_env,recursive=r=='rec',single=len(bs)==1); lines.append(line)
                 new.update({n:bound[n] for n in names(p)})
             lines.append(self.expr(body,new))
             return block(';\n'.join(lines))
@@ -305,8 +325,10 @@ class Translator:
                 return self.ident('hol_record_update_lazy',env)+'('+self.expr(e[2],env)+')('+callbacks+')'
             values={n.split('.')[-1]:self.expr(v,env) for n,v in e[1]}
             lines=[]
-            if e[2] is None and any(not pure(v) for _,v in e[1]):
+            if e[2] is None and sum(not pure(v) for _,v in e[1])>1:
+                impure={n.split('.')[-1] for n,v in e[1] if not pure(v)}
                 for n in reversed(layout):
+                    if n not in impure:continue
                     temp=self.fresh();lines.append('let '+temp+' = '+values[n]);values[n]=temp
             pairs='{'+','.join(string(n)+': '+values[n] for n in fields)+'}'
             if e[2] is None:

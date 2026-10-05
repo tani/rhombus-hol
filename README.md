@@ -36,7 +36,7 @@ Rhombus/HOL frontend, or old multi-package architecture is used.
 ## Build
 
 ```sh
-raco pkg install --auto --batch --no-docs --skip-installed .
+raco pkg install --auto --batch --no-docs --skip-installed --name rhombus-hol "$PWD"
 raco make rhombus/hol/equal.rhm
 raco test rhombus/hol/tests
 ```

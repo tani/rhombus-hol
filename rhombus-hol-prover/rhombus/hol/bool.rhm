@@ -1,0 +1,215 @@
+#lang rhombus/static
+// SPDX-FileCopyrightText: 2026 Masaya Taniguchi
+// SPDX-License-Identifier: 0BSD
+//
+// HOL Light bool.ml compatibility layer.
+// The logical constants live in backend/proof/logic/bool.rhm and all proof
+// producing operations are implemented by backend/proof/logic/derived.rhm.
+// This module restores the conventional HOL Light surface API without adding
+// any trusted inference rule.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel/names open
+  rhombus/hol/kernel open
+  rhombus/hol/backend/proof/logic/bool open
+  rhombus/hol/backend/proof/logic/conversion open
+  rhombus/hol/backend/proof/logic/derived open
+
+export:
+  // logical syntax
+  bool
+  tm_true
+  tm_false
+  is_iff
+  dest_iff
+  mk_iff
+  mk_conj
+  list_mk_conj
+  mk_imp
+  mk_forall
+  list_mk_forall
+  mk_exists
+  list_mk_exists
+  mk_disj
+  list_mk_disj
+  mk_neg
+  mk_uexists
+  // definitions
+  T_DEF
+  AND_DEF
+  IMP_DEF
+  FORALL_DEF
+  EXISTS_DEF
+  OR_DEF
+  F_DEF
+  NOT_DEF
+  EXISTS_UNIQUE_DEF
+  // rules
+  PINST
+  PROVE_HYP
+  TRUTH
+  EQT_ELIM
+  EQT_INTRO
+  CONJ
+  CONJUNCT1
+  CONJUNCT2
+  CONJ_PAIR
+  CONJUNCTS
+  LIST_CONJ
+  MP
+  DISCH
+  DISCH_ALL
+  UNDISCH
+  UNDISCH_ALL
+  IMP_ANTISYM_RULE
+  ADD_ASSUM
+  EQ_IMP_RULE
+  IMP_TRANS
+  SPEC
+  SPECL
+  SPEC_VAR
+  SPEC_ALL
+  ISPEC
+  ISPECL
+  GEN
+  GENL
+  GEN_ALL
+  EXISTS
+  SIMPLE_EXISTS
+  CHOOSE
+  SIMPLE_CHOOSE
+  DISJ1
+  DISJ2
+  DISJ_CASES
+  SIMPLE_DISJ_CASES
+  NOT_ELIM
+  NOT_INTRO
+  EQF_INTRO
+  EQF_ELIM
+  CONTR
+  CCONTR
+  EXISTENCE
+  ETA_CONV
+  EXT
+  SELECT_UNIQUE
+
+// Boolean equality is HOL Light's IFF.
+fun is_iff(t :: Term) :: Boolean:
+  match dest_eq(t)
+  | [l, _]: type_of(l) == bool
+  | ~else: #false
+
+fun dest_iff(t :: Term) :: List.of(Term):
+  match dest_eq(t)
+  | [l, r] when type_of(l) == bool: [l, r]
+  | ~else: error(~who: #'dest_iff, "not a Boolean equivalence")
+
+fun mk_iff(l :: Term, r :: Term) :: Term:
+  unless type_of(l) == bool && type_of(r) == bool
+  | error(~who: #'mk_iff, "operands are not Boolean")
+  mk_eq(l, r)
+
+fun end_itlist_bin(who :: Symbol, f :: Function.of_arity(2),
+                   xs :: List.of(Term)) :: Term:
+  match xs
+  | []: error(~who: who, "empty list")
+  | List.cons(x, rest):
+      recur loop (left :: Term = x, rest :~ List.of(Term) = rest):
+        match rest
+        | []: left
+        | List.cons(y, more):
+            // HOL Light's end_itlist associates to the right.
+            let tail:
+              match more
+              | []: y
+              | ~else: end_itlist_bin(who, f, List.cons(y, more))
+            f(left, tail)
+
+fun list_mk_conj(xs :: List.of(Term)) :: Term:
+  end_itlist_bin(#'list_mk_conj, mk_conj, xs)
+
+fun list_mk_disj(xs :: List.of(Term)) :: Term:
+  end_itlist_bin(#'list_mk_disj, mk_disj, xs)
+
+fun list_mk_forall(vs :: List.of(FVar), body :: Term) :: Term:
+  mk_forall_list(vs, body)
+
+fun list_mk_exists(vs :: List.of(FVar), body :: Term) :: Term:
+  for values(t :~ Term = body) (v in vs.reverse()): mk_exists(v, t)
+
+fun mk_uexists(v :: FVar, body :: Term) :: Term:
+  mk_exists1(v, body)
+
+// The defining theorems are values in the base theory, exactly corresponding
+// to HOL Light's *_DEF bindings.
+def T_DEF :: Thm = base_defs(c_true)
+def AND_DEF :: Thm = base_defs(c_conj)
+def IMP_DEF :: Thm = base_defs(c_imp)
+def FORALL_DEF :: Thm = base_defs(c_forall)
+def EXISTS_DEF :: Thm = base_defs(c_exists)
+def OR_DEF :: Thm = base_defs(c_disj)
+def F_DEF :: Thm = base_defs(c_false)
+def NOT_DEF :: Thm = base_defs(c_neg)
+def EXISTS_UNIQUE_DEF :: Thm = base_defs(c_exists1)
+
+// Instantiate types first, then free terms, as HOL Light PINST does.
+fun PINST(thy :: Theory, tyin :: Map.of(Symbol, HType),
+          tmin :: Map.of(Term, Term), th :: Thm) :: Thm:
+  let typed = INST_TYPE(thy, tyin, th)
+  let theta:
+    for values(out :~ Map = {}) ((v, t) in tmin):
+      out ++ {inst_type(tyin, v :~ Term): t :~ Term}
+  INST(thy, theta, typed)
+
+fun CONJ_PAIR(thy :: Theory, th :: Thm) :: values(Thm, Thm):
+  values(CONJUNCT1(thy, th), CONJUNCT2(thy, th))
+
+fun SPEC_VAR(thy :: Theory, th :: Thm) :: values(FVar, Thm):
+  match dest_forall(concl_of(th))
+  | #false: error(~who: #'SPEC_VAR, "theorem is not universally quantified")
+  | [v0, _]:
+      let v = variant(hyps_of(th) ++ [concl_of(th)], v0 :~ FVar)
+      values(v, SPEC(thy, v, th))
+
+// Type-instantiating SPEC. The generic quantified type is matched against the
+// supplied term before ordinary SPEC performs the term instantiation.
+fun ISPEC(thy :: Theory, t :: Term, th :: Thm) :: Thm:
+  match dest_forall(concl_of(th))
+  | #false: error(~who: #'ISPEC, "theorem is not universally quantified")
+  | [v, _]:
+      match type_match((v :~ FVar).ty, type_of(t), {})
+      | #false:
+          error(~who: #'ISPEC, "cannot type-instantiate quantified variable")
+      | tyin:
+          SPEC(thy, t, INST_TYPE(thy, tyin :~ Map, th))
+
+fun ISPECL(thy :: Theory, ts :: List.of(Term), th :: Thm) :: Thm:
+  for values(acc :~ Thm = th) (t in ts): ISPEC(thy, t, acc)
+
+fun SIMPLE_EXISTS(thy :: Theory, v :: FVar, th :: Thm) :: Thm:
+  EXISTS(thy, mk_exists(v, concl_of(th)), v, th)
+
+fun SIMPLE_CHOOSE(thy :: Theory, v :: FVar, th :: Thm) :: Thm:
+  match hyps_of(th)
+  | []: error(~who: #'SIMPLE_CHOOSE, "theorem has no hypothesis to choose")
+  | List.cons(h, _):
+      CHOOSE(thy, v, ASSUME(thy, mk_exists(v, h)), th)
+
+fun SIMPLE_DISJ_CASES(thy :: Theory, th1 :: Thm, th2 :: Thm) :: Thm:
+  match [hyps_of(th1), hyps_of(th2)]
+  | [List.cons(h1, _), List.cons(h2, _)]:
+      DISJ_CASES(thy, ASSUME(thy, mk_disj(h1, h2)), th1, th2)
+  | ~else:
+      error(~who: #'SIMPLE_DISJ_CASES,
+            "both branch theorems need a hypothesis")
+
+// A |- exists1 x. P x  ==>  A |- exists x. P x.
+fun EXISTENCE(thy :: Theory, th :: Thm) :: Thm:
+  match concl_of(th)
+  | Comb(Const(n, _), (pred :: Abs)) when n == c_exists1:
+      let unfolded = unfold_def(thy, base_defs(c_exists1), [pred])
+      CONJUNCT1(thy, EQ_MP(unfolded, th))
+  | ~else:
+      error(~who: #'EXISTENCE, "theorem is not uniquely existential")

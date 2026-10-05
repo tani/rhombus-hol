@@ -3,7 +3,6 @@
 import: "private/compat.rhm" open
 import: "fusion.rhm" open
 import: "basics.rhm" open
-import: "private/ordered_map.rhm" open
 export:
   empty_net
   enter
@@ -14,7 +13,7 @@ class Cnet(k)
 class Lcnet(k)
 class Lnet(k)
 class Netnode(vnet,cnets,lcnets,lnets,tips)
-def empty_net = Netnode(#false,map_empty,map_empty,map_empty,PairList [])
+def empty_net = Netnode(#false,Map.empty,Map.empty,Map.empty,PairList [])
 fun canon_eq(x,y):
   try:
     compare(x)(y) == 0
@@ -47,11 +46,8 @@ fun label_to_store(lconsts,tm):
   | mem(op)(lconsts): Pair(Lcnet(Pair(fst(dest_var(op)),length(args))),args)
   | ~else: Pair(Vnet(),PairList [])
 fun update(k,upd,m):
-  def child:
-    try:
-      map_find(compare)(k)(m)
-      ~catch NotFound(): empty_net
-  map_add(compare)(k)(upd(child))(m)
+  def child = if k in m | m[k] | empty_net
+  m.set(k,upd(child))
 fun net_update(lconsts,elem,tms,net):
   def Netnode(v,c,lc,l,tips) = net
   match tms
@@ -78,9 +74,9 @@ fun follow(tms,net):
   | PairList [tm, & rtms]:
       def Pair(label,ntms) = label_for_lookup(tm)
       fun collect(k,m):
-        try:
-          follow(append(ntms)(rtms),map_find(compare)(k)(m))
-          ~catch NotFound(): PairList []
+        if k in m
+        | follow(append(ntms)(rtms),m[k])
+        | PairList []
       def collection:
         match label
         | Cnet(k): collect(k,c)
@@ -104,5 +100,9 @@ fun merge_nets(Pair(n1,n2)):
   def Netnode(v1,c1,lc1,l1,t1) = n1
   def Netnode(v2,c2,lc2,l2,t2) = n2
   def v = cond | v1 && v2: merge_nets(Pair(v1,v2)) | v1: v1 | ~else: v2
-  fun merge_map(a,b): map_union(compare)(fun(k): fun(x): fun(y): merge_nets(Pair(x,y)))(a)(b)
+  fun merge_map(a,b):
+    def mutable out = a
+    for ((k,y) in b):
+      out := out.set(k,if k in out | merge_nets(Pair(out[k],y)) | y)
+    out
   Netnode(v,merge_map(c1,c2),merge_map(lc1,lc2),merge_map(l1,l2),set_merge(t1,t2))

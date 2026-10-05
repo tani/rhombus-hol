@@ -1,13 +1,28 @@
 # Project policy
 
-This repository is a from-scratch Rhombus port of HOL Light.
+Rhombus/HOL is a direct Rhombus port of the HOL Light proof engine.
 
-The primary reference is upstream HOL Light.  Preserve its module order,
-logical boundary, derived-rule structure, and operational behaviour unless
-Rhombus requires a mechanical adaptation.
+## Engine boundary
+
+The source-to-source port covers:
+
+`fusion -> basics -> nets -> equal -> bool -> drule -> tactics -> itab -> simp`.
+
+Do not port HOL Light's parser, preterm, or printer. The frontend above the
+engine is Rhombus-native and should use Rhombus macros and syntax facilities.
+
+## Translation policy
+
+The primary reference is upstream HOL Light. Preserve module order, logical
+boundaries, derived-rule structure, and operational behavior unless Rhombus
+requires a local mechanical adaptation.
+
+Keep the HOL Light-corresponding modules directly under `rhombus/hol/`.
+Mechanical OCaml-compatibility helpers belong under `rhombus/hol/private/`
+and must not become an alternative proof architecture.
 
 Do not reintroduce the deleted Isabelle/HOL kernel, waterfall prover, previous
-Rhombus/HOL frontend, executable-language layer, or compatibility wrappers.
+Rhombus/HOL frontend, executable-language layer, or multi-package layout.
 
-Keep one package and one implementation.  Prefer direct translations over new
-architectures.  Every departure from HOL Light should be local and documented.
+Prefer direct translations over redesigns inside the engine. Every semantic
+departure from HOL Light should be local and documented.

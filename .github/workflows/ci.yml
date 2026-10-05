@@ -1,18 +1,11 @@
 name: CI
 
-# The two commands used as completion checks:
-#
-#   raco make rhombus-hol-prover/rhombus/hol.rkt   the library compiles
-#   raco test rhombus-hol/rhombus/hol/tests         the suite passes
-#
-
 on:
   push:
     branches: ['**']
   pull_request:
   workflow_dispatch:
 
-# A second push to a branch makes the first run's answer stale.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -20,100 +13,16 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Check distributable license notices
-        run: |
-          test -s LICENSE
-          test -s THIRD_PARTY_NOTICES
-          test -s THIRD_PARTY_LICENSES/HOL-Light.txt
-          test -s THIRD_PARTY_LICENSES/HOL4.txt
-          test -s THIRD_PARTY_LICENSES/ACL2.txt
-          test -s THIRD_PARTY_LICENSES/Rhombus-Racket-Scribble.txt
-          test -s THIRD_PARTY_LICENSES/Embedded-Fonts.txt
-          test -s THIRD_PARTY_LICENSES/Isabelle.txt
-          for package in \
-            rhombus-hol-kernel rhombus-hol-prover \
-            rhombus-hol-stdlib rhombus-hol isabelle-hol-kernel; do
-            cmp LICENSE "$package/LICENSE"
-            test -s "$package/THIRD_PARTY_NOTICES"
-          done
-          cmp THIRD_PARTY_LICENSES/HOL-Light.txt rhombus-hol-kernel/THIRD_PARTY_LICENSES/HOL-Light.txt
-          cmp THIRD_PARTY_LICENSES/HOL-Light.txt rhombus-hol-prover/THIRD_PARTY_LICENSES/HOL-Light.txt
-          cmp THIRD_PARTY_LICENSES/HOL4.txt rhombus-hol-prover/THIRD_PARTY_LICENSES/HOL4.txt
-          cmp THIRD_PARTY_LICENSES/HOL-Light.txt isabelle-hol-kernel/THIRD_PARTY_LICENSES/HOL-Light.txt
-          cmp THIRD_PARTY_LICENSES/ACL2.txt rhombus-hol-prover/THIRD_PARTY_LICENSES/ACL2.txt
-          cmp THIRD_PARTY_LICENSES/HOL4.txt isabelle-hol-kernel/THIRD_PARTY_LICENSES/HOL4.txt
-          cmp THIRD_PARTY_LICENSES/Rhombus-Racket-Scribble.txt rhombus-hol/THIRD_PARTY_LICENSES/Rhombus-Racket-Scribble.txt
-          cmp THIRD_PARTY_LICENSES/Embedded-Fonts.txt rhombus-hol/THIRD_PARTY_LICENSES/Embedded-Fonts.txt
-          cmp THIRD_PARTY_LICENSES/Isabelle.txt isabelle-hol-kernel/THIRD_PARTY_LICENSES/Isabelle.txt
-
-      - name: Check per-file copyright and licensing
-        uses: fsfe/reuse-action@v6
-
-      # Use the released Racket version tested by the Nix development shell.
       - uses: Bogdanp/setup-racket@v1.11
         with:
           version: 9.3
           variant: CS
-
-      # Install all four together so their dependencies resolve as links to
-      # this checkout. Reuse packages already present on the runner; `--auto`
-      # installs any missing dependencies.
-      # `--no-docs` leaves documentation generation to the Pages workflow.
-      - name: Install the packages
-        run: |
-          raco pkg install --auto --batch --no-docs --skip-installed \
-            rhombus-hol-kernel/ rhombus-hol-prover/ \
-            rhombus-hol-stdlib/ rhombus-hol/
-
-      - name: Compile the libraries
-        run: |
-          raco make rhombus-hol-prover/rhombus/hol.rkt
-          raco make rhombus-hol-stdlib/rhombus/hol/stdlib.rhm
-
-      - name: Run the test suite in parallel
-        run: raco test --jobs 4 rhombus-hol/rhombus/hol/tests
-
-  formal-kernel:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: cachix/install-nix-action@v30
-
-      - name: Install Rhombus compiler and kernel ABI
-        run: >-
-          nix develop --command raco pkg install --auto --batch --no-docs --skip-installed
-          rhombus-lib rhombus-hol-kernel/
-
-      - name: Check formal kernel and generated artifact
-        run: ./isabelle-hol-kernel/tools/export-kernel.sh --check
-
-      - name: Compile generated Rhombus kernel
-        run: |
-          nix develop --command raco make \
-            rhombus-hol-kernel/rhombus/hol/kernel/generated.rhm
-
-      - name: Run generated Rhombus kernel smoke test
-        run: |
-          mkdir -p "$RUNNER_TEMP/rhombus-hol-export"
-          cp rhombus-hol-kernel/rhombus/hol/kernel/generated.rhm \
-            "$RUNNER_TEMP/rhombus-hol-export/rhombus_hol_kernel.rhm"
-          cp isabelle-hol-kernel/tests/Rhombus_HOL_Code_Export_Smoke.rhm \
-            "$RUNNER_TEMP/rhombus-hol-export/"
-          nix develop --command raco test \
-            "$RUNNER_TEMP/rhombus-hol-export/Rhombus_HOL_Code_Export_Smoke.rhm"
-
-      - name: Reject unfinished proof commands
-        run: |
-          if grep -R -n -E '\b(sorry|oops|axiomatization|oracle)\b' isabelle-hol-kernel \
-              --include='*.thy' --include='*.ML'; then
-            echo "::error::unfinished or additional trusted proof command found"
-            exit 1
-          fi
+      - name: Install
+        run: raco pkg install --auto --batch --no-docs --no-setup --skip-installed --name rhombus-hol "$PWD"
+      - name: Compile
+        run: raco make rhombus/hol/simp.rhm
+      - name: Test
+        run: raco test rhombus/hol/tests

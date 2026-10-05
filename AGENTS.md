@@ -26,3 +26,11 @@ Rhombus/HOL frontend, executable-language layer, or multi-package layout.
 
 Prefer direct translations over redesigns inside the engine. Every semantic
 departure from HOL Light should be local and documented.
+
+## Binding style
+
+Use `let` for sequential local value bindings, including destructuring and
+local mutable state. Use `def` for module-level values; exports and forward
+references depend on its definition-wide scope. Keep recursive function
+definitions as `fun`. A local `def` requires an actual recursive or forward
+reference and a short explanation.

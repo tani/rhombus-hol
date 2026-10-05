@@ -1,0 +1,134 @@
+#lang rhombus/static
+// SPDX-FileCopyrightText: 2026 Masaya Taniguchi
+// SPDX-FileCopyrightText: 1998 University of Cambridge
+// SPDX-FileCopyrightText: 1998-2007 John Harrison
+// SPDX-License-Identifier: 0BSD AND BSD-2-Clause
+//
+// HOL Light drule.ml compatibility layer.
+//
+// This module deliberately keeps matching and rewriting outside the trusted
+// kernel.  Every successful operation ends in INST/INST_TYPE or another
+// derived rule and therefore produces an ordinary kernel-checked theorem.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel/names open
+  rhombus/hol/kernel open
+  rhombus/hol/hol_light/bool open
+  rhombus/hol/backend/proof/logic/conversion open
+  rhombus/hol/backend/proof/automation/match open
+
+export:
+  all_from(rhombus/hol/hol_light/bool)
+  all_from(rhombus/hol/backend/proof/logic/conversion)
+  MK_CONJ
+  MK_DISJ
+  MK_FORALL
+  MK_EXISTS
+  GINST
+  PART_MATCH
+  MATCH_MP
+  MP_CONV
+  BETAS_CONV
+  BETA_VAR
+  BETA_CONVS
+  new_definition
+
+fun bool_binop(name :: Symbol) :: Term:
+  mk_const(name, mk_fun(bool, mk_fun(bool, bool)))
+
+fun lift_binop(thy :: Theory, name :: Symbol, th1 :: Thm, th2 :: Thm) :: Thm:
+  MK_COMB(MK_COMB(REFL(thy, bool_binop(name)), th1), th2)
+
+fun MK_CONJ(thy :: Theory, th1 :: Thm, th2 :: Thm) :: Thm:
+  lift_binop(thy, c_conj, th1, th2)
+
+fun MK_DISJ(thy :: Theory, th1 :: Thm, th2 :: Thm) :: Thm:
+  lift_binop(thy, c_disj, th1, th2)
+
+fun MK_FORALL(thy :: Theory, v :: FVar, th :: Thm) :: Thm:
+  let pred_ty = mk_fun(v.ty, bool)
+  AP_TERM(thy,
+          mk_const(c_forall, mk_fun(pred_ty, bool)),
+          ABS(thy, v, th))
+
+fun MK_EXISTS(thy :: Theory, v :: FVar, th :: Thm) :: Thm:
+  let pred_ty = mk_fun(v.ty, bool)
+  AP_TERM(thy,
+          mk_const(c_exists, mk_fun(pred_ty, bool)),
+          ABS(thy, v, th))
+
+fun GINST(thy :: Theory,
+          tyin :: Map.of(Symbol, HType),
+          tmin :: Map.of(Term, Term),
+          th :: Thm) :: Thm:
+  INST(thy, tmin, INST_TYPE(thy, tyin, th))
+
+// Match the selected part of a theorem conclusion against a target term.
+// Unlike HOL Light's higher-order matcher this layer intentionally uses the
+// prover's one-way first-order matcher.  Bound structure is matched exactly;
+// free variables occurring in the selected pattern are the metavariables.
+fun PART_MATCH(thy :: Theory,
+               part :: Function.of_arity(1),
+               th :: Thm,
+               target :: Term) :: Thm:
+  let pattern = part(concl_of(th)) :~ Term
+  let pvars = free_vars(pattern)
+  match term_match(pvars, pattern, target)
+  | #false:
+      error(~who: #'PART_MATCH, "theorem does not match target",
+            error.val(~label: "pattern", show(pattern)),
+            error.val(~label: "target", show(target)))
+  | mr :~ MatchResult:
+      GINST(thy, mr.tyin, mr.theta, th)
+
+// HOL Light MATCH_MP: instantiate a universally quantified implication so
+// that its antecedent is the supplied theorem's conclusion, then apply MP.
+fun MATCH_MP(thy :: Theory, rule :: Thm, premise :: Thm) :: Thm:
+  let specialized = SPEC_ALL(thy, rule)
+  match dest_imp(concl_of(specialized))
+  | #false: error(~who: #'MATCH_MP, "first theorem is not an implication")
+  | [ant, _]:
+      let pvars = free_vars(ant)
+      match term_match(pvars, ant, concl_of(premise))
+      | #false:
+          error(~who: #'MATCH_MP, "antecedent does not match premise",
+                error.val(~label: "antecedent", show(ant)),
+                error.val(~label: "premise", show(concl_of(premise))))
+      | mr :~ MatchResult:
+          MP(thy, GINST(thy, mr.tyin, mr.theta, specialized), premise)
+
+// Convert both sides of an implication.  This is the useful operational core
+// of HOL Light's MP_CONV in a locally-nameless representation.
+fun MP_CONV(c):
+  fun (thy :: Theory, t :: Term) :: maybe(Thm):
+    match dest_imp(t)
+    | #false: #false
+    | [p, q]:
+        match [c(thy, p), c(thy, q)]
+        | [pth :: Thm, qth :: Thm]:
+            lift_binop(thy, c_imp, pth, qth)
+        | [pth :: Thm, #false]:
+            lift_binop(thy, c_imp, pth, REFL(thy, q))
+        | [#false, qth :: Thm]:
+            lift_binop(thy, c_imp, REFL(thy, p), qth)
+        | ~else: #false
+
+// Normalize every beta redex in the term.
+fun BETAS_CONV(thy :: Theory, t :: Term) :: maybe(Thm):
+  TOP_DEPTH_CONV(BETA_CONV)(thy, t)
+
+// HOL Light exposes these two names in drule.ml.  With locally-nameless terms
+// no alpha-repair is needed, so both reduce to the same beta conversion.
+fun BETA_VAR(thy :: Theory, t :: Term) :: maybe(Thm):
+  BETA_CONV(thy, t)
+
+fun BETA_CONVS(thy :: Theory, ts :: List.of(Term)) :: List:
+  ts.map(fun (t): BETA_CONV(thy, t))
+
+// Theory extension wrapper corresponding to HOL Light's new_definition.
+// The caller supplies the full equation; the kernel performs all admissibility
+// checks and returns the extended theory and defining theorem.
+fun new_definition(thy :: Theory, equation :: Term) :: values(Theory, Thm):
+  new_basic_definition(thy, equation)

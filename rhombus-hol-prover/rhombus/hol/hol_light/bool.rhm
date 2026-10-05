@@ -1,0 +1,116 @@
+#lang rhombus/static
+// SPDX-FileCopyrightText: 2026 Masaya Taniguchi
+// SPDX-FileCopyrightText: 1998 University of Cambridge
+// SPDX-FileCopyrightText: 1998-2007 John Harrison
+// SPDX-License-Identifier: 0BSD AND BSD-2-Clause
+//
+// HOL Light bool.ml compatibility layer.
+//
+// The logical constants and their proofs remain implemented in the current
+// locally-nameless kernel stack.  This module restores the bool.ml-facing API
+// without adding a second trusted implementation.
+
+import:
+  rhombus/hol/kernel/type open
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/backend/proof/logic/bool open
+  rhombus/hol/backend/proof/logic/conversion open
+  rhombus/hol/backend/proof/logic/derived open
+
+export:
+  all_from(rhombus/hol/backend/proof/logic/bool)
+  all_from(rhombus/hol/backend/proof/logic/derived)
+  is_iff
+  dest_iff
+  mk_iff
+  PINST
+  list_mk_conj
+  CONJ_PAIR
+  list_mk_disj
+  list_mk_exists
+  mk_uexists
+  SIMPLE_EXISTS
+  SIMPLE_CHOOSE
+  SIMPLE_DISJ_CASES
+  EXISTENCE
+
+fun is_iff(t :: Term) :: Boolean:
+  match dest_eq(t)
+  | [l, _]: type_of(l) == bool
+  | ~else: #false
+
+fun dest_iff(t :: Term) :: List.of(Term):
+  match dest_eq(t)
+  | [l, r] when type_of(l) == bool: [l, r]
+  | ~else: error(~who: #'dest_iff, "not a Boolean equivalence")
+
+fun mk_iff(l :: Term, r :: Term) :: Term:
+  unless type_of(l) == bool && type_of(r) == bool
+  | error(~who: #'mk_iff, "arguments are not Boolean")
+  mk_eq(l, r)
+
+// HOL Light's PINST first type-instantiates a theorem, then instantiates terms.
+// Maps are used instead of association lists because they are the native kernel
+// representation in Rhombus-HOL.
+fun PINST(thy :: Theory,
+          tyin :: Map.of(Symbol, HType),
+          tmin :: Map.of(Term, Term),
+          th :: Thm) :: Thm:
+  INST(thy, tmin, INST_TYPE(thy, tyin, th))
+
+fun list_mk_conj(ts :: List.of(Term)) :: Term:
+  match ts
+  | []: tm_true
+  | List.cons(t0, rest):
+      for values(acc :~ Term = t0) (t in rest): mk_conj(acc, t)
+
+fun CONJ_PAIR(thy :: Theory, th :: Thm) :: values(Thm, Thm):
+  values(CONJUNCT1(thy, th), CONJUNCT2(thy, th))
+
+fun list_mk_disj(ts :: List.of(Term)) :: Term:
+  match ts
+  | []: tm_false
+  | List.cons(t0, rest):
+      for values(acc :~ Term = t0) (t in rest): mk_disj(acc, t)
+
+fun list_mk_exists(vs :: List.of(FVar), body :: Term) :: Term:
+  for values(t :~ Term = body) (v in vs.reverse()): mk_exists(v, t)
+
+fun mk_uexists(v :: FVar, body :: Term) :: Term:
+  mk_comb(
+    mk_const(c_exists1, mk_fun(mk_fun(v.ty, bool), bool)),
+    mk_abs(v, body))
+
+fun SIMPLE_EXISTS(thy :: Theory, v :: FVar, th :: Thm) :: Thm:
+  EXISTS(thy, mk_exists(v, concl_of(th)), v, th)
+
+fun SIMPLE_CHOOSE(thy :: Theory, v :: FVar, th :: Thm) :: Thm:
+  match hyps_of(th)
+  | []: error(~who: #'SIMPLE_CHOOSE, "the theorem has no hypothesis")
+  | List.cons(h, _):
+      CHOOSE(thy, v, ASSUME(thy, mk_exists(v, h)), th)
+
+fun SIMPLE_DISJ_CASES(thy :: Theory, th1 :: Thm, th2 :: Thm) :: Thm:
+  match [hyps_of(th1), hyps_of(th2)]
+  | [List.cons(h1, _), List.cons(h2, _)]:
+      DISJ_CASES(thy, ASSUME(thy, mk_disj(h1, h2)), th1, th2)
+  | ~else:
+      error(~who: #'SIMPLE_DISJ_CASES,
+            "both branch theorems need a hypothesis")
+
+// |- ?!x. P x  ==>  |- ?x. P x
+fun EXISTENCE(thy :: Theory, th :: Thm) :: Thm:
+  let target = concl_of(th)
+  match target
+  | Comb(Const(n, _), pred) when n == c_exists1:
+      let def = unfold_def(
+                  thy,
+                  INST_TYPE(thy,
+                            {#'a: (let (a, _) = dest_fun(type_of(pred)); a)},
+                            base_defs(c_exists1)),
+                  [pred])
+      CONJUNCT1(thy, EQ_MP(def, th))
+  | ~else:
+      error(~who: #'EXISTENCE,
+            "theorem is not a unique-existence theorem")

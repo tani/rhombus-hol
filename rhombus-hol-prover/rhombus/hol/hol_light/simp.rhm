@@ -1,0 +1,199 @@
+#lang rhombus/static
+// SPDX-FileCopyrightText: 2026 Masaya Taniguchi
+// SPDX-FileCopyrightText: 1998 University of Cambridge
+// SPDX-FileCopyrightText: 1998-2007 John Harrison
+// SPDX-License-Identifier: 0BSD AND BSD-2-Clause
+//
+// HOL Light simp.ml compatibility layer.
+//
+// The implementation is backed by the prover RuleDB.  Rewriting therefore
+// shares the same indexed matching, conditional-discharge logic, permutation
+// ordering, and bounded traversal used by the waterfall.
+
+import:
+  rhombus/hol/kernel/term open
+  rhombus/hol/kernel open
+  rhombus/hol/hol_light/tactics open
+  rhombus/hol/backend/proof/logic/conversion open
+  rhombus/hol/backend/proof/logic/derived open
+  rhombus/hol/backend/proof/automation/rules open
+  rhombus/hol/backend/proof/automation/limits open
+  rhombus/hol/backend/proof/automation/goal/node open
+  rhombus/hol/backend/proof/automation/goal/trace open
+
+export:
+  SimpSet
+  empty_ss
+  basic_ss
+  ss_of_thms
+  ss_of_conv
+  AUGMENT_SIMPSET
+  REWR_CONV
+  ONCE_REWRITE_CONV
+  PURE_ONCE_REWRITE_CONV
+  REWRITE_CONV
+  PURE_REWRITE_CONV
+  SIMP_CONV
+  PURE_SIMP_CONV
+  ONCE_SIMP_CONV
+  GEN_REWRITE_RULE
+  REWRITE_RULE
+  PURE_REWRITE_RULE
+  ONCE_REWRITE_RULE
+  PURE_ONCE_REWRITE_RULE
+  SIMP_RULE
+  PURE_SIMP_RULE
+  ONCE_SIMP_RULE
+  GEN_REWRITE_TAC
+  REWRITE_TAC
+  PURE_REWRITE_TAC
+  ONCE_REWRITE_TAC
+  PURE_ONCE_REWRITE_TAC
+  SIMP_TAC
+  PURE_SIMP_TAC
+  ONCE_SIMP_TAC
+  ASM_REWRITE_TAC
+  ASM_SIMP_TAC
+
+class SimpSet(db :: RuleDB, steps :: NonnegInt = default_search_steps)
+
+def empty_ss :: SimpSet = SimpSet(empty_db)
+
+// The current core logical cleanups live in refl_conv and are always active,
+// so no theorem list is required to seed the basic set.
+def basic_ss :: SimpSet = empty_ss
+
+fun add_named_thms(thy :: Theory, db :: RuleDB, prefix :: String,
+                   ths :: List.of(Thm)) :: RuleDB:
+  for values(out :~ RuleDB = db) (th in ths, i in List.iota(ths.length())):
+    add_thm(thy, out,
+            Symbol.from_string(prefix ++ to_string(i)),
+            th :~ Thm)
+
+fun ss_of_thms(thy :: Theory, ths :: List.of(Thm)) :: SimpSet:
+  SimpSet(add_named_thms(thy, empty_db, "simp", ths))
+
+// A conversion cannot be indexed as a theorem rule. Keep the function for API
+// compatibility by returning a set unchanged; callers that need ad-hoc
+// conversions should compose them with ORELSEC/THENC from conversion.rhm.
+fun ss_of_conv(_conv) :: SimpSet:
+  empty_ss
+
+fun AUGMENT_SIMPSET(thy :: Theory, ss :: SimpSet,
+                    ths :: List.of(Thm)) :: SimpSet:
+  SimpSet(add_named_thms(thy, ss.db, "simp+", ths), ss.steps)
+
+fun REWR_CONV(thy :: Theory, th :: Thm):
+  let db = add_thm(thy, empty_db, #'rewrite, th)
+  fun (thy2 :: Theory, t :: Term) :: maybe(Thm):
+    db_conv(db, fresh_budget(default_search_steps))(thy2, t)
+
+fun rewrite_db(thy :: Theory, ths :: List.of(Thm)) :: RuleDB:
+  add_named_thms(thy, empty_db, "rewrite", ths)
+
+fun PURE_ONCE_REWRITE_CONV(thy :: Theory, ths :: List.of(Thm)):
+  let db = rewrite_db(thy, ths)
+  fun (thy2 :: Theory, t :: Term) :: maybe(Thm):
+    ONCE_DEPTH_CONV(
+      db_conv(db, fresh_budget(default_search_steps)))(thy2, t)
+
+fun ONCE_REWRITE_CONV(thy :: Theory, ths :: List.of(Thm)):
+  PURE_ONCE_REWRITE_CONV(thy, ths)
+
+fun PURE_REWRITE_CONV(thy :: Theory, ths :: List.of(Thm)):
+  let db = rewrite_db(thy, ths)
+  fun (thy2 :: Theory, t :: Term) :: maybe(Thm):
+    simp_conv(db, fresh_budget(default_search_steps))(thy2, t)
+
+fun REWRITE_CONV(thy :: Theory, ths :: List.of(Thm)):
+  PURE_REWRITE_CONV(thy, ths)
+
+fun PURE_SIMP_CONV(thy :: Theory, ths :: List.of(Thm)):
+  PURE_REWRITE_CONV(thy, ths)
+
+fun SIMP_CONV(thy :: Theory, ths :: List.of(Thm)):
+  let ss = AUGMENT_SIMPSET(thy, basic_ss, ths)
+  fun (thy2 :: Theory, t :: Term) :: maybe(Thm):
+    simp_conv(ss.db, fresh_budget(ss.steps))(thy2, t)
+
+fun ONCE_SIMP_CONV(thy :: Theory, ths :: List.of(Thm)):
+  PURE_ONCE_REWRITE_CONV(thy, ths)
+
+fun apply_conv_rule(conv, thy :: Theory, th :: Thm) :: Thm:
+  match CONV_RULE(conv, thy, th)
+  | #false: th
+  | out :~ Thm: out
+
+fun GEN_REWRITE_RULE(conv, thy :: Theory, ths :: List.of(Thm), th :: Thm) :: Thm:
+  apply_conv_rule(conv(thy, ths), thy, th)
+
+fun REWRITE_RULE(thy :: Theory, ths :: List.of(Thm), th :: Thm) :: Thm:
+  apply_conv_rule(REWRITE_CONV(thy, ths), thy, th)
+
+fun PURE_REWRITE_RULE(thy :: Theory, ths :: List.of(Thm), th :: Thm) :: Thm:
+  apply_conv_rule(PURE_REWRITE_CONV(thy, ths), thy, th)
+
+fun ONCE_REWRITE_RULE(thy :: Theory, ths :: List.of(Thm), th :: Thm) :: Thm:
+  apply_conv_rule(ONCE_REWRITE_CONV(thy, ths), thy, th)
+
+fun PURE_ONCE_REWRITE_RULE(thy :: Theory, ths :: List.of(Thm), th :: Thm) :: Thm:
+  apply_conv_rule(PURE_ONCE_REWRITE_CONV(thy, ths), thy, th)
+
+fun SIMP_RULE(thy :: Theory, ths :: List.of(Thm), th :: Thm) :: Thm:
+  apply_conv_rule(SIMP_CONV(thy, ths), thy, th)
+
+fun PURE_SIMP_RULE(thy :: Theory, ths :: List.of(Thm), th :: Thm) :: Thm:
+  apply_conv_rule(PURE_SIMP_CONV(thy, ths), thy, th)
+
+fun ONCE_SIMP_RULE(thy :: Theory, ths :: List.of(Thm), th :: Thm) :: Thm:
+  apply_conv_rule(ONCE_SIMP_CONV(thy, ths), thy, th)
+
+fun CONV_TAC(thy :: Theory, conv):
+  fun (g :: Goal) :: maybe(Step):
+    match conv(thy, g.concl)
+    | #false: #false
+    | eqth :~ Thm:
+        let q = rhs_of(eqth)
+        cond
+        | q == g.concl: #false
+        | q == tm_true:
+            Step([], fun (_ths :: List.of(Thm)): EQT_ELIM(thy, eqth), [])
+        | ~else:
+            Step([Goal(g.asms, q)],
+                 fun (ths :: List.of(Thm)): EQ_MP(SYM(thy, eqth), ths[0]),
+                 [Simplified()])
+
+fun GEN_REWRITE_TAC(conv, thy :: Theory, ths :: List.of(Thm)):
+  CONV_TAC(thy, conv(thy, ths))
+
+fun REWRITE_TAC(thy :: Theory, ths :: List.of(Thm)):
+  CONV_TAC(thy, REWRITE_CONV(thy, ths))
+
+fun PURE_REWRITE_TAC(thy :: Theory, ths :: List.of(Thm)):
+  CONV_TAC(thy, PURE_REWRITE_CONV(thy, ths))
+
+fun ONCE_REWRITE_TAC(thy :: Theory, ths :: List.of(Thm)):
+  CONV_TAC(thy, ONCE_REWRITE_CONV(thy, ths))
+
+fun PURE_ONCE_REWRITE_TAC(thy :: Theory, ths :: List.of(Thm)):
+  CONV_TAC(thy, PURE_ONCE_REWRITE_CONV(thy, ths))
+
+fun SIMP_TAC(thy :: Theory, ths :: List.of(Thm)):
+  CONV_TAC(thy, SIMP_CONV(thy, ths))
+
+fun PURE_SIMP_TAC(thy :: Theory, ths :: List.of(Thm)):
+  CONV_TAC(thy, PURE_SIMP_CONV(thy, ths))
+
+fun ONCE_SIMP_TAC(thy :: Theory, ths :: List.of(Thm)):
+  CONV_TAC(thy, ONCE_SIMP_CONV(thy, ths))
+
+fun assumption_theorems(thy :: Theory, g :: Goal) :: List.of(Thm):
+  g.asms.map(fun (a): ASSUME(thy, a))
+
+fun ASM_REWRITE_TAC(thy :: Theory, ths :: List.of(Thm)):
+  fun (g :: Goal) :: maybe(Step):
+    REWRITE_TAC(thy, ths ++ assumption_theorems(thy, g))(g)
+
+fun ASM_SIMP_TAC(thy :: Theory, ths :: List.of(Thm)):
+  fun (g :: Goal) :: maybe(Step):
+    SIMP_TAC(thy, ths ++ assumption_theorems(thy, g))(g)

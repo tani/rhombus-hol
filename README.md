@@ -40,3 +40,19 @@ raco pkg install --auto --batch --no-docs --skip-installed --name rhombus-hol "$
 raco make rhombus/hol/equal.rhm
 raco test rhombus/hol/tests
 ```
+
+
+## Differential verification
+
+The full differential harness is under `differential/`. It builds an OCaml
+oracle from the pinned HOL Light sources and compares it against the live
+Rhombus implementation.
+
+```sh
+python3 differential/tests/run.py
+python3 differential/tests/run_upper.py
+```
+
+The two suites contain 1,296 kernel cases and 2,618 upper-layer cases,
+respectively. They are intentionally excluded from normal CI; the
+`Differential` GitHub Actions workflow is manual-only.

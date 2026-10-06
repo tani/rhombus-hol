@@ -313,7 +313,8 @@ class Translator:
                 out+='\n'+(clause+': '+body if '\n' not in body else clause+':\n'+ind(body,4))
         return out
     def function(self,pattern,body,env,name=None):
-        if name in self.call_arities:
+        staged=name is not None and ident_safe(name) in self.call_arities
+        if staged:
             patterns=[pattern];tail=body
             while tail[0]=='fun':patterns.append(tail[1]);tail=tail[2]
             bound=[n for p in patterns for n in names(p)]
@@ -330,7 +331,7 @@ class Translator:
         text=self.fun_text(name,params,self.lines_of(body,new))
         arity=1;tail=body
         while tail[0]=='fun': arity+=1;tail=tail[2]
-        if name in self.call_arities and arity>1:
+        if staged and arity>1:
             self.call_arities[ident_safe(name)]=arity
             text='curried('+str(arity)+') '+text
         return text

@@ -24,10 +24,12 @@ rhombus/hol/
   class.rhm
   ... standard theories through define.rhm
   private/
-    compat.rhm
-    atoms_map.rhm
-    term_hash.rhm
-    hash_runtime.rhm
+    compat.rhm            lib.ml helpers
+    theory_support.rhm    remaining OCaml stdlib/lib.ml support
+    data_types.rhm        options and variant comparison view
+    atoms_map.rhm         Patricia term maps (generated from lib.ml)
+    term_hash.rhm, hash_runtime.rhm, ocaml_random.rhm
+    type_inference.rhm, type_specification.rhm, quoted_ast.rhm
   tests/
 
 differential/
@@ -128,3 +130,18 @@ child maximum RSS, exit status, and exact differential mismatches.
 See `benchmarks/results.json` for the historical comparison before the
 `atoms` compatibility restoration. Those timings describe the fully reduced
 variant and are not measurements of the current partially restored variant.
+
+## Build and check
+
+Requires Racket 9.3 or later with `rhombus-lib`.
+
+```sh
+raco make -j 4 rhombus/hol/*.rhm          # compile every module
+racket rhombus/hol/tests/fusion.rhm       # also tests/bool.rhm, tests/engine.rhm
+racket rhombus/hol/define.rhm             # replays every standard-theory proof
+```
+
+The standard-theory modules (after `simp.rhm`) are generated; edit `tools/translate/translate.py`
+and regenerate rather than editing them (see `tools/translate/README.md`).
+OCaml tuples are Rhombus lists (`[a, b]`), OCaml lists are `PairList`, and
+record types are classes.

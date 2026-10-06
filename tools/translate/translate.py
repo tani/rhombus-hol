@@ -61,6 +61,26 @@ for fn in ['map','rev','length','concat','exists','filter','find','fold_left','f
 
 def ind(s,n=2): return '\n'.join(' '*n+l for l in s.splitlines())
 def block(s): return '(block:«\n'+ind(s)+'\n»)'
+def unwrap(s):
+    # Drop a (block:« ... ») wrapper that spans the whole text; the caller supplies a block.
+    if not (s.startswith('(block:«\n') and s.endswith('\n»)')): return s
+    depth=0
+    for i,c in enumerate(s):
+        if c=='«': depth+=1
+        elif c=='»':
+            depth-=1
+            if depth==0: return '\n'.join(l[2:] if l.startswith('  ') else l for l in s[len('(block:«\n'):-len('\n»)')].splitlines()) if i==len(s)-2 else s
+    return s
+def colon(s):
+    s=unwrap(s)
+    return ': '+s if '\n' not in s else ':«\n'+ind(s)+'\n»'
+def inline(s):
+    # A fun definition may be followed by ';' on the same line, so keep its body delimited.
+    s=unwrap(s)
+    return ':« '+s+' »' if '\n' not in s else ':«\n'+ind(s)+'\n»'
+def equals(s):
+    s=unwrap(s)
+    return ' = '+s if '\n' not in s else ':«\n'+ind(s)+'\n»'
 def ident_safe(s):
     s=s.replace("'",'_prime')
     if s in ['values','def','cond']:s='hol_'+s
@@ -196,9 +216,9 @@ class Translator:
         for s in names(pattern): new[s]=s
         if len(alternatives(pattern))>1 and names(pattern):
             v=self.fresh()
-            return 'fun'+((' '+ident_safe(name)) if name else '')+'('+v+'):«\n'+ind(self.match(v,[(pattern,None,body)],new))+'\n»'
+            return 'fun'+((' '+ident_safe(name)) if name else '')+'('+v+')'+inline(self.match(v,[(pattern,None,body)],new))
         params='_' if pattern==['construct','()',None] else self.pattern(pattern,new)
-        return 'fun'+((' '+ident_safe(name)) if name else '')+'('+params+'):«\n'+ind(self.expr(body,new))+'\n»'
+        return 'fun'+((' '+ident_safe(name)) if name else '')+'('+params+')'+inline(self.expr(body,new))
     def record_class(self,names):
         # OCaml resolves a label set to the latest record type declaring all of them.
         want=set(names)
@@ -230,9 +250,9 @@ class Translator:
         if p[0]=='var' and e[0] in ['fun','function'] and (top or recursive):
             if e[0]=='fun':return self.function(e[1],e[2],scope,new[p[1]]),new
             v=self.fresh()
-            return 'fun '+ident_safe(new[p[1]])+'('+v+'):«\n'+ind(self.match(v,e[1],scope))+'\n»',new
+            return 'fun '+ident_safe(new[p[1]])+'('+v+')'+inline(self.match(v,e[1],scope)),new
         keyword='def' if top else 'let'
-        return keyword+' '+self.pattern(p,new)+':«\n'+ind(self.expr(e,scope))+'\n»',new
+        return keyword+' '+self.pattern(p,new)+equals(self.expr(e,scope)),new
     def internal_binding(self,name,version):
         plain=ident_safe(name)
         # Keep the HOL Light name unless it could capture a support or Rhombus binding.
@@ -316,9 +336,9 @@ class Translator:
             if e[2]!='labelled':raise ValueError('optional parameter')
             new=env.copy()
             for n in names(e[4]):new[n]=n
-            return '(fun(~'+e[1]+': '+self.pattern(e[4],new)+'):«\n'+ind(self.expr(e[5],new))+'\n»)'
+            return '(fun(~'+e[1]+': '+self.pattern(e[4],new)+')'+colon(self.expr(e[5],new))+')'
         if k=='function':
-            v=self.fresh(); return '(fun('+v+'):«\n'+ind(self.match(v,e[1],env))+'\n»)'
+            v=self.fresh(); return '(fun('+v+')'+colon(self.match(v,e[1],env))+')'
         if k=='let':
             _,r,bs,body=e; lines=[]; new=env.copy()
             if r=='rec':
@@ -456,8 +476,11 @@ class Translator:
         notice+='// LGPL 2.1 with OCaml linking exception; see tools/translate/stdlib.\n'
         return notice+self.module_body(name,['struct',substitute(body)],self.env)
     def match(self,s,cs,env):
-        temp=self.fresh()
-        out='let '+temp+' = '+s+';\nmatch '+temp
+        if '\n' not in s and all(g is None for _,g,_ in cs): temp=s;out='match '+s
+        elif re.fullmatch(r"[A-Za-z_][\w']*",s): temp=s;out='match '+s
+        else:
+            temp=self.fresh()
+            out='let '+temp+' = '+s+';\nmatch '+temp
         for idx,(p,g,b) in enumerate(cs):
             new=env.copy()
             for n in names(p): new[n]=n
@@ -465,7 +488,7 @@ class Translator:
             if g is not None:
                 rest=self.match(temp,cs[idx+1:],env) if idx+1<len(cs) else 'failwith("Pattern match failure")'
                 body='if '+self.expr(g,new)+'\n| '+body+'\n| '+block(rest)
-            for option in alternatives(p):out+='\n| '+self.pattern(option,new)+':«\n'+ind(body,4)+'\n»'
+            for option in alternatives(p):out+='\n| '+self.pattern(option,new)+(colon(body) if '\n' not in unwrap(body) else ':«\n'+ind(unwrap(body),4)+'\n»')
         return out
     def export_specs(self):
         return [('rename '+ident_safe(internal)+' as '+ident_safe(s)) if internal in self.class_values else ident_safe(s) for s,internal in self.exports.items()]

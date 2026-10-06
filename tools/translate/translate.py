@@ -577,9 +577,14 @@ class Translator:
             key,_=self.resolve_module(m[1])
             newkey='.'.join(self.module_path+[name])
             self.module_exports[newkey]=self.module_exports[key]
-            for n in self.module_exports[key]:
-                if actual+'.'+n in self.class_values:self.class_values.add(name+'.'+n)
-                if actual+'.'+n in self.arities:self.arities[name+'.'+n]=self.arities[actual+'.'+n]
+            for old,spec in list(self.modules.items()):
+                if old.startswith(key+'.'):self.modules[newkey+old[len(key):]]=spec
+            for old,exports in list(self.module_exports.items()):
+                if old.startswith(key+'.'):self.module_exports[newkey+old[len(key):]]=exports
+            for value in list(self.class_values):
+                if value.startswith(actual+'.'):self.class_values.add(name+value[len(actual):])
+            for value,arity in list(self.arities.items()):
+                if value.startswith(actual+'.'):self.arities[name+value[len(actual):]]=arity
             if '.' in actual and is_alias(actual.split('.')[0]):
                 head,rest=actual.split('.',1)
                 target='\"'+unalias(head)+'.rhm\".'+rest
@@ -663,7 +668,7 @@ class Translator:
                 out+='\n'+(head+': '+safe(body) if '\n' not in body else head+':\n'+ind(body,4))
         return out
     def export_specs(self):
-        return [('rename '+ident_safe(internal)+' as '+ident_safe(s)) if internal in self.class_values and internal!=s else ident_safe(s) for s,internal in self.exports.items()]
+        return [('rename '+ident_safe(internal)+' as '+ident_safe(s)) if internal!=s and (self.module_path or internal in self.class_values) else ident_safe(s) for s,internal in self.exports.items()]
     def translate(self,ast,deps,header=True):
         self.reserved_names={ident_safe(n) for i in ast if i[0]=='value'
                              for p,_ in i[2] for n in names(p)}
@@ -848,7 +853,7 @@ class Translator:
                 continue
             raise ValueError(f'{self.module}: unsupported structure {item[0]}')
         for s,internal in self.exports.items():
-            if s!=internal and internal not in self.class_values:
+            if not self.module_path and s!=internal and internal not in self.class_values:
                 if internal in self.namespace_values:lines.append('import: .'+ident_safe(internal)+' as '+ident_safe(s))
                 else:lines.append('def '+ident_safe(s)+' = '+ident_safe(internal))
         if header:

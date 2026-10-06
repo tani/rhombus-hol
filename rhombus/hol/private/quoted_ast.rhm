@@ -47,21 +47,63 @@ fun expand_quote(encoded):
 
 meta:
   fun escape(s :: String) :: String:
-    s.replace("\\", "\\\\").replace("\"", "\\\"")
+    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
   fun quoted(n): "\"" +& escape(n.unwrap()) +& "\""
   fun join(parts):
     match parts
     | []: ""
     | [p]: p
     | [p, & rest]: p +& "," +& join(rest)
-  fun encode(stx) :: String:
+  fun application(f, x): "[\"Comb\"," +& f +& "," +& x +& "]"
+  fun function_type(a, b): "[\"Tyapp\",\"fun\",[" +& a +& "," +& b +& "]]"
+  def bool_type = "[\"Tyapp\",\"bool\",[]]"
+  fun variable(n, ty): "[\"Var\"," +& quoted(n) +& "," +& ty +& "]"
+  fun constant(n, ty): "[\"Const\",\"" +& escape(n) +& "\"," +& ty +& "]"
+  fun reference(n, bindings):
+    match bindings
+    | [[name, ty], & rest]:
+        if n.unwrap() == name | variable(n, ty) | reference(n, rest)
+    | []: error("hol_term: unbound Ref")
+  fun abstraction(n, ty, body, bindings):
+    "[\"Abs\"," +& variable(n, ty) +& "," +& encode(body, [[n.unwrap(), ty], & bindings]) +& "]"
+  fun quantified(symbol, n, ty, body, bindings):
+    application(constant(symbol, function_type(function_type(ty, bool_type), bool_type)),
+                abstraction(n, ty, body, bindings))
+  fun binary(symbol, ty, a, b, bindings):
+    application(application(constant(symbol, function_type(ty, function_type(ty, bool_type))),
+                            encode(a, bindings)), encode(b, bindings))
+  fun applications(f, args, bindings):
+    match args
+    | []: f
+    | [arg, & rest]: applications(application(f, encode(arg, bindings)), rest, bindings)
+  fun encode(stx, bindings = []) :: String:
     match stx
+    | 'Tvar($n)': "[\"Tyvar\"," +& quoted(n) +& "]"
+    | 'Fun($a, $b)': function_type(encode(a), encode(b))
+    | 'Bool': bool_type
+    | 'Num': "[\"Tyapp\",\"num\",[]]"
+    | 'Real': "[\"Tyapp\",\"real\",[]]"
+    | 'Int': "[\"Tyapp\",\"int\",[]]"
+    | 'Ref($n)': reference(n, bindings)
+    | 'Lambda($n, $ty, $b)': abstraction(n, encode(ty), b, bindings)
+    | 'Forall($n, $ty, $b)': quantified("!", n, encode(ty), b, bindings)
+    | 'Exists($n, $ty, $b)': quantified("?", n, encode(ty), b, bindings)
+    | 'ExistsUnique($n, $ty, $b)': quantified("?!", n, encode(ty), b, bindings)
+    | 'Eq($ty, $a, $b)': binary("=", encode(ty), a, b, bindings)
+    | 'And($a, $b)': binary("/\\", bool_type, a, b, bindings)
+    | 'Or($a, $b)': binary("\\/", bool_type, a, b, bindings)
+    | 'Implies($a, $b)': binary("==>", bool_type, a, b, bindings)
+    | 'Iff($a, $b)': binary("=", bool_type, a, b, bindings)
+    | 'Not($a)': application(constant("~", function_type(bool_type, bool_type)), encode(a, bindings))
+    | 'True': constant("T", bool_type)
+    | 'False': constant("F", bool_type)
+    | 'App($f, [$a, ...])': applications(encode(f, bindings), [a, ...], bindings)
     | 'Tyvar($n)': "[\"Tyvar\"," +& quoted(n) +& "]"
     | 'Tyapp($n, [$a, ...])': "[\"Tyapp\"," +& quoted(n) +& ",[" +& join([encode('$a'), ...]) +& "]]"
     | 'Var($n, $t)': "[\"Var\"," +& quoted(n) +& "," +& encode(t) +& "]"
     | 'Const($n, $t)': "[\"Const\"," +& quoted(n) +& "," +& encode(t) +& "]"
-    | 'Comb($f, $x)': "[\"Comb\"," +& encode(f) +& "," +& encode(x) +& "]"
-    | 'Abs($v, $b)': "[\"Abs\"," +& encode(v) +& "," +& encode(b) +& "]"
+    | 'Comb($f, $x)': "[\"Comb\"," +& encode(f, bindings) +& "," +& encode(x, bindings) +& "]"
+    | 'Abs($v, $b)': "[\"Abs\"," +& encode(v, bindings) +& "," +& encode(b, bindings) +& "]"
     | _: error("hol_term: unsupported term syntax")
 expr.macro 'hol_term($t)':
   'expand_quote($(encode(t)))'

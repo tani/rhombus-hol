@@ -84,7 +84,9 @@ missing layout fails generation. Constructor and field order never change.
 Kernel constructors retain their separate private, opaque implementation.
 
 Nested modules use their own scope for short names. Redefined or conflicting
-bindings keep short suffixes. Imported names are opened selectively only when
+bindings keep short suffixes. Public namespace names use export renames so
+they do not create local bindings that capture references to parent scopes.
+Imported names are opened selectively only when
 no original binding can capture them; namespace aliases remain qualified.
 Proof operators (`then_tac`, `then_list`, `or_tac`, `then_conv`, `or_conv`)
 expand the original combinators, retaining the original expression tree.
@@ -114,6 +116,7 @@ Checks:
 ```sh
 python3 differential/tests/check_runtime.py
 python3 differential/tests/check_stdlib.py
+python3 differential/tests/check_translation.py
 HOL_THEORY_TIMEOUT=600 python3 differential/tests/check_foundations.py --all
 python3 tools/translate/snapshot.py
 ```
@@ -125,4 +128,7 @@ are read only by the differential harness, never by runtime theory modules.
 
 Saved verification: all 2,979 exported theorems in the 34 standard modules
 match the pinned original. See [verification.json](verification.json). The
-engine also passes 3,912 differential cases and 25 local tests.
+engine also passes 3,912 differential cases and 58 local tests. The generated
+translation regressions add seven checks against inherited binding capture,
+included nested namespaces, and curried declarations whose original names
+contain apostrophes.

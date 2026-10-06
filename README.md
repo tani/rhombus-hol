@@ -98,7 +98,7 @@ normalized; hypotheses, conclusions, constants, and free term names must agree.
 It rejects kernel axioms outside the original ETA_AX, SELECT_AX, and INFINITY_AX.
 All 2,979 exported theorems across the 34 standard modules match the original,
 and all proofs replay in the Rhombus kernel. Local engine tests also pass
-(25 tests). See [tools/translate/verification.json](tools/translate/verification.json)
+(58 tests). See [tools/translate/verification.json](tools/translate/verification.json)
 for the saved module coverage and checks,
 and [tools/translate/README.md](tools/translate/README.md) for generation and
 full-theory verification commands. Expected theorems are never runtime axioms.

@@ -49,8 +49,8 @@ This preserves tree shape and stateful predicate traversal, including Metis's
 random model callbacks. The original OCaml sources and licenses are in `stdlib/`.
 
 Mechanical adaptations include curried calls, immutable record maps with
-declared field order, tuple patterns bridging the engine's named goal states
-and instantiations, and shared exception/option representations. Effectful
+declared field order, OCaml tuples as Rhombus lists (pairs included; OCaml lists are `PairList`),
+record types as classes with a `port_update` method, and shared exception/option representations. Effectful
 arguments and constructor fields preserve OCaml's right-to-left evaluation;
 simultaneous value bindings preserve their left-to-right evaluation. Unit
 callbacks accept one unit value and are bridged to the existing zero-argument

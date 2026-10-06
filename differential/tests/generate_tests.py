@@ -6,15 +6,15 @@ def ty(t,L):
  if t[0]=='v':return ('mk_vartype '+json.dumps(t[1])) if L=='ml' else 'mk_vartype('+json.dumps(t[1])+')'
  if t[0]=='b':return 'bool_ty'
  args=[ty(t[1],L),ty(t[2],L)]
- return 'mk_type("fun",['+';'.join(args)+'])' if L=='ml' else 'mk_type(Pair("fun",PairList ['+','.join(args)+']))'
+ return 'mk_type("fun",['+';'.join(args)+'])' if L=='ml' else 'mk_type(["fun",PairList ['+','.join(args)+']])'
 B=('b',);A=('v','A');C=('v','B');F=lambda a,b:('f',a,b)
 def vt(n,t):return ('var',n,t)
 def ab(v,b):return ('abs',v,b,F(v[-1],b[-1]))
 def ap(f,a):return ('comb',f,a,f[-1][2])
 def tm(t,L):
- if t[0]=='var':return ('mk_var('+json.dumps(t[1])+','+ty(t[2],L)+')') if L=='ml' else 'mk_var(Pair('+json.dumps(t[1])+','+ty(t[2],L)+'))'
+ if t[0]=='var':return ('mk_var('+json.dumps(t[1])+','+ty(t[2],L)+')') if L=='ml' else 'mk_var(['+json.dumps(t[1])+','+ty(t[2],L)+'])'
  f='mk_abs' if t[0]=='abs' else 'mk_comb';a,b=tm(t[1],L),tm(t[2],L)
- return f+'('+a+','+b+')' if L=='ml' else f+'(Pair('+a+','+b+'))'
+ return f+'('+a+','+b+')' if L=='ml' else f+'(['+a+','+b+'])'
 def gen(t,depth,env=()):
  if depth==0 or r.random()<.4:
   candidates=[x for x in env if x[-1]==t];return r.choice(candidates) if candidates and r.random()<.6 else vt(r.choice(['x','y','z','x\'']),t)
@@ -38,7 +38,7 @@ fun sty(t):
   if is_vartype(t)
   | "V(" +& dest_vartype(t) +& ")"
   | block:
-      def Pair(n,a) = dest_type(t)
+      def [n,a] = dest_type(t)
       "T(" +& n +& "," +& join(map(sty)(a)) +& ")"
 fun join(l):
   match l
@@ -48,20 +48,20 @@ fun join(l):
 fun stm(t):
   cond
   | is_var(t):
-      def Pair(n,ty) = dest_var(t)
+      def [n,ty] = dest_var(t)
       "v(" +& n +& "," +& sty(ty) +& ")"
   | is_const(t):
-      def Pair(n,ty) = dest_const(t)
+      def [n,ty] = dest_const(t)
       "c(" +& n +& "," +& sty(ty) +& ")"
   | is_comb(t):
-      def Pair(f,a) = dest_comb(t)
+      def [f,a] = dest_comb(t)
       "a(" +& stm(f) +& "," +& stm(a) +& ")"
   | ~else:
-      def Pair(v,b) = dest_abs(t)
+      def [v,b] = dest_abs(t)
       "l(" +& stm(v) +& "," +& stm(b) +& ")"
 fun sl(l): join(map(stm)(l))
 fun sth(th):
-  def Pair(a,c) = dest_thm(th)
+  def [a,c] = dest_thm(th)
   "[" +& sl(a) +& "]|-" +& stm(c)
 fun sb(b): if b | "true" | "false"
 fun sn(n): to_string(if n == 0 | 0 | (if n < 0 | -1 | 1))
@@ -84,14 +84,14 @@ for i in range(180):
  add(f'identity-vsubst-{i}',f'sb (vsubst [] t{i} == t{i})',f'sb(vsubst(PairList [])(t{i}) === t{i})')
  add(f'alpha-{i}',f'sn (alphaorder t{i} ({tm(u,"ml")}))',f'sn(alphaorder(t{i})({tm(u,"rhm")}))')
  v=vt('x',A);w=vt('y',A)
- add(f'vsubst-{i}',f'stm (vsubst [{tm(w,"ml")},{tm(v,"ml")}] t{i})',f'stm(vsubst(PairList [Pair({tm(w,"rhm")},{tm(v,"rhm")})])(t{i}))')
- add(f'inst-{i}',f'stm (inst [bool_ty,aty;bool_ty,bty] t{i})',f'stm(inst(PairList [Pair(bool_ty,aty),Pair(bool_ty,bty)])(t{i}))')
+ add(f'vsubst-{i}',f'stm (vsubst [{tm(w,"ml")},{tm(v,"ml")}] t{i})',f'stm(vsubst(PairList [[{tm(w,"rhm")},{tm(v,"rhm")}]])(t{i}))')
+ add(f'inst-{i}',f'stm (inst [bool_ty,aty;bool_ty,bty] t{i})',f'stm(inst(PairList [[bool_ty,aty],[bool_ty,bty]])(t{i}))')
  add(f'REFL-{i}',f'sth (p_REFL t{i})',f'sth(REFL(t{i}))')
- add(f'INST_TYPE-{i}',f'sth (p_INST_TYPE [bool_ty,aty;bool_ty,bty] (p_REFL t{i}))',f'sth(INST_TYPE(PairList [Pair(bool_ty,aty),Pair(bool_ty,bty)])(REFL(t{i})))')
+ add(f'INST_TYPE-{i}',f'sth (p_INST_TYPE [bool_ty,aty;bool_ty,bty] (p_REFL t{i}))',f'sth(INST_TYPE(PairList [[bool_ty,aty],[bool_ty,bty]])(REFL(t{i})))')
 # Directed capture and type-collapse adversaries; exact names are compared.
 for i,t in enumerate([ab(vt('y',A),vt('x',A)),ab(vt('x',A),vt('x',C)),ab(vt('x',A),ab(vt('x',C),vt('x',A)))]):
- add(f'capture-{i}',f'stm (vsubst [{tm(vt("y",A),"ml")},{tm(vt("x",A),"ml")}] ({tm(t,"ml")}))',f'stm(vsubst(PairList [Pair({tm(vt("y",A),"rhm")},{tm(vt("x",A),"rhm")})])({tm(t,"rhm")}))')
- add(f'collapse-{i}',f'stm (inst [bool_ty,aty;bool_ty,bty] ({tm(t,"ml")}))',f'stm(inst(PairList [Pair(bool_ty,aty),Pair(bool_ty,bty)])({tm(t,"rhm")}))')
+ add(f'capture-{i}',f'stm (vsubst [{tm(vt("y",A),"ml")},{tm(vt("x",A),"ml")}] ({tm(t,"ml")}))',f'stm(vsubst(PairList [[{tm(vt("y",A),"rhm")},{tm(vt("x",A),"rhm")}]])({tm(t,"rhm")}))')
+ add(f'collapse-{i}',f'stm (inst [bool_ty,aty;bool_ty,bty] ({tm(t,"ml")}))',f'stm(inst(PairList [[bool_ty,aty],[bool_ty,bty]])({tm(t,"rhm")}))')
 # Primitive composition and negative checks.
 xm=tm(vt('x',B),'ml');xh=tm(vt('x',B),'rhm');ym=tm(vt('y',B),'ml');yh=tm(vt('y',B),'rhm')
 add('ASSUME',f'sth(p_ASSUME ({xm}))',f'sth(ASSUME({xh}))')
@@ -99,40 +99,40 @@ add('TRANS',f'sth(p_TRANS (p_REFL ({xm})) (p_REFL ({xm})))',f'sth(TRANS(REFL({xh
 add('EQ_MP',f'sth(p_EQ_MP (p_REFL ({xm})) (p_ASSUME ({xm})))',f'sth(EQ_MP(REFL({xh}))(ASSUME({xh})))')
 add('DEDUCT',f'sth(p_DEDUCT_ANTISYM_RULE (p_ASSUME ({xm})) (p_ASSUME ({ym})))',f'sth(DEDUCT_ANTISYM_RULE(ASSUME({xh}))(ASSUME({yh})))')
 add('ABS',f'sth(p_ABS ({xm}) (p_REFL ({xm})))',f'sth(ABS({xh})(REFL({xh})))')
-add('ABS-reject',f'sth(p_ABS ({xm}) (p_ASSUME (mk_eq({xm},{xm}))))',f'sth(ABS({xh})(ASSUME(mk_eq(Pair({xh},{xh})))))')
-for name,m,h in [('bad-arity','mk_type("fun",[])','mk_type(Pair("fun",PairList []))'),('unknown-type','mk_type("unknown",[])','mk_type(Pair("unknown",PairList []))'),('bad-assume','p_ASSUME(mk_var("x",aty))','ASSUME(mk_var(Pair("x",aty)))'),('BETA-reject','p_BETA(mk_comb(mk_abs('+xm+','+xm+'),'+ym+'))','BETA(mk_comb(Pair(mk_abs(Pair('+xh+','+xh+')),'+yh+')))')]:
+add('ABS-reject',f'sth(p_ABS ({xm}) (p_ASSUME (mk_eq({xm},{xm}))))',f'sth(ABS({xh})(ASSUME(mk_eq([{xh},{xh}]))))')
+for name,m,h in [('bad-arity','mk_type("fun",[])','mk_type(["fun",PairList []])'),('unknown-type','mk_type("unknown",[])','mk_type(["unknown",PairList []])'),('bad-assume','p_ASSUME(mk_var("x",aty))','ASSUME(mk_var(["x",aty]))'),('BETA-reject','p_BETA(mk_comb(mk_abs('+xm+','+xm+'),'+ym+'))','BETA(mk_comb([mk_abs(['+xh+','+xh+']),'+yh+']))')]:
  add(name,'(ignore('+m+');"ok")','block: '+h+'; "ok"')
 red=ap(ab(vt('x',B),vt('x',B)),vt('x',B))
 add('BETA',f'sth(p_BETA({tm(red,"ml")}))',f'sth(BETA({tm(red,"rhm")}))')
-add('MK_COMB',f'sth(p_MK_COMB(p_REFL(mk_abs({xm},{xm})),p_REFL({xm})))',f'sth(MK_COMB(Pair(REFL(mk_abs(Pair({xh},{xh}))),REFL({xh}))))')
+add('MK_COMB',f'sth(p_MK_COMB(p_REFL(mk_abs({xm},{xm})),p_REFL({xm})))',f'sth(MK_COMB([REFL(mk_abs([{xh},{xh}])),REFL({xh})]))')
 for nm,m,h in [('qmap','qmap (fun x->x) l == l','qmap(I)(l) === l'),('filter','filter (fun _->true) l == l','filter(fun(_): #true)(l) === l')]:
  ml.append('let l = [aty;bty] in emit "sharing-'+nm+'" (fun () -> sb('+m+'));;')
  rh.append('block:\n  def l = PairList [aty,bty]\n  emit("sharing-'+nm+'",fun(): sb('+h+'))');cases.append('sharing-'+nm)
 
 identity=ab(vt('x',A),vt('x',A)); im=tm(identity,'ml'); ih=tm(identity,'rhm')
-add('new_basic_definition',f'sth(new_basic_definition(mk_eq(mk_var("identity",mk_fun_ty aty aty),{im})))',f'sth(new_basic_definition(mk_eq(Pair(mk_var(Pair("identity",mk_fun_ty(aty)(aty))),{ih}))))')
-add('new_definition-duplicate',f'sth(new_basic_definition(mk_eq(mk_var("identity",mk_fun_ty aty aty),{im})))',f'sth(new_basic_definition(mk_eq(Pair(mk_var(Pair("identity",mk_fun_ty(aty)(aty))),{ih}))))')
-add('new_definition-open',f'sth(new_basic_definition(mk_eq(mk_var("open_def",bool_ty),{xm})))',f'sth(new_basic_definition(mk_eq(Pair(mk_var(Pair("open_def",bool_ty)),{xh}))))')
-add('new_definition-hidden-type',f'sth(new_basic_definition(mk_eq(mk_var("hidden",bool_ty),mk_eq({im},{im}))))',f'sth(new_basic_definition(mk_eq(Pair(mk_var(Pair("hidden",bool_ty)),mk_eq(Pair({ih},{ih}))))))')
+add('new_basic_definition',f'sth(new_basic_definition(mk_eq(mk_var("identity",mk_fun_ty aty aty),{im})))',f'sth(new_basic_definition(mk_eq([mk_var(["identity",mk_fun_ty(aty)(aty)]),{ih}])))')
+add('new_definition-duplicate',f'sth(new_basic_definition(mk_eq(mk_var("identity",mk_fun_ty aty aty),{im})))',f'sth(new_basic_definition(mk_eq([mk_var(["identity",mk_fun_ty(aty)(aty)]),{ih}])))')
+add('new_definition-open',f'sth(new_basic_definition(mk_eq(mk_var("open_def",bool_ty),{xm})))',f'sth(new_basic_definition(mk_eq([mk_var(["open_def",bool_ty]),{xh}])))')
+add('new_definition-hidden-type',f'sth(new_basic_definition(mk_eq(mk_var("hidden",bool_ty),mk_eq({im},{im}))))',f'sth(new_basic_definition(mk_eq([mk_var(["hidden",bool_ty]),mk_eq([{ih},{ih}])])))')
 add('definitions-state','String.concat "!" (List.map sth (definitions()))','join(map(sth)(definitions()))')
 ml.append('new_constant("predicate",mk_fun_ty bool_ty bool_ty);;')
-rh.append('new_constant(Pair("predicate",mk_fun_ty(bool_ty)(bool_ty)))')
+rh.append('new_constant(["predicate",mk_fun_ty(bool_ty)(bool_ty)])')
 ml.append('let witness = new_axiom(mk_comb(mk_const("predicate",[]),'+xm+'));;')
-rh.append('def witness = new_axiom(mk_comb(Pair(mk_const(Pair("predicate",PairList [])),'+xh+')))')
-add('new_basic_type_definition','let a,b = new_basic_type_definition "subtype" ("abs_sub","rep_sub") witness in sth a^"!"^sth b','block: def Pair(a,b) = new_basic_type_definition("subtype")(Pair("abs_sub","rep_sub"))(witness); sth(a) +& "!" +& sth(b)')
-add('typedef-duplicate','let a,b = new_basic_type_definition "subtype" ("abs_sub","rep_sub") witness in sth a^"!"^sth b','block: def Pair(a,b) = new_basic_type_definition("subtype")(Pair("abs_sub","rep_sub"))(witness); sth(a) +& "!" +& sth(b)')
-add('constant-state-order','String.concat ";" (List.map (fun(n,t)->n^":"^sty t) (constants()))','join(map(fun(Pair(n,t)): n +& ":" +& sty(t))(constants()))')
-add('type-state-order','String.concat ";" (List.map (fun(n,a)->n^":"^string_of_int a) (types()))','join(map(fun(Pair(n,a)): n +& ":" +& to_string(a))(types()))')
+rh.append('def witness = new_axiom(mk_comb([mk_const(["predicate",PairList []]),'+xh+']))')
+add('new_basic_type_definition','let a,b = new_basic_type_definition "subtype" ("abs_sub","rep_sub") witness in sth a^"!"^sth b','block: def [a,b] = new_basic_type_definition("subtype")(["abs_sub","rep_sub"])(witness); sth(a) +& "!" +& sth(b)')
+add('typedef-duplicate','let a,b = new_basic_type_definition "subtype" ("abs_sub","rep_sub") witness in sth a^"!"^sth b','block: def [a,b] = new_basic_type_definition("subtype")(["abs_sub","rep_sub"])(witness); sth(a) +& "!" +& sth(b)')
+add('constant-state-order','String.concat ";" (List.map (fun(n,t)->n^":"^sty t) (constants()))','join(map(fun([n,t]): n +& ":" +& sty(t))(constants()))')
+add('type-state-order','String.concat ";" (List.map (fun(n,a)->n^":"^string_of_int a) (types()))','join(map(fun([n,a]): n +& ":" +& to_string(a))(types()))')
 add('axioms-state','String.concat ";" (List.map sth (axioms()))','join(map(sth)(axioms()))')
-add('INST-assumptions',f'sth(p_INST [{ym},{xm}] (p_ASSUME({xm})))',f'sth(INST(PairList [Pair({yh},{xh})])(ASSUME({xh})))')
-add('bad-subst-list',f'stm(vsubst [{xm},mk_abs({xm},{xm})] ({xm}))',f'stm(vsubst(PairList [Pair({xh},mk_abs(Pair({xh},{xh})))])({xh}))')
-add('mk_comb-reject',f'stm(mk_comb({xm},{xm}))',f'stm(mk_comb(Pair({xh},{xh})))')
-add('type_subst-first','sty(type_subst [bool_ty,aty;bty,aty] (mk_fun_ty aty bty))','sty(type_subst(PairList [Pair(bool_ty,aty),Pair(bty,aty)])(mk_fun_ty(aty)(bty)))')
-add('type_subst-ignore-nonvariable','sty(type_subst [aty,bool_ty] bool_ty)','sty(type_subst(PairList [Pair(aty,bool_ty)])(bool_ty))')
-add('type_subst-identity','sb(type_subst [bool_ty,bty] (mk_fun_ty aty aty) == (mk_fun_ty aty aty))','sb(type_subst(PairList [Pair(bool_ty,bty)])(mk_fun_ty(aty)(aty)) === mk_fun_ty(aty)(aty))')
+add('INST-assumptions',f'sth(p_INST [{ym},{xm}] (p_ASSUME({xm})))',f'sth(INST(PairList [[{yh},{xh}]])(ASSUME({xh})))')
+add('bad-subst-list',f'stm(vsubst [{xm},mk_abs({xm},{xm})] ({xm}))',f'stm(vsubst(PairList [[{xh},mk_abs([{xh},{xh}])]])({xh}))')
+add('mk_comb-reject',f'stm(mk_comb({xm},{xm}))',f'stm(mk_comb([{xh},{xh}]))')
+add('type_subst-first','sty(type_subst [bool_ty,aty;bty,aty] (mk_fun_ty aty bty))','sty(type_subst(PairList [[bool_ty,aty],[bty,aty]])(mk_fun_ty(aty)(bty)))')
+add('type_subst-ignore-nonvariable','sty(type_subst [aty,bool_ty] bool_ty)','sty(type_subst(PairList [[aty,bool_ty]])(bool_ty))')
+add('type_subst-identity','sb(type_subst [bool_ty,bty] (mk_fun_ty aty aty) == (mk_fun_ty aty aty))','sb(type_subst(PairList [[bool_ty,bty]])(mk_fun_ty(aty)(aty)) === mk_fun_ty(aty)(aty))')
 # Identity is tested using the same allocated input, not two distinct constructors.
 ml[-1]='let original = mk_fun_ty aty aty in emit "type_subst-identity" (fun () -> sb(type_subst [bool_ty,bty] original == original));;'
-rh[-1]='block: def original = mk_fun_ty(aty)(aty); emit("type_subst-identity",fun(): sb(type_subst(PairList [Pair(bool_ty,bty)])(original) === original))'
+rh[-1]='block: def original = mk_fun_ty(aty)(aty); emit("type_subst-identity",fun(): sb(type_subst(PairList [[bool_ty,bty]])(original) === original))'
 (p/'tests/oracle_cases.ml').write_text(mlhead+'\n'.join(ml)+'\n')
 (p/'tests/cases.rhm').write_text(rhhead+'\n'.join(rh)+'\n')
 (p/'results/cases.json').write_text(json.dumps({'seed':271828,'cases':cases,'term_pool':180},indent=2))

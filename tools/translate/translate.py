@@ -151,14 +151,14 @@ class Translator:
     def term(self,t):
         k=t[0]
         if k=='Tyvar': return f'Fusion.mk_vartype({string(t[1])})'
-        if k=='Tyapp': return f'Fusion.mk_type(Pair({string(t[1])},PairList [{",".join(self.term(x) for x in t[2])}]))'
+        if k=='Tyapp': return f'Fusion.mk_type([{string(t[1])}, PairList [{", ".join(self.term(x) for x in t[2])}]])'
         if k in ['Var','Const']:
             ctor='mk_var' if k=='Var' else 'mk_mconst'
             namespace='Fusion' if k=='Var' else 'Basics'
-            return f'{namespace}.{ctor}(Pair({string(t[1])},{self.term(t[2])}))'
+            return f'{namespace}.{ctor}([{string(t[1])}, {self.term(t[2])}])'
         if k in ['Comb','Abs']:
             ctor='mk_comb' if k=='Comb' else 'mk_abs'
-            return f'Fusion.{ctor}(Pair({self.term(t[1])},{self.term(t[2])}))'
+            return f'Fusion.{ctor}([{self.term(t[1])}, {self.term(t[2])}])'
         raise ValueError(k)
     def pattern(self,p,env):
         k=p[0]
@@ -168,8 +168,7 @@ class Translator:
         if k in ['int','string']: return p[1] if k=='int' else string(p[1])
         if k=='tuple':
             ps=p[1]
-            # Pairs stay Pair; longer OCaml tuples are Rhombus lists (OCaml lists are PairList).
-            if len(ps)==2: return 'Pair('+','.join(self.pattern(q,env) for q in ps)+')'
+            # OCaml tuples are Rhombus lists (OCaml lists are PairList).
             return '['+', '.join(self.pattern(q,env) for q in ps)+']'
         if k=='construct':
             c,arg=p[1:]
@@ -267,7 +266,7 @@ class Translator:
             return self.ident('expand_quote',env)+'('+string(encoded)+')'
         if k=='tuple':
             es=e[1]
-            return self.ordered_constructor('Pair' if len(es)==2 else '[]',es,env)
+            return self.ordered_constructor('[]',es,env)
         if k=='array': return self.ordered_constructor('Array',e[1],env)
         if k=='construct':
             c,arg=e[1:]
@@ -284,7 +283,7 @@ class Translator:
                     'Abs':'Fusion.mk_abs','Tyvar':'Fusion.mk_vartype','Tyapp':'Fusion.mk_type'}
             if c.startswith('Fusion.') and c.split('.')[-1] in kernel:
                 args=[self.expr(x,env) for x in es]
-                return kernel[c.split('.')[-1]]+'('+(self.ordered_constructor('Pair',es,env) if len(args)==2 else args[0])+')'
+                return kernel[c.split('.')[-1]]+'('+(self.ordered_constructor('[]',es,env) if len(args)==2 else args[0])+')'
             return self.ordered_constructor(c,es,env)
         if k=='apply':
             f,args=e[1:3]
@@ -619,7 +618,7 @@ class Translator:
                         self.class_values.add(internal)
                         kind=0 if n==0 else 1;tag=counts[kind];counts[kind]+=1
                         fs=fields.get(ctor,[f'field{i}' for i in range(n)])
-                        lines.append('class '+internal+'('+','.join(fs)+'):«\n  extends '+self.ident('HolVariant',self.env)+';\n  override port_view(): Pair('+str(kind)+',Pair('+str(tag)+',PairList ['+','.join('this.'+f for f in fs)+']))\n»')
+                        lines.append('class '+internal+'('+','.join(fs)+'):«\n  extends '+self.ident('HolVariant',self.env)+';\n  override port_view(): ['+str(kind)+', ['+str(tag)+', PairList ['+','.join('this.'+f for f in fs)+']]]\n»')
                         self.exports[ctor]=internal
                         self.env[ctor]=internal
                 continue

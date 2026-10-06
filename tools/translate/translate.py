@@ -63,6 +63,10 @@ def ind(s,n=2): return '\n'.join(' '*n+l for l in s.splitlines())
 def safe(text):
     # An inline 'if' would swallow the enclosing alternatives' bars.
     return '('+text+')' if '\n' not in text and text.startswith('if ') else text
+def group(open_,vals,close):
+    # Operands stay on one line unless one spans lines; then each starts its own line.
+    if all('\n' not in v for v in vals): return open_+', '.join(vals)+close
+    return open_+'\n'+ind(',\n'.join(vals))+close
 def alt(text):
     # One '|' alternative of an if/match: continuation lines align after the bar.
     first,*rest=safe(text).split('\n')
@@ -132,7 +136,7 @@ def alternatives(p):
 
 class Translator:
     def __init__(self,module,quotes):
-        self.module=module; self.quotes=quotes; self.counter=0; self.cur=[]; self.fun_names=set(); self.let_names=set(); self.no_natural=False
+        self.module=module; self.quotes=quotes; self.counter=0; self.cur=[]; self.fun_names=set(); self.let_names=set(); self.no_natural=False; self.name_counts={}; self.used_locals=set()
         self.quote_module=module
         self.bridge=module not in CORE and module!='preterm'
         self.env={}; self.exports={}
@@ -232,12 +236,25 @@ class Translator:
         # Anonymous functions are parenthesized inline when short, else a named local function.
         if '\n' not in body: return '('+self.fun_text(None,params,body)+')'
         return self.fun_text(None,params,body)
+    def clauses(self,name,cases,env):
+        # A multi-clause fun (one clause per alternative); None when a guard needs match.
+        if any(g is not None for _,g,_ in cases): return None
+        head='fun'+((' '+ident_safe(name)) if name else '')
+        out=head
+        for p,_,b in cases:
+            new=env.copy()
+            for n in names(p): new[n]=n
+            body=self.lines_of(b,new)
+            for option in alternatives(p):
+                params='_' if option==['construct','()',None] else self.pattern(option,new)
+                clause='| '+(ident_safe(name) if name else '')+'('+params+')'
+                out+='\n'+(clause+': '+body if '\n' not in body else clause+':\n'+ind(body,4))
+        return out
     def function(self,pattern,body,env,name=None):
         new=env.copy()
         for s in names(pattern): new[s]=s
         if len(alternatives(pattern))>1 and names(pattern):
-            v='port_arg'
-            return self.fun_text(name,v,self.match(v,[(pattern,None,body)],new,fresh_scope=True))
+            return self.clauses(name,[(pattern,None,body)],env)
         params='_' if pattern==['construct','()',None] else self.pattern(pattern,new)
         return self.fun_text(name,params,self.lines_of(body,new))
     def record_class(self,names):
@@ -258,8 +275,14 @@ class Translator:
         # and another local binding of the same name would clash in one Rhombus block.
         if natural and not self.no_natural and s not in SUPPORT and not s.startswith('port_') and s not in self.fun_names and not (is_fun and s in self.let_names):
             (self.fun_names if is_fun else self.let_names).add(s)
+            self.used_locals.add(ident_safe(s))
             return ident_safe(s)
-        return self.fresh()+'_'+ident_safe(s)
+        base=ident_safe(s)
+        n=self.name_counts.get(base,1)+1
+        while base+'_'+str(n) in self.used_locals: n+=1
+        self.name_counts[base]=n
+        self.used_locals.add(base+'_'+str(n))
+        return base+'_'+str(n)
     def binding(self,p,e,env,top=False,recursive=False,single=False):
         ns=names(p); new=env.copy()
         for s in ns:
@@ -273,8 +296,11 @@ class Translator:
         scope=new if recursive else env
         if p[0]=='var' and e[0] in ['fun','function'] and (top or recursive):
             if e[0]=='fun':return self.function(e[1],e[2],scope,new[p[1]]),new
-            v='port_arg'
-            return self.fun_text(new[p[1]],v,self.match(v,e[1],scope,fresh_scope=True)),new
+            text=self.clauses(new[p[1]],e[1],scope)
+            if text is None:
+                v=self.local_name('arg',False)
+                text=self.fun_text(new[p[1]],v,self.match(v,e[1],scope,fresh_scope=True))
+            return text,new
         keyword='def' if top else 'let'
         value=self.lines_of(e,scope) if top else self.expr(e,scope)
         return assign(keyword+' '+self.pattern(p,new),value),new
@@ -289,22 +315,25 @@ class Translator:
             candidate='port_'+candidate
         self.used_binding_names.add(ident_safe(candidate))
         return candidate
+    def embed(self,text):
+        # A multi-line operand starts on its own line inside its enclosing call.
+        return '\n'+ind(text) if '\n' in text else text
     def ordered(self,args,env,fn=None):
-        # Operands are evaluated left to right, not in OCaml's unspecified-in-practice
-        # right-to-left order. Only multi-line operands are bound to a temporary.
+        # Operands are evaluated left to right, not in OCaml's right-to-left order, and
+        # are written in place; no temporaries are introduced for them.
         out=[]
         for a in args:
             stmts,r=self.sub(lambda a=a:self.expr(a,env))
             self.cur.extend(stmts)
-            out.append(self.hoist(r) if '\n' in r else r)
+            out.append(r)
         if fn is None: return out,None,False
         stmts,fr=self.sub(lambda:self.expr(fn,env))
         self.cur.extend(stmts)
-        if '\n' in fr: return out,self.hoist(fr),False
+        if '\n' in fr: return out,group('(',[fr],')'),False
         return out,fr,True
     def ordered_constructor(self,ctor,args,env):
         vals,_,_=self.ordered(args,env)
-        return '['+', '.join(vals)+']' if ctor=='[]' else ctor+'('+','.join(vals)+')'
+        return group('[',vals,']') if ctor=='[]' else ctor+group('(',vals,')')
     def expr(self,e,env):
         k=e[0]
         if k=='id': return self.ident(e[1],env)
@@ -334,7 +363,7 @@ class Translator:
             kernel={'Var':'Fusion.mk_var','Const':'Basics.mk_mconst','Comb':'Fusion.mk_comb',
                     'Abs':'Fusion.mk_abs','Tyvar':'Fusion.mk_vartype','Tyapp':'Fusion.mk_type'}
             if c.startswith('Fusion.') and c.split('.')[-1] in kernel:
-                return kernel[c.split('.')[-1]]+'('+(self.ordered_constructor('[]',es,env) if len(es)==2 else self.atom(es[0],env))+')'
+                return kernel[c.split('.')[-1]]+group('(',[self.ordered_constructor('[]',es,env) if len(es)==2 else self.atom(es[0],env)],')')
             return self.ordered_constructor(c,es,env)
         if k=='apply':
             f,args=e[1:3]
@@ -349,17 +378,15 @@ class Translator:
             if inline_f and f[0] not in ['id','apply']: s='('+s+')'
             for arg_index,(a,label) in enumerate(zip(args,labels)):
                 if label.startswith('?'):raise ValueError('optional argument forwarding')
-                if label:s+='('+label+': '+outs[arg_index]+')';continue
-                if a==['construct','()',None]: s=self.ident('hol_apply_unit',env)+'('+s+')'
-                else: s+='('+outs[arg_index]+')'
+                if label:s+=group('('+label+': ',[outs[arg_index]],')');continue
+                if a==['construct','()',None]: s=self.ident('hol_apply_unit',env)+group('(',[s],')')
+                else: s+=group('(',[outs[arg_index]],')')
             return s
         if k=='fun':
             new=env.copy()
             pattern=e[1]
             if len(alternatives(pattern))>1 and names(pattern):
-                v='port_arg'
-                for n in names(pattern): new[n]=n
-                return self.lambda_expr(v,self.match(v,[(pattern,None,e[2])],new,fresh_scope=True))
+                return self.clauses(None,[(pattern,None,e[2])],env)
             for n in names(pattern): new[n]=n
             params='_' if pattern==['construct','()',None] else self.pattern(pattern,new)
             return self.lambda_expr(params,self.lines_of(e[2],new))
@@ -369,7 +396,10 @@ class Translator:
             for n in names(e[4]):new[n]=n
             return self.lambda_expr('~'+e[1]+': '+self.pattern(e[4],new),self.lines_of(e[5],new))
         if k=='function':
-            v='port_arg'; return self.lambda_expr(v,self.match(v,e[1],env,fresh_scope=True))
+            text=self.clauses(None,e[1],env)
+            if text is not None: return text
+            v=self.local_name('arg',False)
+            return self.lambda_expr(v,self.match(v,e[1],env,fresh_scope=True))
         if k=='let':
             _,r,bs,body=e; new=env.copy()
             if r=='rec':
@@ -387,7 +417,7 @@ class Translator:
             return mkif(cond,then,other)
         if k=='match': return self.match(self.atom(e[1],env),e[2],env)
         if k=='try':
-            caught='port_exn'
+            caught='exn'
             cases=e[2]+[(['var',caught],None,['apply',['id','raise'],[['id',caught]]])]
             return 'try:\n'+ind(self.lines_of(e[1],env))+'\n  ~catch '+caught+':\n'+ind(self.match(caught,cases,env,fresh_scope=True),4)
         if k=='seq':
@@ -401,14 +431,15 @@ class Translator:
             given={n.split('.')[-1]:v for n,v in e[1]}
             cls,layout=self.record_class(given)
             if e[2] is not None:
-                base=self.hoist(self.expr(e[2],env))
+                base=self.atom(e[2],env)
+                if e[2][0] not in ['id','field']: base='('+base+')'
             fields=[f for f in layout if f in given]
             # OCaml evaluates the fields right to left, in layout order.
             vals,_,_=self.ordered([given[f] for f in fields],env)
             values=dict(zip(fields,vals))
             if e[2] is None:
-                return cls+'('+','.join(values[f] for f in layout)+')'
-            return base+'.port_update({'+','.join(string(ident_safe(f))+': '+values[f] for f in fields)+'})'
+                return cls+group('(',[values[f] for f in layout],')')
+            return base+'.port_update('+group('{',[string(ident_safe(f))+': '+values[f] for f in fields],'}')+')'
         if k=='letmodule':
             if e[2][0]=='moduleid':
                 alias=e[1]; target=e[2][1]
@@ -423,15 +454,15 @@ class Translator:
             body=self.expr(e[3],new);self.module_env=previous
             return body
         if k=='lazy':
-            return self.ident('hol_lazy',env)+'('+self.lambda_expr('',self.lines_of(e[1],env))+')'
+            return self.ident('hol_lazy',env)+group('(',[self.lambda_expr('',self.lines_of(e[1],env))],')')
         if k=='while':
-            loop=self.fresh()
+            loop=self.local_name('loop',True,True)
             cond=self.lines_of(e[1],env)
             body=self.lines_of(e[2],env)
             self.emit(self.fun_text(loop,'','if '+cond+'\n'+alt(body+'\n'+loop+'()')+'\n| #void'))
             return loop+'()'
         if k=='for':
-            p,a,b,d,body=e[1:];start=self.fresh();end=self.fresh();loop=self.fresh();new=env.copy()
+            p,a,b,d,body=e[1:];start=self.local_name('start',True);end=self.local_name('stop',True);loop=self.local_name('loop',True,True);new=env.copy()
             for n in names(p):new[n]=n
             v=self.pattern(p,new)
             cond=v+('>' if d=='up' else '<')+end
@@ -515,7 +546,7 @@ class Translator:
             return '\n'.join(stmts+[r])
         if all(g is None for _,g,_ in cs) or re.fullmatch(r"[A-Za-z_][\w']*",s): temp=s
         else:
-            temp=self.fresh();self.emit('let '+temp+' = '+s)
+            temp=self.local_name('subject',True);self.emit('let '+temp+' = '+s)
         out='match '+temp
         for idx,(p,g,b) in enumerate(cs):
             new=env.copy()
@@ -592,7 +623,7 @@ class Translator:
                 e=item[1]
                 if e[0]=='apply' and e[1]==['id','needs']: continue
                 text=self.lines_of(e,self.env)
-                lines.append(text if '\n' not in text else 'def '+self.fresh()+'_eval:\n'+ind(text)); continue
+                lines.append(text if '\n' not in text else 'def initialization_'+self.fresh().split('_')[-1]+':\n'+ind(text)); continue
             if item[0]=='value':
                 base_env=self.env.copy()
                 for p,e in item[2]:
@@ -642,7 +673,7 @@ class Translator:
                 self.exports[item[1]]=item[1]
                 continue
             if item[0]=='include' and item[1]!=['moduleid','List']:
-                name=self.fresh()+'_include'
+                name='include_'+str(self.fresh().split('_')[-1])
                 lines.append(self.module_body(name,item[1],self.env))
                 for n in self.module_exports['.'.join(self.module_path+[name])]:
                     internal=self.module+'_include_'+ident_safe(n)

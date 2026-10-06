@@ -54,10 +54,14 @@ and instantiations, and shared exception/option representations. Effectful
 arguments and constructor fields preserve OCaml's right-to-left evaluation;
 simultaneous value bindings preserve their left-to-right evaluation. Unit
 callbacks accept one unit value and are bridged to the existing zero-argument
-native engine functions. Local values use `let`; recursive functions use `fun`.
+native engine functions. Local values use `let`; recursive functions use `fun`. Translated modules are
+imported under capitalized namespaces (`Fusion`, `Tactics`, ...). A top-level
+value defined once keeps its HOL Light name; nested modules and redefinitions
+use module-prefixed names. Generated files start with a DO NOT EDIT header.
 
-Hash-table storage uses native immutable associations; bucket iteration order
-is not exposed as an OCaml-compatible API. The source AVL functors and the
+`Hashtbl` is a Rhombus `MutableMap` from each key to its stack of bindings
+(`add` shadows, `remove` restores); `fold` visits bindings newest first.
+Bucket iteration order is not an OCaml-compatible API. The source AVL functors and the
 Patricia term maps preserve the traversal required by the standard proofs.
 
 The theories replay their original proof scripts. Timing and Format diagnostic

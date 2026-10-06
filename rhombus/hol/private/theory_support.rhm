@@ -4,7 +4,6 @@
 // This module does not parse HOL terms or provide proof rules.
 import: "compat.rhm" open
 import: "data_types.rhm" open
-import: "ordered_map.rhm" open
 import: "ocaml_random.rhm" open
 import: "quoted_ast.rhm" open
 import: "../fusion.rhm" open
@@ -88,40 +87,6 @@ export:
   hol_float
   string_of_thm
   print_thm
-  OrderedMap
-  ordered_map_empty
-  ordered_map_is_empty
-  ordered_map_singleton
-  ordered_map_cardinal
-  ordered_map_find
-  ordered_map_add
-  ordered_map_bindings
-  ordered_map_fold
-  ordered_map_filter
-  ordered_map_mem
-  ordered_map_remove
-  ordered_map_map
-  ordered_map_exists
-  ordered_map_merge
-  OrderedSet
-  ordered_set_empty
-  ordered_set_is_empty
-  ordered_set_singleton
-  ordered_set_cardinal
-  ordered_set_elements
-  ordered_set_fold
-  ordered_set_mem
-  ordered_set_compare
-  ordered_set_add
-  ordered_set_union
-  ordered_set_diff
-  ordered_set_choose
-  ordered_set_equal
-  ordered_set_exists
-  ordered_set_remove
-  ordered_set_subset
-  ordered_set_inter
-  ordered_set_for_all
   hol_pipe
   Not_found
   OCamlList
@@ -858,6 +823,11 @@ fun hol_string_concat(sep):
     match l
     | PairList []: ""
     | PairList [h,&t]: h +& itlist(fun(x): fun(y): sep +& x +& y)(t)("")
+// The unqualified lib.ml versions, visible below despite the OCamlList names.
+def list_rev = rev
+def list_exists = exists
+def list_hd = hd
+def list_mem = mem
 namespace OCamlList:
   export:
     map
@@ -894,10 +864,10 @@ namespace OCamlList:
       | PairList [h,&t]:
           let v=f(h)
           PairList.cons(v,map(f)(t))
-  def rev = (fun(l): rev_itlist(fun(x): fun(t): PairList.cons(x,t))(l)(PairList []))
+  def rev = list_rev
   def length = (fun(l): itlist(fun(_): fun(n): n+1)(l)(0))
   def concat = flat
-  def exists = (fun(p): fun(l): !forall(fun(x): !p(x))(l))
+  def exists = list_exists
   fun filter(p):
     fun(l):
       match l
@@ -914,9 +884,9 @@ namespace OCamlList:
   fun fold_left(f): fun(a): fun(l): rev_itlist(C(f))(l)(a)
   fun fold_right(f): fun(l): fun(a): itlist(f)(l)(a)
   def for_all = forall
-  fun hd(l): match l | PairList [h,&_]: h | _: failwith("hd")
+  def hd = list_hd
   def iter = do_list
-  fun mem(x): fun(l): exists(fun(y): x==y)(l)
+  def mem = list_mem
   fun mem_assoc(x): fun(l): exists(fun(Pair(y,_)): x==y)(l)
   def nth = C(el)
   fun partition(p):
@@ -1151,7 +1121,13 @@ fun hol_force(p):
         ~catch e:
           p.state.value:=Some(Pair(#false,e))
           hol_raise(e)
-class HolHashTable(entries)
+// OCaml Hashtbl: bindings of one key are stacked, newest first. Each binding
+// carries a sequence number so that fold visits bindings oldest first.
+class Not_found()
+class HolHashTable(bindings, counter)
+fun hashtbl_bindings(t):
+  for fold (acc = PairList []) ((k, st) in t.bindings):
+    rev_itlist(fun(Pair(n, v)): fun(acc): PairList.cons(Pair(n, Pair(k, v)), acc))(st)(acc)
 namespace Hashtbl:
   export:
     create
@@ -1161,34 +1137,38 @@ namespace Hashtbl:
     fold
     clear
     replace
-  fun clear(t): t.entries.value:=PairList []
-  fun replace(t):
+  fun create(_): HolHashTable(MutableMap(), Box(0))
+  fun clear(t):
+    for (k in t.bindings.keys().to_list()): t.bindings.remove(k)
+  fun stack(t, k): t.bindings.get(k, PairList [])
+  fun find(t):
     fun(k):
-      fun(v):
-        fun upd(l):
-          match l
-          | PairList []: PairList [Pair(k,v)]
-          | PairList [Pair(key,_old) as h,&rest]:
-              if key==k | PairList.cons(Pair(k,v),rest) | PairList.cons(h,upd(rest))
-        t.entries.value:=upd(t.entries.value)
-  fun create(_): HolHashTable(Box(PairList []))
-  fun find(t): fun(k): OCamlList.assoc(k)(t.entries.value)
+      match stack(t, k)
+      | PairList [Pair(_, v), & _]: v
+      | _: hol_raise(Not_found())
   fun add(t):
     fun(k):
       fun(v):
-        t.entries.value:=PairList.cons(Pair(k,v),t.entries.value)
+        t.counter.value := t.counter.value + 1
+        t.bindings[k] := PairList.cons(Pair(t.counter.value, v), stack(t, k))
+  fun replace(t):
+    fun(k):
+      fun(v):
+        match stack(t, k)
+        | PairList [Pair(n, _), & rest]: t.bindings[k] := PairList.cons(Pair(n, v), rest)
+        | _: add(t)(k)(v)
   fun remove(t):
     fun(k):
-      fun drop(l):
-        match l
-        | PairList []: l
-        | PairList [Pair(key,_) as h,&rest]:
-            if key==k | rest | PairList.cons(h,drop(rest))
-      t.entries.value:=drop(t.entries.value)
+      match stack(t, k)
+      | PairList [_, & rest]:
+          if rest == PairList [] | t.bindings.remove(k) | (t.bindings[k] := rest)
+      | _: #void
   fun fold(f):
     fun(t):
       fun(start):
-        rev_itlist(fun(Pair(k,v)): fun(a): f(k)(v)(a))(t.entries.value)(start)
+        let all = hashtbl_bindings(t)
+        let newest_first = sort(fun(Pair(n1, _)): fun(Pair(n2, _)): n1 >= n2)(all)
+        rev_itlist(fun(Pair(_, Pair(k, v))): fun(a): f(k)(v)(a))(newest_first)(start)
 
 fun hol_invalid_arg(s): hol_raise(InvalidArgument(s))
 

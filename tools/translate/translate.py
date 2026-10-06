@@ -468,7 +468,7 @@ class Translator:
         self.redefined={n for n,c in counts.items() if c>1}
         self.other_reserved={ident_safe(i[1]) for i in ast if i[0] in ['module','exception']}
         self.other_reserved.update(c for i in ast if i[0]=='types' for _,cs in i[1] for c,n in cs)
-        lines=['#lang rhombus', '// Direct translation of the pinned HOL Light '+self.module+'.ml.',
+        lines=['#lang rhombus', '// GENERATED FILE - DO NOT EDIT. Regenerate with tools/translate/translate.py.', '// Direct translation of the pinned HOL Light '+self.module+'.ml.',
                source_notice(self.module),
                '// Quotations are expanded offline; every proof is replayed here.',
                'import: "private/compat.rhm" open', 'import: "private/theory_support.rhm" as Host']
@@ -608,7 +608,7 @@ class Translator:
             if s!=internal and internal not in self.class_values:
                 if internal in self.namespace_values:lines.append('import:« .'+ident_safe(internal)+' as '+ident_safe(s)+' »')
                 else:lines.append('def '+ident_safe(s)+' = '+ident_safe(internal))
-        if header: lines.insert(6,'export:\n'+ind('\n'.join(self.export_specs())))
+        if header: lines.insert(7,'export:\n'+ind('\n'.join(self.export_specs())))
         return '\n\n'.join(lines)+'\n'
 
 def translate_type_support():

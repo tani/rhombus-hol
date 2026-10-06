@@ -14,7 +14,6 @@ export:
   TRANS_TAC
   ANTS_TAC
   HYP
-  GoalState
   null_inst
   null_meta
   equals_goal
@@ -111,9 +110,7 @@ export:
   TAC_PROOF
   _FALSITY_
 
-class GoalState(meta, goals, just)
-
-def null_inst = Instantiation(PairList [],PairList [],PairList [])
+def null_inst = [PairList [], PairList [], PairList []]
 def null_meta = Pair(PairList [],null_inst)
 
 fun plist_rev(l): rev_itlist(fun(x): fun(a): PairList.cons(x,a))(l)(PairList [])
@@ -143,22 +140,22 @@ fun equals_goal(Pair(a,w)):
     forall2(fun(Pair(s,th)): fun(Pair(s1,th1)): s == s1 && equals_thm(th)(th1))(a)(a1)
       && w == w1
 
-fun inst_goal(i :: Instantiation):
+fun inst_goal(i):
   fun(Pair(thms,w)):
     Pair(map(fun(Pair(s,th)): Pair(s,INSTANTIATE_ALL(i)(th)))(thms),
          instantiate(i)(w))
 
-fun compose_insts(i1 :: Instantiation):
-  fun(i2 :: Instantiation):
+fun compose_insts([bcs1, tmin1, tyin1] as i1):
+  fun([bcs2, tmin2_, tyin2_] as i2):
     let tmin = map(
-      fun(Pair(t,v)): Pair(instantiate(i2)(t),inst(i2.tyin)(v))
-    )(i1.tmin)
+      fun(Pair(t,v)): Pair(instantiate(i2)(t),inst(tyin2_)(v))
+    )(tmin1)
     let tyin = map(
-      fun(Pair(t,v)): Pair(type_subst(i2.tyin)(t),v)
-    )(i1.tyin)
-    let tmin2 = filter(fun(Pair(_,x)): !can(rev_assoc(x))(tmin))(i2.tmin)
-    let tyin2 = filter(fun(Pair(_,a)): !can(rev_assoc(a))(tyin))(i2.tyin)
-    Instantiation(append(i1.bcs)(i2.bcs),append(tmin)(tmin2),append(tyin)(tyin2))
+      fun(Pair(t,v)): Pair(type_subst(tyin2_)(t),v)
+    )(tyin1)
+    let tmin2 = filter(fun(Pair(_,x)): !can(rev_assoc(x))(tmin))(tmin2_)
+    let tyin2 = filter(fun(Pair(_,a)): !can(rev_assoc(a))(tyin))(tyin2_)
+    [append(bcs1)(bcs2),append(tmin)(tmin2),append(tyin)(tyin2)]
 
 def falsity_var = mk_var(Pair("_FALSITY_",bool_ty))
 def _FALSITY_ = new_definition(mk_eq(Pair(falsity_var,lhs(concl(F_DEF)))))
@@ -177,7 +174,7 @@ fun fake_thm(Pair(asl,w)):
 fun VALID(tac):
   fun(Pair(asl,w) as g):
     let res = tac(g)
-    let GoalState(Pair(mvs,i),gls,just) = res
+    let [Pair(mvs,i),gls,just] = res
     let ths = map(fake_thm)(gls)
     let Pair(asl1,w1) = dest_thm(just(null_inst)(ths))
     let Pair(asl2,w2) = inst_goal(i)(g)
@@ -205,35 +202,35 @@ fun seqapply(tacs):
   fun(goals):
     match Pair(tacs,goals)
     | Pair(PairList [],PairList []):
-        GoalState(null_meta,PairList [],propagate_empty)
+        [null_meta,PairList [],propagate_empty]
     | Pair(PairList [tac, & ts],PairList [goal, & gs]):
-        let GoalState(Pair(mvs1,insts1),gls1,just1) = tac(goal)
+        let [Pair(mvs1,insts1),gls1,just1] = tac(goal)
         let goals1 = map(inst_goal(insts1))(gs)
-        let GoalState(Pair(mvs2,insts2),gls2,just2) = seqapply(ts)(goals1)
-        GoalState(
+        let [Pair(mvs2,insts2),gls2,just2] = seqapply(ts)(goals1)
+        [
           Pair(union(mvs1)(mvs2),compose_insts(insts1)(insts2)),
           append(map(inst_goal(insts2))(gls1))(gls2),
-          compose_justs(length(gls1),just1,just2,insts2))
+          compose_justs(length(gls1),just1,just2,insts2)]
     | _: failwith("seqapply: Length mismatch")
 
-fun tacsequence(gstate :: GoalState):
+fun tacsequence(gstate):
   fun(tacl):
-    let GoalState(Pair(mvs1,insts1),gls1,just1) = gstate
-    let GoalState(Pair(mvs2,insts2),gls2,just2) = seqapply(tacl)(gls1)
+    let [Pair(mvs1,insts1),gls1,just1] = gstate
+    let [Pair(mvs2,insts2),gls2,just2] = seqapply(tacl)(gls1)
     fun jst(i): fun(ths): just1(compose_insts(insts2)(i))(just2(i)(ths))
     let just = if gls2 == PairList [] | propagate_thm(jst(null_inst)(PairList [])) | jst
-    GoalState(Pair(union(mvs1)(mvs2),compose_insts(insts1)(insts2)),gls2,just)
+    [Pair(union(mvs1)(mvs2),compose_insts(insts1)(insts2)),gls2,just]
 
 fun THEN(tac1):
   fun(tac2):
     fun(g):
-      let GoalState(_,gls,_) as gs = tac1(g)
+      let [_,gls,_] as gs = tac1(g)
       tacsequence(gs)(replicate(tac2)(length(gls)))
 
 fun THENL(tac1):
   fun(tacl):
     fun(g):
-      let GoalState(_,gls,_) as gs = tac1(g)
+      let [_,gls,_] as gs = tac1(g)
       if gls == PairList [] | tacsequence(gs)(PairList []) | tacsequence(gs)(tacl)
 
 fun ORELSE(tac1):
@@ -245,7 +242,7 @@ fun ORELSE(tac1):
 
 fun FAIL_TAC(tok): fun(_g): failwith(tok)
 def NO_TAC = FAIL_TAC("NO_TAC")
-fun ALL_TAC(g): GoalState(null_meta,PairList [g],fun(_i): fun(PairList [th]): th)
+fun ALL_TAC(g): [null_meta,PairList [g],fun(_i): fun(PairList [th]): th]
 fun TRY(tac): ORELSE(tac)(ALL_TAC)
 fun REPEAT(tac):
   fun(g): ORELSE(THEN(tac)(REPEAT(tac)))(ALL_TAC)(g)
@@ -255,7 +252,7 @@ fun MAP_EVERY(tacf): fun(lst): EVERY(map(tacf)(lst))
 fun MAP_FIRST(tacf): fun(lst): FIRST(map(tacf)(lst))
 fun CHANGED_TAC(tac):
   fun(g):
-    let GoalState(meta,gls,_) as gs = tac(g)
+    let [meta,gls,_] as gs = tac(g)
     if meta == null_meta && length(gls) == 1 && equals_goal(hd(gls))(g)
     | failwith("CHANGED_TAC")
     | gs
@@ -287,7 +284,7 @@ fun FIRST_TCL(xs): end_itlist(fun(a): fun(b): ORELSE_TCL(a)(b))(xs)
 fun LABEL_TAC(s):
   fun(thm):
     fun(Pair(asl,w)):
-      GoalState(null_meta,PairList [Pair(PairList.cons(Pair(s,thm),asl),w)], fun(i): fun(PairList [th]): PROVE_HYP(INSTANTIATE_ALL(i)(thm))(th))
+      [null_meta,PairList [Pair(PairList.cons(Pair(s,thm),asl),w)], fun(i): fun(PairList [th]): PROVE_HYP(INSTANTIATE_ALL(i)(thm))(th)]
 def ASSUME_TAC = LABEL_TAC("")
 
 fun FIND_ASSUM(ttac):
@@ -341,7 +338,7 @@ fun ASM(tltac):
 fun ACCEPT_TAC(th):
   fun(Pair(_,w)):
     if aconv(concl(th))(w)
-    | GoalState(null_meta,PairList [],propagate_thm(th))
+    | [null_meta,PairList [],propagate_thm(th)]
     | failwith("ACCEPT_TAC")
 
 fun CONV_TAC(conv):
@@ -358,11 +355,11 @@ fun CONV_TAC(conv):
           | ACCEPT_TAC(EQT_ELIM(th))(g)
           | block:
               let th1 = SYM(th)
-              GoalState(
+              [
                 null_meta,PairList [Pair(asl,r)],
                 fun(i):
                   fun(PairList [sth]):
-                    EQ_MP(INSTANTIATE_ALL(i)(th1))(sth))
+                    EQ_MP(INSTANTIATE_ALL(i)(th1))(sth)]
 
 fun REFL_TAC(Pair(_,w) as g):
   try:
@@ -377,12 +374,12 @@ fun ABS_TAC(Pair(asl,w)):
     let avoids = itlist(fun(Pair(_,th)): fun(a): union(thm_frees(th))(a))(asl)(frees(w))
     let v = mk_primed_var(avoids)(lv)
     let goal = mk_eq(Pair(vsubst(PairList [Pair(v,lv)])(lb),vsubst(PairList [Pair(v,rv)])(rb)))
-    GoalState(
+    [
       null_meta,PairList [Pair(asl,goal)],
       fun(i):
         fun(PairList [th]):
           let ath = ABS(v)(th)
-          EQ_MP(ALPHA(concl(ath))(instantiate(i)(w)))(ath))
+          EQ_MP(ALPHA(concl(ath))(instantiate(i)(w)))(ath)]
     ~catch Failure(_): failwith("ABS_TAC")
 
 fun MK_COMB_TAC(Pair(asl,gl)):
@@ -390,9 +387,9 @@ fun MK_COMB_TAC(Pair(asl,gl)):
     let Pair(l,r) = dest_eq(gl)
     let Pair(f,x) = dest_comb(l)
     let Pair(g,y) = dest_comb(r)
-    GoalState(
+    [
       null_meta,PairList [Pair(asl,mk_eq(Pair(f,g))),Pair(asl,mk_eq(Pair(x,y)))],
-      fun(_i): fun(PairList [th1,th2]): MK_COMB(Pair(th1,th2)))
+      fun(_i): fun(PairList [th1,th2]): MK_COMB(Pair(th1,th2))]
     ~catch Failure(_): failwith("MK_COMB_TAC")
 
 def AP_TERM_TAC = THENL(MK_COMB_TAC)(PairList [REFL_TAC,ALL_TAC])
@@ -419,31 +416,31 @@ fun DISCH_TAC(Pair(asl,w)):
   try:
     let Pair(ant,c) = dest_imp(w)
     let th1 = ASSUME(ant)
-    GoalState(
+    [
       null_meta,PairList [Pair(PairList.cons(Pair("",th1),asl),c)],
-      fun(i): fun(PairList [th]): DISCH(instantiate(i)(ant))(th))
+      fun(i): fun(PairList [th]): DISCH(instantiate(i)(ant))(th)]
     ~catch Failure(_):
       try:
         let ant = dest_neg(w)
         let th1 = ASSUME(ant)
-        GoalState(
+        [
           null_meta,PairList [Pair(PairList.cons(Pair("",th1),asl),f_tm)],
-          fun(i): fun(PairList [th]): NOT_INTRO(DISCH(instantiate(i)(ant))(th)))
+          fun(i): fun(PairList [th]): NOT_INTRO(DISCH(instantiate(i)(ant))(th))]
         ~catch Failure(_): failwith("DISCH_TAC")
 
 fun MP_TAC(thm):
   fun(Pair(asl,w)):
-    GoalState(
+    [
       null_meta,PairList [Pair(asl,mk_imp(Pair(concl(thm),w)))],
-      fun(i): fun(PairList [th]): MP(th)(INSTANTIATE_ALL(i)(thm)))
+      fun(i): fun(PairList [th]): MP(th)(INSTANTIATE_ALL(i)(thm))]
 
 fun EQ_TAC(Pair(asl,w)):
   try:
     let Pair(l,r) = dest_eq(w)
-    GoalState(
+    [
       null_meta,
       PairList [Pair(asl,mk_imp(Pair(l,r))),Pair(asl,mk_imp(Pair(r,l)))],
-      fun(_i): fun(PairList [th1,th2]): IMP_ANTISYM_RULE(th1)(th2))
+      fun(_i): fun(PairList [th1,th2]): IMP_ANTISYM_RULE(th1)(th2)]
     ~catch Failure(_): failwith("EQ_TAC")
 
 fun UNDISCH_TAC(tm):
@@ -459,16 +456,16 @@ fun UNDISCH_TAC(tm):
                 let Pair(x,rest) = loop(t)
                 Pair(x,PairList.cons(h,rest))
       loop(asl)
-    GoalState(
+    [
       null_meta,PairList [Pair(asl1,mk_imp(Pair(tm,w)))],
-      fun(i): fun(PairList [th]): MP(th)(INSTANTIATE_ALL(i)(thm)))
+      fun(i): fun(PairList [th]): MP(th)(INSTANTIATE_ALL(i)(thm))]
 
 fun SPEC_TAC(Pair(t,x)):
   fun(Pair(asl,w)):
     try:
-      GoalState(
+      [
         null_meta,PairList [Pair(asl,mk_forall(Pair(x,subst(PairList [Pair(x,t)])(w))))],
-        fun(i): fun(PairList [th]): SPEC(instantiate(i)(t))(th))
+        fun(i): fun(PairList [th]): SPEC(instantiate(i)(t))(th)]
       ~catch Failure(_): failwith("SPEC_TAC")
 
 fun X_GEN_TAC(x1):
@@ -487,9 +484,9 @@ fun X_GEN_TAC(x1):
           | failwith("X_GEN_TAC: invalid variable")
           | block:
               let afn = CONV_RULE(GEN_ALPHA_CONV(x))
-              GoalState(
+              [
                 null_meta,PairList [Pair(asl,vsubst(PairList [Pair(x1,x)])(bod))],
-                fun(_i): fun(PairList [th]): afn(GEN(x1)(th)))
+                fun(_i): fun(PairList [th]): afn(GEN(x1)(th))]
 
 fun X_CHOOSE_TAC(x1):
   fun(xth):
@@ -506,9 +503,9 @@ fun X_CHOOSE_TAC(x1):
           let avoids = itlist(fun(Pair(_,th)): fun(a): union(thm_frees(th))(a))(asl)(union(frees(w))(thm_frees(xth)))
           if mem(x1)(avoids)
           | failwith("X_CHOOSE_TAC: invalid variable")
-          | GoalState(
+          | [
               null_meta,PairList [Pair(PairList.cons(Pair("",xth1),asl),w)],
-              fun(i): fun(PairList [th]): CHOOSE(Pair(x1,INSTANTIATE_ALL(i)(xth)))(th))
+              fun(i): fun(PairList [th]): CHOOSE(Pair(x1,INSTANTIATE_ALL(i)(xth)))(th)]
 
 fun EXISTS_TAC(t):
   fun(Pair(asl,w)):
@@ -518,9 +515,9 @@ fun EXISTS_TAC(t):
         ~catch Failure(_): failwith("EXISTS_TAC: Goal not existentially quantified")
     if type_of(v) != type_of(t)
     | failwith("EXISTS_TAC: wrong type")
-    | GoalState(
+    | [
         null_meta,PairList [Pair(asl,vsubst(PairList [Pair(t,v)])(bod))],
-        fun(i): fun(PairList [th]): EXISTS(Pair(instantiate(i)(w),instantiate(i)(t)))(th))
+        fun(i): fun(PairList [th]): EXISTS(Pair(instantiate(i)(w),instantiate(i)(t)))(th)]
 
 fun GEN_TAC(Pair(asl,w) as g):
   try:
@@ -542,25 +539,25 @@ fun CHOOSE_TAC(xth):
 fun CONJ_TAC(Pair(asl,w)):
   try:
     let Pair(l,r) = dest_conj(w)
-    GoalState(
+    [
       null_meta,PairList [Pair(asl,l),Pair(asl,r)],
-      fun(_i): fun(PairList [th1,th2]): CONJ(th1)(th2))
+      fun(_i): fun(PairList [th1,th2]): CONJ(th1)(th2)]
     ~catch Failure(_): failwith("CONJ_TAC")
 
 fun DISJ1_TAC(Pair(asl,w)):
   try:
     let Pair(l,r) = dest_disj(w)
-    GoalState(
+    [
       null_meta,PairList [Pair(asl,l)],
-      fun(i): fun(PairList [th]): DISJ1(th)(instantiate(i)(r)))
+      fun(i): fun(PairList [th]): DISJ1(th)(instantiate(i)(r))]
     ~catch Failure(_): failwith("DISJ1_TAC")
 
 fun DISJ2_TAC(Pair(asl,w)):
   try:
     let Pair(l,r) = dest_disj(w)
-    GoalState(
+    [
       null_meta,PairList [Pair(asl,r)],
-      fun(i): fun(PairList [th]): DISJ2(instantiate(i)(l))(th))
+      fun(i): fun(PairList [th]): DISJ2(instantiate(i)(l))(th)]
     ~catch Failure(_): failwith("DISJ2_TAC")
 
 fun DISJ_CASES_TAC(dth):
@@ -571,17 +568,17 @@ fun DISJ_CASES_TAC(dth):
   let thl = ASSUME(l)
   let thr = ASSUME(r)
   fun(Pair(asl,w)):
-    GoalState(
+    [
       null_meta,
       PairList [Pair(PairList.cons(Pair("",thl),asl),w),
                 Pair(PairList.cons(Pair("",thr),asl),w)],
-      fun(i): fun(PairList [th1,th2]): DISJ_CASES(INSTANTIATE_ALL(i)(dth))(th1)(th2))
+      fun(i): fun(PairList [th1,th2]): DISJ_CASES(INSTANTIATE_ALL(i)(dth))(th1)(th2)]
 
 fun CONTR_TAC(cth):
   fun(Pair(_,w)):
     try:
       let th = CONTR(w)(cth)
-      GoalState(null_meta,PairList [],propagate_thm(th))
+      [null_meta,PairList [],propagate_thm(th)]
       ~catch Failure(_): failwith("CONTR_TAC")
 
 fun MATCH_ACCEPT_TAC(th):
@@ -589,7 +586,7 @@ fun MATCH_ACCEPT_TAC(th):
     fun(Pair(_,w)):
       try:
         let ith = PART_MATCH(I)(th)(w)
-        GoalState(null_meta,PairList [],propagate_thm(ith))
+        [null_meta,PairList [],propagate_thm(ith)]
         ~catch Failure(_): failwith("ACCEPT_TAC")
   THEN(REPEAT(GEN_TAC))(raw)
 
@@ -611,9 +608,9 @@ fun MATCH_MP_TAC(th):
     try:
       let xth = match_fun(w)
       let lant = fst(dest_imp(concl(xth)))
-      GoalState(
+      [
         null_meta,PairList [Pair(asl,lant)],
-        fun(i): fun(PairList [sth]): MP(INSTANTIATE_ALL(i)(xth))(sth))
+        fun(i): fun(PairList [sth]): MP(INSTANTIATE_ALL(i)(xth))(sth)]
       ~catch Failure(_): failwith("MATCH_MP_TAC: No match")
 
 fun CONJUNCTS_THEN2(ttac1):
@@ -621,14 +618,14 @@ fun CONJUNCTS_THEN2(ttac1):
     fun(cth):
       let Pair(c1,c2) = dest_conj(concl(cth))
       fun(gl):
-        let GoalState(meta,gls,jfn):
+        let [meta,gls,jfn]:
           THEN(ttac1(ASSUME(c1)))(ttac2(ASSUME(c2)))(gl)
-        GoalState(
+        [
           meta,gls,
           fun(i):
             fun(ths):
               let Pair(th1,th2) = CONJ_PAIR(INSTANTIATE_ALL(i)(cth))
-              PROVE_HYP(th1)(PROVE_HYP(th2)(jfn(i)(ths))))
+              PROVE_HYP(th1)(PROVE_HYP(th2)(jfn(i)(ths)))]
 def CONJUNCTS_THEN = W(CONJUNCTS_THEN2)
 fun DISJ_CASES_THEN2(ttac1):
   fun(ttac2):
@@ -684,26 +681,26 @@ fun FIRST_X_ASSUM(ttac):
 fun SUBGOAL_THEN(wa):
   fun(ttac):
     fun(Pair(asl,w)):
-      let GoalState(meta,gls,just) = ttac(ASSUME(wa))(Pair(asl,w))
-      GoalState(
+      let [meta,gls,just] = ttac(ASSUME(wa))(Pair(asl,w))
+      [
         meta,PairList.cons(Pair(asl,wa),gls),
-        fun(i): fun(l): PROVE_HYP(hd(l))(just(i)(tl(l))))
+        fun(i): fun(l): PROVE_HYP(hd(l))(just(i)(tl(l)))]
 
 fun FREEZE_THEN(ttac):
   fun(th):
     fun(Pair(asl,w)):
-      let GoalState(meta,gls,just) = ttac(ASSUME(concl(th)))(Pair(asl,w))
-      GoalState(meta,gls,fun(i): fun(l): PROVE_HYP(th)(just(i)(l)))
+      let [meta,gls,just] = ttac(ASSUME(concl(th)))(Pair(asl,w))
+      [meta,gls,fun(i): fun(l): PROVE_HYP(th)(just(i)(l))]
 
 fun X_META_EXISTS_TAC(t):
   fun(Pair(asl,w)):
     try:
       if !is_var(t) | fail() | #void
       let Pair(v,bod) = dest_exists(w)
-      GoalState(
+      [
         Pair(PairList [t],null_inst),
         PairList [Pair(asl,vsubst(PairList [Pair(t,v)])(bod))],
-        fun(i): fun(PairList [th]): EXISTS(Pair(instantiate(i)(w),instantiate(i)(t)))(th))
+        fun(i): fun(PairList [th]): EXISTS(Pair(instantiate(i)(w),instantiate(i)(t)))(th)]
       ~catch Failure(_): failwith("X_META_EXISTS_TAC")
 
 fun META_EXISTS_TAC(Pair(asl,w) as gl):
@@ -715,10 +712,10 @@ fun META_SPEC_TAC(t):
   fun(thm):
     fun(Pair(asl,w)):
       let sth = SPEC(t)(thm)
-      GoalState(
+      [
         Pair(PairList [t],null_inst),
         PairList [Pair(PairList.cons(Pair("",sth),asl),w)],
-        fun(i): fun(PairList [th]): PROVE_HYP(SPEC(instantiate(i)(t))(thm))(th))
+        fun(i): fun(PairList [th]): PROVE_HYP(SPEC(instantiate(i)(t))(thm))(th)]
 
 fun CHEAT_TAC(Pair(_,w) as g): ACCEPT_TAC(mk_thm(Pair(PairList [],w)))(g)
 
@@ -735,8 +732,8 @@ fun prove(Pair(t,tac)):
 
 fun TAC_PROOF(Pair(Pair(asl,w) as g,tac)):
   if type_of(w) != bool_ty | failwith("mk_goalstate: Non-boolean goal") | #void
-  let gs = GoalState(null_meta,PairList [g],fun(inst): fun(PairList [th]): INSTANTIATE_ALL(inst)(th))
-  let GoalState(_,sgs,just) = tacsequence(gs)(PairList [tac])
+  let gs = [null_meta,PairList [g],fun(inst): fun(PairList [th]): INSTANTIATE_ALL(inst)(th)]
+  let [_,sgs,just] = tacsequence(gs)(PairList [tac])
   if sgs == PairList [] | just(null_inst)(PairList []) | failwith("TAC_PROOF: Unsolved goals")
 
 // Original tactics.ml derived tactics used by the standard theory sequence.

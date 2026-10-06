@@ -120,7 +120,7 @@ class Translator:
         self.quote_module=module
         self.bridge=module not in CORE and module!='preterm'
         self.env={}; self.exports={}
-        self.record_layouts={}
+        self.record_defs=[]
         self.class_values=set()
         self.module_env={}
         self.top_group={}
@@ -167,9 +167,10 @@ class Translator:
         if k=='alias': return self.pattern(p[1],env)+' as '+ident_safe(env.get(p[2],p[2]))
         if k in ['int','string']: return p[1] if k=='int' else string(p[1])
         if k=='tuple':
-            ps=p[1]; ctor='Pair' if len(ps)==2 else ('Interop.Triple3' if len(ps)==3 and self.bridge else f'HolTuple{len(ps)}')
-            if ctor!='Pair':ctor=self.ident(ctor,env)
-            return ctor+'('+','.join(self.pattern(q,env) for q in ps)+')'
+            ps=p[1]
+            # Pairs stay Pair; longer OCaml tuples are Rhombus lists (OCaml lists are PairList).
+            if len(ps)==2: return 'Pair('+','.join(self.pattern(q,env) for q in ps)+')'
+            return '['+', '.join(self.pattern(q,env) for q in ps)+']'
         if k=='construct':
             c,arg=p[1:]
             if c=='[]': return 'PairList []'
@@ -187,7 +188,9 @@ class Translator:
         if k=='or': return '('+self.pattern(p[1],env)+' || '+self.pattern(p[2],env)+')'
         if k=='record':
             if p[1][0][0]=='contents': return 'Box('+self.pattern(p[1][0][1],env)+')'
-            return '{'+','.join(string(n.split('.')[-1])+': '+self.pattern(q,env) for n,q in p[1])+'}'
+            given={n.split('.')[-1]:q for n,q in p[1]}
+            cls,layout=self.record_class(given)
+            return cls+'('+','.join(self.pattern(given[f],env) if f in given else '_' for f in layout)+')'
         raise ValueError(f'pattern {p}')
     def function(self,pattern,body,env,name=None):
         new=env.copy()
@@ -197,6 +200,19 @@ class Translator:
             return 'fun'+((' '+ident_safe(name)) if name else '')+'('+v+'):«\n'+ind(self.match(v,[(pattern,None,body)],new))+'\n»'
         params='_' if pattern==['construct','()',None] else self.pattern(pattern,new)
         return 'fun'+((' '+ident_safe(name)) if name else '')+'('+params+'):«\n'+ind(self.expr(body,new))+'\n»'
+    def record_class(self,names):
+        # OCaml resolves a label set to the latest record type declaring all of them.
+        want=set(names)
+        exact=[d for d in self.record_defs if set(d[1])==want]
+        subset=[d for d in self.record_defs if want<=set(d[1])]
+        found=exact or subset
+        if not found: raise ValueError(f'{self.module}: no record type for fields {sorted(want)}')
+        cls,layout,path=found[-1]
+        here=self.module_path
+        common=0
+        while common<len(path) and common<len(here) and path[common]==here[common]:common+=1
+        rest=path[common:] if common<len(path) and not (len(path)<=len(here) and here[:len(path)]==path) else []
+        return '.'.join(list(rest)+[cls]),layout
     def local_name(self,s,natural):
         # Keep OCaml's own name when no other binding can be captured by it.
         if natural and s not in SUPPORT and not s.startswith('port_'):return ident_safe(s)
@@ -230,13 +246,14 @@ class Translator:
         self.used_binding_names.add(ident_safe(candidate))
         return candidate
     def ordered_constructor(self,ctor,args,env):
+        def make(vals): return '['+', '.join(vals)+']' if ctor=='[]' else ctor+'('+','.join(vals)+')'
         # Only effectful arguments need a binding to keep OCaml's right-to-left order.
-        if sum(not pure(a) for a in args)<2:return ctor+'('+','.join(self.expr(a,env) for a in args)+')'
+        if sum(not pure(a) for a in args)<2:return make([self.expr(a,env) for a in args])
         lines=[];variables={}
         for i in reversed(range(len(args))):
             if pure(args[i]):continue
             v=self.fresh();lines.append('let '+v+' = '+self.expr(args[i],env));variables[i]=v
-        return block(';\n'.join(lines+[ctor+'('+','.join(variables[i] if i in variables else self.expr(args[i],env) for i in range(len(args)))+')']))
+        return block(';\n'.join(lines+[make([variables[i] if i in variables else self.expr(args[i],env) for i in range(len(args))])]))
     def expr(self,e,env):
         k=e[0]
         if k=='id': return self.ident(e[1],env)
@@ -249,11 +266,8 @@ class Translator:
             encoded=json.dumps(self.quotes[key],ensure_ascii=False,separators=(',',':'))
             return self.ident('expand_quote',env)+'('+string(encoded)+')'
         if k=='tuple':
-            es=e[1]; ctor='Pair' if len(es)==2 else ('Interop.triple3' if len(es)==3 and self.bridge else f'HolTuple{len(es)}')
-            if ctor!='Pair':ctor=self.ident(ctor,env)
-            # Tactic results in the source are the goalstate triple.
-            if len(es)==3 and es[2][0]=='fun' and es[0]==['id','null_meta']: ctor=self.ident('GoalState',env)
-            return self.ordered_constructor(ctor,es,env)
+            es=e[1]
+            return self.ordered_constructor('Pair' if len(es)==2 else '[]',es,env)
         if k=='array': return self.ordered_constructor('Array',e[1],env)
         if k=='construct':
             c,arg=e[1:]
@@ -296,8 +310,6 @@ class Translator:
                 if a==['construct','()',None]: s=self.ident('hol_apply_unit',env)+'('+s+')'
                 else:
                     value=captured.get(arg_index) or self.expr(a,env)
-                    if self.bridge and f[0]=='id' and f[1] in ['INSTANTIATE','INSTANTIATE_ALL','instantiate','inst_goal','compose_insts'] and (arg_index==0 or f[1]=='compose_insts'):
-                        value='Interop.coerce_instantiation('+value+')'
                     s+='('+value+')'
             return block(';\n'.join(lines+[s])) if lines else s
         if k=='fun': return '('+self.function(e[1],e[2],env)+')'
@@ -329,25 +341,29 @@ class Translator:
             s+=';\n  ~catch '+caught+':«\n'+ind(self.match(caught,cases,env),4)+'\n  »'
             return block(s+'\n»')
         if k=='seq': return block(self.expr(e[1],env)+';\n'+self.expr(e[2],env))
-        if k=='field': return self.expr(e[1],env)+(' .value' if e[2]=='contents' else '['+string(e[2].split('.')[-1])+']')
+        if k=='field':
+            base=self.expr(e[1],env)
+            if e[1][0] not in ['id','field']: base='('+base+')'
+            return base+('.value' if e[2]=='contents' else '.'+ident_safe(e[2].split('.')[-1]))
         if k=='record':
-            fields=[n.split('.')[-1] for n,_ in e[1]]
-            layout=self.record_layouts.get(frozenset(fields),fields)
-            if e[2] is not None and any(not pure(v) for _,v in e[1]):
-                callbacks='{'+','.join(string(n.split('.')[-1])+': (fun():«\n'+ind(self.expr(v,env))+'\n»)' for n,v in e[1])+'}'
-                return self.ident('hol_record_update_lazy',env)+'('+self.expr(e[2],env)+')('+callbacks+')'
-            values={n.split('.')[-1]:self.expr(v,env) for n,v in e[1]}
-            lines=[]
-            if e[2] is None and sum(not pure(v) for _,v in e[1])>1:
-                impure={n.split('.')[-1] for n,v in e[1] if not pure(v)}
-                for n in reversed(layout):
-                    if n not in impure:continue
-                    temp=self.fresh();lines.append('let '+temp+' = '+values[n]);values[n]=temp
-            pairs='{'+','.join(string(n)+': '+values[n] for n in fields)+'}'
+            given={n.split('.')[-1]:v for n,v in e[1]}
+            cls,layout=self.record_class(given)
+            lines=[];values={}
+            if e[2] is not None:
+                base=self.fresh();lines.append('let '+base+' = '+self.expr(e[2],env))
+            impure=[f for f in layout if f in given and not pure(given[f])]
+            # OCaml evaluates the fields right to left; bind them only when order can matter.
+            hoist=set(impure) if len(impure)>1 or (e[2] is not None and impure) else set()
+            for f in reversed(layout):
+                if f not in given:continue
+                if f in hoist:
+                    temp=self.fresh();lines.append('let '+temp+' = '+self.expr(given[f],env));values[f]=temp
+                else:values[f]=self.expr(given[f],env)
             if e[2] is None:
-                pairs=pairs[:-1]+',"port_record_order": PairList ['+','.join(string(n) for n in layout)+']}'
-                return block(';\n'.join(lines+[pairs])) if lines else pairs
-            return self.ident('hol_record_update',env)+'('+self.expr(e[2],env)+')('+pairs+')'
+                result=cls+'('+','.join(values[f] for f in layout)+')'
+            else:
+                result=base+'.port_update({'+','.join(string(ident_safe(f))+': '+values[f] for f in layout if f in given)+'})'
+            return block(';\n'.join(lines+[result])) if lines else result
         if k=='letmodule':
             if e[2][0]=='moduleid':
                 alias=e[1]; target=e[2][1]
@@ -393,7 +409,7 @@ class Translator:
         child=Translator(self.module+'_'+name,self.quotes)
         child.quote_module=self.quote_module;child.env=env.copy();child.bridge=self.bridge
         child.class_values=self.class_values.copy()
-        child.record_layouts=self.record_layouts.copy()
+        child.record_defs=self.record_defs
         child.module_env=self.module_env.copy()
         child.unresolved=self.unresolved
         child.modules=self.modules;child.module_exports=self.module_exports;child.arities=self.arities.copy()
@@ -479,7 +495,6 @@ class Translator:
                 name=name.strip()
                 if re.fullmatch(r'\w+',name) and name not in OPS:self.env[name]='Host.'+name
             if self.bridge:
-                lines.append('import: "private/tuple_bridge.rhm" as Interop')
                 lines.append('import: "private/type_inference.rhm" as TypeInference')
                 if self.module=='ind_types':
                     lines.append('import: "private/type_specification.rhm" as NativeTypes')
@@ -511,8 +526,6 @@ class Translator:
                 for ctor,args in re.findall(r'^class ([A-Za-z_]\w*)\(([^)]*)\)',source,re.M):
                     self.arities[alias+'.'+aliases.get(ctor,ctor)]=len(args.split(',')) if args else 0
                 for name in re.findall(r"^export bind\.macro '([A-Za-z_]\w*)",source,re.M): self.env[name]=alias+'.'+name
-        if header and self.bridge:
-            for n in ['INSTANTIATE','INSTANTIATE_ALL','instantiate','inst_goal','compose_insts','term_type_unify']:self.env[n]='Interop.'+n
         for item in ast:
             if item[0]=='eval':
                 e=item[1]
@@ -591,7 +604,14 @@ class Translator:
                 for ty,cs in item[1]:
                     counts=[0,0]
                     record_fields=[c for c,n in cs if not isinstance(n,int)]
-                    if record_fields:self.record_layouts[frozenset(record_fields)]=record_fields
+                    if record_fields:
+                        cls=self.module+'_rec_'+ty
+                        while ident_safe(cls) in self.used_binding_names or cls in self.reserved_names: cls='port_'+cls
+                        self.used_binding_names.add(ident_safe(cls))
+                        fs=[ident_safe(f) for f in record_fields]
+                        self.record_defs.append((cls,record_fields,tuple(self.module_path)));self.exports[cls]=cls
+                        self.class_values.add(cls)
+                        lines.append('class '+cls+'('+','.join(fs)+'):«\n  extends '+self.ident('HolVariant',self.env)+';\n  override port_view():«\n    PairList ['+','.join('this.'+f for f in fs)+']\n  »;\n  method port_update(updates):«\n    '+cls+'('+','.join('(if updates.has_key('+string(f)+') | updates['+string(f)+'] | this.'+f+')' for f in fs)+')\n  »\n»')
                     for ctor,n in cs:
                         if not isinstance(n,int): continue # Host Map carries record labels directly.
                         internal=self.module+'_ctor_'+ctor

@@ -9,9 +9,9 @@ def main():
 import: "../../rhombus/hol/private/compat.rhm" open
 import: "../../rhombus/hol/private/ocaml_random.rhm" open
 ocaml_random_init(0)
-for (i in 0 .. 100):« println("random:" +& to_string(ocaml_random_bits())) »
+for (i in 0 .. 100): println("random:" +& to_string(ocaml_random_bits()))
 ocaml_random_init(-1)
-for (i in 0 .. 100):« println("random:" +& to_string(ocaml_random_int(101))) »
+for (i in 0 .. 100): println("random:" +& to_string(ocaml_random_int(101)))
 let seen=Box(PairList [])
 fun f(x):
   seen.value := PairList.cons(x,seen.value)

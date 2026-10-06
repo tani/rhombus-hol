@@ -218,7 +218,10 @@ class Translator:
         return stmts,r
     def emit(self,text): self.cur.append(text)
     def hoist(self,text):
-        v=self.fresh();self.emit(assign('let '+v,text));return v
+        v=self.fresh()
+        if text.startswith('fun(') and '\n' in text: self.emit('fun '+v+text[3:])
+        else: self.emit(assign('let '+v,text))
+        return v
     def atom(self,e,env):
         r=self.expr(e,env)
         return self.hoist(r) if '\n' in r else r
@@ -228,12 +231,12 @@ class Translator:
     def lambda_expr(self,params,body):
         # Anonymous functions are parenthesized inline when short, else a named local function.
         if '\n' not in body: return '('+self.fun_text(None,params,body)+')'
-        v=self.fresh();self.emit(self.fun_text(v,params,body));return v
+        return self.fun_text(None,params,body)
     def function(self,pattern,body,env,name=None):
         new=env.copy()
         for s in names(pattern): new[s]=s
         if len(alternatives(pattern))>1 and names(pattern):
-            v=self.fresh()
+            v='port_arg'
             return self.fun_text(name,v,self.match(v,[(pattern,None,body)],new,fresh_scope=True))
         params='_' if pattern==['construct','()',None] else self.pattern(pattern,new)
         return self.fun_text(name,params,self.lines_of(body,new))
@@ -270,7 +273,7 @@ class Translator:
         scope=new if recursive else env
         if p[0]=='var' and e[0] in ['fun','function'] and (top or recursive):
             if e[0]=='fun':return self.function(e[1],e[2],scope,new[p[1]]),new
-            v=self.fresh()
+            v='port_arg'
             return self.fun_text(new[p[1]],v,self.match(v,e[1],scope,fresh_scope=True)),new
         keyword='def' if top else 'let'
         value=self.lines_of(e,scope) if top else self.expr(e,scope)
@@ -287,23 +290,17 @@ class Translator:
         self.used_binding_names.add(ident_safe(candidate))
         return candidate
     def ordered(self,args,env,fn=None):
-        # OCaml evaluates arguments right to left, then the function. Only effectful or
-        # multi-line operands are bound to temporaries, and only when order can matter.
-        comp=[self.sub(lambda a=a:self.expr(a,env)) for a in args]
-        fcomp=self.sub(lambda:self.expr(fn,env)) if fn is not None else None
-        cx=[(not pure(a)) or '\n' in c[1] for a,c in zip(args,comp)]
-        fcx=fn is not None and ((not pure(fn)) or '\n' in fcomp[1])
-        many=sum(cx)>1 or (fcx and any(cx))
-        out=[None]*len(args)
-        for i in reversed(range(len(args))):
-            stmts,r=comp[i]
+        # Operands are evaluated left to right, not in OCaml's unspecified-in-practice
+        # right-to-left order. Only multi-line operands are bound to a temporary.
+        out=[]
+        for a in args:
+            stmts,r=self.sub(lambda a=a:self.expr(a,env))
             self.cur.extend(stmts)
-            if cx[i] and (many or '\n' in r): r=self.hoist(r)
-            out[i]=r
+            out.append(self.hoist(r) if '\n' in r else r)
         if fn is None: return out,None,False
-        stmts,fr=fcomp
+        stmts,fr=self.sub(lambda:self.expr(fn,env))
         self.cur.extend(stmts)
-        if fcx and (any(cx) or '\n' in fr): return out,self.hoist(fr),False
+        if '\n' in fr: return out,self.hoist(fr),False
         return out,fr,True
     def ordered_constructor(self,ctor,args,env):
         vals,_,_=self.ordered(args,env)
@@ -360,7 +357,7 @@ class Translator:
             new=env.copy()
             pattern=e[1]
             if len(alternatives(pattern))>1 and names(pattern):
-                v=self.fresh()
+                v='port_arg'
                 for n in names(pattern): new[n]=n
                 return self.lambda_expr(v,self.match(v,[(pattern,None,e[2])],new,fresh_scope=True))
             for n in names(pattern): new[n]=n
@@ -372,7 +369,7 @@ class Translator:
             for n in names(e[4]):new[n]=n
             return self.lambda_expr('~'+e[1]+': '+self.pattern(e[4],new),self.lines_of(e[5],new))
         if k=='function':
-            v=self.fresh(); return self.lambda_expr(v,self.match(v,e[1],env,fresh_scope=True))
+            v='port_arg'; return self.lambda_expr(v,self.match(v,e[1],env,fresh_scope=True))
         if k=='let':
             _,r,bs,body=e; new=env.copy()
             if r=='rec':
@@ -390,7 +387,7 @@ class Translator:
             return mkif(cond,then,other)
         if k=='match': return self.match(self.atom(e[1],env),e[2],env)
         if k=='try':
-            caught=self.fresh()
+            caught='port_exn'
             cases=e[2]+[(['var',caught],None,['apply',['id','raise'],[['id',caught]]])]
             return 'try:\n'+ind(self.lines_of(e[1],env))+'\n  ~catch '+caught+':\n'+ind(self.match(caught,cases,env,fresh_scope=True),4)
         if k=='seq':
@@ -745,7 +742,24 @@ def translate(module,deps):
     (STAGE/(module+'.namespaces.json')).write_text(json.dumps({k:v for k,v in t.module_exports.items() if not is_alias(k.split('.')[0])}))
     (STAGE/(module+'.unresolved.json')).write_text(json.dumps(sorted(t.unresolved)))
 
+def translate_lib_support():
+    # The lib.ml helpers inside private/theory_support.rhm, regenerated in place.
+    selected=['last','butlast','el','mapi','rev_itlist2','flat','remove','find_index','index','unions','set_eq','uniq','gcd','allpairs','assocd','merge','mergesort','num_of_string']
+    ast=json.loads(read_data('lib.json'))
+    path=ROOT/'rhombus/hol/private/theory_support.rhm'
+    text=path.read_text()
+    for name in selected:
+        items=[i for i in ast if i[0]=='value' and any(name in names(p) for p,_ in i[2]) and len(i[2])==1]
+        if len(items)!=1: raise ValueError('lib item '+name)
+        t=Translator('lib',{});t.bridge=False
+        new=t.translate(items,[],header=False).strip('\n')
+        pattern=re.compile(r'^(?:fun|def) lib_'+name+r'\b.*?^def '+name+r' = lib_'+name+r'$',re.S|re.M)
+        if not pattern.search(text): raise ValueError('theory_support block '+name)
+        text=pattern.sub(lambda m:new,text,count=1)
+    write_changed(path,text)
+
 if __name__=='__main__':
     translate_type_support()
+    translate_lib_support()
     translate_fpf_support()
     for i,module in enumerate(sys.argv[1:]): translate(module,sys.argv[1:i+1])

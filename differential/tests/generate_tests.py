@@ -37,9 +37,8 @@ import: "../../rhombus/hol/private/compat.rhm" open
 fun sty(t):
   if is_vartype(t)
   | "V(" +& dest_vartype(t) +& ")"
-  | block:
-      def [n,a] = dest_type(t)
-      "T(" +& n +& "," +& join(map(sty)(a)) +& ")"
+  | let [n,a] = dest_type(t)
+    "T(" +& n +& "," +& join(map(sty)(a)) +& ")"
 fun join(l):
   match l
   | PairList []: ""
@@ -73,9 +72,27 @@ fun emit(id,f):
   println(id +& "\\t" +& value)
 '''
 cases=[]
+
+def split_stmts(h):
+    parts=[];depth=0;cur='';q=None
+    for c in h:
+        if q:
+            cur+=c
+            if c==q:q=None
+        elif c in '"\'':q=c;cur+=c
+        elif c in '([{':depth+=1;cur+=c
+        elif c in ')]}':depth-=1;cur+=c
+        elif c==';' and depth==0:parts.append(cur.strip());cur=''
+        else:cur+=c
+    parts.append(cur.strip());return parts
+def rh_fun(h):
+    # A Rhombus lambda; "do: a; b" bodies become indented statements.
+    if not h.startswith('do: '):return 'fun(): '+h
+    st=[('let '+x[4:] if x.startswith('def ') else x) for x in split_stmts(h[4:])]
+    return 'fun():\n'+'\n'.join('  '+x for x in st)
 def add(id,m,h):
  ml.append('emit '+json.dumps(id)+' (fun () -> '+m+');;')
- rh.append('emit('+json.dumps(id)+',fun(): '+h+')');cases.append(id)
+ rh.append('emit('+json.dumps(id)+','+rh_fun(h)+')');cases.append(id)
 for i in range(180):
  t=gen(r.choice([B,A,C,F(A,A),F(B,B),F(A,B)]),3);u=gen(t[-1],2)
  for L,out in [('ml',ml),('rhm',rh)]:
@@ -101,13 +118,13 @@ add('DEDUCT',f'sth(p_DEDUCT_ANTISYM_RULE (p_ASSUME ({xm})) (p_ASSUME ({ym})))',f
 add('ABS',f'sth(p_ABS ({xm}) (p_REFL ({xm})))',f'sth(ABS({xh})(REFL({xh})))')
 add('ABS-reject',f'sth(p_ABS ({xm}) (p_ASSUME (mk_eq({xm},{xm}))))',f'sth(ABS({xh})(ASSUME(mk_eq([{xh},{xh}]))))')
 for name,m,h in [('bad-arity','mk_type("fun",[])','mk_type(["fun",PairList []])'),('unknown-type','mk_type("unknown",[])','mk_type(["unknown",PairList []])'),('bad-assume','p_ASSUME(mk_var("x",aty))','ASSUME(mk_var(["x",aty]))'),('BETA-reject','p_BETA(mk_comb(mk_abs('+xm+','+xm+'),'+ym+'))','BETA(mk_comb([mk_abs(['+xh+','+xh+']),'+yh+']))')]:
- add(name,'(ignore('+m+');"ok")','block: '+h+'; "ok"')
+ add(name,'(ignore('+m+');"ok")','do: '+h+'; "ok"')
 red=ap(ab(vt('x',B),vt('x',B)),vt('x',B))
 add('BETA',f'sth(p_BETA({tm(red,"ml")}))',f'sth(BETA({tm(red,"rhm")}))')
 add('MK_COMB',f'sth(p_MK_COMB(p_REFL(mk_abs({xm},{xm})),p_REFL({xm})))',f'sth(MK_COMB([REFL(mk_abs([{xh},{xh}])),REFL({xh})]))')
 for nm,m,h in [('qmap','qmap (fun x->x) l == l','qmap(I)(l) === l'),('filter','filter (fun _->true) l == l','filter(fun(_): #true)(l) === l')]:
  ml.append('let l = [aty;bty] in emit "sharing-'+nm+'" (fun () -> sb('+m+'));;')
- rh.append('block:\n  def l = PairList [aty,bty]\n  emit("sharing-'+nm+'",fun(): sb('+h+'))');cases.append('sharing-'+nm)
+ rh.append('emit("sharing-'+nm+'",fun():\n  let l = PairList [aty,bty]\n  sb('+h+'))');cases.append('sharing-'+nm)
 
 identity=ab(vt('x',A),vt('x',A)); im=tm(identity,'ml'); ih=tm(identity,'rhm')
 add('new_basic_definition',f'sth(new_basic_definition(mk_eq(mk_var("identity",mk_fun_ty aty aty),{im})))',f'sth(new_basic_definition(mk_eq([mk_var(["identity",mk_fun_ty(aty)(aty)]),{ih}])))')
@@ -119,8 +136,8 @@ ml.append('new_constant("predicate",mk_fun_ty bool_ty bool_ty);;')
 rh.append('new_constant(["predicate",mk_fun_ty(bool_ty)(bool_ty)])')
 ml.append('let witness = new_axiom(mk_comb(mk_const("predicate",[]),'+xm+'));;')
 rh.append('def witness = new_axiom(mk_comb([mk_const(["predicate",PairList []]),'+xh+']))')
-add('new_basic_type_definition','let a,b = new_basic_type_definition "subtype" ("abs_sub","rep_sub") witness in sth a^"!"^sth b','block: def [a,b] = new_basic_type_definition("subtype")(["abs_sub","rep_sub"])(witness); sth(a) +& "!" +& sth(b)')
-add('typedef-duplicate','let a,b = new_basic_type_definition "subtype" ("abs_sub","rep_sub") witness in sth a^"!"^sth b','block: def [a,b] = new_basic_type_definition("subtype")(["abs_sub","rep_sub"])(witness); sth(a) +& "!" +& sth(b)')
+add('new_basic_type_definition','let a,b = new_basic_type_definition "subtype" ("abs_sub","rep_sub") witness in sth a^"!"^sth b','do: def [a,b] = new_basic_type_definition("subtype")(["abs_sub","rep_sub"])(witness); sth(a) +& "!" +& sth(b)')
+add('typedef-duplicate','let a,b = new_basic_type_definition "subtype" ("abs_sub","rep_sub") witness in sth a^"!"^sth b','do: def [a,b] = new_basic_type_definition("subtype")(["abs_sub","rep_sub"])(witness); sth(a) +& "!" +& sth(b)')
 add('constant-state-order','String.concat ";" (List.map (fun(n,t)->n^":"^sty t) (constants()))','join(map(fun([n,t]): n +& ":" +& sty(t))(constants()))')
 add('type-state-order','String.concat ";" (List.map (fun(n,a)->n^":"^string_of_int a) (types()))','join(map(fun([n,a]): n +& ":" +& to_string(a))(types()))')
 add('axioms-state','String.concat ";" (List.map sth (axioms()))','join(map(sth)(axioms()))')
@@ -132,7 +149,7 @@ add('type_subst-ignore-nonvariable','sty(type_subst [aty,bool_ty] bool_ty)','sty
 add('type_subst-identity','sb(type_subst [bool_ty,bty] (mk_fun_ty aty aty) == (mk_fun_ty aty aty))','sb(type_subst(PairList [[bool_ty,bty]])(mk_fun_ty(aty)(aty)) === mk_fun_ty(aty)(aty))')
 # Identity is tested using the same allocated input, not two distinct constructors.
 ml[-1]='let original = mk_fun_ty aty aty in emit "type_subst-identity" (fun () -> sb(type_subst [bool_ty,bty] original == original));;'
-rh[-1]='block: def original = mk_fun_ty(aty)(aty); emit("type_subst-identity",fun(): sb(type_subst(PairList [[bool_ty,bty]])(original) === original))'
+rh[-1]='emit("type_subst-identity",fun():\n  let original = mk_fun_ty(aty)(aty)\n  sb(type_subst(PairList [[bool_ty,bty]])(original) === original))'
 (p/'tests/oracle_cases.ml').write_text(mlhead+'\n'.join(ml)+'\n')
 (p/'tests/cases.rhm').write_text(rhhead+'\n'.join(rh)+'\n')
 (p/'results/cases.json').write_text(json.dumps({'seed':271828,'cases':cases,'term_pool':180},indent=2))

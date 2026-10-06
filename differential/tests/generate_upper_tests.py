@@ -10,8 +10,26 @@ if hash_checks:
 rh=[d['rhhead']+'\n'+imports+'fun sint(n): to_string(n)\nfun snty(l): join(map(sty)(l))\n']
 
 cases=[];coverage=set()
+
+def split_stmts(h):
+    parts=[];depth=0;cur='';q=None
+    for c in h:
+        if q:
+            cur+=c
+            if c==q:q=None
+        elif c in '"\'':q=c;cur+=c
+        elif c in '([{':depth+=1;cur+=c
+        elif c in ')]}':depth-=1;cur+=c
+        elif c==';' and depth==0:parts.append(cur.strip());cur=''
+        else:cur+=c
+    parts.append(cur.strip());return parts
+def rh_fun(h):
+    # A Rhombus lambda; "do: a; b" bodies become indented statements.
+    if not h.startswith('do: '):return 'fun(): '+h
+    st=[('let '+x[4:] if x.startswith('def ') else x) for x in split_stmts(h[4:])]
+    return 'fun():\n'+'\n'.join('  '+x for x in st)
 def add(i,m,h,api=None):
- ml.append('emit '+json.dumps(i)+' (fun () -> '+m+');;');rh.append('emit('+json.dumps(i)+',fun(): '+h+')');cases.append(i)
+ ml.append('emit '+json.dumps(i)+' (fun () -> '+m+');;');rh.append('emit('+json.dumps(i)+','+rh_fun(h)+')');cases.append(i)
  if api:coverage.add(api)
 def define(n,m,h):ml.append('let '+n+' = '+m+';;');rh.append('def '+n+' = '+h)
 def list_(xs,L):return '['+';'.join(xs)+']' if L=='ml' else 'PairList ['+','.join(xs)+']'
@@ -50,13 +68,13 @@ for n,m,h in ops:add(n,m,h,n.split('-')[0])
 for name,cn in [('conj','/\\'),('disj','\\/'),('imp','==>')]:
  define(name,'mk_binary '+json.dumps(cn)+' (x,y)','mk_binary('+json.dumps(cn)+')([x,y])')
  add('is_'+name,'sb(is_'+name+' '+name+')','sb(is_'+name+'('+name+'))','is_'+name)
- add('dest_'+name,'sl(let l,r=dest_'+name+' '+name+' in [l;r])','sl(block: def [l,r] = dest_'+name+'('+name+'); PairList [l,r])','dest_'+name)
+ add('dest_'+name,'sl(let l,r=dest_'+name+' '+name+' in [l;r])','do: def [l,r] = dest_'+name+'('+name+'); sl(PairList [l,r])','dest_'+name)
 for name,cn in [('forall','!'),('exists','?'),('uexists','?!')]:
  define(name,'mk_binder '+json.dumps(cn)+' (x,conj)','mk_binder('+json.dumps(cn)+')([x,conj])')
  add('is_'+name,'sb(is_'+name+' '+name+')','sb(is_'+name+'('+name+'))','is_'+name)
- add('dest_'+name,'sl(let v,b=dest_'+name+' '+name+' in [v;b])','sl(block: def [v,b] = dest_'+name+'('+name+'); PairList [v,b])','dest_'+name)
+ add('dest_'+name,'sl(let v,b=dest_'+name+' '+name+' in [v;b])','do: def [v,b] = dest_'+name+'('+name+'); sl(PairList [v,b])','dest_'+name)
  if name!='uexists':add('strip_'+name,'sl(fst(strip_'+name+' '+name+'))','sl(fst(strip_'+name+'('+name+')))','strip_'+name)
-for n,m,h in [('is_binary','sb(is_binary "/\\\\" conj)','sb(is_binary("/\\\\")(conj))'),('dest_binary','sl(let l,r=dest_binary "/\\\\" conj in [l;r])','sl(block: def [l,r] = dest_binary("/\\\\")(conj); PairList [l,r])'),('is_binder','sb(is_binder "!" forall)','sb(is_binder("!")(forall))'),('dest_binder','stm(snd(dest_binder "!" forall))','stm(snd(dest_binder("!")(forall)))'),('is_binop','sb(is_binop op form)','sb(is_binop(op)(form))'),('dest_binop','stm(fst(dest_binop op form))','stm(fst(dest_binop(op)(form)))'),('list_mk_binop','stm(list_mk_binop op [x;y;z])','stm(list_mk_binop(op)(PairList [x,y,z]))'),('binops','sl(binops op form)','sl(binops(op)(form))'),('conjuncts','sl(conjuncts form)','sl(conjuncts(form))'),('disjuncts','sl(disjuncts disj)','sl(disjuncts(disj))')]:add(n,m,h,n)
+for n,m,h in [('is_binary','sb(is_binary "/\\\\" conj)','sb(is_binary("/\\\\")(conj))'),('dest_binary','sl(let l,r=dest_binary "/\\\\" conj in [l;r])','do: def [l,r] = dest_binary("/\\\\")(conj); sl(PairList [l,r])'),('is_binder','sb(is_binder "!" forall)','sb(is_binder("!")(forall))'),('dest_binder','stm(snd(dest_binder "!" forall))','stm(snd(dest_binder("!")(forall)))'),('is_binop','sb(is_binop op form)','sb(is_binop(op)(form))'),('dest_binop','stm(fst(dest_binop op form))','stm(fst(dest_binop(op)(form)))'),('list_mk_binop','stm(list_mk_binop op [x;y;z])','stm(list_mk_binop(op)(PairList [x,y,z]))'),('binops','sl(binops op form)','sl(binops(op)(form))'),('conjuncts','sl(conjuncts form)','sl(conjuncts(form))'),('disjuncts','sl(disjuncts disj)','sl(disjuncts(disj))')]:add(n,m,h,n)
 define('neg','mk_comb(mk_const("~",[]),x)','mk_comb([mk_const(["~",PairList []]),x])')
 add('is_neg','sb(is_neg neg)','sb(is_neg(neg))','is_neg');add('dest_neg','stm(dest_neg neg)','stm(dest_neg(neg))','dest_neg')
 define('lis','list_mk_icomb "CONS" [x;mk_mconst("NIL",mk_type("list",[bool_ty]))]','list_mk_icomb("CONS")(PairList [x,mk_mconst(["NIL",mk_type(["list",PairList [bool_ty]])])])')
@@ -66,7 +84,7 @@ add('dest_numeral','string_of_num(dest_numeral numeral)','sint(dest_numeral(nume
 for i,n in enumerate([0,1,2,3,16,257,2**150+7]):add('finty-'+str(i),'sty(mk_finty(num_of_string "'+str(n)+'"))','sty(mk_finty('+str(n)+'))','mk_finty');add('finty-round-'+str(i),'string_of_num(dest_finty(mk_finty(num_of_string "'+str(n)+'")))','sint(dest_finty(mk_finty('+str(n)+')))','dest_finty')
 add('finty-rational','sty(mk_finty(num_of_string "3/2"))','sty(mk_finty(3/2))','mk_finty')
 define('gabs','mk_gabs(mk_comb(f,x),y)','mk_gabs([mk_comb([f,x]),y])')
-for n,m,h in [('is_gabs','sb(is_gabs gabs)','sb(is_gabs(gabs))'),('dest_gabs','sl(let a,b=dest_gabs gabs in [a;b])','sl(block: def [a,b] = dest_gabs(gabs); PairList [a,b])'),('list_mk_gabs','stm(list_mk_gabs([x;y],z))','stm(list_mk_gabs([PairList [x,y],z]))'),('strip_gabs','sl(fst(strip_gabs gabs))','sl(fst(strip_gabs(gabs)))')]:add(n,m,h,n)
+for n,m,h in [('is_gabs','sb(is_gabs gabs)','sb(is_gabs(gabs))'),('dest_gabs','sl(let a,b=dest_gabs gabs in [a;b])','do: def [a,b] = dest_gabs(gabs); sl(PairList [a,b])'),('list_mk_gabs','stm(list_mk_gabs([x;y],z))','stm(list_mk_gabs([PairList [x,y],z]))'),('strip_gabs','sl(fst(strip_gabs gabs))','sl(fst(strip_gabs(gabs)))')]:add(n,m,h,n)
 define('lettm','mk_let([x,y],conj)','mk_let([PairList [[x,y]],conj])');coverage.add('mk_let');coverage.add('mk_gabs')
 add('is_let','sb(is_let lettm)','sb(is_let(lettm))','is_let');add('dest_let','stm(snd(dest_let lettm))','stm(snd(dest_let(lettm)))','dest_let')
 # Every conversional exercised, including failures, alpha renaming and substitution.
@@ -77,7 +95,7 @@ ml.append('let calls = ref [];; let trace t = calls := !calls @ [stm t]; p_REFL 
 rh.append('def mutable calls = PairList []\nfun trace(t):\n  calls := append(calls)(PairList [stm(t)])\n  REFL(t)\nfun reset(): calls := PairList []\nfun gettrace(): join(calls)')
 for cn,extra in [('COMB2_CONV',''),('COMB_CONV',''),('BINOP2_CONV',''),('BINOP_CONV',''),('DEPTH_BINOP_CONV','')]:
  args='trace trace' if '2' in cn else ('op trace' if cn=='DEPTH_BINOP_CONV' else 'trace');rargs='(trace)(trace)' if '2' in cn else ('(op)(trace)' if cn=='DEPTH_BINOP_CONV' else '(trace)');target='form' if 'BINOP' in cn else 'red'
- add('trace-'+cn,f'(reset(); ignore(p_{cn} {args} {target}); gettrace())',f'block: reset(); {cn}{rargs}({target}); gettrace()',cn)
+ add('trace-'+cn,f'(reset(); ignore(p_{cn} {args} {target}); gettrace())',f'do: reset(); {cn}{rargs}({target}); gettrace()',cn)
 # CACHE_CONV preserves successful theorem sharing, adapts alpha, retries Failure.
 ml.append('let ccalls=ref 0;; let cached=p_CACHE_CONV(fun t -> incr ccalls; p_REFL t);; let cth=cached id;;')
 rh.append('def mutable ccalls = 0\ndef cached = CACHE_CONV(fun(t): ccalls := ccalls+1; REFL(t))\ndef cth = cached(id)')
@@ -100,7 +118,7 @@ for cn in ['RATOR_CONV','RAND_CONV','COMB2_CONV','ABS_CONV','BINDER_CONV','BINOP
 add('THENC-bad','sth(p_THENC p_ALL_CONV (fun _ -> p_REFL y) x)','sth(THENC(ALL_CONV)(fun(t): REFL(y))(x))','THENC')
 for cn in ['ONCE_DEPTH_CONV','DEPTH_CONV','REDEPTH_CONV','TOP_DEPTH_CONV','TOP_SWEEP_CONV']:
  ml.append('reset();;');rh.append('reset()')
- add('trace-'+cn,'(ignore(p_'+cn+'(fun t -> ignore(trace t); p_BETA_CONV t) nested);gettrace())','block: '+cn+'(fun(t): trace(t); BETA_CONV(t))(nested); gettrace()',cn)
+ add('trace-'+cn,'(ignore(p_'+cn+'(fun t -> ignore(trace t); p_BETA_CONV t) nested);gettrace())','do: '+cn+'(fun(t): trace(t); BETA_CONV(t))(nested); gettrace()',cn)
 ml.append('let fcalls=ref 0;; let fc=p_CACHE_CONV(fun _ -> incr fcalls; failwith "cached failure");;')
 rh.append('def mutable fcalls = 0\ndef fc = CACHE_CONV(fun(t): fcalls := fcalls+1; failwith("cached failure"))')
 for i in range(2):add('cache-fail-'+str(i),'sth(fc x)','sth(fc(x))','CACHE_CONV')

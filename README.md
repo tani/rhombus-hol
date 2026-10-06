@@ -30,6 +30,7 @@ rhombus/hol/
     atoms_map.rhm         Patricia term maps (generated from lib.ml)
     term_hash.rhm, hash_runtime.rhm, ocaml_random.rhm
     type_inference.rhm, type_specification.rhm, quoted_ast.rhm
+    curried.rhm, declarations.rhm, proof_syntax.rhm, variant_base.rhm
   tests/
 
 differential/
@@ -145,3 +146,20 @@ The standard-theory modules (after `simp.rhm`) are generated; edit `tools/transl
 and regenerate rather than editing them (see `tools/translate/README.md`).
 OCaml tuples are Rhombus lists (`[a, b]`), OCaml lists are `PairList`, and
 record types are classes.
+
+
+## Generated source style
+
+The generator emits ordinary indentation, scoped names, descriptive payload
+fields, shared variant/record declarations, and compact typed term syntax.
+Curried declarations accept either grouped arguments or repeated application:
+
+```rhombus
+curried fun add(x, y): x + y
+check add(1)(2) ~is 3
+check add(1, 2) ~is 3
+```
+
+Standard proofs use the existing combinators through small infix operators.
+These forms are defined in `rhombus/hol/private/`; they introduce no new proof
+rules. See `tools/translate/README.md` for generation and evaluation details.

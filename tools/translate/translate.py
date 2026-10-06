@@ -5,6 +5,7 @@ output uses explicit, inferred term/type constructors rather than a parser.
 """
 from pathlib import Path
 import json, re, sys, os, gzip
+from fields import constructor_fields
 
 ROOT=Path(__file__).resolve().parents[2]
 STAGE=Path(os.environ.get('HOL_PORT_STAGE','/tmp/hol-port'))
@@ -64,9 +65,9 @@ def safe(text):
     # An inline 'if' would swallow the enclosing alternatives' bars.
     return '('+text+')' if '\n' not in text and text.startswith('if ') else text
 def group(open_,vals,close):
-    # Operands stay on one line unless one spans lines; then each starts its own line.
-    if all('\n' not in v for v in vals): return open_+', '.join(vals)+close
-    return open_+'\n'+ind(',\n'.join(vals))+close
+    inline=open_+', '.join(vals)+close
+    if '\n' not in inline and len(inline)<=96: return inline
+    return open_+'\n'+ind(',\n'.join(vals))+'\n'+close
 def alt(text):
     # One '|' alternative of an if/match: continuation lines align after the bar.
     first,*rest=safe(text).split('\n')
@@ -76,6 +77,12 @@ def mkif(cond,a,b):
     return 'if '+cond+'\n'+alt(a)+'\n'+alt(b)
 def assign(head,text):
     return head+' = '+text if '\n' not in text else head+':\n'+ind(text)
+def infix(left,op,right):
+    text=left+' '+op+' '+right
+    if '\n' not in text and len(text)<=96:return '('+text+')'
+    if left.startswith(('fun','if ','match ','try:')):left=group('(',[left],')')
+    if right.startswith(('fun','if ','match ','try:')):right=group('(',[right],')')
+    return '(\n'+ind(left+' '+op+' \\')+'\n'+ind(right)+'\n)'
 def ident_safe(s):
     s=s.replace("'",'_prime')
     if s in ['values','def','cond']:s='hol_'+s
@@ -89,13 +96,43 @@ def unalias(a):
         if modalias(f)==a:return f
 def is_alias(a): return unalias(a) is not None
 def string(s): return json.dumps(s,ensure_ascii=False)
+def declared_classes(source):
+    return re.findall(r'^(?:class |record |  )(\w+)\(([^)\n]*)\)(?::|$)',source,re.M)
+def curried_arities(source):
+    found={n:int(a) for a,n in re.findall(r'^\s*curried\((\d+)\) fun (\w+)\(',source,re.M)}
+    for name,params in re.findall(r'^curried fun (\w+)\(([^\n]*)\):',source,re.M):
+        depth=0;count=1
+        for c in params:
+            if c in '([{':depth+=1
+            elif c in ')]}':depth-=1
+            elif c==',' and depth==0:count+=1
+        found[name]=count
+    for public,internal in re.findall(r'^def (\w+) = (\w+)$',source,re.M):
+        if internal in found:found[public]=found[internal]
+    return found
+def source_bindings(ast):
+    result=set()
+    def visit(node):
+        if isinstance(node,list):
+            if len(node)>1 and node[0]=='var' and isinstance(node[1],str):result.add(ident_safe(node[1]))
+            if len(node)>1 and node[0] in ['module','exception'] and isinstance(node[1],str):result.add(ident_safe(node[1]))
+            if len(node)>1 and node[0]=='types':
+                for ty,constructors in node[1]:
+                    result.update(ident_safe(c) for c,n in constructors if isinstance(n,int))
+                    result.add(''.join(part[:1].upper()+part[1:] for part in ty.split('_')))
+            for child in node:visit(child)
+    visit(ast)
+    return result
 def support_names():
     names=set(OPS.values())|{'fun','let','def','if','match','block','try','for','class','import','export','when','unless','cond','values',
         'abs','math','println','print','to_string','max','min','sqrt','floor','ceiling','round','time','sort','error','void','displayln','Num','Char','Bytes','Path','Symbol','Keyword','Number','Boolean','Any','Function','Procedure','compare','error','begin','use','is_a','as','in','with','else','then','do','and','or','not',
         'List','Map','Array','Set','String','Int','Box','Pair','PairList'}
     for f in ['compat','theory_support','type_inference']:
         t=(ROOT/'rhombus/hol/private'/(f+'.rhm')).read_text()
-        names|=set(re.findall(r"^(?:def|fun|class)\s+([A-Za-z_][\w']*)",t,re.M))|set(re.findall(r"^  ([A-Za-z_][\w']*)$",t,re.M))
+        names|=set(re.findall(r"^(?:def|fun|class)\s+([A-Za-z_][\w']*)",t,re.M))
+        exported=re.search(r'^export:\n((?:[ \t]+[^\n]*\n)+)',t,re.M)
+        if exported:
+            names.update(line.strip().rsplit(' as ',1)[-1] for line in exported[1].splitlines())
     return names
 SUPPORT=support_names()
 def source_notice(module):
@@ -152,6 +189,8 @@ class Translator:
         self.arities={"Some":1,"Tyvar":1,"Tyapp":2,"Var":2,"Const":2,"Comb":2,"Abs":2}
         self.arities.update({'Fusion.'+n:k for n,k in self.arities.items() if n!='Some'})
         self.modules={};self.module_path=[];self.module_exports={}
+        self.call_arities={}
+        self.proof_operators=False
     def fresh(self): self.counter+=1; return f'port_tmp_{self.counter}'
     def ident(self,s,env):
         if s in env: return ident_safe(env[s])
@@ -168,13 +207,45 @@ class Translator:
             if '.' not in s:self.unresolved.add(s)
             return ident_safe(s)
         raise ValueError(f'{self.module}: unknown operator/path {s}')
-    def term(self,t):
-        # Constructor-shaped syntax read by the hol_term macro (never expanded as code).
-        k=t[0]
-        if k=='Tyvar': return f'Tyvar({string(t[1])})'
-        if k=='Tyapp': return f'Tyapp({string(t[1])}, [{", ".join(self.term(x) for x in t[2])}])'
-        if k in ['Var','Const']: return f'{k}({string(t[1])}, {self.term(t[2])})'
-        return f'{k}({self.term(t[1])}, {self.term(t[2])})'
+    def term(self,t,bound=()):
+        # Typed syntax is serialized at expansion time, never parsed as HOL text.
+        # Only exact constant signatures get shorthand; every other node stays explicit.
+        k=t[0];boolean=['Tyapp','bool',[]]
+        arrow=lambda a,b:['Tyapp','fun',[a,b]]
+        call=lambda name,args:group(name+'(',args,')')
+        if k=='Tyvar':return call('Tvar',[string(t[1])])
+        if k=='Tyapp':
+            if t[1]=='fun' and len(t[2])==2:return call('Fun',[self.term(x) for x in t[2]])
+            if not t[2] and t[1] in ['bool','num','real','int']:return t[1].capitalize()
+            return call('Tyapp',[string(t[1]),group('[',[self.term(x) for x in t[2]],']')])
+        if k=='Var':
+            nearest=next((v for v in bound if v[1]==t[1]),None)
+            if nearest==t:return call('Ref',[string(t[1])])
+        if k in ['Var','Const']:
+            if k=='Const' and t[2]==boolean and t[1] in ['T','F']:return 'True' if t[1]=='T' else 'False'
+            return call(k,[string(t[1]),self.term(t[2])])
+        if k=='Abs':
+            v=t[1]
+            return call('Lambda',[string(v[1]),self.term(v[2]),self.term(t[2],(v,)+bound)])
+        f,x=t[1:]
+        quantifiers={'!':'Forall','?':'Exists','?!':'ExistsUnique'}
+        if f[0]=='Const' and f[1] in quantifiers and x[0]=='Abs':
+            v=x[1]
+            if f[2]==arrow(arrow(v[2],boolean),boolean):
+                return call(quantifiers[f[1]],[string(v[1]),self.term(v[2]),self.term(x[2],(v,)+bound)])
+        if f==['Const','~',arrow(boolean,boolean)]:return call('Not',[self.term(x,bound)])
+        if f[0]=='Comb' and f[1][0]=='Const':
+            c,a=f[1:];ty=c[2]
+            ops={'/\\':'And','\\/':'Or','==>':'Implies','=':'Iff'}
+            if c[1] in ops and ty==arrow(boolean,arrow(boolean,boolean)):
+                return call(ops[c[1]],[self.term(a,bound),self.term(x,bound)])
+            if c[1]=='=' and ty[0]=='Tyapp' and ty[1]=='fun' and len(ty[2])==2:
+                a_ty=ty[2][0]
+                if ty==arrow(a_ty,arrow(a_ty,boolean)):
+                    return call('Eq',[self.term(a_ty),self.term(a,bound),self.term(x,bound)])
+        args=[];head=t
+        while head[0]=='Comb':args.append(head[2]);head=head[1]
+        return call('App',[self.term(head,bound),group('[',[self.term(a,bound) for a in reversed(args)],']')])
     def pattern(self,p,env):
         k=p[0]
         if k=='any': return '_'
@@ -216,14 +287,9 @@ class Translator:
         finally:stmts=self.cur;self.cur=saved
         return stmts,r
     def emit(self,text): self.cur.append(text)
-    def hoist(self,text):
-        v=self.fresh()
-        if text.startswith('fun(') and '\n' in text: self.emit('fun '+v+text[3:])
-        else: self.emit(assign('let '+v,text))
-        return v
     def atom(self,e,env):
         r=self.expr(e,env)
-        return self.hoist(r) if '\n' in r else r
+        return group('(',[r],')') if '\n' in r else r
     def fun_text(self,name,params,body):
         head='fun'+((' '+ident_safe(name)) if name else '')+'('+params+')'
         return head+': '+body if '\n' not in body else head+':\n'+ind(body)
@@ -246,12 +312,27 @@ class Translator:
                 out+='\n'+(clause+': '+body if '\n' not in body else clause+':\n'+ind(body,4))
         return out
     def function(self,pattern,body,env,name=None):
+        if name in self.call_arities:
+            patterns=[pattern];tail=body
+            while tail[0]=='fun':patterns.append(tail[1]);tail=tail[2]
+            bound=[n for p in patterns for n in names(p)]
+            if len(set(bound))==len(bound):
+                new=env.copy()
+                for n in bound:new[n]=n
+                params=', '.join('_' if p==['construct','()',None] else self.pattern(p,new) for p in patterns)
+                return 'curried '+self.fun_text(name,params,self.lines_of(tail,new))
         new=env.copy()
         for s in names(pattern): new[s]=s
         if len(alternatives(pattern))>1 and names(pattern):
             return self.clauses(name,[(pattern,None,body)],env)
         params='_' if pattern==['construct','()',None] else self.pattern(pattern,new)
-        return self.fun_text(name,params,self.lines_of(body,new))
+        text=self.fun_text(name,params,self.lines_of(body,new))
+        arity=1;tail=body
+        while tail[0]=='fun': arity+=1;tail=tail[2]
+        if name in self.call_arities and arity>1:
+            self.call_arities[ident_safe(name)]=arity
+            text='curried('+str(arity)+') '+text
+        return text
     def record_class(self,names):
         # OCaml resolves a label set to the latest record type declaring all of them.
         want=set(names)
@@ -302,10 +383,10 @@ class Translator:
     def internal_binding(self,name,version):
         plain=ident_safe(name)
         # Keep the HOL Light name unless it could capture a support or Rhombus binding.
-        if not self.module_path and version==1 and plain==name and name not in SUPPORT and name not in self.other_reserved and name not in self.redefined and name not in self.used_binding_names and not name.startswith('port_') and name[0].isalpha():
+        if version==1 and plain==name and name not in SUPPORT and name not in self.other_reserved and name not in self.redefined and name not in self.used_binding_names and not name.startswith('port_') and name[0].isalpha():
             self.used_binding_names.add(name)
             return name
-        candidate=self.module+'_'+name+('_v'+str(version) if version>1 else '')
+        candidate=(name+'_v'+str(version) if version>1 else name+'_impl') if self.module_path else self.module+'_'+name+('_v'+str(version) if version>1 else '')
         while ident_safe(candidate) in self.reserved_names or ident_safe(candidate) in self.used_binding_names:
             candidate='port_'+candidate
         self.used_binding_names.add(ident_safe(candidate))
@@ -346,7 +427,13 @@ class Translator:
         if k=='construct':
             c,arg=e[1:]
             if c=='[]': return 'PairList []'
-            if c=='::': return self.ordered_constructor('PairList.cons',arg[1],env)
+            if c=='::':
+                heads=[];tail=e
+                while tail[0]=='construct' and tail[1]=='::':
+                    head,tail=tail[2][1];heads.append(head)
+                vals,_,_=self.ordered(heads,env)
+                if tail!=['construct','[]',None]: vals.append('& '+self.atom(tail,env))
+                return group('PairList [',vals,']')
             if c in ['true','false']: return '#'+c
             if c=='()': return '#void'
             c=self.ident(c,env)
@@ -370,6 +457,20 @@ class Translator:
             outs,fs,inline_f=self.ordered(args,env,f)
             s=fs
             if inline_f and f[0] not in ['id','apply']: s='('+s+')'
+            proof_ops={'Tactics.THEN':'then_tac','Tactics.THENL':'then_list',
+                       'Tactics.ORELSE':'or_tac','Equal.THENC':'then_conv','Equal.ORELSEC':'or_conv'}
+            if self.proof_operators and fs in proof_ops and len(args)>=2 and not any(labels):
+                s=infix(outs[0],proof_ops[fs],outs[1])
+                for out in outs[2:]:s+=group('(',[out],')')
+                return s
+            arity=self.call_arities.get(fs,1)
+            if arity>1 and not any(labels) and all(a!=['construct','()',None] for a in args):
+                # Later argument expressions must not move before an earlier stage.
+                count=min(arity,len(args))
+                if all(pure(a) for a in args[1:count]):
+                    s+=group('(',outs[:count],')')
+                    for out in outs[count:]:s+=group('(',[out],')')
+                    return s
             for arg_index,(a,label) in enumerate(zip(args,labels)):
                 if label.startswith('?'):raise ValueError('optional argument forwarding')
                 if label:s+=group('('+label+': ',[outs[arg_index]],')');continue
@@ -491,6 +592,8 @@ class Translator:
         child.module_env=self.module_env.copy()
         child.unresolved=self.unresolved
         child.modules=self.modules;child.module_exports=self.module_exports;child.arities=self.arities.copy()
+        child.call_arities=self.call_arities.copy()
+        child.proof_operators=self.proof_operators
         child.module_path=self.module_path+[name]
         body=child.translate(m[1],[],header=False)
         self.module_exports['.'.join(child.module_path)]=list(child.exports)
@@ -555,7 +658,7 @@ class Translator:
                 out+='\n'+(head+': '+safe(body) if '\n' not in body else head+':\n'+ind(body,4))
         return out
     def export_specs(self):
-        return [('rename '+ident_safe(internal)+' as '+ident_safe(s)) if internal in self.class_values else ident_safe(s) for s,internal in self.exports.items()]
+        return [('rename '+ident_safe(internal)+' as '+ident_safe(s)) if internal in self.class_values and internal!=s else ident_safe(s) for s,internal in self.exports.items()]
     def translate(self,ast,deps,header=True):
         self.reserved_names={ident_safe(n) for i in ast if i[0]=='value'
                              for p,_ in i[2] for n in names(p)}
@@ -573,8 +676,13 @@ class Translator:
         lines=['#lang rhombus', '// GENERATED FILE - DO NOT EDIT. Regenerate with tools/translate/translate.py.', '// Direct translation of the pinned HOL Light '+self.module+'.ml.',
                source_notice(self.module),
                '// Quotations are expanded offline; every proof is replayed here.',
-               'import: "private/compat.rhm" open', 'import: "private/theory_support.rhm" as Host']
+               'import: "private/compat.rhm" open', 'import: "private/theory_support.rhm" as Host',
+               'import: "private/curried.rhm" open',
+               'import: "private/declarations.rhm" open']
         core=CORE[:4] if self.module=='preterm' else (['fusion','basics','equal'] if self.module=='bool' else (CORE[:CORE.index(self.module)] if self.module in CORE else CORE))
+        if header:
+            self.proof_operators='tactics' in core+deps
+            if self.proof_operators:lines.append('import: "private/proof_syntax.rhm" open')
         if not header: lines=[]
         else:
             for name in re.search(r'^export:\n((?:[ \t]+[^\n]*\n)+)',(ROOT/'rhombus/hol/private/theory_support.rhm').read_text(),re.M)[1].splitlines():
@@ -590,7 +698,9 @@ class Translator:
                     name=name.strip().rsplit(' as ',1)[-1]
                     if re.fullmatch(r'\w+',name):self.env[name]='TypeInference.'+name
                 aliases=dict(re.findall(r'\brename (\w+) as (\w+)',source))
-                for ctor,args in re.findall(r'^class ([A-Za-z_]\w*)\(([^)]*)\)',source,re.M):
+                for name,arity in curried_arities(source).items():
+                    self.call_arities['TypeInference.'+name]=arity
+                for ctor,args in declared_classes(source):
                     self.arities['TypeInference.'+aliases.get(ctor,ctor)]=len(args.split(',')) if args else 0
             for n in dict.fromkeys(core+deps):
                 alias=modalias(n)
@@ -609,7 +719,9 @@ class Translator:
                     if re.fullmatch(r'\w+',name) and name not in OPS:self.env[name]=alias+'.'+name
                     if alias+'.'+name in self.modules:self.module_env[name]=alias+'.'+name
                 aliases=dict(re.findall(r'\brename (\w+) as (\w+)',source))
-                for ctor,args in re.findall(r'^class ([A-Za-z_]\w*)\(([^)]*)\)',source,re.M):
+                for name,arity in curried_arities(source).items():
+                    self.call_arities[alias+'.'+name]=arity
+                for ctor,args in declared_classes(source):
                     self.arities[alias+'.'+aliases.get(ctor,ctor)]=len(args.split(',')) if args else 0
                 for name in re.findall(r"^export bind\.macro '([A-Za-z_]\w*)",source,re.M): self.env[name]=alias+'.'+name
         for item in ast:
@@ -623,7 +735,10 @@ class Translator:
                 for p,e in item[2]:
                     for name in names(p):
                         self.versions[name]=self.versions.get(name,0)+1
-                        self.top_group[name]=self.internal_binding(name,self.versions[name])
+                    self.top_group[name]=self.internal_binding(name,self.versions[name])
+                    tail=e;arity=0
+                    while tail[0]=='fun':arity+=1;tail=tail[2]
+                    if arity>1:self.call_arities[ident_safe(self.top_group[name])]=arity
                 if item[1]=='rec':self.env.update(self.top_group)
                 result_env=self.env.copy()
                 for p,e in item[2]:
@@ -650,7 +765,8 @@ class Translator:
                 continue
             if item[0]=='exception':
                 arity=item[2] if len(item)>2 else 0
-                lines.append('class '+item[1]+'('+','.join('field'+str(i) for i in range(arity))+')')
+                fields=['message'] if arity==1 else constructor_fields(item[1],arity)
+                lines.append('class '+item[1]+'('+', '.join(fields)+')')
                 self.exports[item[1]]=item[1]
                 self.env[item[1]]=item[1]
                 self.class_values.add(item[1]);self.arities[item[1]]=arity
@@ -670,7 +786,7 @@ class Translator:
                 name='include_'+str(self.fresh().split('_')[-1])
                 lines.append(self.module_body(name,item[1],self.env))
                 for n in self.module_exports['.'.join(self.module_path+[name])]:
-                    internal=self.module+'_include_'+ident_safe(n)
+                    internal=('included_'+ident_safe(n)) if self.module_path else self.module+'_include_'+ident_safe(n)
                     key='.'.join(self.module_path+[name,n])
                     if name+'.'+n in self.class_values:
                         internal=name+'.'+n
@@ -685,46 +801,82 @@ class Translator:
                 std=['map','rev','length','concat','exists','filter','find','fold_left','fold_right',
                      'for_all','hd','iter','mem','mem_assoc','nth','partition','rev_append','sort','map2','assoc','concat_map','filter_map','fold_left2','fold_right2','mapi','rev_map','for_all2']
                 for n in std:
-                    internal=self.module+'_stdlib_'+n
+                    internal=('stdlib_'+n) if self.module_path else self.module+'_stdlib_'+n
                     lines.append('def '+internal+' = '+self.ident('OCamlList.'+n,self.env))
                     self.env[n]=internal;self.exports[n]=internal
                 continue
             if item[0]=='types':
-                fields={'Prover':['conv','augmentor'],'Simpset':['net','prover','provers','rewmaker']}
                 for ty,cs in item[1]:
-                    counts=[0,0]
                     record_fields=[c for c,n in cs if not isinstance(n,int)]
                     if record_fields:
-                        cls=self.module+'_rec_'+ty
-                        while ident_safe(cls) in self.used_binding_names or cls in self.reserved_names: cls='port_'+cls
+                        cls=''.join(part[:1].upper()+part[1:] for part in ty.split('_'))
+                        if cls in SUPPORT or cls in self.other_reserved or cls in self.module_env:cls+='Record'
+                        while ident_safe(cls) in self.used_binding_names: cls+='Record'
                         self.used_binding_names.add(ident_safe(cls))
                         fs=[ident_safe(f) for f in record_fields]
                         self.record_defs.append((cls,record_fields,tuple(self.module_path)));self.exports[cls]=cls
                         self.class_values.add(cls)
-                        lines.append('class '+cls+'('+', '.join(fs)+'):\n  extends '+self.ident('HolVariant',self.env)+'\n  override port_view(): PairList ['+', '.join('this.'+f for f in fs)+']\n  method port_update(updates):\n    '+cls+'('+', '.join('(if updates.has_key('+string(f)+') | updates['+string(f)+'] | this.'+f+')' for f in fs)+')')
+                        lines.append('record '+cls+'('+', '.join(fs)+')')
+                    constructors=[]
                     for ctor,n in cs:
                         if not isinstance(n,int): continue # Host Map carries record labels directly.
-                        internal=self.module+'_ctor_'+ctor
+                        internal=ident_safe(ctor)
+                        if internal in SUPPORT or internal in self.used_binding_names or internal in self.module_env:internal+='Value'
+                        while internal in self.used_binding_names:internal+='Value'
+                        self.used_binding_names.add(internal)
                         self.arities[ctor]=n;self.arities[internal]=n
                         self.class_values.add(internal)
-                        kind=0 if n==0 else 1;tag=counts[kind];counts[kind]+=1
-                        fs=fields.get(ctor,[f'field{i}' for i in range(n)])
-                        lines.append('class '+internal+'('+', '.join(fs)+'):\n  extends '+self.ident('HolVariant',self.env)+'\n  override port_view(): ['+str(kind)+', ['+str(tag)+', PairList ['+', '.join('this.'+f for f in fs)+']]]')
+                        fs=constructor_fields(ctor,n)
+                        constructors.append(internal+'('+', '.join(fs)+')')
                         self.exports[ctor]=internal
                         self.env[ctor]=internal
+                    if constructors:lines.append('variant '+ident_safe(ty)+':\n'+ind('\n'.join(constructors)))
                 continue
             raise ValueError(f'{self.module}: unsupported structure {item[0]}')
         for s,internal in self.exports.items():
             if s!=internal and internal not in self.class_values:
                 if internal in self.namespace_values:lines.append('import: .'+ident_safe(internal)+' as '+ident_safe(s))
                 else:lines.append('def '+ident_safe(s)+' = '+ident_safe(internal))
-        if header: lines.insert(7,'export:\n'+ind('\n'.join(self.export_specs())))
+        if header:
+            # Open only names that cannot capture any original binding, even inside
+            # nested functions. Keep qualifications for earlier shadowed imports.
+            bound=source_bindings(ast)|self.used_binding_names
+            imports={modalias(n):n for n in dict.fromkeys(core+deps)}
+            bound.update(imports)
+            text='\n\n'.join(lines)
+            used_names=set(re.findall(r'\b[A-Z]\w*\.\w+\b',text))
+            short_imports={}
+            replacements={}
+            for name,target in self.env.items():
+                if not re.fullmatch(r'[A-Za-z_]\w*',name) or name in bound:continue
+                if target.count('.')!=1:continue
+                alias,public=target.split('.')
+                if alias not in imports or public!=name:continue
+                if target not in used_names:continue
+                replacements[target]=name
+                short_imports.setdefault(imports[alias],[]).append(name)
+            if replacements:
+                # A single lexical pass protects strings and avoids one scan of
+                # the whole module per imported identifier.
+                token=re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|(?<![\w.])(?:'+
+                                 '|'.join(re.escape(n) for n in sorted(replacements,key=len,reverse=True))+r')\b')
+                lines=[token.sub(lambda m:replacements.get(m[0],m[0]),line) for line in lines]
+            for module,opened in short_imports.items():
+                lines.insert(5,'import: "'+module+'.rhm" open:\n  only:\n'+ind('\n'.join(opened),4))
+            lines.insert(7,'export:\n'+ind('\n'.join(self.export_specs())))
+            # One import block instead of blank lines around every import/name.
+            file_imports=[line for line in lines if line.startswith('import: "')]
+            position=next(i for i,line in enumerate(lines) if line.startswith('import: "'))
+            lines=[line for line in lines if not line.startswith('import: "')]
+            lines.insert(position,'import:\n'+ind('\n'.join(line[len('import: '):] for line in file_imports)))
         return '\n\n'.join(lines)+'\n'
 
 def translate_type_support():
     t=Translator('preterm',{})
     text=t.translate(json.loads(read_data('preterm.json')),[])
     text=text.replace('private/compat.rhm','compat.rhm').replace('private/theory_support.rhm','theory_support.rhm')
+    text=text.replace('private/curried.rhm','curried.rhm')
+    text=text.replace('private/declarations.rhm','declarations.rhm')
     for name in CORE[:4]:text=text.replace('\"'+name+'.rhm\"','\"../'+name+'.rhm\"')
     write_changed(ROOT/'rhombus/hol/private/type_inference.rhm',text)
 
@@ -778,7 +930,7 @@ def translate_lib_support():
         if len(items)!=1: raise ValueError('lib item '+name)
         t=Translator('lib',{});t.bridge=False
         new=t.translate(items,[],header=False).strip('\n')
-        pattern=re.compile(r'^(?:fun|def) lib_'+name+r'\b.*?^def '+name+r' = lib_'+name+r'$',re.S|re.M)
+        pattern=re.compile(r'^(?:curried(?:\(\d+\))? )?(?:fun|def) lib_'+name+r'\b.*?^def '+name+r' = lib_'+name+r'$',re.S|re.M)
         if not pattern.search(text): raise ValueError('theory_support block '+name)
         text=pattern.sub(lambda m:new,text,count=1)
     write_changed(path,text)

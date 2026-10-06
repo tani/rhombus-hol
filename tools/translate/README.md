@@ -5,12 +5,18 @@ The original source files are under `differential/upstream`.
 
 `ast.ml` reads the compiler AST produced by the original HOL Light Camlp5
 extension. `translate.py` preserves definitions, curried calls, branches,
-pattern matching, exceptions, and proof scripts. Literal quotations become constructor-shaped syntax,
-`hol_term(Comb(Const("!", Tyapp(...)), ...))`, holding their offline-inferred,
-typed ASTs. The `hol_term` macro in `private/quoted_ast.rhm` reads that syntax
-at expansion time (it is never expanded as code, which is about 20 times
-faster to compile than nested `mk_comb` calls) and the result is materialized
-through the existing public kernel term/type constructors at run time.
+pattern matching, exceptions, and proof scripts. Literal quotations use typed
+Rhombus macro syntax, for example:
+
+```rhombus
+hol_term(Forall("x", Tvar("A"), Eq(Tvar("A"), Ref("x"), Ref("x"))))
+```
+
+The macro in `private/quoted_ast.rhm` serializes this syntax at expansion time;
+it is never expanded as nested constructor calls. `Forall`, `Eq`, and other
+shorthands restore exact constant signatures, while `Ref` restores a bound
+variable's original name and type. Unrecognized constants and types stay
+explicit. Runtime terms still use the public kernel constructors.
 Runtime code
 never imports a recorded theorem or adds an axiom to replace a proof.
 
@@ -49,21 +55,51 @@ functor application specializes these groups with the original comparator.
 This preserves tree shape and stateful predicate traversal, including Metis's
 random model callbacks. The original OCaml sources and licenses are in `stdlib/`.
 
-Mechanical adaptations include curried calls, immutable record maps with
-declared field order, OCaml tuples as Rhombus lists (pairs included; OCaml lists are `PairList`),
-record types as classes with a `port_update` method, and shared exception/option representations. Effectful
-arguments and constructor fields preserve OCaml's right-to-left evaluation;
-simultaneous value bindings preserve their left-to-right evaluation. Unit
-callbacks accept one unit value and are bridged to the existing zero-argument
-native engine functions. Local values use `let`; recursive functions use `fun`. Translated modules are
-imported under capitalized namespaces (`Fusion`, `Tactics`, ...). A top-level
-value defined once keeps its HOL Light name; nested modules and redefinitions
-use module-prefixed names. Generated files start with a DO NOT EDIT header.
+Mechanical adaptations include immutable record updates, OCaml tuples as
+Rhombus lists (pairs included; OCaml lists are `PairList`), and shared
+exception/option representations. Arguments follow Rhombus evaluation order;
+the port does not restore OCaml's right-to-left operand evaluation. Local
+values use `let`; recursive functions use `fun`.
+
+`private/curried.rhm` implements variadic staged application:
+
+```rhombus
+curried fun add(x, y): x + y
+// Both add(1)(2) and add(1, 2) return 3.
+```
+
+Every unary stage executes as its argument arrives. A partial application
+shares the state allocated in its completed stages; a completed application
+returns its result unchanged. Extra arguments apply to a function result.
+The generator flattens consecutive lambdas into these declarations. For
+shadowed parameter names it retains the explicit staged declaration. Lambdas
+separated by computation keep that computation at its original stage. Calls
+are grouped only when their callee has a known staged arity and later
+argument expressions are pure. Arbitrary callbacks retain unary calls.
+
+`variant` declarations derive comparison tags from original constructor order;
+`record` declarations derive comparison views and immutable `port_update`.
+`tools/translate/fields.py` records payload names from the pinned source; a
+missing layout fails generation. Constructor and field order never change.
+Kernel constructors retain their separate private, opaque implementation.
+
+Nested modules use their own scope for short names. Redefined or conflicting
+bindings keep short suffixes. Imported names are opened selectively only when
+no original binding can capture them; namespace aliases remain qualified.
+Proof operators (`then_tac`, `then_list`, `or_tac`, `then_conv`, `or_conv`)
+expand the original combinators, retaining the original expression tree.
+The generator formats long calls and branches with indentation and uses
+`PairList [a, b, & tail]` instead of chains of list constructors.
 
 `Hashtbl` is a Rhombus `MutableMap` from each key to its stack of bindings
 (`add` shadows, `remove` restores); `fold` visits bindings newest first.
-Bucket iteration order is not an OCaml-compatible API. The source AVL functors and the
-Patricia term maps preserve the traversal required by the standard proofs.
+Bucket iteration order is not an OCaml-compatible API. The source AVL functors preserve tree structure; Patricia term maps retain
+the original traversal. Set predicates and Map.exists retain their recorded
+callback traces. Map.merge has a preexisting evaluation-order difference: its
+callbacks run in ascending key order here, versus descending order in OCaml.
+The `check_stdlib.py` oracle still reports that difference without changing
+its expected trace. It is also present in the checkout before this readability
+refactor.
 
 The theories replay their original proof scripts. Timing and Format diagnostic
 output are compatibility stubs; they are not a HOL text printer. Internal

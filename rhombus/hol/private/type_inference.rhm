@@ -17,9 +17,35 @@
 
 // Quotations are expanded offline; every proof is replayed here.
 
-import: "compat.rhm" open
-
-import: "theory_support.rhm" as Host
+import:
+  "../basics.rhm" open:
+    only:
+      type_match
+      mk_mconst
+      mk_gabs
+  "../fusion.rhm" open:
+    only:
+      mk_type
+      mk_vartype
+      tyvars
+      aty
+      get_const_type
+      mk_var
+      mk_comb
+      dest_var
+      dest_const
+      dest_comb
+      dest_abs
+      Tyvar
+      Tyapp
+  "compat.rhm" open
+  "theory_support.rhm" as Host
+  "curried.rhm" open
+  "declarations.rhm" open
+  "../fusion.rhm" as Fusion
+  "../basics.rhm" as Basics
+  "../nets.rhm" as Nets
+  "../equal.rhm" as Equal
 
 export:
   ignore_constant_varstruct
@@ -38,28 +64,20 @@ export:
   hide_constant
   unhide_constant
   is_hidden
-  rename preterm_ctor_Utv as Utv
-  rename preterm_ctor_Ptycon as Ptycon
-  rename preterm_ctor_Stv as Stv
+  rename UtvValue as Utv
+  rename PtyconValue as Ptycon
+  rename StvValue as Stv
   dpty
   pretype_of_type
-  rename preterm_ctor_Varp as Varp
-  rename preterm_ctor_Constp as Constp
-  rename preterm_ctor_Combp as Combp
-  rename preterm_ctor_Absp as Absp
-  rename preterm_ctor_Typing as Typing
+  rename VarpValue as Varp
+  rename ConstpValue as Constp
+  rename CombpValue as Combp
+  rename AbspValue as Absp
+  rename TypingValue as Typing
   preterm_of_term
   type_of_pretype
   term_of_preterm
   retypecheck
-
-import: "../fusion.rhm" as Fusion
-
-import: "../basics.rhm" as Basics
-
-import: "../nets.rhm" as Nets
-
-import: "../equal.rhm" as Equal
 
 def preterm_ignore_constant_varstruct = Box(#true)
 
@@ -69,11 +87,10 @@ def preterm_type_invention_error = Box(#false)
 
 def preterm_the_implicit_types = Box(PairList [])
 
-fun preterm_make_overloadable(s):
-  fun(gty):
-    if can(assoc(s))(Host.ref_get(Host.the_overload_skeletons))
-    | (if Host.hol_equal(assoc(s)(Host.ref_get(Host.the_overload_skeletons)))(gty) | #void | failwith("make_overloadable: differs from existing skeleton"))
-    | Host.ref_set(Host.the_overload_skeletons)(PairList.cons([s, gty], Host.ref_get(Host.the_overload_skeletons)))
+curried fun preterm_make_overloadable(s, gty):
+  if can(assoc(s))(Host.ref_get(Host.the_overload_skeletons))
+  | (if Host.hol_equal(assoc(s)(Host.ref_get(Host.the_overload_skeletons)))(gty) | #void | failwith("make_overloadable: differs from existing skeleton"))
+  | Host.ref_set(Host.the_overload_skeletons)(PairList [[s, gty], & Host.ref_get(Host.the_overload_skeletons)])
 
 fun preterm_remove_interface(sym):
   let interface = filter(o(Host.hol_unequal(sym))(fst))(Host.ref_get(Host.the_interface))
@@ -82,23 +99,23 @@ fun preterm_remove_interface(sym):
 fun preterm_reduce_interface([sym, tm]):
   let namty:
     try:
-      Fusion.dest_const(tm)
+      dest_const(tm)
       ~catch exn:
         match exn
-        | Failure(_): Fusion.dest_var(tm)
+        | Failure(_): dest_var(tm)
         | exn: Host.hol_raise(exn)
   Host.ref_set(Host.the_interface)(filter(Host.hol_unequal([sym, namty]))(Host.ref_get(Host.the_interface)))
 
 fun preterm_override_interface([sym, tm]):
   let namty:
     try:
-      Fusion.dest_const(tm)
+      dest_const(tm)
       ~catch exn:
         match exn
-        | Failure(_): Fusion.dest_var(tm)
+        | Failure(_): dest_var(tm)
         | exn: Host.hol_raise(exn)
   let interface = filter(o(Host.hol_unequal(sym))(fst))(Host.ref_get(Host.the_interface))
-  Host.ref_set(Host.the_interface)(PairList.cons([sym, namty], interface))
+  Host.ref_set(Host.the_interface)(PairList [[sym, namty], & interface])
 
 fun preterm_overload_interface([sym, tm]):
   let gty:
@@ -110,139 +127,127 @@ fun preterm_overload_interface([sym, tm]):
         | exn: Host.hol_raise(exn)
   let [name, ty] as namty:
     try:
-      Fusion.dest_const(tm)
+      dest_const(tm)
       ~catch exn:
         match exn
-        | Failure(_): Fusion.dest_var(tm)
+        | Failure(_): dest_var(tm)
         | exn: Host.hol_raise(exn)
-  if Host.hol_not(can(Basics.type_match(gty)(ty))(PairList []))
+  if Host.hol_not(can(type_match(gty)(ty))(PairList []))
   | failwith("Not an instance of type skeleton")
   | let interface = filter(Host.hol_unequal([sym, namty]))(Host.ref_get(Host.the_interface))
-    Host.ref_set(Host.the_interface)(PairList.cons([sym, namty], interface))
+    Host.ref_set(Host.the_interface)(PairList [[sym, namty], & interface])
 
 fun preterm_prioritize_overload(ty):
   Host.do_list(
     fun([s, gty]):
       try:
-        let [_, [n, t]] = find((fun([s_prime, [n, t]]): (Host.hol_equal(s_prime)(s) && mem(ty)(map(fst)(Basics.type_match(gty)(t)(PairList []))))))(Host.ref_get(Host.the_interface))
-        preterm_overload_interface([s, Fusion.mk_var([n, t])])
+        let [_, [n, t]]:
+          find(
+            (fun([s_prime, [n, t]]): (Host.hol_equal(s_prime)(s) && mem(ty)(map(fst)(type_match(gty)(t)(PairList [])))))
+          )(Host.ref_get(Host.the_interface))
+        preterm_overload_interface([s, mk_var([n, t])])
         ~catch exn:
           match exn
           | Failure(_): #void
-          | exn: Host.hol_raise(exn))(Host.ref_get(Host.the_overload_skeletons))
+          | exn: Host.hol_raise(exn)
+  )(Host.ref_get(Host.the_overload_skeletons))
 
-def [preterm_new_type_abbrev, preterm_remove_type_abbrev, preterm_type_abbrevs]:
+def [preterm_new_type_abbrev_v2, preterm_remove_type_abbrev_v2, preterm_type_abbrevs]:
   let the_type_abbreviations = Box(PairList [])
-  let remove_type_abbrev_2 = (fun(s): Host.ref_set(the_type_abbreviations)(filter((fun([s_prime, _]): Host.hol_unequal(s_prime)(s)))(Host.ref_get(the_type_abbreviations))))
+  let remove_type_abbrev_2:
+    fun(s):
+      Host.ref_set(the_type_abbreviations)(
+        filter((fun([s_prime, _]): Host.hol_unequal(s_prime)(s)))(Host.ref_get(the_type_abbreviations))
+      )
   let new_type_abbrev_2:
     fun([s, ty]):
       remove_type_abbrev_2(s)
-      Host.ref_set(the_type_abbreviations)(Host.merge(Host.hol_lt)(PairList.cons([s, ty], PairList []))(Host.ref_get(the_type_abbreviations)))
+      Host.ref_set(the_type_abbreviations)(Host.merge(Host.hol_lt)(PairList [[s, ty]])(Host.ref_get(the_type_abbreviations)))
   let type_abbrevs_2 = (fun(_): Host.ref_get(the_type_abbreviations))
   [new_type_abbrev_2, remove_type_abbrev_2, type_abbrevs_2]
 
-def [preterm_hide_constant, preterm_unhide_constant, preterm_is_hidden]:
+def [preterm_hide_constant_v2, preterm_unhide_constant_v2, preterm_is_hidden]:
   let hcs = Box(PairList [])
-  let hide_constant_2 = (fun(c): Host.ref_set(hcs)(union(PairList.cons(c, PairList []))(Host.ref_get(hcs))))
-  let unhide_constant_2 = (fun(c): Host.ref_set(hcs)(subtract(Host.ref_get(hcs))(PairList.cons(c, PairList []))))
+  let hide_constant_2 = (fun(c): Host.ref_set(hcs)(union(PairList [c])(Host.ref_get(hcs))))
+  let unhide_constant_2 = (fun(c): Host.ref_set(hcs)(subtract(Host.ref_get(hcs))(PairList [c])))
   let is_hidden_2 = (fun(c): mem(c)(Host.ref_get(hcs)))
   [hide_constant_2, unhide_constant_2, is_hidden_2]
 
-class preterm_ctor_Utv(field0):
-  extends Host.HolVariant
-  override port_view(): [1, [0, PairList [this.field0]]]
+variant pretype:
+  UtvValue(name)
+  PtyconValue(name, arguments)
+  StvValue(index)
 
-class preterm_ctor_Ptycon(field0, field1):
-  extends Host.HolVariant
-  override port_view(): [1, [1, PairList [this.field0, this.field1]]]
-
-class preterm_ctor_Stv(field0):
-  extends Host.HolVariant
-  override port_view(): [1, [2, PairList [this.field0]]]
-
-def preterm_dpty = preterm_ctor_Ptycon("", PairList [])
+def preterm_dpty = PtyconValue("", PairList [])
 
 fun preterm_pretype_of_type(ty):
   match ty
-  | Fusion.Tyvar(s): preterm_ctor_Utv(s)
-  | Fusion.Tyapp(con,args): preterm_ctor_Ptycon(con, map(preterm_pretype_of_type)(args))
+  | Tyvar(s): UtvValue(s)
+  | Tyapp(con,args): PtyconValue(con, map(preterm_pretype_of_type)(args))
 
-class preterm_ctor_Varp(field0, field1):
-  extends Host.HolVariant
-  override port_view(): [1, [0, PairList [this.field0, this.field1]]]
-
-class preterm_ctor_Constp(field0, field1):
-  extends Host.HolVariant
-  override port_view(): [1, [1, PairList [this.field0, this.field1]]]
-
-class preterm_ctor_Combp(field0, field1):
-  extends Host.HolVariant
-  override port_view(): [1, [2, PairList [this.field0, this.field1]]]
-
-class preterm_ctor_Absp(field0, field1):
-  extends Host.HolVariant
-  override port_view(): [1, [3, PairList [this.field0, this.field1]]]
-
-class preterm_ctor_Typing(field0, field1):
-  extends Host.HolVariant
-  override port_view(): [1, [4, PairList [this.field0, this.field1]]]
+variant preterm:
+  VarpValue(name, pretype)
+  ConstpValue(name, pretype)
+  CombpValue(operator, operand)
+  AbspValue(variable, body)
+  TypingValue(term, pretype)
 
 fun preterm_preterm_of_term(tm):
   try:
-    let [n, ty] = Fusion.dest_var(tm)
-    preterm_ctor_Varp(n, preterm_pretype_of_type(ty))
+    let [n, ty] = dest_var(tm)
+    VarpValue(n, preterm_pretype_of_type(ty))
     ~catch exn:
       match exn
       | Failure(_):
           try:
-            let [n, ty] = Fusion.dest_const(tm)
-            preterm_ctor_Constp(n, preterm_pretype_of_type(ty))
+            let [n, ty] = dest_const(tm)
+            ConstpValue(n, preterm_pretype_of_type(ty))
             ~catch exn:
               match exn
               | Failure(_):
                   try:
-                    let [v, bod] = Fusion.dest_abs(tm)
-                    preterm_ctor_Absp(preterm_preterm_of_term(v), preterm_preterm_of_term(bod))
+                    let [v, bod] = dest_abs(tm)
+                    AbspValue(preterm_preterm_of_term(v), preterm_preterm_of_term(bod))
                     ~catch exn:
                       match exn
                       | Failure(_):
-                          let [l, r] = Fusion.dest_comb(tm)
-                          preterm_ctor_Combp(preterm_preterm_of_term(l), preterm_preterm_of_term(r))
+                          let [l, r] = dest_comb(tm)
+                          CombpValue(preterm_preterm_of_term(l), preterm_preterm_of_term(r))
                       | exn: Host.hol_raise(exn)
               | exn: Host.hol_raise(exn)
       | exn: Host.hol_raise(exn)
 
-def [preterm_type_of_pretype, preterm_term_of_preterm, preterm_retypecheck]:
+def [preterm_type_of_pretype_v2, preterm_term_of_preterm_v2, preterm_retypecheck]:
   let tyv_num = Box(0)
   let new_type_var:
     fun(_):
       let n = Host.ref_get(tyv_num)
       Host.ref_set(tyv_num)(Host.hol_add(n)(1))
-      preterm_ctor_Stv(n)
-  let pmk_cv = (fun([s, pty]): (if can(Fusion.get_const_type)(s) | preterm_ctor_Constp(s, pty) | preterm_ctor_Varp(s, pty)))
-  let num_pty = preterm_ctor_Ptycon("num", PairList [])
-  let NUMERAL_2 = preterm_ctor_Constp("NUMERAL", preterm_ctor_Ptycon("fun", PairList.cons(num_pty, PairList.cons(num_pty, PairList []))))
-  let BIT0_2 = preterm_ctor_Constp("BIT0", preterm_ctor_Ptycon("fun", PairList.cons(num_pty, PairList.cons(num_pty, PairList []))))
-  let BIT1_2 = preterm_ctor_Constp("BIT1", preterm_ctor_Ptycon("fun", PairList.cons(num_pty, PairList.cons(num_pty, PairList []))))
-  let t_0_2 = preterm_ctor_Constp("_0", num_pty)
+      StvValue(n)
+  let pmk_cv = (fun([s, pty]): (if can(get_const_type)(s) | ConstpValue(s, pty) | VarpValue(s, pty)))
+  let num_pty = PtyconValue("num", PairList [])
+  let NUMERAL_2 = ConstpValue("NUMERAL", PtyconValue("fun", PairList [num_pty, num_pty]))
+  let BIT0_2 = ConstpValue("BIT0", PtyconValue("fun", PairList [num_pty, num_pty]))
+  let BIT1_2 = ConstpValue("BIT1", PtyconValue("fun", PairList [num_pty, num_pty]))
+  let t_0_2 = ConstpValue("_0", num_pty)
   fun pmk_numeral_2(n):
     if Host.hol_equal(n)(Host.num_0)
     | t_0_2
     | let m_2 = Host.quo_num(n)(Host.num_2)
       let b_2 = Host.mod_num(n)(Host.num_2)
       let op = (if Host.hol_equal(b_2)(Host.num_0) | BIT0_2 | BIT1_2)
-      preterm_ctor_Combp(op, pmk_numeral_2(m_2))
-  let pmk_numeral = (fun(n): preterm_ctor_Combp(NUMERAL_2, pmk_numeral_2(n)))
+      CombpValue(op, pmk_numeral_2(m_2))
+  let pmk_numeral = (fun(n): CombpValue(NUMERAL_2, pmk_numeral_2(n)))
   fun pretype_subst(th):
     fun(ty):
       match ty
-      | preterm_ctor_Ptycon(tycon,args): preterm_ctor_Ptycon(tycon, map(pretype_subst(th))(args))
-      | preterm_ctor_Utv(v): rev_assocd(ty)(th)(ty)
+      | PtyconValue(tycon,args): PtyconValue(tycon, map(pretype_subst(th))(args))
+      | UtvValue(v): rev_assocd(ty)(th)(ty)
       | _: failwith("pretype_subst: Unexpected form of pretype")
   let pretype_instance:
     fun(ty):
       let gty_2 = preterm_pretype_of_type(ty)
-      let tyvs_2 = map(preterm_pretype_of_type)(Fusion.tyvars(ty))
+      let tyvs_2 = map(preterm_pretype_of_type)(tyvars(ty))
       let subs = map((fun(tv): [Host.hol_apply_unit(new_type_var), tv]))(tyvs_2)
       pretype_subst(subs)(gty_2)
   let get_generic_type:
@@ -250,33 +255,33 @@ def [preterm_type_of_pretype, preterm_term_of_preterm, preterm_retypecheck]:
       match filter(o(Host.hol_equal(cname))(fst))(Host.ref_get(Host.the_interface))
       | PairList [[_, [c, ty]], & PairList []]: ty
       | PairList [_, & PairList [_, & _]]: assoc(cname)(Host.ref_get(Host.the_overload_skeletons))
-      | PairList []: Fusion.get_const_type(cname)
+      | PairList []: get_const_type(cname)
   let get_var_type = (fun(vname): assoc(vname)(Host.ref_get(preterm_the_implicit_types)))
   fun solve(env):
     fun(pty):
       match pty
-      | preterm_ctor_Ptycon(f,args): preterm_ctor_Ptycon(f, map(solve(env))(args))
-      | preterm_ctor_Stv(i): (if Host.defined(env)(i) | solve(env)(Host.apply(env)(i)) | pty)
+      | PtyconValue(f,args): PtyconValue(f, map(solve(env))(args))
+      | StvValue(i): (if Host.defined(env)(i) | solve(env)(Host.apply(env)(i)) | pty)
       | _: pty
   fun free_stvs_2
-  | free_stvs_2(preterm_ctor_Stv(n)): PairList.cons(n, PairList [])
-  | free_stvs_2(preterm_ctor_Utv(_)): PairList []
-  | free_stvs_2(preterm_ctor_Ptycon(_,args)): Host.flat(map(free_stvs_2)(args))
+  | free_stvs_2(StvValue(n)): PairList [n]
+  | free_stvs_2(UtvValue(_)): PairList []
+  | free_stvs_2(PtyconValue(_,args)): Host.flat(map(free_stvs_2)(args))
   let free_stvs = o(Host.setify)(free_stvs_2)
   let string_of_pretype:
     fun(stvs):
       fun type_of_pretype_prime(ns):
         fun
-        | (preterm_ctor_Stv(n)): Fusion.mk_vartype((if mem(n)(ns) | Host.hol_concat("?")(Host.hol_string_of_int(n)) | "_"))
-        | (preterm_ctor_Utv(v)): Fusion.mk_vartype(v)
-        | (preterm_ctor_Ptycon(con,args)): Fusion.mk_type([con, map(type_of_pretype_prime(ns))(args)])
+        | (StvValue(n)): mk_vartype((if mem(n)(ns) | Host.hol_concat("?")(Host.hol_string_of_int(n)) | "_"))
+        | (UtvValue(v)): mk_vartype(v)
+        | (PtyconValue(con,args)): mk_type([con, map(type_of_pretype_prime(ns))(args)])
       o(Host.string_of_type)(type_of_pretype_prime(stvs))
   fun untyped_t_of_pt
-  | untyped_t_of_pt(preterm_ctor_Varp(s,pty)): Fusion.mk_var([s, Fusion.aty])
-  | untyped_t_of_pt(preterm_ctor_Constp(s,pty)): Basics.mk_mconst([s, Fusion.get_const_type(s)])
-  | untyped_t_of_pt(preterm_ctor_Combp(l,r)): Fusion.mk_comb([untyped_t_of_pt(l), untyped_t_of_pt(r)])
-  | untyped_t_of_pt(preterm_ctor_Absp(v,bod)): Basics.mk_gabs([untyped_t_of_pt(v), untyped_t_of_pt(bod)])
-  | untyped_t_of_pt(preterm_ctor_Typing(ptm,pty)): untyped_t_of_pt(ptm)
+  | untyped_t_of_pt(VarpValue(s,pty)): mk_var([s, aty])
+  | untyped_t_of_pt(ConstpValue(s,pty)): mk_mconst([s, get_const_type(s)])
+  | untyped_t_of_pt(CombpValue(l,r)): mk_comb([untyped_t_of_pt(l), untyped_t_of_pt(r)])
+  | untyped_t_of_pt(AbspValue(v,bod)): mk_gabs([untyped_t_of_pt(v), untyped_t_of_pt(bod)])
+  | untyped_t_of_pt(TypingValue(ptm,pty)): untyped_t_of_pt(ptm)
   let string_of_preterm = o(Host.string_of_term)(untyped_t_of_pt)
   let string_of_ty_error:
     fun(env):
@@ -287,25 +292,38 @@ def [preterm_type_of_pretype, preterm_term_of_preterm, preterm_retypecheck]:
           let ty2_2 = solve(env)(ty2)
           let sty1 = string_of_pretype(free_stvs(ty2_2))(ty1_2)
           let sty2 = string_of_pretype(free_stvs(ty1_2))(ty2_2)
-          let default_msg = (fun(s): Host.hol_concat(" ")(Host.hol_concat(s)(Host.hol_concat(" cannot have type ")(Host.hol_concat(sty1)(Host.hol_concat(" and ")(Host.hol_concat(sty2)(" simultaneously")))))))
+          let default_msg:
+            fun(s):
+              Host.hol_concat(" ")(
+                Host.hol_concat(s)(
+                  Host.hol_concat(" cannot have type ")(Host.hol_concat(sty1)(Host.hol_concat(" and ")(Host.hol_concat(sty2)(" simultaneously"))))
+                )
+              )
           match t
-          | preterm_ctor_Constp(s,_): Host.hol_concat(" ")(Host.hol_concat(s)(Host.hol_concat(" has type ")(Host.hol_concat(Host.string_of_type(Fusion.get_const_type(s)))(Host.hol_concat(", ")(Host.hol_concat("it cannot be used with type ")(sty2))))))
-          | preterm_ctor_Varp(s,_): default_msg(s)
+          | ConstpValue(s,_):
+              Host.hol_concat(" ")(
+                Host.hol_concat(s)(
+                  Host.hol_concat(" has type ")(
+                    Host.hol_concat(Host.string_of_type(get_const_type(s)))(Host.hol_concat(", ")(Host.hol_concat("it cannot be used with type ")(sty2)))
+                  )
+                )
+              )
+          | VarpValue(s,_): default_msg(s)
           | t: default_msg(string_of_preterm(t))
   fun istrivial(ptm):
     fun(env):
       fun(x):
         fun(arg_2):
           match arg_2
-          | preterm_ctor_Stv(y): (Host.hol_equal(y)(x) || (Host.defined(env)(y) && istrivial(ptm)(env)(x)(Host.apply(env)(y))))
-          | preterm_ctor_Ptycon(f,args):
+          | StvValue(y): (Host.hol_equal(y)(x) || (Host.defined(env)(y) && istrivial(ptm)(env)(x)(Host.apply(env)(y))))
+          | PtyconValue(f,args):
               if exists(istrivial(ptm)(env)(x))(args)
               | failwith(string_of_ty_error(env)(ptm))
               | match arg_2
-                | preterm_ctor_Ptycon(_,_): #false
-                | preterm_ctor_Utv(_): #false
-          | preterm_ctor_Ptycon(_,_): #false
-          | preterm_ctor_Utv(_): #false
+                | PtyconValue(_,_): #false
+                | UtvValue(_): #false
+          | PtyconValue(_,_): #false
+          | UtvValue(_): #false
   let unify:
     fun(ptm):
       fun(env):
@@ -319,258 +337,268 @@ def [preterm_type_of_pretype, preterm_term_of_preterm, preterm_retypecheck]:
                     if Host.hol_equal(ty1)(ty2)
                     | unify_2(env)(oth)
                     | match arg_3
-                      | PairList [[preterm_ctor_Ptycon(f,fargs), preterm_ctor_Ptycon(g,gargs), ptm], & oth]: (if (Host.hol_equal(f)(g) && Host.hol_equal(length(fargs))(length(gargs))) | unify_2(env)(append(Host.map2((fun(x): (fun(y): [x, y, ptm])))(fargs)(gargs))(oth)) | failwith(string_of_ty_error(env)(ptm)))
-                      | PairList [[preterm_ctor_Stv(x), t, ptm], & oth]:
+                      | PairList [[PtyconValue(f,fargs), PtyconValue(g,gargs), ptm], & oth]: (if (Host.hol_equal(f)(g) && Host.hol_equal(length(fargs))(length(gargs))) | unify_2(env)(append(Host.map2((fun(x): (fun(y): [x, y, ptm])))(fargs)(gargs))(oth)) | failwith(string_of_ty_error(env)(ptm)))
+                      | PairList [[StvValue(x), t, ptm], & oth]:
                           if Host.defined(env)(x)
-                          | unify_2(env)(PairList.cons([Host.apply(env)(x), t, ptm], oth))
+                          | unify_2(env)(PairList [[Host.apply(env)(x), t, ptm], & oth])
                           | unify_2((if istrivial(ptm)(env)(x)(t) | env | Host.fpf_define(x)(t)(env)))(oth)
-                      | PairList [[t, preterm_ctor_Stv(x), ptm], & oth]: unify_2(env)(PairList.cons([preterm_ctor_Stv(x), t, ptm], oth))
+                      | PairList [[t, StvValue(x), ptm], & oth]: unify_2(env)(PairList [[StvValue(x), t, ptm], & oth])
                       | PairList [[_, _, ptm], & oth]: failwith(string_of_ty_error(env)(ptm))
-                | PairList [[preterm_ctor_Ptycon(f,fargs), preterm_ctor_Ptycon(g,gargs), ptm], & oth]: (if (Host.hol_equal(f)(g) && Host.hol_equal(length(fargs))(length(gargs))) | unify_2(env)(append(Host.map2((fun(x): (fun(y): [x, y, ptm])))(fargs)(gargs))(oth)) | failwith(string_of_ty_error(env)(ptm)))
-                | PairList [[preterm_ctor_Stv(x), t, ptm], & oth]:
+                | PairList [[PtyconValue(f,fargs), PtyconValue(g,gargs), ptm], & oth]: (if (Host.hol_equal(f)(g) && Host.hol_equal(length(fargs))(length(gargs))) | unify_2(env)(append(Host.map2((fun(x): (fun(y): [x, y, ptm])))(fargs)(gargs))(oth)) | failwith(string_of_ty_error(env)(ptm)))
+                | PairList [[StvValue(x), t, ptm], & oth]:
                     if Host.defined(env)(x)
-                    | unify_2(env)(PairList.cons([Host.apply(env)(x), t, ptm], oth))
+                    | unify_2(env)(PairList [[Host.apply(env)(x), t, ptm], & oth])
                     | unify_2((if istrivial(ptm)(env)(x)(t) | env | Host.fpf_define(x)(t)(env)))(oth)
-                | PairList [[t, preterm_ctor_Stv(x), ptm], & oth]: unify_2(env)(PairList.cons([preterm_ctor_Stv(x), t, ptm], oth))
+                | PairList [[t, StvValue(x), ptm], & oth]: unify_2(env)(PairList [[StvValue(x), t, ptm], & oth])
                 | PairList [[_, _, ptm], & oth]: failwith(string_of_ty_error(env)(ptm))
             unify_2(env)(
-              PairList.cons(
+              PairList [
                 [
                   ty1,
                   ty2,
                   match ptm
                   | Host.None(): Host.None()
-                  | Host.Some(t): Host.Some([t, ty1, ty2])],
-                PairList []))
+                  | Host.Some(t): Host.Some([t, ty1, ty2])
+                ]
+              ]
+            )
   fun typify(ty):
     fun([ptm, venv, uenv]):
       match ptm
-      | preterm_ctor_Varp(s,_):
+      | VarpValue(s,_):
           if can(assoc(s))(venv)
           | let ty_prime = assoc(s)(venv)
-            [preterm_ctor_Varp(s, ty_prime), PairList [], unify(Host.Some(ptm))(uenv)(ty_prime)(ty)]
+            [VarpValue(s, ty_prime), PairList [], unify(Host.Some(ptm))(uenv)(ty_prime)(ty)]
           | match ptm
-            | preterm_ctor_Varp(s,_):
+            | VarpValue(s,_):
                 if can(Host.num_of_string)(s)
                 | let t = pmk_numeral(Host.num_of_string(s))
-                  let ty_prime = preterm_ctor_Ptycon("num", PairList [])
+                  let ty_prime = PtyconValue("num", PairList [])
                   [t, PairList [], unify(Host.Some(ptm))(uenv)(ty_prime)(ty)]
                 | match ptm
-                  | preterm_ctor_Varp(s,_):
+                  | VarpValue(s,_):
                       Host.warn((Host.hol_unequal(s)("") && Host.isnum(s)))("Non-numeral begins with a digit")
                       if (Host.hol_not(preterm_is_hidden(s)) && can(get_generic_type)(s))
                       | let pty = pretype_instance(get_generic_type(s))
-                        let ptm = preterm_ctor_Constp(s, pty)
+                        let ptm = ConstpValue(s, pty)
                         [ptm, PairList [], unify(Host.Some(ptm))(uenv)(pty)(ty)]
-                      | let ptm = preterm_ctor_Varp(s, ty)
+                      | let ptm = VarpValue(s, ty)
                         if Host.hol_not(can(get_var_type)(s))
-                        | [ptm, PairList.cons([s, ty], PairList []), uenv]
+                        | [ptm, PairList [[s, ty]], uenv]
                         | let pty = pretype_instance(get_var_type(s))
-                          [ptm, PairList.cons([s, ty], PairList []), unify(Host.Some(ptm))(uenv)(pty)(ty)]
-                  | preterm_ctor_Combp(f,x):
+                          [ptm, PairList [[s, ty]], unify(Host.Some(ptm))(uenv)(pty)(ty)]
+                  | CombpValue(f,x):
                       let ty_prime_prime = Host.hol_apply_unit(new_type_var)
-                      let ty_prime = preterm_ctor_Ptycon("fun", PairList.cons(ty_prime_prime, PairList.cons(ty, PairList [])))
+                      let ty_prime = PtyconValue("fun", PairList [ty_prime_prime, ty])
                       let [f_prime, venv1, uenv1] = typify(ty_prime)([f, venv, uenv])
                       let [x_prime, venv2, uenv2] = typify(ty_prime_prime)([x, append(venv1)(venv), uenv1])
-                      [preterm_ctor_Combp(f_prime, x_prime), append(venv1)(venv2), uenv2]
-                  | preterm_ctor_Typing(tm,pty): typify(ty)([tm, venv, unify(Host.Some(tm))(uenv)(ty)(pty)])
-                  | preterm_ctor_Absp(v,bod):
+                      [CombpValue(f_prime, x_prime), append(venv1)(venv2), uenv2]
+                  | TypingValue(tm,pty): typify(ty)([tm, venv, unify(Host.Some(tm))(uenv)(ty)(pty)])
+                  | AbspValue(v,bod):
                       let [ty_prime, ty_prime_prime]:
                         match ty
-                        | preterm_ctor_Ptycon("fun",PairList [ty_prime, & PairList [ty_prime_prime, & PairList []]]): [ty_prime, ty_prime_prime]
+                        | PtyconValue("fun",PairList [ty_prime, & PairList [ty_prime_prime, & PairList []]]): [ty_prime, ty_prime_prime]
                         | _: [Host.hol_apply_unit(new_type_var), Host.hol_apply_unit(new_type_var)]
-                      let ty_prime_prime_prime = preterm_ctor_Ptycon("fun", PairList.cons(ty_prime, PairList.cons(ty_prime_prime, PairList [])))
+                      let ty_prime_prime_prime = PtyconValue("fun", PairList [ty_prime, ty_prime_prime])
                       let uenv0 = unify(Host.Some(ptm))(uenv)(ty_prime_prime_prime)(ty)
                       let [v_prime, venv1, uenv1] = typify(ty_prime)([v, PairList [], uenv0])
                       let [v_prime, venv1, uenv1]:
                         match v_prime
-                        | preterm_ctor_Constp(s,_):
+                        | ConstpValue(s,_):
                             if Host.ref_get(preterm_ignore_constant_varstruct)
-                            | [preterm_ctor_Varp(s, ty_prime), PairList.cons([s, ty_prime], PairList []), uenv0]
+                            | [VarpValue(s, ty_prime), PairList [[s, ty_prime]], uenv0]
                             | match v_prime
                               | _: [v_prime, venv1, uenv1]
                         | _: [v_prime, venv1, uenv1]
                       let [bod_prime, venv2, uenv2] = typify(ty_prime_prime)([bod, append(venv1)(venv), uenv1])
-                      [preterm_ctor_Absp(v_prime, bod_prime), venv2, uenv2]
+                      [AbspValue(v_prime, bod_prime), venv2, uenv2]
                   | _: failwith("typify: unexpected constant at this stage")
-            | preterm_ctor_Varp(s,_):
+            | VarpValue(s,_):
                 Host.warn((Host.hol_unequal(s)("") && Host.isnum(s)))("Non-numeral begins with a digit")
                 if (Host.hol_not(preterm_is_hidden(s)) && can(get_generic_type)(s))
                 | let pty = pretype_instance(get_generic_type(s))
-                  let ptm = preterm_ctor_Constp(s, pty)
+                  let ptm = ConstpValue(s, pty)
                   [ptm, PairList [], unify(Host.Some(ptm))(uenv)(pty)(ty)]
-                | let ptm = preterm_ctor_Varp(s, ty)
+                | let ptm = VarpValue(s, ty)
                   if Host.hol_not(can(get_var_type)(s))
-                  | [ptm, PairList.cons([s, ty], PairList []), uenv]
+                  | [ptm, PairList [[s, ty]], uenv]
                   | let pty = pretype_instance(get_var_type(s))
-                    [ptm, PairList.cons([s, ty], PairList []), unify(Host.Some(ptm))(uenv)(pty)(ty)]
-            | preterm_ctor_Combp(f,x):
+                    [ptm, PairList [[s, ty]], unify(Host.Some(ptm))(uenv)(pty)(ty)]
+            | CombpValue(f,x):
                 let ty_prime_prime = Host.hol_apply_unit(new_type_var)
-                let ty_prime = preterm_ctor_Ptycon("fun", PairList.cons(ty_prime_prime, PairList.cons(ty, PairList [])))
+                let ty_prime = PtyconValue("fun", PairList [ty_prime_prime, ty])
                 let [f_prime, venv1, uenv1] = typify(ty_prime)([f, venv, uenv])
                 let [x_prime, venv2, uenv2] = typify(ty_prime_prime)([x, append(venv1)(venv), uenv1])
-                [preterm_ctor_Combp(f_prime, x_prime), append(venv1)(venv2), uenv2]
-            | preterm_ctor_Typing(tm,pty): typify(ty)([tm, venv, unify(Host.Some(tm))(uenv)(ty)(pty)])
-            | preterm_ctor_Absp(v,bod):
+                [CombpValue(f_prime, x_prime), append(venv1)(venv2), uenv2]
+            | TypingValue(tm,pty): typify(ty)([tm, venv, unify(Host.Some(tm))(uenv)(ty)(pty)])
+            | AbspValue(v,bod):
                 let [ty_prime, ty_prime_prime]:
                   match ty
-                  | preterm_ctor_Ptycon("fun",PairList [ty_prime, & PairList [ty_prime_prime, & PairList []]]): [ty_prime, ty_prime_prime]
+                  | PtyconValue("fun",PairList [ty_prime, & PairList [ty_prime_prime, & PairList []]]): [ty_prime, ty_prime_prime]
                   | _: [Host.hol_apply_unit(new_type_var), Host.hol_apply_unit(new_type_var)]
-                let ty_prime_prime_prime = preterm_ctor_Ptycon("fun", PairList.cons(ty_prime, PairList.cons(ty_prime_prime, PairList [])))
+                let ty_prime_prime_prime = PtyconValue("fun", PairList [ty_prime, ty_prime_prime])
                 let uenv0 = unify(Host.Some(ptm))(uenv)(ty_prime_prime_prime)(ty)
                 let [v_prime, venv1, uenv1] = typify(ty_prime)([v, PairList [], uenv0])
                 let [v_prime, venv1, uenv1]:
                   match v_prime
-                  | preterm_ctor_Constp(s,_):
+                  | ConstpValue(s,_):
                       if Host.ref_get(preterm_ignore_constant_varstruct)
-                      | [preterm_ctor_Varp(s, ty_prime), PairList.cons([s, ty_prime], PairList []), uenv0]
+                      | [VarpValue(s, ty_prime), PairList [[s, ty_prime]], uenv0]
                       | match v_prime
                         | _: [v_prime, venv1, uenv1]
                   | _: [v_prime, venv1, uenv1]
                 let [bod_prime, venv2, uenv2] = typify(ty_prime_prime)([bod, append(venv1)(venv), uenv1])
-                [preterm_ctor_Absp(v_prime, bod_prime), venv2, uenv2]
+                [AbspValue(v_prime, bod_prime), venv2, uenv2]
             | _: failwith("typify: unexpected constant at this stage")
-      | preterm_ctor_Varp(s,_):
+      | VarpValue(s,_):
           if can(Host.num_of_string)(s)
           | let t = pmk_numeral(Host.num_of_string(s))
-            let ty_prime = preterm_ctor_Ptycon("num", PairList [])
+            let ty_prime = PtyconValue("num", PairList [])
             [t, PairList [], unify(Host.Some(ptm))(uenv)(ty_prime)(ty)]
           | match ptm
-            | preterm_ctor_Varp(s,_):
+            | VarpValue(s,_):
                 Host.warn((Host.hol_unequal(s)("") && Host.isnum(s)))("Non-numeral begins with a digit")
                 if (Host.hol_not(preterm_is_hidden(s)) && can(get_generic_type)(s))
                 | let pty = pretype_instance(get_generic_type(s))
-                  let ptm = preterm_ctor_Constp(s, pty)
+                  let ptm = ConstpValue(s, pty)
                   [ptm, PairList [], unify(Host.Some(ptm))(uenv)(pty)(ty)]
-                | let ptm = preterm_ctor_Varp(s, ty)
+                | let ptm = VarpValue(s, ty)
                   if Host.hol_not(can(get_var_type)(s))
-                  | [ptm, PairList.cons([s, ty], PairList []), uenv]
+                  | [ptm, PairList [[s, ty]], uenv]
                   | let pty = pretype_instance(get_var_type(s))
-                    [ptm, PairList.cons([s, ty], PairList []), unify(Host.Some(ptm))(uenv)(pty)(ty)]
-            | preterm_ctor_Combp(f,x):
+                    [ptm, PairList [[s, ty]], unify(Host.Some(ptm))(uenv)(pty)(ty)]
+            | CombpValue(f,x):
                 let ty_prime_prime = Host.hol_apply_unit(new_type_var)
-                let ty_prime = preterm_ctor_Ptycon("fun", PairList.cons(ty_prime_prime, PairList.cons(ty, PairList [])))
+                let ty_prime = PtyconValue("fun", PairList [ty_prime_prime, ty])
                 let [f_prime, venv1, uenv1] = typify(ty_prime)([f, venv, uenv])
                 let [x_prime, venv2, uenv2] = typify(ty_prime_prime)([x, append(venv1)(venv), uenv1])
-                [preterm_ctor_Combp(f_prime, x_prime), append(venv1)(venv2), uenv2]
-            | preterm_ctor_Typing(tm,pty): typify(ty)([tm, venv, unify(Host.Some(tm))(uenv)(ty)(pty)])
-            | preterm_ctor_Absp(v,bod):
+                [CombpValue(f_prime, x_prime), append(venv1)(venv2), uenv2]
+            | TypingValue(tm,pty): typify(ty)([tm, venv, unify(Host.Some(tm))(uenv)(ty)(pty)])
+            | AbspValue(v,bod):
                 let [ty_prime, ty_prime_prime]:
                   match ty
-                  | preterm_ctor_Ptycon("fun",PairList [ty_prime, & PairList [ty_prime_prime, & PairList []]]): [ty_prime, ty_prime_prime]
+                  | PtyconValue("fun",PairList [ty_prime, & PairList [ty_prime_prime, & PairList []]]): [ty_prime, ty_prime_prime]
                   | _: [Host.hol_apply_unit(new_type_var), Host.hol_apply_unit(new_type_var)]
-                let ty_prime_prime_prime = preterm_ctor_Ptycon("fun", PairList.cons(ty_prime, PairList.cons(ty_prime_prime, PairList [])))
+                let ty_prime_prime_prime = PtyconValue("fun", PairList [ty_prime, ty_prime_prime])
                 let uenv0 = unify(Host.Some(ptm))(uenv)(ty_prime_prime_prime)(ty)
                 let [v_prime, venv1, uenv1] = typify(ty_prime)([v, PairList [], uenv0])
                 let [v_prime, venv1, uenv1]:
                   match v_prime
-                  | preterm_ctor_Constp(s,_):
+                  | ConstpValue(s,_):
                       if Host.ref_get(preterm_ignore_constant_varstruct)
-                      | [preterm_ctor_Varp(s, ty_prime), PairList.cons([s, ty_prime], PairList []), uenv0]
+                      | [VarpValue(s, ty_prime), PairList [[s, ty_prime]], uenv0]
                       | match v_prime
                         | _: [v_prime, venv1, uenv1]
                   | _: [v_prime, venv1, uenv1]
                 let [bod_prime, venv2, uenv2] = typify(ty_prime_prime)([bod, append(venv1)(venv), uenv1])
-                [preterm_ctor_Absp(v_prime, bod_prime), venv2, uenv2]
+                [AbspValue(v_prime, bod_prime), venv2, uenv2]
             | _: failwith("typify: unexpected constant at this stage")
-      | preterm_ctor_Varp(s,_):
+      | VarpValue(s,_):
           Host.warn((Host.hol_unequal(s)("") && Host.isnum(s)))("Non-numeral begins with a digit")
           if (Host.hol_not(preterm_is_hidden(s)) && can(get_generic_type)(s))
           | let pty = pretype_instance(get_generic_type(s))
-            let ptm = preterm_ctor_Constp(s, pty)
+            let ptm = ConstpValue(s, pty)
             [ptm, PairList [], unify(Host.Some(ptm))(uenv)(pty)(ty)]
-          | let ptm = preterm_ctor_Varp(s, ty)
+          | let ptm = VarpValue(s, ty)
             if Host.hol_not(can(get_var_type)(s))
-            | [ptm, PairList.cons([s, ty], PairList []), uenv]
+            | [ptm, PairList [[s, ty]], uenv]
             | let pty = pretype_instance(get_var_type(s))
-              [ptm, PairList.cons([s, ty], PairList []), unify(Host.Some(ptm))(uenv)(pty)(ty)]
-      | preterm_ctor_Combp(f,x):
+              [ptm, PairList [[s, ty]], unify(Host.Some(ptm))(uenv)(pty)(ty)]
+      | CombpValue(f,x):
           let ty_prime_prime = Host.hol_apply_unit(new_type_var)
-          let ty_prime = preterm_ctor_Ptycon("fun", PairList.cons(ty_prime_prime, PairList.cons(ty, PairList [])))
+          let ty_prime = PtyconValue("fun", PairList [ty_prime_prime, ty])
           let [f_prime, venv1, uenv1] = typify(ty_prime)([f, venv, uenv])
           let [x_prime, venv2, uenv2] = typify(ty_prime_prime)([x, append(venv1)(venv), uenv1])
-          [preterm_ctor_Combp(f_prime, x_prime), append(venv1)(venv2), uenv2]
-      | preterm_ctor_Typing(tm,pty): typify(ty)([tm, venv, unify(Host.Some(tm))(uenv)(ty)(pty)])
-      | preterm_ctor_Absp(v,bod):
+          [CombpValue(f_prime, x_prime), append(venv1)(venv2), uenv2]
+      | TypingValue(tm,pty): typify(ty)([tm, venv, unify(Host.Some(tm))(uenv)(ty)(pty)])
+      | AbspValue(v,bod):
           let [ty_prime, ty_prime_prime]:
             match ty
-            | preterm_ctor_Ptycon("fun",PairList [ty_prime, & PairList [ty_prime_prime, & PairList []]]): [ty_prime, ty_prime_prime]
+            | PtyconValue("fun",PairList [ty_prime, & PairList [ty_prime_prime, & PairList []]]): [ty_prime, ty_prime_prime]
             | _: [Host.hol_apply_unit(new_type_var), Host.hol_apply_unit(new_type_var)]
-          let ty_prime_prime_prime = preterm_ctor_Ptycon("fun", PairList.cons(ty_prime, PairList.cons(ty_prime_prime, PairList [])))
+          let ty_prime_prime_prime = PtyconValue("fun", PairList [ty_prime, ty_prime_prime])
           let uenv0 = unify(Host.Some(ptm))(uenv)(ty_prime_prime_prime)(ty)
           let [v_prime, venv1, uenv1] = typify(ty_prime)([v, PairList [], uenv0])
           let [v_prime, venv1, uenv1]:
             match v_prime
-            | preterm_ctor_Constp(s,_):
+            | ConstpValue(s,_):
                 if Host.ref_get(preterm_ignore_constant_varstruct)
-                | [preterm_ctor_Varp(s, ty_prime), PairList.cons([s, ty_prime], PairList []), uenv0]
+                | [VarpValue(s, ty_prime), PairList [[s, ty_prime]], uenv0]
                 | match v_prime
                   | _: [v_prime, venv1, uenv1]
             | _: [v_prime, venv1, uenv1]
           let [bod_prime, venv2, uenv2] = typify(ty_prime_prime)([bod, append(venv1)(venv), uenv1])
-          [preterm_ctor_Absp(v_prime, bod_prime), venv2, uenv2]
+          [AbspValue(v_prime, bod_prime), venv2, uenv2]
       | _: failwith("typify: unexpected constant at this stage")
   fun resolve_interface(ptm):
     fun(cont):
       fun(env):
         match ptm
-        | preterm_ctor_Combp(f,x): resolve_interface(f)(resolve_interface(x)(cont))(env)
-        | preterm_ctor_Absp(v,bod): resolve_interface(v)(resolve_interface(bod)(cont))(env)
-        | preterm_ctor_Varp(_,_): cont(env)
-        | preterm_ctor_Constp(s,ty):
+        | CombpValue(f,x): resolve_interface(f)(resolve_interface(x)(cont))(env)
+        | AbspValue(v,bod): resolve_interface(v)(resolve_interface(bod)(cont))(env)
+        | VarpValue(_,_): cont(env)
+        | ConstpValue(s,ty):
             let maps = filter((fun([s_prime, _]): Host.hol_equal(s_prime)(s)))(Host.ref_get(Host.the_interface))
             if Host.hol_equal(maps)(PairList [])
             | cont(env)
             | tryfind(
                 fun([_, [_, ty_prime]]):
                   let ty_prime = pretype_instance(ty_prime)
-                  cont(unify(Host.Some(ptm))(env)(ty_prime)(ty)))(maps)
+                  cont(unify(Host.Some(ptm))(env)(ty_prime)(ty))
+              )(maps)
   fun solve_preterm(env):
     fun(ptm):
       match ptm
-      | preterm_ctor_Varp(s,ty): preterm_ctor_Varp(s, solve(env)(ty))
-      | preterm_ctor_Combp(f,x): preterm_ctor_Combp(solve_preterm(env)(f), solve_preterm(env)(x))
-      | preterm_ctor_Absp(v,bod): preterm_ctor_Absp(solve_preterm(env)(v), solve_preterm(env)(bod))
-      | preterm_ctor_Constp(s,ty):
+      | VarpValue(s,ty): VarpValue(s, solve(env)(ty))
+      | CombpValue(f,x): CombpValue(solve_preterm(env)(f), solve_preterm(env)(x))
+      | AbspValue(v,bod): AbspValue(solve_preterm(env)(v), solve_preterm(env)(bod))
+      | ConstpValue(s,ty):
           let tys = solve(env)(ty)
           try:
-            let [_, [c_prime, _]] = find((fun([s_prime, [c_prime, ty_prime]]): (Host.hol_equal(s)(s_prime) && can(unify(Host.None())(env)(pretype_instance(ty_prime)))(ty))))(Host.ref_get(Host.the_interface))
+            let [_, [c_prime, _]]:
+              find(
+                (fun([s_prime, [c_prime, ty_prime]]): (Host.hol_equal(s)(s_prime) && can(unify(Host.None())(env)(pretype_instance(ty_prime)))(ty)))
+              )(Host.ref_get(Host.the_interface))
             pmk_cv([c_prime, tys])
             ~catch exn:
               match exn
-              | Failure(_): preterm_ctor_Constp(s, tys)
+              | Failure(_): ConstpValue(s, tys)
               | exn: Host.hol_raise(exn)
   fun type_of_pretype_base(ty):
     match ty
-    | preterm_ctor_Stv(n):
+    | StvValue(n):
         let s = Host.hol_concat("?")(Host.hol_string_of_int(n))
-        [Fusion.mk_vartype(s), #true]
-    | preterm_ctor_Utv(v): [Fusion.mk_vartype(v), #false]
-    | preterm_ctor_Ptycon(con,args):
+        [mk_vartype(s), #true]
+    | UtvValue(v): [mk_vartype(v), #false]
+    | PtyconValue(con,args):
         let [args_prime, translated] = unzip(map(type_of_pretype_base)(args))
         let translated = Host.OCamlList.fold_left(Host.hol_or)(#false)(translated)
-        [Fusion.mk_type([con, args_prime]), translated]
+        [mk_type([con, args_prime]), translated]
   let type_of_pretype_2 = (fun(ty): fst(type_of_pretype_base(ty)))
   let stvs_translated_terms = Box(PairList [])
   fun term_of_preterm_3(ptm):
     match ptm
-    | preterm_ctor_Varp(s,pty):
+    | VarpValue(s,pty):
         let [ty, translated] = type_of_pretype_base(pty)
-        let v = Fusion.mk_var([s, ty])
-        let _ = (if (translated && Host.hol_not(exists((fun(s_prime): Host.hol_equal(s)(s_prime)))(Host.ref_get(stvs_translated_terms)))) | Host.ref_set(stvs_translated_terms)(PairList.cons(s, Host.ref_get(stvs_translated_terms))) | #void)
+        let v = mk_var([s, ty])
+        let _ = (if (translated && Host.hol_not(exists((fun(s_prime): Host.hol_equal(s)(s_prime)))(Host.ref_get(stvs_translated_terms)))) | Host.ref_set(stvs_translated_terms)(PairList [s, & Host.ref_get(stvs_translated_terms)]) | #void)
         v
-    | preterm_ctor_Constp(s,pty):
+    | ConstpValue(s,pty):
         let [ty, translated] = type_of_pretype_base(pty)
-        let c = Basics.mk_mconst([s, ty])
-        let _ = (if (translated && Host.hol_not(exists((fun(s_prime): Host.hol_equal(s)(s_prime)))(Host.ref_get(stvs_translated_terms)))) | Host.ref_set(stvs_translated_terms)(PairList.cons(s, Host.ref_get(stvs_translated_terms))) | #void)
+        let c = mk_mconst([s, ty])
+        let _ = (if (translated && Host.hol_not(exists((fun(s_prime): Host.hol_equal(s)(s_prime)))(Host.ref_get(stvs_translated_terms)))) | Host.ref_set(stvs_translated_terms)(PairList [s, & Host.ref_get(stvs_translated_terms)]) | #void)
         c
-    | preterm_ctor_Combp(l,r): Fusion.mk_comb([term_of_preterm_3(l), term_of_preterm_3(r)])
-    | preterm_ctor_Absp(v,bod): Basics.mk_gabs([term_of_preterm_3(v), term_of_preterm_3(bod)])
-    | preterm_ctor_Typing(ptm,pty): term_of_preterm_3(ptm)
+    | CombpValue(l,r): mk_comb([term_of_preterm_3(l), term_of_preterm_3(r)])
+    | AbspValue(v,bod): mk_gabs([term_of_preterm_3(v), term_of_preterm_3(bod)])
+    | TypingValue(ptm,pty): term_of_preterm_3(ptm)
   let report_type_invention:
     fun(_):
       if Host.hol_unequal(Host.ref_get(stvs_translated_terms))(PairList [])
-      | (if Host.ref_get(preterm_type_invention_error) | failwith(Host.hol_concat("typechecking error (cannot infer type of variables): ")(Host.hol_string_concat(", ")(Host.ref_get(stvs_translated_terms)))) | Host.warn(Host.ref_get(preterm_type_invention_warning))("inventing type variables"))
+      | if Host.ref_get(preterm_type_invention_error)
+        | failwith(
+            Host.hol_concat("typechecking error (cannot infer type of variables): ")(Host.hol_string_concat(", ")(Host.ref_get(stvs_translated_terms)))
+          )
+        | Host.warn(Host.ref_get(preterm_type_invention_warning))("inventing type variables")
       | #void
   let term_of_preterm_2:
     fun(ptm):
@@ -620,15 +648,15 @@ def overload_interface = preterm_overload_interface
 
 def prioritize_overload = preterm_prioritize_overload
 
-def new_type_abbrev = preterm_new_type_abbrev
+def new_type_abbrev = preterm_new_type_abbrev_v2
 
-def remove_type_abbrev = preterm_remove_type_abbrev
+def remove_type_abbrev = preterm_remove_type_abbrev_v2
 
 def type_abbrevs = preterm_type_abbrevs
 
-def hide_constant = preterm_hide_constant
+def hide_constant = preterm_hide_constant_v2
 
-def unhide_constant = preterm_unhide_constant
+def unhide_constant = preterm_unhide_constant_v2
 
 def is_hidden = preterm_is_hidden
 
@@ -638,8 +666,8 @@ def pretype_of_type = preterm_pretype_of_type
 
 def preterm_of_term = preterm_preterm_of_term
 
-def type_of_pretype = preterm_type_of_pretype
+def type_of_pretype = preterm_type_of_pretype_v2
 
-def term_of_preterm = preterm_term_of_preterm
+def term_of_preterm = preterm_term_of_preterm_v2
 
 def retypecheck = preterm_retypecheck

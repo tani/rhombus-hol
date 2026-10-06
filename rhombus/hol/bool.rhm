@@ -15,9 +15,70 @@
 
 // Quotations are expanded offline; every proof is replayed here.
 
-import: "private/compat.rhm" open
-
-import: "private/theory_support.rhm" as Host
+import:
+  "equal.rhm" open:
+    only:
+      lhand
+      BETA_CONV
+      AP_TERM
+      AP_THM
+      SYM
+      RAND_CONV
+      CONV_RULE
+      BETA_RULE
+  "basics.rhm" open:
+    only:
+      bndvar
+      mk_binary
+      type_match
+      thm_frees
+      mk_binder
+      dest_conj
+      is_imp
+      dest_imp
+      is_forall
+      dest_forall
+      strip_forall
+      dest_disj
+  "fusion.rhm" open:
+    only:
+      aty
+      type_of
+      mk_comb
+      dest_var
+      dest_comb
+      dest_abs
+      frees
+      freesl
+      variant
+      vsubst
+      inst
+      rand
+      rator
+      dest_thm
+      hyp
+      concl
+      REFL
+      MK_COMB
+      ABS
+      ASSUME
+      EQ_MP
+      DEDUCT_ANTISYM_RULE
+      INST_TYPE
+      INST
+      new_basic_definition
+      mk_eq
+      aconv
+      Tyapp
+      Const
+      Comb
+  "private/compat.rhm" open
+  "private/theory_support.rhm" as Host
+  "private/curried.rhm" open
+  "private/declarations.rhm" open
+  "fusion.rhm" as Fusion
+  "basics.rhm" as Basics
+  "equal.rhm" as Equal
 
 export:
   is_iff
@@ -88,12 +149,6 @@ export:
   set_verbose_symbols
   unset_verbose_symbols
 
-import: "fusion.rhm" as Fusion
-
-import: "basics.rhm" as Basics
-
-import: "equal.rhm" as Equal
-
 Host.parse_as_prefix("~")
 
 Host.parse_as_binder("\\")
@@ -112,110 +167,143 @@ Host.parse_as_infix(["/\\", [8, "right"]])
 
 Host.parse_as_infix(["<=>", [2, "right"]])
 
-Host.override_interface(["<=>", Host.hol_term(Const("=", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])))])
+Host.override_interface(["<=>", Host.hol_term(Const("=", Fun(Bool, Fun(Bool, Bool))))])
 
 Host.parse_as_infix(["=", [12, "right"]])
 
 fun is_iff(tm):
   match tm
-  | Fusion.Comb(Fusion.Comb(Fusion.Const("=",Fusion.Tyapp("fun",PairList [Fusion.Tyapp("bool",PairList []), & PairList [_, & PairList []]])),l),r): #true
+  | Comb(Comb(Const("=",Tyapp("fun",PairList [Tyapp("bool",PairList []), & PairList [_, & PairList []]])),l),r): #true
   | _: #false
 
 fun dest_iff(tm):
   match tm
-  | Fusion.Comb(Fusion.Comb(Fusion.Const("=",Fusion.Tyapp("fun",PairList [Fusion.Tyapp("bool",PairList []), & PairList [_, & PairList []]])),l),r): [l, r]
+  | Comb(Comb(Const("=",Tyapp("fun",PairList [Tyapp("bool",PairList []), & PairList [_, & PairList []]])),l),r): [l, r]
   | _: failwith("dest_iff")
 
 def mk_iff:
-  let eq_tm = Host.hol_term(Const("=", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])))
-  (fun([l, r]): Fusion.mk_comb([Fusion.mk_comb([eq_tm, l]), r]))
+  let eq_tm = Host.hol_term(Const("=", Fun(Bool, Fun(Bool, Bool))))
+  (fun([l, r]): mk_comb([mk_comb([eq_tm, l]), r]))
 
-fun PINST(tyin):
-  fun(tmin):
-    let iterm_fn_2 = Fusion.INST(map(Host.F_F(I)(Fusion.inst(tyin)))(tmin))
-    let itype_fn_2 = Fusion.INST_TYPE(tyin)
-    fun(th):
-      try:
-        iterm_fn_2(itype_fn_2(th))
-        ~catch exn:
-          match exn
-          | Failure(_): failwith("PINST")
-          | exn: Host.hol_raise(exn)
+curried fun PINST(tyin, tmin):
+  let iterm_fn_2 = INST(map(Host.F_F(I)(inst(tyin)))(tmin))
+  let itype_fn_2 = INST_TYPE(tyin)
+  fun(th):
+    try:
+      iterm_fn_2(itype_fn_2(th))
+      ~catch exn:
+        match exn
+        | Failure(_): failwith("PINST")
+        | exn: Host.hol_raise(exn)
 
-fun PROVE_HYP(ath): (fun(bth): (if exists(Fusion.aconv(Fusion.concl(ath)))(Fusion.hyp(bth)) | Fusion.EQ_MP(Fusion.DEDUCT_ANTISYM_RULE(ath)(bth))(ath) | bth))
+curried fun PROVE_HYP(ath, bth): (if exists(aconv(concl(ath)))(hyp(bth)) | EQ_MP(DEDUCT_ANTISYM_RULE(ath)(bth))(ath) | bth)
 
-def T_DEF = Fusion.new_basic_definition(Host.hol_term(Comb(Comb(Const("=", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("T", Tyapp("bool", []))), Comb(Comb(Const("=", Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])]), Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])]), Tyapp("bool", [])])])), Abs(Var("p", Tyapp("bool", [])), Var("p", Tyapp("bool", [])))), Abs(Var("p", Tyapp("bool", [])), Var("p", Tyapp("bool", [])))))))
+def T_DEF:
+  new_basic_definition(
+    Host.hol_term(Iff(
+      Var("T", Bool),
+      Eq(Fun(Bool, Bool), Lambda("p", Bool, Ref("p")), Lambda("p", Bool, Ref("p")))
+    ))
+  )
 
-def TRUTH = Fusion.EQ_MP(Equal.SYM(T_DEF))(Fusion.REFL(Host.hol_term(Abs(Var("p", Tyapp("bool", [])), Var("p", Tyapp("bool", []))))))
+def TRUTH = EQ_MP(SYM(T_DEF))(REFL(Host.hol_term(Lambda("p", Bool, Ref("p")))))
 
 fun EQT_ELIM(th):
   try:
-    Fusion.EQ_MP(Equal.SYM(th))(TRUTH)
+    EQ_MP(SYM(th))(TRUTH)
     ~catch exn:
       match exn
       | Failure(_): failwith("EQT_ELIM")
       | exn: Host.hol_raise(exn)
 
 def EQT_INTRO:
-  let t = Host.hol_term(Var("t", Tyapp("bool", [])))
-  let th1 = Fusion.DEDUCT_ANTISYM_RULE(Fusion.ASSUME(t))(TRUTH)
-  let th2 = EQT_ELIM(Fusion.ASSUME(Fusion.concl(th1)))
-  let pth = Fusion.DEDUCT_ANTISYM_RULE(th2)(th1)
-  (fun(th): Fusion.EQ_MP(Fusion.INST(PairList.cons([Fusion.concl(th), t], PairList []))(pth))(th))
+  let t = Host.hol_term(Var("t", Bool))
+  let th1 = DEDUCT_ANTISYM_RULE(ASSUME(t))(TRUTH)
+  let th2 = EQT_ELIM(ASSUME(concl(th1)))
+  let pth = DEDUCT_ANTISYM_RULE(th2)(th1)
+  (fun(th): EQ_MP(INST(PairList [[concl(th), t]])(pth))(th))
 
-def AND_DEF = Fusion.new_basic_definition(Host.hol_term(Comb(Comb(Const("=", Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])]), Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])]), Tyapp("bool", [])])])), Var("/\\", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])]))), Abs(Var("p", Tyapp("bool", [])), Abs(Var("q", Tyapp("bool", [])), Comb(Comb(Const("=", Tyapp("fun", [Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])]), Tyapp("bool", [])]), Tyapp("fun", [Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])]), Tyapp("bool", [])]), Tyapp("bool", [])])])), Abs(Var("f", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Comb(Comb(Var("f", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("p", Tyapp("bool", []))), Var("q", Tyapp("bool", []))))), Abs(Var("f", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Comb(Comb(Var("f", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Const("T", Tyapp("bool", []))), Const("T", Tyapp("bool", []))))))))))
+def AND_DEF:
+  new_basic_definition(
+    Host.hol_term(Eq(
+      Fun(Bool, Fun(Bool, Bool)),
+      Var("/\\", Fun(Bool, Fun(Bool, Bool))),
+      Lambda(
+        "p",
+        Bool,
+        Lambda(
+          "q",
+          Bool,
+          Eq(
+            Fun(Fun(Bool, Fun(Bool, Bool)), Bool),
+            Lambda("f", Fun(Bool, Fun(Bool, Bool)), App(Ref("f"), [Ref("p"), Ref("q")])),
+            Lambda("f", Fun(Bool, Fun(Bool, Bool)), App(Ref("f"), [True, True]))
+          )
+        )
+      )
+    ))
+  )
 
-def mk_conj = Basics.mk_binary("/\\")
+def mk_conj = mk_binary("/\\")
 
 def list_mk_conj = end_itlist(curry(mk_conj))
 
 def CONJ:
-  let f_2 = Host.hol_term(Var("f", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])))
-  let p_2 = Host.hol_term(Var("p", Tyapp("bool", [])))
-  let q_2 = Host.hol_term(Var("q", Tyapp("bool", [])))
-  let th1 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(AND_DEF)(p_2))
-  let th2 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(th1)(q_2))
-  let th3 = Fusion.EQ_MP(th2)(Fusion.ASSUME(mk_conj([p_2, q_2])))
-  let pth1_2 = EQT_ELIM(Equal.BETA_RULE(Equal.AP_THM(th3)(Host.hol_term(Abs(Var("p", Tyapp("bool", [])), Abs(Var("q", Tyapp("bool", [])), Var("q", Tyapp("bool", []))))))))
-  let pth_2 = Fusion.ASSUME(p_2)
-  let qth_2 = Fusion.ASSUME(q_2)
-  let th1 = Fusion.MK_COMB([Equal.AP_TERM(f_2)(EQT_INTRO(pth_2)), EQT_INTRO(qth_2)])
-  let th2 = Fusion.ABS(f_2)(th1)
-  let th3 = Equal.BETA_RULE(Equal.AP_THM(Equal.AP_THM(AND_DEF)(p_2))(q_2))
-  let pth2_2 = Fusion.EQ_MP(Equal.SYM(th3))(th2)
-  let pth = Fusion.DEDUCT_ANTISYM_RULE(pth1_2)(pth2_2)
+  let f_2 = Host.hol_term(Var("f", Fun(Bool, Fun(Bool, Bool))))
+  let p_2 = Host.hol_term(Var("p", Bool))
+  let q_2 = Host.hol_term(Var("q", Bool))
+  let th1 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(AND_DEF)(p_2))
+  let th2 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(th1)(q_2))
+  let th3 = EQ_MP(th2)(ASSUME(mk_conj([p_2, q_2])))
+  let pth1_2:
+    EQT_ELIM(
+      BETA_RULE(AP_THM(th3)(Host.hol_term(Lambda("p", Bool, Lambda("q", Bool, Ref("q"))))))
+    )
+  let pth_2 = ASSUME(p_2)
+  let qth_2 = ASSUME(q_2)
+  let th1 = MK_COMB([AP_TERM(f_2)(EQT_INTRO(pth_2)), EQT_INTRO(qth_2)])
+  let th2 = ABS(f_2)(th1)
+  let th3 = BETA_RULE(AP_THM(AP_THM(AND_DEF)(p_2))(q_2))
+  let pth2_2 = EQ_MP(SYM(th3))(th2)
+  let pth = DEDUCT_ANTISYM_RULE(pth1_2)(pth2_2)
   fun(th1):
     fun(th2):
-      let th = Fusion.INST(PairList.cons([Fusion.concl(th1), p_2], PairList.cons([Fusion.concl(th2), q_2], PairList [])))(pth)
-      Fusion.EQ_MP(Fusion.EQ_MP(Fusion.DEDUCT_ANTISYM_RULE(th1)(th))(th1))(th2)
+      let th = INST(PairList [[concl(th1), p_2], [concl(th2), q_2]])(pth)
+      EQ_MP(EQ_MP(DEDUCT_ANTISYM_RULE(th1)(th))(th1))(th2)
 
 def CONJUNCT1:
-  let P_2 = Host.hol_term(Var("P", Tyapp("bool", [])))
-  let Q_2 = Host.hol_term(Var("Q", Tyapp("bool", [])))
-  let th1 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(AND_DEF)(P_2))
-  let th2 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(th1)(Q_2))
-  let th3 = Fusion.EQ_MP(th2)(Fusion.ASSUME(mk_conj([P_2, Q_2])))
-  let pth = EQT_ELIM(Equal.BETA_RULE(Equal.AP_THM(th3)(Host.hol_term(Abs(Var("p", Tyapp("bool", [])), Abs(Var("q", Tyapp("bool", [])), Var("p", Tyapp("bool", []))))))))
+  let P_2 = Host.hol_term(Var("P", Bool))
+  let Q_2 = Host.hol_term(Var("Q", Bool))
+  let th1 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(AND_DEF)(P_2))
+  let th2 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(th1)(Q_2))
+  let th3 = EQ_MP(th2)(ASSUME(mk_conj([P_2, Q_2])))
+  let pth:
+    EQT_ELIM(
+      BETA_RULE(AP_THM(th3)(Host.hol_term(Lambda("p", Bool, Lambda("q", Bool, Ref("p"))))))
+    )
   fun(th):
     try:
-      let [l, r] = Basics.dest_conj(Fusion.concl(th))
-      Fusion.EQ_MP(Fusion.DEDUCT_ANTISYM_RULE(th)(Fusion.INST(PairList.cons([l, P_2], PairList.cons([r, Q_2], PairList [])))(pth)))(th)
+      let [l, r] = dest_conj(concl(th))
+      EQ_MP(DEDUCT_ANTISYM_RULE(th)(INST(PairList [[l, P_2], [r, Q_2]])(pth)))(th)
       ~catch exn:
         match exn
         | Failure(_): failwith("CONJUNCT1")
         | exn: Host.hol_raise(exn)
 
 def CONJUNCT2:
-  let P_3 = Host.hol_term(Var("P", Tyapp("bool", [])))
-  let Q_3 = Host.hol_term(Var("Q", Tyapp("bool", [])))
-  let th1 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(AND_DEF)(P_3))
-  let th2 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(th1)(Q_3))
-  let th3 = Fusion.EQ_MP(th2)(Fusion.ASSUME(mk_conj([P_3, Q_3])))
-  let pth = EQT_ELIM(Equal.BETA_RULE(Equal.AP_THM(th3)(Host.hol_term(Abs(Var("p", Tyapp("bool", [])), Abs(Var("q", Tyapp("bool", [])), Var("q", Tyapp("bool", []))))))))
+  let P_3 = Host.hol_term(Var("P", Bool))
+  let Q_3 = Host.hol_term(Var("Q", Bool))
+  let th1 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(AND_DEF)(P_3))
+  let th2 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(th1)(Q_3))
+  let th3 = EQ_MP(th2)(ASSUME(mk_conj([P_3, Q_3])))
+  let pth:
+    EQT_ELIM(
+      BETA_RULE(AP_THM(th3)(Host.hol_term(Lambda("p", Bool, Lambda("q", Bool, Ref("q"))))))
+    )
   fun(th):
     try:
-      let [l, r] = Basics.dest_conj(Fusion.concl(th))
-      Fusion.EQ_MP(Fusion.DEDUCT_ANTISYM_RULE(th)(Fusion.INST(PairList.cons([l, P_3], PairList.cons([r, Q_3], PairList [])))(pth)))(th)
+      let [l, r] = dest_conj(concl(th))
+      EQ_MP(DEDUCT_ANTISYM_RULE(th)(INST(PairList [[l, P_3], [r, Q_3]])(pth)))(th)
       ~catch exn:
         match exn
         | Failure(_): failwith("CONJUNCT2")
@@ -231,41 +319,52 @@ fun CONJ_PAIR(th):
 
 def CONJUNCTS = striplist(CONJ_PAIR)
 
-def IMP_DEF = Fusion.new_basic_definition(Host.hol_term(Comb(Comb(Const("=", Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])]), Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])]), Tyapp("bool", [])])])), Var("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])]))), Abs(Var("p", Tyapp("bool", [])), Abs(Var("q", Tyapp("bool", [])), Comb(Comb(Const("=", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Comb(Comb(Const("/\\", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("p", Tyapp("bool", []))), Var("q", Tyapp("bool", [])))), Var("p", Tyapp("bool", []))))))))
+def IMP_DEF:
+  new_basic_definition(
+    Host.hol_term(Eq(
+      Fun(Bool, Fun(Bool, Bool)),
+      Var("==>", Fun(Bool, Fun(Bool, Bool))),
+      Lambda("p", Bool, Lambda("q", Bool, Iff(And(Ref("p"), Ref("q")), Ref("p"))))
+    ))
+  )
 
-def mk_imp = Basics.mk_binary("==>")
+def mk_imp = mk_binary("==>")
 
 def MP:
-  let p_3 = Host.hol_term(Var("p", Tyapp("bool", [])))
-  let q_3 = Host.hol_term(Var("q", Tyapp("bool", [])))
-  let th1_2 = Equal.BETA_RULE(Equal.AP_THM(Equal.AP_THM(IMP_DEF)(p_3))(q_3))
-  let th2_2 = CONJ(Fusion.ASSUME(p_3))(Fusion.ASSUME(q_3))
-  let th3_2 = CONJUNCT1(Fusion.ASSUME(mk_conj([p_3, q_3])))
-  let pth_3 = Fusion.EQ_MP(Equal.SYM(th1_2))(Fusion.DEDUCT_ANTISYM_RULE(th2_2)(th3_2))
-  let th1 = Equal.BETA_RULE(Equal.AP_THM(Equal.AP_THM(IMP_DEF)(p_3))(q_3))
-  let th2 = Fusion.EQ_MP(th1)(Fusion.ASSUME(mk_imp([p_3, q_3])))
-  let qth_3 = CONJUNCT2(Fusion.EQ_MP(Equal.SYM(th2))(Fusion.ASSUME(p_3)))
-  let rth = Fusion.DEDUCT_ANTISYM_RULE(pth_3)(qth_3)
+  let p_3 = Host.hol_term(Var("p", Bool))
+  let q_3 = Host.hol_term(Var("q", Bool))
+  let th1_2 = BETA_RULE(AP_THM(AP_THM(IMP_DEF)(p_3))(q_3))
+  let th2_2 = CONJ(ASSUME(p_3))(ASSUME(q_3))
+  let th3_2 = CONJUNCT1(ASSUME(mk_conj([p_3, q_3])))
+  let pth_3 = EQ_MP(SYM(th1_2))(DEDUCT_ANTISYM_RULE(th2_2)(th3_2))
+  let th1 = BETA_RULE(AP_THM(AP_THM(IMP_DEF)(p_3))(q_3))
+  let th2 = EQ_MP(th1)(ASSUME(mk_imp([p_3, q_3])))
+  let qth_3 = CONJUNCT2(EQ_MP(SYM(th2))(ASSUME(p_3)))
+  let rth = DEDUCT_ANTISYM_RULE(pth_3)(qth_3)
   fun(ith):
     fun(th):
-      let [ant, con] = Basics.dest_imp(Fusion.concl(ith))
-      (if Fusion.aconv(ant)(Fusion.concl(th)) | Fusion.EQ_MP(Fusion.EQ_MP(Fusion.DEDUCT_ANTISYM_RULE(th)(Fusion.INST(PairList.cons([ant, p_3], PairList.cons([con, q_3], PairList [])))(rth)))(th))(ith) | failwith("MP: theorems do not agree"))
+      let [ant, con] = dest_imp(concl(ith))
+      if aconv(ant)(concl(th))
+      | EQ_MP(
+          EQ_MP(DEDUCT_ANTISYM_RULE(th)(INST(PairList [[ant, p_3], [con, q_3]])(rth)))(th)
+        )(ith)
+      | failwith("MP: theorems do not agree")
 
 def DISCH:
-  let p_4 = Host.hol_term(Var("p", Tyapp("bool", [])))
-  let q_4 = Host.hol_term(Var("q", Tyapp("bool", [])))
-  let pth = Equal.SYM(Equal.BETA_RULE(Equal.AP_THM(Equal.AP_THM(IMP_DEF)(p_4))(q_4)))
+  let p_4 = Host.hol_term(Var("p", Bool))
+  let q_4 = Host.hol_term(Var("q", Bool))
+  let pth = SYM(BETA_RULE(AP_THM(AP_THM(IMP_DEF)(p_4))(q_4)))
   fun(a):
     fun(th):
-      let th1 = CONJ(Fusion.ASSUME(a))(th)
-      let th2 = CONJUNCT1(Fusion.ASSUME(Fusion.concl(th1)))
-      let th3 = Fusion.DEDUCT_ANTISYM_RULE(th1)(th2)
-      let th4 = Fusion.INST(PairList.cons([a, p_4], PairList.cons([Fusion.concl(th), q_4], PairList [])))(pth)
-      Fusion.EQ_MP(th4)(th3)
+      let th1 = CONJ(ASSUME(a))(th)
+      let th2 = CONJUNCT1(ASSUME(concl(th1)))
+      let th3 = DEDUCT_ANTISYM_RULE(th1)(th2)
+      let th4 = INST(PairList [[a, p_4], [concl(th), q_4]])(pth)
+      EQ_MP(th4)(th3)
 
 fun DISCH_ALL(th):
   try:
-    DISCH_ALL(DISCH(hd(Fusion.hyp(th)))(th))
+    DISCH_ALL(DISCH(hd(hyp(th)))(th))
     ~catch exn:
       match exn
       | Failure(_): th
@@ -273,360 +372,473 @@ fun DISCH_ALL(th):
 
 fun UNDISCH(th):
   try:
-    MP(th)(Fusion.ASSUME(Fusion.rand(Fusion.rator(Fusion.concl(th)))))
+    MP(th)(ASSUME(rand(rator(concl(th)))))
     ~catch exn:
       match exn
       | Failure(_): failwith("UNDISCH")
       | exn: Host.hol_raise(exn)
 
-fun UNDISCH_ALL(th): (if Basics.is_imp(Fusion.concl(th)) | UNDISCH_ALL(UNDISCH(th)) | th)
+fun UNDISCH_ALL(th): (if is_imp(concl(th)) | UNDISCH_ALL(UNDISCH(th)) | th)
 
 def IMP_ANTISYM_RULE:
-  let p_5 = Host.hol_term(Var("p", Tyapp("bool", [])))
-  let q_5 = Host.hol_term(Var("q", Tyapp("bool", [])))
-  let imp_tm_2 = Host.hol_term(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])))
+  let p_5 = Host.hol_term(Var("p", Bool))
+  let q_5 = Host.hol_term(Var("q", Bool))
+  let imp_tm_2 = Host.hol_term(Const("==>", Fun(Bool, Fun(Bool, Bool))))
   let pq_2 = mk_imp([p_5, q_5])
   let qp_2 = mk_imp([q_5, p_5])
-  let [pth1, pth2] = CONJ_PAIR(Fusion.ASSUME(mk_conj([pq_2, qp_2])))
-  let pth3 = Fusion.DEDUCT_ANTISYM_RULE(UNDISCH(pth2))(UNDISCH(pth1))
-  let pth4_2 = DISCH_ALL(Fusion.ASSUME(q_5))
-  let pth5_2 = Fusion.ASSUME(Fusion.mk_eq([p_5, q_5]))
-  let pth6 = CONJ(Fusion.EQ_MP(Equal.SYM(Equal.AP_THM(Equal.AP_TERM(imp_tm_2)(pth5_2))(q_5)))(pth4_2))(Fusion.EQ_MP(Equal.SYM(Equal.AP_TERM(Fusion.mk_comb([imp_tm_2, q_5]))(pth5_2)))(pth4_2))
-  let pth = Fusion.DEDUCT_ANTISYM_RULE(pth6)(pth3)
+  let [pth1, pth2] = CONJ_PAIR(ASSUME(mk_conj([pq_2, qp_2])))
+  let pth3 = DEDUCT_ANTISYM_RULE(UNDISCH(pth2))(UNDISCH(pth1))
+  let pth4_2 = DISCH_ALL(ASSUME(q_5))
+  let pth5_2 = ASSUME(mk_eq([p_5, q_5]))
+  let pth6 = CONJ(EQ_MP(SYM(AP_THM(AP_TERM(imp_tm_2)(pth5_2))(q_5)))(pth4_2))(EQ_MP(SYM(AP_TERM(mk_comb([imp_tm_2, q_5]))(pth5_2)))(pth4_2))
+  let pth = DEDUCT_ANTISYM_RULE(pth6)(pth3)
   fun(th1):
     fun(th2):
-      let [p1, q1] = Basics.dest_imp(Fusion.concl(th1))
-      Fusion.EQ_MP(Fusion.INST(PairList.cons([p1, p_5], PairList.cons([q1, q_5], PairList [])))(pth))(CONJ(th1)(th2))
+      let [p1, q1] = dest_imp(concl(th1))
+      EQ_MP(INST(PairList [[p1, p_5], [q1, q_5]])(pth))(CONJ(th1)(th2))
 
-fun ADD_ASSUM(tm): (fun(th): MP(DISCH(tm)(th))(Fusion.ASSUME(tm)))
+curried fun ADD_ASSUM(tm, th): MP(DISCH(tm)(th))(ASSUME(tm))
 
 def EQ_IMP_RULE:
-  let peq = Host.hol_term(Comb(Comb(Const("=", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("p", Tyapp("bool", []))), Var("q", Tyapp("bool", []))))
+  let peq = Host.hol_term(Iff(Var("p", Bool), Var("q", Bool)))
   let [p, q] = dest_iff(peq)
-  let pth1_3 = DISCH(peq)(DISCH(p)(Fusion.EQ_MP(Fusion.ASSUME(peq))(Fusion.ASSUME(p))))
-  let pth2_3 = DISCH(peq)(DISCH(q)(Fusion.EQ_MP(Equal.SYM(Fusion.ASSUME(peq)))(Fusion.ASSUME(q))))
+  let pth1_3 = DISCH(peq)(DISCH(p)(EQ_MP(ASSUME(peq))(ASSUME(p))))
+  let pth2_3 = DISCH(peq)(DISCH(q)(EQ_MP(SYM(ASSUME(peq)))(ASSUME(q))))
   fun(th):
-    let [l, r] = dest_iff(Fusion.concl(th))
-    [MP(Fusion.INST(PairList.cons([l, p], PairList.cons([r, q], PairList [])))(pth1_3))(th), MP(Fusion.INST(PairList.cons([l, p], PairList.cons([r, q], PairList [])))(pth2_3))(th)]
+    let [l, r] = dest_iff(concl(th))
+    [
+      MP(INST(PairList [[l, p], [r, q]])(pth1_3))(th),
+      MP(INST(PairList [[l, p], [r, q]])(pth2_3))(th)
+    ]
 
 def IMP_TRANS:
-  let pq_3 = Host.hol_term(Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("p", Tyapp("bool", []))), Var("q", Tyapp("bool", []))))
-  let qr_2 = Host.hol_term(Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("q", Tyapp("bool", []))), Var("r", Tyapp("bool", []))))
-  let [p_6, q_6] = Basics.dest_imp(pq_3)
-  let r_2 = Fusion.rand(qr_2)
-  let pth = itlist(DISCH)(PairList.cons(pq_3, PairList.cons(qr_2, PairList.cons(p_6, PairList []))))(MP(Fusion.ASSUME(qr_2))(MP(Fusion.ASSUME(pq_3))(Fusion.ASSUME(p_6))))
+  let pq_3 = Host.hol_term(Implies(Var("p", Bool), Var("q", Bool)))
+  let qr_2 = Host.hol_term(Implies(Var("q", Bool), Var("r", Bool)))
+  let [p_6, q_6] = dest_imp(pq_3)
+  let r_2 = rand(qr_2)
+  let pth = itlist(DISCH)(PairList [pq_3, qr_2, p_6])(MP(ASSUME(qr_2))(MP(ASSUME(pq_3))(ASSUME(p_6))))
   fun(th1):
     fun(th2):
-      let [x_2, y_2] = Basics.dest_imp(Fusion.concl(th1))
-      let [y_prime_2, z_2] = Basics.dest_imp(Fusion.concl(th2))
-      (if Host.hol_unequal(y_2)(y_prime_2) | failwith("IMP_TRANS") | MP(MP(Fusion.INST(PairList.cons([x_2, p_6], PairList.cons([y_2, q_6], PairList.cons([z_2, r_2], PairList []))))(pth))(th1))(th2))
+      let [x_2, y_2] = dest_imp(concl(th1))
+      let [y_prime_2, z_2] = dest_imp(concl(th2))
+      (if Host.hol_unequal(y_2)(y_prime_2) | failwith("IMP_TRANS") | MP(MP(INST(PairList [[x_2, p_6], [y_2, q_6], [z_2, r_2]])(pth))(th1))(th2))
 
-def FORALL_DEF = Fusion.new_basic_definition(Host.hol_term(Comb(Comb(Const("=", Tyapp("fun", [Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])]), Tyapp("fun", [Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])]), Tyapp("bool", [])])])), Var("!", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])]))), Abs(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])), Comb(Comb(Const("=", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])])])), Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]))), Abs(Var("x", Tyvar("A")), Const("T", Tyapp("bool", []))))))))
+def FORALL_DEF:
+  new_basic_definition(
+    Host.hol_term(Eq(
+      Fun(Fun(Tvar("A"), Bool), Bool),
+      Var("!", Fun(Fun(Tvar("A"), Bool), Bool)),
+      Lambda(
+        "P",
+        Fun(Tvar("A"), Bool),
+        Eq(Fun(Tvar("A"), Bool), Ref("P"), Lambda("x", Tvar("A"), True))
+      )
+    ))
+  )
 
-def mk_forall = Basics.mk_binder("!")
+def mk_forall = mk_binder("!")
 
 fun list_mk_forall([vs, bod]): itlist(curry(mk_forall))(vs)(bod)
 
 def SPEC:
-  let P_4 = Host.hol_term(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])))
-  let x_3 = Host.hol_term(Var("x", Tyvar("A")))
-  let th1 = Fusion.EQ_MP(Equal.AP_THM(FORALL_DEF)(Host.hol_term(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])))))(Fusion.ASSUME(Host.hol_term(Comb(Const("!", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])])), Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]))))))
-  let th2 = Equal.AP_THM(Equal.CONV_RULE(Equal.BETA_CONV)(th1))(Host.hol_term(Var("x", Tyvar("A"))))
-  let th3 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(th2)
+  let P_4 = Host.hol_term(Var("P", Fun(Tvar("A"), Bool)))
+  let x_3 = Host.hol_term(Var("x", Tvar("A")))
+  let th1:
+    EQ_MP(AP_THM(FORALL_DEF)(Host.hol_term(Var("P", Fun(Tvar("A"), Bool)))))(
+      ASSUME(
+        Host.hol_term(App(Const("!", Fun(Fun(Tvar("A"), Bool), Bool)), [Var("P", Fun(Tvar("A"), Bool))]))
+      )
+    )
+  let th2 = AP_THM(CONV_RULE(BETA_CONV)(th1))(Host.hol_term(Var("x", Tvar("A"))))
+  let th3 = CONV_RULE(RAND_CONV(BETA_CONV))(th2)
   let pth = DISCH_ALL(EQT_ELIM(th3))
   fun(tm):
     fun(th):
       try:
-        let abs_2 = Fusion.rand(Fusion.concl(th))
-        Equal.CONV_RULE(Equal.BETA_CONV)(MP(PINST(PairList.cons([snd(Fusion.dest_var(Basics.bndvar(abs_2))), Fusion.aty], PairList []))(PairList.cons([abs_2, P_4], PairList.cons([tm, x_3], PairList [])))(pth))(th))
+        let abs_2 = rand(concl(th))
+        CONV_RULE(BETA_CONV)(
+          MP(
+            PINST(
+              PairList [[snd(dest_var(bndvar(abs_2))), aty]],
+              PairList [[abs_2, P_4], [tm, x_3]]
+            )(pth)
+          )(th)
+        )
         ~catch exn:
           match exn
           | Failure(_): failwith("SPEC")
           | exn: Host.hol_raise(exn)
 
-fun SPECL(tms):
-  fun(th):
-    try:
-      rev_itlist(SPEC)(tms)(th)
-      ~catch exn:
-        match exn
-        | Failure(_): failwith("SPECL")
-        | exn: Host.hol_raise(exn)
+curried fun SPECL(tms, th):
+  try:
+    rev_itlist(SPEC)(tms)(th)
+    ~catch exn:
+      match exn
+      | Failure(_): failwith("SPECL")
+      | exn: Host.hol_raise(exn)
 
 fun SPEC_VAR(th):
-  let bv = Fusion.variant(Basics.thm_frees(th))(Basics.bndvar(Fusion.rand(Fusion.concl(th))))
+  let bv = variant(thm_frees(th))(bndvar(rand(concl(th))))
   [bv, SPEC(bv)(th)]
 
-fun SPEC_ALL(th): (if Basics.is_forall(Fusion.concl(th)) | SPEC_ALL(snd(SPEC_VAR(th))) | th)
+fun SPEC_ALL(th): (if is_forall(concl(th)) | SPEC_ALL(snd(SPEC_VAR(th))) | th)
 
-fun ISPEC(t):
-  fun(th):
-    let [x, _]:
-      try:
-        Basics.dest_forall(Fusion.concl(th))
-        ~catch exn:
-          match exn
-          | Failure(_): failwith("ISPEC: input theorem not universally quantified")
-          | exn: Host.hol_raise(exn)
-    let tyins:
-      try:
-        Basics.type_match(snd(Fusion.dest_var(x)))(Fusion.type_of(t))(PairList [])
-        ~catch exn:
-          match exn
-          | Failure(_): failwith("ISPEC can't type-instantiate input theorem")
-          | exn: Host.hol_raise(exn)
+curried fun ISPEC(t, th):
+  let [x, _]:
     try:
-      SPEC(t)(Fusion.INST_TYPE(tyins)(th))
+      dest_forall(concl(th))
       ~catch exn:
         match exn
-        | Failure(_): failwith("ISPEC: type variable(s) free in assumptions")
+        | Failure(_): failwith("ISPEC: input theorem not universally quantified")
         | exn: Host.hol_raise(exn)
-
-fun ISPECL(tms):
-  fun(th):
+  let tyins:
     try:
-      if Host.hol_equal(tms)(PairList [])
-      | th
-      | let avs = fst(Host.chop_list(length(tms))(fst(Basics.strip_forall(Fusion.concl(th)))))
-        let tyins = itlist2(Basics.type_match)(map(o(snd)(Fusion.dest_var))(avs))(map(Fusion.type_of)(tms))(PairList [])
-        SPECL(tms)(Fusion.INST_TYPE(tyins)(th))
+      type_match(snd(dest_var(x)))(type_of(t))(PairList [])
       ~catch exn:
         match exn
-        | Failure(_): failwith("ISPECL")
+        | Failure(_): failwith("ISPEC can't type-instantiate input theorem")
         | exn: Host.hol_raise(exn)
+  try:
+    SPEC(t)(INST_TYPE(tyins)(th))
+    ~catch exn:
+      match exn
+      | Failure(_): failwith("ISPEC: type variable(s) free in assumptions")
+      | exn: Host.hol_raise(exn)
+
+curried fun ISPECL(tms, th):
+  try:
+    if Host.hol_equal(tms)(PairList [])
+    | th
+    | let avs = fst(Host.chop_list(length(tms))(fst(strip_forall(concl(th)))))
+      let tyins = itlist2(type_match)(map(o(snd)(dest_var))(avs))(map(type_of)(tms))(PairList [])
+      SPECL(tms)(INST_TYPE(tyins)(th))
+    ~catch exn:
+      match exn
+      | Failure(_): failwith("ISPECL")
+      | exn: Host.hol_raise(exn)
 
 def GEN:
-  let pth = Equal.SYM(Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(FORALL_DEF)(Host.hol_term(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]))))))
+  let pth:
+    SYM(
+      CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(FORALL_DEF)(Host.hol_term(Var("P", Fun(Tvar("A"), Bool)))))
+    )
   fun(x):
-    let qth = Fusion.INST_TYPE(PairList.cons([snd(Fusion.dest_var(x)), Fusion.aty], PairList []))(pth)
-    let ptm = Fusion.rand(Fusion.rand(Fusion.concl(qth)))
+    let qth = INST_TYPE(PairList [[snd(dest_var(x)), aty]])(pth)
+    let ptm = rand(rand(concl(qth)))
     fun(th):
-      let th_prime = Fusion.ABS(x)(EQT_INTRO(th))
-      let phi = Equal.lhand(Fusion.concl(th_prime))
-      let rth = Fusion.INST(PairList.cons([phi, ptm], PairList []))(qth)
-      Fusion.EQ_MP(rth)(th_prime)
+      let th_prime = ABS(x)(EQT_INTRO(th))
+      let phi = lhand(concl(th_prime))
+      let rth = INST(PairList [[phi, ptm]])(qth)
+      EQ_MP(rth)(th_prime)
 
 def GENL = itlist(GEN)
 
 fun GEN_ALL(th):
-  let [asl, c] = Fusion.dest_thm(th)
-  let vars = subtract(Fusion.frees(c))(Fusion.freesl(asl))
+  let [asl, c] = dest_thm(th)
+  let vars = subtract(frees(c))(freesl(asl))
   GENL(vars)(th)
 
-def EXISTS_DEF = Fusion.new_basic_definition(Host.hol_term(Comb(Comb(Const("=", Tyapp("fun", [Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])]), Tyapp("fun", [Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])]), Tyapp("bool", [])])])), Var("?", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])]))), Abs(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])), Comb(Const("!", Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])]), Tyapp("bool", [])])), Abs(Var("q", Tyapp("bool", [])), Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Comb(Const("!", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])])), Abs(Var("x", Tyvar("A")), Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Comb(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])), Var("x", Tyvar("A")))), Var("q", Tyapp("bool", [])))))), Var("q", Tyapp("bool", [])))))))))
+def EXISTS_DEF:
+  new_basic_definition(
+    Host.hol_term(Eq(
+      Fun(Fun(Tvar("A"), Bool), Bool),
+      Var("?", Fun(Fun(Tvar("A"), Bool), Bool)),
+      Lambda(
+        "P",
+        Fun(Tvar("A"), Bool),
+        Forall(
+          "q",
+          Bool,
+          Implies(Forall("x", Tvar("A"), Implies(App(Ref("P"), [Ref("x")]), Ref("q"))), Ref("q"))
+        )
+      )
+    ))
+  )
 
-def mk_exists = Basics.mk_binder("?")
+def mk_exists = mk_binder("?")
 
 fun list_mk_exists([vs, bod]): itlist(curry(mk_exists))(vs)(bod)
 
 def EXISTS:
-  let P_5 = Host.hol_term(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])))
-  let x_4 = Host.hol_term(Var("x", Tyvar("A")))
-  let th1 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(EXISTS_DEF)(P_5))
-  let th2 = SPEC(Host.hol_term(Var("x", Tyvar("A"))))(Fusion.ASSUME(Host.hol_term(Comb(Const("!", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])])), Abs(Var("x", Tyvar("A")), Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Comb(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])), Var("x", Tyvar("A")))), Var("Q", Tyapp("bool", []))))))))
-  let th3 = DISCH(Host.hol_term(Comb(Const("!", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])])), Abs(Var("x", Tyvar("A")), Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Comb(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])), Var("x", Tyvar("A")))), Var("Q", Tyapp("bool", [])))))))(MP(th2)(Fusion.ASSUME(Host.hol_term(Comb(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])), Var("x", Tyvar("A")))))))
-  let pth = Fusion.EQ_MP(Equal.SYM(th1))(GEN(Host.hol_term(Var("Q", Tyapp("bool", []))))(th3))
+  let P_5 = Host.hol_term(Var("P", Fun(Tvar("A"), Bool)))
+  let x_4 = Host.hol_term(Var("x", Tvar("A")))
+  let th1 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(EXISTS_DEF)(P_5))
+  let th2:
+    SPEC(Host.hol_term(Var("x", Tvar("A"))))(
+      ASSUME(
+        Host.hol_term(Forall("x", Tvar("A"), Implies(App(Var("P", Fun(Tvar("A"), Bool)), [Ref("x")]), Var("Q", Bool))))
+      )
+    )
+  let th3:
+    DISCH(
+      Host.hol_term(Forall("x", Tvar("A"), Implies(App(Var("P", Fun(Tvar("A"), Bool)), [Ref("x")]), Var("Q", Bool))))
+    )(
+      MP(th2)(ASSUME(Host.hol_term(App(Var("P", Fun(Tvar("A"), Bool)), [Var("x", Tvar("A"))]))))
+    )
+  let pth = EQ_MP(SYM(th1))(GEN(Host.hol_term(Var("Q", Bool)))(th3))
   fun([etm, stm]):
     fun(th):
       try:
-        let [qf, abs_3] = Fusion.dest_comb(etm)
-        let bth = Equal.BETA_CONV(Fusion.mk_comb([abs_3, stm]))
-        let cth = PINST(PairList.cons([Fusion.type_of(stm), Fusion.aty], PairList []))(PairList.cons([abs_3, P_5], PairList.cons([stm, x_4], PairList [])))(pth)
-        PROVE_HYP(Fusion.EQ_MP(Equal.SYM(bth))(th))(cth)
+        let [qf, abs_3] = dest_comb(etm)
+        let bth = BETA_CONV(mk_comb([abs_3, stm]))
+        let cth = PINST(PairList [[type_of(stm), aty]], PairList [[abs_3, P_5], [stm, x_4]])(pth)
+        PROVE_HYP(EQ_MP(SYM(bth))(th), cth)
         ~catch exn:
           match exn
           | Failure(_): failwith("EXISTS")
           | exn: Host.hol_raise(exn)
 
-fun SIMPLE_EXISTS(v): (fun(th): EXISTS([mk_exists([v, Fusion.concl(th)]), v])(th))
+curried fun SIMPLE_EXISTS(v, th): EXISTS([mk_exists([v, concl(th)]), v])(th)
 
 def CHOOSE:
-  let P_6 = Host.hol_term(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])))
-  let Q_4 = Host.hol_term(Var("Q", Tyapp("bool", [])))
-  let th1 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(EXISTS_DEF)(P_6))
-  let th2 = SPEC(Host.hol_term(Var("Q", Tyapp("bool", []))))(UNDISCH(fst(EQ_IMP_RULE(th1))))
-  let pth = DISCH_ALL(DISCH(Host.hol_term(Comb(Const("?", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])])), Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])))))(UNDISCH(th2)))
+  let P_6 = Host.hol_term(Var("P", Fun(Tvar("A"), Bool)))
+  let Q_4 = Host.hol_term(Var("Q", Bool))
+  let th1 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(EXISTS_DEF)(P_6))
+  let th2 = SPEC(Host.hol_term(Var("Q", Bool)))(UNDISCH(fst(EQ_IMP_RULE(th1))))
+  let pth:
+    DISCH_ALL(
+      DISCH(
+        Host.hol_term(App(Const("?", Fun(Fun(Tvar("A"), Bool), Bool)), [Var("P", Fun(Tvar("A"), Bool))]))
+      )(UNDISCH(th2))
+    )
   fun([v, th1]):
     fun(th2):
       try:
-        let abs_4 = Fusion.rand(Fusion.concl(th1))
-        let [bv, bod] = Fusion.dest_abs(abs_4)
-        let cmb = Fusion.mk_comb([abs_4, v])
-        let pat = Fusion.vsubst(PairList.cons([v, bv], PairList []))(bod)
-        let th3 = Equal.CONV_RULE(Equal.BETA_CONV)(Fusion.ASSUME(cmb))
+        let abs_4 = rand(concl(th1))
+        let [bv, bod] = dest_abs(abs_4)
+        let cmb = mk_comb([abs_4, v])
+        let pat = vsubst(PairList [[v, bv]])(bod)
+        let th3 = CONV_RULE(BETA_CONV)(ASSUME(cmb))
         let th4 = GEN(v)(DISCH(cmb)(MP(DISCH(pat)(th2))(th3)))
-        let th5 = PINST(PairList.cons([snd(Fusion.dest_var(v)), Fusion.aty], PairList []))(PairList.cons([abs_4, P_6], PairList.cons([Fusion.concl(th2), Q_4], PairList [])))(pth)
+        let th5 = PINST(PairList [[snd(dest_var(v)), aty]])(PairList [[abs_4, P_6], [concl(th2), Q_4]])(pth)
         MP(MP(th5)(th4))(th1)
         ~catch exn:
           match exn
           | Failure(_): failwith("CHOOSE")
           | exn: Host.hol_raise(exn)
 
-fun SIMPLE_CHOOSE(v): (fun(th): CHOOSE([v, Fusion.ASSUME(mk_exists([v, hd(Fusion.hyp(th))]))])(th))
+curried fun SIMPLE_CHOOSE(v, th): CHOOSE([v, ASSUME(mk_exists([v, hd(hyp(th))]))])(th)
 
-def OR_DEF = Fusion.new_basic_definition(Host.hol_term(Comb(Comb(Const("=", Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])]), Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])]), Tyapp("bool", [])])])), Var("\\/", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])]))), Abs(Var("p", Tyapp("bool", [])), Abs(Var("q", Tyapp("bool", [])), Comb(Const("!", Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])]), Tyapp("bool", [])])), Abs(Var("r", Tyapp("bool", [])), Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("p", Tyapp("bool", []))), Var("r", Tyapp("bool", [])))), Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("q", Tyapp("bool", []))), Var("r", Tyapp("bool", [])))), Var("r", Tyapp("bool", [])))))))))))
+def OR_DEF:
+  new_basic_definition(
+    Host.hol_term(Eq(
+      Fun(Bool, Fun(Bool, Bool)),
+      Var("\\/", Fun(Bool, Fun(Bool, Bool))),
+      Lambda(
+        "p",
+        Bool,
+        Lambda(
+          "q",
+          Bool,
+          Forall(
+            "r",
+            Bool,
+            Implies(Implies(Ref("p"), Ref("r")), Implies(Implies(Ref("q"), Ref("r")), Ref("r")))
+          )
+        )
+      )
+    ))
+  )
 
-def mk_disj = Basics.mk_binary("\\/")
+def mk_disj = mk_binary("\\/")
 
 def list_mk_disj = end_itlist(curry(mk_disj))
 
 def DISJ1:
-  let P_7 = Host.hol_term(Var("P", Tyapp("bool", [])))
-  let Q_5 = Host.hol_term(Var("Q", Tyapp("bool", [])))
-  let th1 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(OR_DEF)(Host.hol_term(Var("P", Tyapp("bool", [])))))
-  let th2 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(th1)(Host.hol_term(Var("Q", Tyapp("bool", [])))))
-  let th3 = MP(Fusion.ASSUME(Host.hol_term(Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("P", Tyapp("bool", []))), Var("t", Tyapp("bool", []))))))(Fusion.ASSUME(Host.hol_term(Var("P", Tyapp("bool", [])))))
-  let th4 = GEN(Host.hol_term(Var("t", Tyapp("bool", []))))(DISCH(Host.hol_term(Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("P", Tyapp("bool", []))), Var("t", Tyapp("bool", [])))))(DISCH(Host.hol_term(Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("Q", Tyapp("bool", []))), Var("t", Tyapp("bool", [])))))(th3)))
-  let pth = Fusion.EQ_MP(Equal.SYM(th2))(th4)
+  let P_7 = Host.hol_term(Var("P", Bool))
+  let Q_5 = Host.hol_term(Var("Q", Bool))
+  let th1 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(OR_DEF)(Host.hol_term(Var("P", Bool))))
+  let th2 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(th1)(Host.hol_term(Var("Q", Bool))))
+  let th3 = MP(ASSUME(Host.hol_term(Implies(Var("P", Bool), Var("t", Bool)))))(ASSUME(Host.hol_term(Var("P", Bool))))
+  let th4:
+    GEN(Host.hol_term(Var("t", Bool)))(
+      DISCH(Host.hol_term(Implies(Var("P", Bool), Var("t", Bool))))(DISCH(Host.hol_term(Implies(Var("Q", Bool), Var("t", Bool))))(th3))
+    )
+  let pth = EQ_MP(SYM(th2))(th4)
   fun(th):
     fun(tm):
       try:
-        Fusion.EQ_MP(Fusion.DEDUCT_ANTISYM_RULE(th)(Fusion.INST(PairList.cons([Fusion.concl(th), P_7], PairList.cons([tm, Q_5], PairList [])))(pth)))(th)
+        EQ_MP(
+          DEDUCT_ANTISYM_RULE(th)(INST(PairList [[concl(th), P_7], [tm, Q_5]])(pth))
+        )(th)
         ~catch exn:
           match exn
           | Failure(_): failwith("DISJ1")
           | exn: Host.hol_raise(exn)
 
 def DISJ2:
-  let P_8 = Host.hol_term(Var("P", Tyapp("bool", [])))
-  let Q_6 = Host.hol_term(Var("Q", Tyapp("bool", [])))
-  let th1 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(OR_DEF)(Host.hol_term(Var("P", Tyapp("bool", [])))))
-  let th2 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(th1)(Host.hol_term(Var("Q", Tyapp("bool", [])))))
-  let th3 = MP(Fusion.ASSUME(Host.hol_term(Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("Q", Tyapp("bool", []))), Var("t", Tyapp("bool", []))))))(Fusion.ASSUME(Host.hol_term(Var("Q", Tyapp("bool", [])))))
-  let th4 = GEN(Host.hol_term(Var("t", Tyapp("bool", []))))(DISCH(Host.hol_term(Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("P", Tyapp("bool", []))), Var("t", Tyapp("bool", [])))))(DISCH(Host.hol_term(Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("Q", Tyapp("bool", []))), Var("t", Tyapp("bool", [])))))(th3)))
-  let pth = Fusion.EQ_MP(Equal.SYM(th2))(th4)
+  let P_8 = Host.hol_term(Var("P", Bool))
+  let Q_6 = Host.hol_term(Var("Q", Bool))
+  let th1 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(OR_DEF)(Host.hol_term(Var("P", Bool))))
+  let th2 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(th1)(Host.hol_term(Var("Q", Bool))))
+  let th3 = MP(ASSUME(Host.hol_term(Implies(Var("Q", Bool), Var("t", Bool)))))(ASSUME(Host.hol_term(Var("Q", Bool))))
+  let th4:
+    GEN(Host.hol_term(Var("t", Bool)))(
+      DISCH(Host.hol_term(Implies(Var("P", Bool), Var("t", Bool))))(DISCH(Host.hol_term(Implies(Var("Q", Bool), Var("t", Bool))))(th3))
+    )
+  let pth = EQ_MP(SYM(th2))(th4)
   fun(tm):
     fun(th):
       try:
-        Fusion.EQ_MP(Fusion.DEDUCT_ANTISYM_RULE(th)(Fusion.INST(PairList.cons([tm, P_8], PairList.cons([Fusion.concl(th), Q_6], PairList [])))(pth)))(th)
+        EQ_MP(
+          DEDUCT_ANTISYM_RULE(th)(INST(PairList [[tm, P_8], [concl(th), Q_6]])(pth))
+        )(th)
         ~catch exn:
           match exn
           | Failure(_): failwith("DISJ2")
           | exn: Host.hol_raise(exn)
 
 def DISJ_CASES:
-  let P_9 = Host.hol_term(Var("P", Tyapp("bool", [])))
-  let Q_7 = Host.hol_term(Var("Q", Tyapp("bool", [])))
-  let R_2 = Host.hol_term(Var("R", Tyapp("bool", [])))
-  let th1 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(OR_DEF)(Host.hol_term(Var("P", Tyapp("bool", [])))))
-  let th2 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(th1)(Host.hol_term(Var("Q", Tyapp("bool", [])))))
-  let th3 = SPEC(Host.hol_term(Var("R", Tyapp("bool", []))))(Fusion.EQ_MP(th2)(Fusion.ASSUME(Host.hol_term(Comb(Comb(Const("\\/", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("P", Tyapp("bool", []))), Var("Q", Tyapp("bool", [])))))))
+  let P_9 = Host.hol_term(Var("P", Bool))
+  let Q_7 = Host.hol_term(Var("Q", Bool))
+  let R_2 = Host.hol_term(Var("R", Bool))
+  let th1 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(OR_DEF)(Host.hol_term(Var("P", Bool))))
+  let th2 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(th1)(Host.hol_term(Var("Q", Bool))))
+  let th3 = SPEC(Host.hol_term(Var("R", Bool)))(EQ_MP(th2)(ASSUME(Host.hol_term(Or(Var("P", Bool), Var("Q", Bool))))))
   let pth = UNDISCH(UNDISCH(th3))
   fun(th0):
     fun(th1):
       fun(th2):
         try:
-          let c1_2 = Fusion.concl(th1)
-          let c2_2 = Fusion.concl(th2)
-          if Host.hol_not(Fusion.aconv(c1_2)(c2_2))
+          let c1_2 = concl(th1)
+          let c2_2 = concl(th2)
+          if Host.hol_not(aconv(c1_2)(c2_2))
           | failwith("DISJ_CASES")
-          | let [l, r] = Basics.dest_disj(Fusion.concl(th0))
-            let th = Fusion.INST(PairList.cons([l, P_9], PairList.cons([r, Q_7], PairList.cons([c1_2, R_2], PairList []))))(pth)
-            PROVE_HYP(DISCH(r)(th2))(PROVE_HYP(DISCH(l)(th1))(Fusion.EQ_MP(Fusion.DEDUCT_ANTISYM_RULE(th0)(th))(th0)))
+          | let [l, r] = dest_disj(concl(th0))
+            let th = INST(PairList [[l, P_9], [r, Q_7], [c1_2, R_2]])(pth)
+            PROVE_HYP(DISCH(r)(th2))(PROVE_HYP(DISCH(l)(th1))(EQ_MP(DEDUCT_ANTISYM_RULE(th0)(th))(th0)))
           ~catch exn:
             match exn
             | Failure(_): failwith("DISJ_CASES")
             | exn: Host.hol_raise(exn)
 
-fun SIMPLE_DISJ_CASES(th1): (fun(th2): DISJ_CASES(Fusion.ASSUME(mk_disj([hd(Fusion.hyp(th1)), hd(Fusion.hyp(th2))])))(th1)(th2))
+curried fun SIMPLE_DISJ_CASES(th1, th2): DISJ_CASES(ASSUME(mk_disj([hd(hyp(th1)), hd(hyp(th2))])))(th1)(th2)
 
-def F_DEF = Fusion.new_basic_definition(Host.hol_term(Comb(Comb(Const("=", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("F", Tyapp("bool", []))), Comb(Const("!", Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])]), Tyapp("bool", [])])), Abs(Var("p", Tyapp("bool", [])), Var("p", Tyapp("bool", [])))))))
+def F_DEF = new_basic_definition(Host.hol_term(Iff(Var("F", Bool), Forall("p", Bool, Ref("p")))))
 
-def NOT_DEF = Fusion.new_basic_definition(Host.hol_term(Comb(Comb(Const("=", Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])]), Tyapp("fun", [Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])]), Tyapp("bool", [])])])), Var("~", Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])]))), Abs(Var("p", Tyapp("bool", [])), Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("p", Tyapp("bool", []))), Const("F", Tyapp("bool", [])))))))
+def NOT_DEF:
+  new_basic_definition(
+    Host.hol_term(Eq(Fun(Bool, Bool), Var("~", Fun(Bool, Bool)), Lambda("p", Bool, Implies(Ref("p"), False))))
+  )
 
 def mk_neg:
-  let neg_tm = Host.hol_term(Const("~", Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])))
+  let neg_tm = Host.hol_term(Const("~", Fun(Bool, Bool)))
   fun(tm):
     try:
-      Fusion.mk_comb([neg_tm, tm])
+      mk_comb([neg_tm, tm])
       ~catch exn:
         match exn
         | Failure(_): failwith("mk_neg")
         | exn: Host.hol_raise(exn)
 
 def NOT_ELIM:
-  let P = Host.hol_term(Var("P", Tyapp("bool", [])))
-  let pth = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(NOT_DEF)(P))
+  let P = Host.hol_term(Var("P", Bool))
+  let pth = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(NOT_DEF)(P))
   fun(th):
     try:
-      Fusion.EQ_MP(Fusion.INST(PairList.cons([Fusion.rand(Fusion.concl(th)), P], PairList []))(pth))(th)
+      EQ_MP(INST(PairList [[rand(concl(th)), P]])(pth))(th)
       ~catch exn:
         match exn
         | Failure(_): failwith("NOT_ELIM")
         | exn: Host.hol_raise(exn)
 
 def NOT_INTRO:
-  let P = Host.hol_term(Var("P", Tyapp("bool", [])))
-  let pth = Equal.SYM(Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(NOT_DEF)(P)))
+  let P = Host.hol_term(Var("P", Bool))
+  let pth = SYM(CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(NOT_DEF)(P)))
   fun(th):
     try:
-      Fusion.EQ_MP(Fusion.INST(PairList.cons([Fusion.rand(Fusion.rator(Fusion.concl(th))), P], PairList []))(pth))(th)
+      EQ_MP(INST(PairList [[rand(rator(concl(th))), P]])(pth))(th)
       ~catch exn:
         match exn
         | Failure(_): failwith("NOT_INTRO")
         | exn: Host.hol_raise(exn)
 
 def EQF_INTRO:
-  let P = Host.hol_term(Var("P", Tyapp("bool", [])))
-  let th1_3 = NOT_ELIM(Fusion.ASSUME(Host.hol_term(Comb(Const("~", Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])), Var("P", Tyapp("bool", []))))))
-  let th2_3 = DISCH(Host.hol_term(Const("F", Tyapp("bool", []))))(SPEC(P)(Fusion.EQ_MP(F_DEF)(Fusion.ASSUME(Host.hol_term(Const("F", Tyapp("bool", [])))))))
+  let P = Host.hol_term(Var("P", Bool))
+  let th1_3 = NOT_ELIM(ASSUME(Host.hol_term(Not(Var("P", Bool)))))
+  let th2_3 = DISCH(Host.hol_term(False))(SPEC(P)(EQ_MP(F_DEF)(ASSUME(Host.hol_term(False)))))
   let pth = DISCH_ALL(IMP_ANTISYM_RULE(th1_3)(th2_3))
   fun(th):
     try:
-      MP(Fusion.INST(PairList.cons([Fusion.rand(Fusion.concl(th)), P], PairList []))(pth))(th)
+      MP(INST(PairList [[rand(concl(th)), P]])(pth))(th)
       ~catch exn:
         match exn
         | Failure(_): failwith("EQF_INTRO")
         | exn: Host.hol_raise(exn)
 
 def EQF_ELIM:
-  let P = Host.hol_term(Var("P", Tyapp("bool", [])))
-  let th1 = Fusion.EQ_MP(Fusion.ASSUME(Host.hol_term(Comb(Comb(Const("=", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Var("P", Tyapp("bool", []))), Const("F", Tyapp("bool", []))))))(Fusion.ASSUME(Host.hol_term(Var("P", Tyapp("bool", [])))))
-  let th2 = DISCH(P)(SPEC(Host.hol_term(Const("F", Tyapp("bool", []))))(Fusion.EQ_MP(F_DEF)(th1)))
+  let P = Host.hol_term(Var("P", Bool))
+  let th1 = EQ_MP(ASSUME(Host.hol_term(Iff(Var("P", Bool), False))))(ASSUME(Host.hol_term(Var("P", Bool))))
+  let th2 = DISCH(P)(SPEC(Host.hol_term(False))(EQ_MP(F_DEF)(th1)))
   let pth = DISCH_ALL(NOT_INTRO(th2))
   fun(th):
     try:
-      MP(Fusion.INST(PairList.cons([Fusion.rand(Fusion.rator(Fusion.concl(th))), P], PairList []))(pth))(th)
+      MP(INST(PairList [[rand(rator(concl(th))), P]])(pth))(th)
       ~catch exn:
         match exn
         | Failure(_): failwith("EQF_ELIM")
         | exn: Host.hol_raise(exn)
 
 def CONTR:
-  let P_10 = Host.hol_term(Var("P", Tyapp("bool", [])))
-  let f_tm_2 = Host.hol_term(Const("F", Tyapp("bool", [])))
-  let pth = SPEC(P_10)(Fusion.EQ_MP(F_DEF)(Fusion.ASSUME(Host.hol_term(Const("F", Tyapp("bool", []))))))
-  (fun(tm): (fun(th): (if Host.hol_unequal(Fusion.concl(th))(f_tm_2) | failwith("CONTR") | Fusion.EQ_MP(Fusion.DEDUCT_ANTISYM_RULE(th)(Fusion.INST(PairList.cons([tm, P_10], PairList []))(pth)))(th))))
+  let P_10 = Host.hol_term(Var("P", Bool))
+  let f_tm_2 = Host.hol_term(False)
+  let pth = SPEC(P_10)(EQ_MP(F_DEF)(ASSUME(Host.hol_term(False))))
+  (fun(tm): (fun(th): (if Host.hol_unequal(concl(th))(f_tm_2) | failwith("CONTR") | EQ_MP(DEDUCT_ANTISYM_RULE(th)(INST(PairList [[tm, P_10]])(pth)))(th))))
 
-def EXISTS_UNIQUE_DEF = Fusion.new_basic_definition(Host.hol_term(Comb(Comb(Const("=", Tyapp("fun", [Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])]), Tyapp("fun", [Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])]), Tyapp("bool", [])])])), Var("?!", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])]))), Abs(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])), Comb(Comb(Const("/\\", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Comb(Const("?", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])])), Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])))), Comb(Const("!", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])])), Abs(Var("x", Tyvar("A")), Comb(Const("!", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])])), Abs(Var("y", Tyvar("A")), Comb(Comb(Const("==>", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Comb(Comb(Const("/\\", Tyapp("fun", [Tyapp("bool", []), Tyapp("fun", [Tyapp("bool", []), Tyapp("bool", [])])])), Comb(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])), Var("x", Tyvar("A")))), Comb(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])), Var("y", Tyvar("A"))))), Comb(Comb(Const("=", Tyapp("fun", [Tyvar("A"), Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])])), Var("x", Tyvar("A"))), Var("y", Tyvar("A")))))))))))))
+def EXISTS_UNIQUE_DEF:
+  new_basic_definition(
+    Host.hol_term(Eq(
+      Fun(Fun(Tvar("A"), Bool), Bool),
+      Var("?!", Fun(Fun(Tvar("A"), Bool), Bool)),
+      Lambda(
+        "P",
+        Fun(Tvar("A"), Bool),
+        And(
+          App(Const("?", Fun(Fun(Tvar("A"), Bool), Bool)), [Ref("P")]),
+          Forall(
+            "x",
+            Tvar("A"),
+            Forall(
+              "y",
+              Tvar("A"),
+              Implies(
+                And(App(Ref("P"), [Ref("x")]), App(Ref("P"), [Ref("y")])),
+                Eq(Tvar("A"), Ref("x"), Ref("y"))
+              )
+            )
+          )
+        )
+      )
+    ))
+  )
 
-def mk_uexists = Basics.mk_binder("?!")
+def mk_uexists = mk_binder("?!")
 
 def EXISTENCE:
-  let P = Host.hol_term(Var("P", Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])])))
-  let th1 = Equal.CONV_RULE(Equal.RAND_CONV(Equal.BETA_CONV))(Equal.AP_THM(EXISTS_UNIQUE_DEF)(P))
+  let P = Host.hol_term(Var("P", Fun(Tvar("A"), Bool)))
+  let th1 = CONV_RULE(RAND_CONV(BETA_CONV))(AP_THM(EXISTS_UNIQUE_DEF)(P))
   let th2 = UNDISCH(fst(EQ_IMP_RULE(th1)))
   let pth = DISCH_ALL(CONJUNCT1(th2))
   fun(th):
     try:
-      let abs_5 = Fusion.rand(Fusion.concl(th))
-      let ty = snd(Fusion.dest_var(Basics.bndvar(abs_5)))
-      MP(PINST(PairList.cons([ty, Fusion.aty], PairList []))(PairList.cons([abs_5, P], PairList []))(pth))(th)
+      let abs_5 = rand(concl(th))
+      let ty = snd(dest_var(bndvar(abs_5)))
+      MP(PINST(PairList [[ty, aty]], PairList [[abs_5, P]])(pth))(th)
       ~catch exn:
         match exn
         | Failure(_): failwith("EXISTENCE")
         | exn: Host.hol_raise(exn)
 
 fun set_verbose_symbols(_):
-  Host.do_list(Host.parse_as_binder)(PairList.cons("forall", PairList.cons("exists", PairList.cons("existsunique", PairList []))))
-  Host.override_interface(["true", Host.hol_term(Const("T", Tyapp("bool", [])))])
-  Host.override_interface(["false", Host.hol_term(Const("F", Tyapp("bool", [])))])
-  Host.override_interface(["forall", Host.hol_term(Const("!", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])])))])
-  Host.override_interface(["exists", Host.hol_term(Const("?", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])])))])
-  Host.override_interface(["existsunique", Host.hol_term(Const("?!", Tyapp("fun", [Tyapp("fun", [Tyvar("A"), Tyapp("bool", [])]), Tyapp("bool", [])])))])
+  Host.do_list(Host.parse_as_binder)(PairList ["forall", "exists", "existsunique"])
+  Host.override_interface(["true", Host.hol_term(True)])
+  Host.override_interface(["false", Host.hol_term(False)])
+  Host.override_interface(["forall", Host.hol_term(Const("!", Fun(Fun(Tvar("A"), Bool), Bool)))])
+  Host.override_interface(["exists", Host.hol_term(Const("?", Fun(Fun(Tvar("A"), Bool), Bool)))])
+  Host.override_interface(["existsunique", Host.hol_term(Const("?!", Fun(Fun(Tvar("A"), Bool), Bool)))])
 
 fun unset_verbose_symbols(_):
-  Host.do_list(Host.unparse_as_binder)(PairList.cons("forall", PairList.cons("exists", PairList.cons("existsunique", PairList []))))
-  Host.do_list(Host.remove_interface)(PairList.cons("true", PairList.cons("false", PairList.cons("forall", PairList.cons("exists", PairList.cons("existsunique", PairList []))))))
+  Host.do_list(Host.unparse_as_binder)(PairList ["forall", "exists", "existsunique"])
+  Host.do_list(Host.remove_interface)(PairList ["true", "false", "forall", "exists", "existsunique"])
 
 Host.hol_apply_unit(set_verbose_symbols)

@@ -60,27 +60,18 @@ for fn in ['map','rev','length','concat','exists','filter','find','fold_left','f
     OPS['List.'+fn]='OCamlList.'+fn
 
 def ind(s,n=2): return '\n'.join(' '*n+l for l in s.splitlines())
-def block(s): return '(block:«\n'+ind(s)+'\n»)'
-def unwrap(s):
-    # Drop a (block:« ... ») wrapper that spans the whole text; the caller supplies a block.
-    if not (s.startswith('(block:«\n') and s.endswith('\n»)')): return s
-    depth=0
-    for i,c in enumerate(s):
-        if c=='«': depth+=1
-        elif c=='»':
-            depth-=1
-            if depth==0: return '\n'.join(l[2:] if l.startswith('  ') else l for l in s[len('(block:«\n'):-len('\n»)')].splitlines()) if i==len(s)-2 else s
-    return s
-def colon(s):
-    s=unwrap(s)
-    return ': '+s if '\n' not in s else ':«\n'+ind(s)+'\n»'
-def inline(s):
-    # A fun definition may be followed by ';' on the same line, so keep its body delimited.
-    s=unwrap(s)
-    return ':« '+s+' »' if '\n' not in s else ':«\n'+ind(s)+'\n»'
-def equals(s):
-    s=unwrap(s)
-    return ' = '+s if '\n' not in s else ':«\n'+ind(s)+'\n»'
+def safe(text):
+    # An inline 'if' would swallow the enclosing alternatives' bars.
+    return '('+text+')' if '\n' not in text and text.startswith('if ') else text
+def alt(text):
+    # One '|' alternative of an if/match: continuation lines align after the bar.
+    first,*rest=safe(text).split('\n')
+    return '| '+first+''.join('\n  '+l for l in rest)
+def mkif(cond,a,b):
+    if all('\n' not in t and ' | ' not in t for t in (cond,a,b)): return '(if '+cond+' | '+a+' | '+b+')'
+    return 'if '+cond+'\n'+alt(a)+'\n'+alt(b)
+def assign(head,text):
+    return head+' = '+text if '\n' not in text else head+':\n'+ind(text)
 def ident_safe(s):
     s=s.replace("'",'_prime')
     if s in ['values','def','cond']:s='hol_'+s
@@ -118,6 +109,11 @@ def names(p):
     if p[0]=='record': return sum((names(q) for _,q in p[1]),[])
     return []
 
+def has_letmodule(x):
+    if isinstance(x,list):
+        return (len(x)>0 and x[0]=='letmodule') or any(has_letmodule(y) for y in x)
+    return False
+
 def pure(e):
     if e[0] in ['id','int','float','string','quote','fun','function','labelfun']:return True
     if e[0] in ['tuple','array']:return all(pure(x) for x in e[1])
@@ -136,7 +132,7 @@ def alternatives(p):
 
 class Translator:
     def __init__(self,module,quotes):
-        self.module=module; self.quotes=quotes; self.counter=0
+        self.module=module; self.quotes=quotes; self.counter=0; self.cur=[]; self.fun_names=set(); self.let_names=set(); self.no_natural=False
         self.quote_module=module
         self.bridge=module not in CORE and module!='preterm'
         self.env={}; self.exports={}
@@ -211,14 +207,36 @@ class Translator:
             cls,layout=self.record_class(given)
             return cls+'('+','.join(self.pattern(given[f],env) if f in given else '_' for f in layout)+')'
         raise ValueError(f'pattern {p}')
+    def lines_of(self,e,env):
+        # The statements an expression needs, then its value, as a block body.
+        stmts,r=self.sub(lambda:self.expr(e,env))
+        return '\n'.join(stmts+[r])
+    def sub(self,fn):
+        saved=self.cur;self.cur=[]
+        try:r=fn()
+        finally:stmts=self.cur;self.cur=saved
+        return stmts,r
+    def emit(self,text): self.cur.append(text)
+    def hoist(self,text):
+        v=self.fresh();self.emit(assign('let '+v,text));return v
+    def atom(self,e,env):
+        r=self.expr(e,env)
+        return self.hoist(r) if '\n' in r else r
+    def fun_text(self,name,params,body):
+        head='fun'+((' '+ident_safe(name)) if name else '')+'('+params+')'
+        return head+': '+body if '\n' not in body else head+':\n'+ind(body)
+    def lambda_expr(self,params,body):
+        # Anonymous functions are parenthesized inline when short, else a named local function.
+        if '\n' not in body: return '('+self.fun_text(None,params,body)+')'
+        v=self.fresh();self.emit(self.fun_text(v,params,body));return v
     def function(self,pattern,body,env,name=None):
         new=env.copy()
         for s in names(pattern): new[s]=s
         if len(alternatives(pattern))>1 and names(pattern):
             v=self.fresh()
-            return 'fun'+((' '+ident_safe(name)) if name else '')+'('+v+')'+inline(self.match(v,[(pattern,None,body)],new))
+            return self.fun_text(name,v,self.match(v,[(pattern,None,body)],new,fresh_scope=True))
         params='_' if pattern==['construct','()',None] else self.pattern(pattern,new)
-        return 'fun'+((' '+ident_safe(name)) if name else '')+'('+params+')'+inline(self.expr(body,new))
+        return self.fun_text(name,params,self.lines_of(body,new))
     def record_class(self,names):
         # OCaml resolves a label set to the latest record type declaring all of them.
         want=set(names)
@@ -232,9 +250,12 @@ class Translator:
         while common<len(path) and common<len(here) and path[common]==here[common]:common+=1
         rest=path[common:] if common<len(path) and not (len(path)<=len(here) and here[:len(path)]==path) else []
         return '.'.join(list(rest)+[cls]),layout
-    def local_name(self,s,natural):
-        # Keep OCaml's own name when no other binding can be captured by it.
-        if natural and s not in SUPPORT and not s.startswith('port_'):return ident_safe(s)
+    def local_name(self,s,natural,is_fun=False):
+        # Keep OCaml's own name when no other binding can be captured by it. A local fun
+        # and another local binding of the same name would clash in one Rhombus block.
+        if natural and not self.no_natural and s not in SUPPORT and not s.startswith('port_') and s not in self.fun_names and not (is_fun and s in self.let_names):
+            (self.fun_names if is_fun else self.let_names).add(s)
+            return ident_safe(s)
         return self.fresh()+'_'+ident_safe(s)
     def binding(self,p,e,env,top=False,recursive=False,single=False):
         ns=names(p); new=env.copy()
@@ -250,9 +271,10 @@ class Translator:
         if p[0]=='var' and e[0] in ['fun','function'] and (top or recursive):
             if e[0]=='fun':return self.function(e[1],e[2],scope,new[p[1]]),new
             v=self.fresh()
-            return 'fun '+ident_safe(new[p[1]])+'('+v+')'+inline(self.match(v,e[1],scope)),new
+            return self.fun_text(new[p[1]],v,self.match(v,e[1],scope,fresh_scope=True)),new
         keyword='def' if top else 'let'
-        return keyword+' '+self.pattern(p,new)+equals(self.expr(e,scope)),new
+        value=self.lines_of(e,scope) if top else self.expr(e,scope)
+        return assign(keyword+' '+self.pattern(p,new),value),new
     def internal_binding(self,name,version):
         plain=ident_safe(name)
         # Keep the HOL Light name unless it could capture a support or Rhombus binding.
@@ -264,15 +286,28 @@ class Translator:
             candidate='port_'+candidate
         self.used_binding_names.add(ident_safe(candidate))
         return candidate
-    def ordered_constructor(self,ctor,args,env):
-        def make(vals): return '['+', '.join(vals)+']' if ctor=='[]' else ctor+'('+','.join(vals)+')'
-        # Only effectful arguments need a binding to keep OCaml's right-to-left order.
-        if sum(not pure(a) for a in args)<2:return make([self.expr(a,env) for a in args])
-        lines=[];variables={}
+    def ordered(self,args,env,fn=None):
+        # OCaml evaluates arguments right to left, then the function. Only effectful or
+        # multi-line operands are bound to temporaries, and only when order can matter.
+        comp=[self.sub(lambda a=a:self.expr(a,env)) for a in args]
+        fcomp=self.sub(lambda:self.expr(fn,env)) if fn is not None else None
+        cx=[(not pure(a)) or '\n' in c[1] for a,c in zip(args,comp)]
+        fcx=fn is not None and ((not pure(fn)) or '\n' in fcomp[1])
+        many=sum(cx)>1 or (fcx and any(cx))
+        out=[None]*len(args)
         for i in reversed(range(len(args))):
-            if pure(args[i]):continue
-            v=self.fresh();lines.append('let '+v+' = '+self.expr(args[i],env));variables[i]=v
-        return block(';\n'.join(lines+[make([variables[i] if i in variables else self.expr(args[i],env) for i in range(len(args))])]))
+            stmts,r=comp[i]
+            self.cur.extend(stmts)
+            if cx[i] and (many or '\n' in r): r=self.hoist(r)
+            out[i]=r
+        if fn is None: return out,None,False
+        stmts,fr=fcomp
+        self.cur.extend(stmts)
+        if fcx and (any(cx) or '\n' in fr): return out,self.hoist(fr),False
+        return out,fr,True
+    def ordered_constructor(self,ctor,args,env):
+        vals,_,_=self.ordered(args,env)
+        return '['+', '.join(vals)+']' if ctor=='[]' else ctor+'('+','.join(vals)+')'
     def expr(self,e,env):
         k=e[0]
         if k=='id': return self.ident(e[1],env)
@@ -302,87 +337,81 @@ class Translator:
             kernel={'Var':'Fusion.mk_var','Const':'Basics.mk_mconst','Comb':'Fusion.mk_comb',
                     'Abs':'Fusion.mk_abs','Tyvar':'Fusion.mk_vartype','Tyapp':'Fusion.mk_type'}
             if c.startswith('Fusion.') and c.split('.')[-1] in kernel:
-                args=[self.expr(x,env) for x in es]
-                return kernel[c.split('.')[-1]]+'('+(self.ordered_constructor('[]',es,env) if len(args)==2 else args[0])+')'
+                return kernel[c.split('.')[-1]]+'('+(self.ordered_constructor('[]',es,env) if len(es)==2 else self.atom(es[0],env))+')'
             return self.ordered_constructor(c,es,env)
         if k=='apply':
             f,args=e[1:3]
             labels=e[3] if len(e)>3 else ['']*len(args)
             if f[0]=='id' and f[1] in ['&&','||'] and len(args)==2:
-                return '('+self.expr(args[0],env)+' '+f[1]+' '+self.expr(args[1],env)+')'
-            lines=[];captured={}
-            impure=[i for i,a in enumerate(args) if not pure(a)]
-            if len(impure)>1 or (not pure(f) and impure):
-                for i in reversed(impure):
-                    v=self.fresh();lines.append('let '+v+' = '+self.expr(args[i],env));captured[i]=v
-                if pure(f):
-                    s=self.expr(f,env)
-                    if f[0] not in ['id','apply']: s='('+s+')'
-                else:
-                    fn=self.fresh();lines.append('let '+fn+' = '+self.expr(f,env));s=fn
-            else:
-                s=self.expr(f,env)
-                if f[0] not in ['id','apply']: s='('+s+')'
+                left=self.atom(args[0],env)
+                right=self.lines_of(args[1],env)
+                if '\n' not in right: return '('+left+' '+f[1]+' '+right+')'
+                return mkif(left,right,'#false') if f[1]=='&&' else mkif(left,'#true',right)
+            outs,fs,inline_f=self.ordered(args,env,f)
+            s=fs
+            if inline_f and f[0] not in ['id','apply']: s='('+s+')'
             for arg_index,(a,label) in enumerate(zip(args,labels)):
                 if label.startswith('?'):raise ValueError('optional argument forwarding')
-                if label:s+='('+label+': '+(captured[arg_index] if arg_index in captured else self.expr(a,env))+')';continue
+                if label:s+='('+label+': '+outs[arg_index]+')';continue
                 if a==['construct','()',None]: s=self.ident('hol_apply_unit',env)+'('+s+')'
-                else:
-                    value=captured.get(arg_index) or self.expr(a,env)
-                    s+='('+value+')'
-            return block(';\n'.join(lines+[s])) if lines else s
-        if k=='fun': return '('+self.function(e[1],e[2],env)+')'
+                else: s+='('+outs[arg_index]+')'
+            return s
+        if k=='fun':
+            new=env.copy()
+            pattern=e[1]
+            if len(alternatives(pattern))>1 and names(pattern):
+                v=self.fresh()
+                for n in names(pattern): new[n]=n
+                return self.lambda_expr(v,self.match(v,[(pattern,None,e[2])],new,fresh_scope=True))
+            for n in names(pattern): new[n]=n
+            params='_' if pattern==['construct','()',None] else self.pattern(pattern,new)
+            return self.lambda_expr(params,self.lines_of(e[2],new))
         if k=='labelfun':
             if e[2]!='labelled':raise ValueError('optional parameter')
             new=env.copy()
             for n in names(e[4]):new[n]=n
-            return '(fun(~'+e[1]+': '+self.pattern(e[4],new)+')'+colon(self.expr(e[5],new))+')'
+            return self.lambda_expr('~'+e[1]+': '+self.pattern(e[4],new),self.lines_of(e[5],new))
         if k=='function':
-            v=self.fresh(); return '(fun('+v+')'+colon(self.match(v,e[1],env))+')'
+            v=self.fresh(); return self.lambda_expr(v,self.match(v,e[1],env,fresh_scope=True))
         if k=='let':
-            _,r,bs,body=e; lines=[]; new=env.copy()
+            _,r,bs,body=e; new=env.copy()
             if r=='rec':
-                for p,_ in bs:
-                    for s in names(p): new[s]=self.local_name(s,len(bs)==1)
+                for p,b0 in bs:
+                    for s in names(p): new[s]=self.local_name(s,len(bs)==1,b0[0] in ['fun','function'])
             base_env=env.copy()
             for p,b in bs:
-                line,bound=self.binding(p,b,new if r=='rec' else base_env,recursive=r=='rec',single=len(bs)==1); lines.append(line)
+                line,bound=self.binding(p,b,new if r=='rec' else base_env,recursive=r=='rec',single=len(bs)==1); self.emit(line)
                 new.update({n:bound[n] for n in names(p)})
-            lines.append(self.expr(body,new))
-            return block(';\n'.join(lines))
+            return self.expr(body,new)
         if k=='if':
-            return block('if '+self.expr(e[1],env)+'\n| '+self.expr(e[2],env)+'\n| '+('#void' if e[3] is None else self.expr(e[3],env)))
-        if k=='match': return block(self.match(self.expr(e[1],env),e[2],env))
+            cond=self.atom(e[1],env)
+            then=self.lines_of(e[2],env)
+            other='#void' if e[3] is None else self.lines_of(e[3],env)
+            return mkif(cond,then,other)
+        if k=='match': return self.match(self.atom(e[1],env),e[2],env)
         if k=='try':
-            s='try:«\n'+ind(self.expr(e[1],env))
             caught=self.fresh()
             cases=e[2]+[(['var',caught],None,['apply',['id','raise'],[['id',caught]]])]
-            s+=';\n  ~catch '+caught+':«\n'+ind(self.match(caught,cases,env),4)+'\n  »'
-            return block(s+'\n»')
-        if k=='seq': return block(self.expr(e[1],env)+';\n'+self.expr(e[2],env))
+            return 'try:\n'+ind(self.lines_of(e[1],env))+'\n  ~catch '+caught+':\n'+ind(self.match(caught,cases,env,fresh_scope=True),4)
+        if k=='seq':
+            self.emit(self.expr(e[1],env))
+            return self.expr(e[2],env)
         if k=='field':
-            base=self.expr(e[1],env)
+            base=self.atom(e[1],env)
             if e[1][0] not in ['id','field']: base='('+base+')'
             return base+('.value' if e[2]=='contents' else '.'+ident_safe(e[2].split('.')[-1]))
         if k=='record':
             given={n.split('.')[-1]:v for n,v in e[1]}
             cls,layout=self.record_class(given)
-            lines=[];values={}
             if e[2] is not None:
-                base=self.fresh();lines.append('let '+base+' = '+self.expr(e[2],env))
-            impure=[f for f in layout if f in given and not pure(given[f])]
-            # OCaml evaluates the fields right to left; bind them only when order can matter.
-            hoist=set(impure) if len(impure)>1 or (e[2] is not None and impure) else set()
-            for f in reversed(layout):
-                if f not in given:continue
-                if f in hoist:
-                    temp=self.fresh();lines.append('let '+temp+' = '+self.expr(given[f],env));values[f]=temp
-                else:values[f]=self.expr(given[f],env)
+                base=self.hoist(self.expr(e[2],env))
+            fields=[f for f in layout if f in given]
+            # OCaml evaluates the fields right to left, in layout order.
+            vals,_,_=self.ordered([given[f] for f in fields],env)
+            values=dict(zip(fields,vals))
             if e[2] is None:
-                result=cls+'('+','.join(values[f] for f in layout)+')'
-            else:
-                result=base+'.port_update({'+','.join(string(ident_safe(f))+': '+values[f] for f in layout if f in given)+'})'
-            return block(';\n'.join(lines+[result])) if lines else result
+                return cls+'('+','.join(values[f] for f in layout)+')'
+            return base+'.port_update({'+','.join(string(ident_safe(f))+': '+values[f] for f in fields)+'})'
         if k=='letmodule':
             if e[2][0]=='moduleid':
                 alias=e[1]; target=e[2][1]
@@ -393,20 +422,28 @@ class Translator:
             ns=self.module_body(e[1],e[2],env)
             new=env.copy();new[e[1]]=e[1]
             previous=self.module_env.copy();self.module_env[e[1]]=e[1]
+            self.emit(ns)
             body=self.expr(e[3],new);self.module_env=previous
-            return block(ns+';\n'+body)
-        if k=='lazy': return self.ident('hol_lazy',env)+'(fun():«\n'+ind(self.expr(e[1],env))+'\n»)'
+            return body
+        if k=='lazy':
+            return self.ident('hol_lazy',env)+'('+self.lambda_expr('',self.lines_of(e[1],env))+')'
         if k=='while':
             loop=self.fresh()
-            return block('fun '+loop+'():«\n'+ind('if '+self.expr(e[1],env)+'\n| '+block(self.expr(e[2],env)+';\n'+loop+'()')+'\n| #void')+'\n»;\n'+loop+'()')
+            cond=self.lines_of(e[1],env)
+            body=self.lines_of(e[2],env)
+            self.emit(self.fun_text(loop,'','if '+cond+'\n'+alt(body+'\n'+loop+'()')+'\n| #void'))
+            return loop+'()'
         if k=='for':
             p,a,b,d,body=e[1:];start=self.fresh();end=self.fresh();loop=self.fresh();new=env.copy()
             for n in names(p):new[n]=n
             v=self.pattern(p,new)
             cond=v+('>' if d=='up' else '<')+end
             step=v+('+1' if d=='up' else '-1')
-            return block('let '+start+'='+self.expr(a,env)+';\nlet '+end+'='+self.expr(b,env)+';\nfun '+loop+'('+v+'):«\n'+ind('if '+cond+'\n| #void\n| '+block(self.expr(body,new)+';\n'+loop+'('+step+')'))+'\n»;\n'+loop+'('+start+')')
-        if k=='assert': return block('if '+self.expr(e[1],env)+'\n| #void\n| failwith("Assertion failed")')
+            self.emit(assign('let '+start,self.expr(a,env)))
+            self.emit(assign('let '+end,self.expr(b,env)))
+            self.emit(self.fun_text(loop,v,'if '+cond+'\n| #void\n'+alt(self.lines_of(body,new)+'\n'+loop+'('+step+')')))
+            return loop+'('+start+')'
+        if k=='assert': return mkif(self.atom(e[1],env),'#void','failwith("Assertion failed")')
         raise ValueError(f'{self.module}: unhandled expression {k}')
     def module_body(self,name,m,env):
         if m[0]=='moduleid':
@@ -421,7 +458,7 @@ class Translator:
                 head,rest=actual.split('.',1)
                 target='\"'+unalias(head)+'.rhm\".'+rest
             else:target='.'+actual
-            return 'import:« '+target+' as '+name+' »'
+            return 'import: '+target+' as '+name
         m=self.expand_module(m)
         if m[0]=='stdlib':return self.stdlib_module(name,m[1],m[2])
         if m[0]!='struct': raise ValueError('module '+str(m[:2]))
@@ -439,8 +476,8 @@ class Translator:
             if internal in child.class_values:self.class_values.add(name+'.'+public)
         for ctor,n in child.arities.items():
             if ctor in child.exports or ('.' in ctor and ctor.split('.')[0] in child.exports):self.arities[name+'.'+ctor]=n
-        exports=('export:«\n'+ind(';\n'.join(child.export_specs()))+'\n»;\n') if child.exports else ''
-        return 'namespace '+name+':«\n'+ind(exports+(body.replace('\n\n',';\n') or 'def module_initialized = #void'))+'\n»'
+        exports=('export:\n'+ind('\n'.join(child.export_specs()))+'\n\n') if child.exports else ''
+        return 'namespace '+name+':\n'+ind(exports+(body.strip() or 'def module_initialized = #void'))
     def resolve_module(self,path):
         for i in range(len(self.module_path),-1,-1):
             full='.'.join(self.module_path[:i]+[path])
@@ -475,20 +512,25 @@ class Translator:
         notice='// OCaml 4.14.1 '+kind+'.Make; Copyright 1996 INRIA, Xavier Leroy.\n'
         notice+='// LGPL 2.1 with OCaml linking exception; see tools/translate/stdlib.\n'
         return notice+self.module_body(name,['struct',substitute(body)],self.env)
-    def match(self,s,cs,env):
-        if '\n' not in s and all(g is None for _,g,_ in cs): temp=s;out='match '+s
-        elif re.fullmatch(r"[A-Za-z_][\w']*",s): temp=s;out='match '+s
+    def match(self,s,cs,env,fresh_scope=False):
+        if fresh_scope:
+            stmts,r=self.sub(lambda:self.match(s,cs,env))
+            return '\n'.join(stmts+[r])
+        if all(g is None for _,g,_ in cs) or re.fullmatch(r"[A-Za-z_][\w']*",s): temp=s
         else:
-            temp=self.fresh()
-            out='let '+temp+' = '+s+';\nmatch '+temp
+            temp=self.fresh();self.emit('let '+temp+' = '+s)
+        out='match '+temp
         for idx,(p,g,b) in enumerate(cs):
             new=env.copy()
             for n in names(p): new[n]=n
-            body=self.expr(b,new)
+            body=self.lines_of(b,new)
             if g is not None:
-                rest=self.match(temp,cs[idx+1:],env) if idx+1<len(cs) else 'failwith("Pattern match failure")'
-                body='if '+self.expr(g,new)+'\n| '+body+'\n| '+block(rest)
-            for option in alternatives(p):out+='\n| '+self.pattern(option,new)+(colon(body) if '\n' not in unwrap(body) else ':«\n'+ind(unwrap(body),4)+'\n»')
+                rest=self.match(temp,cs[idx+1:],env,fresh_scope=True) if idx+1<len(cs) else 'failwith("Pattern match failure")'
+                gstmts,cond=self.sub(lambda:self.atom(g,new))
+                body='\n'.join(gstmts+[mkif(cond,body,rest)])
+            for option in alternatives(p):
+                head='| '+self.pattern(option,new)
+                out+='\n'+(head+': '+safe(body) if '\n' not in body else head+':\n'+ind(body,4))
         return out
     def export_specs(self):
         return [('rename '+ident_safe(internal)+' as '+ident_safe(s)) if internal in self.class_values else ident_safe(s) for s,internal in self.exports.items()]
@@ -552,7 +594,8 @@ class Translator:
             if item[0]=='eval':
                 e=item[1]
                 if e[0]=='apply' and e[1]==['id','needs']: continue
-                lines.append(self.expr(e,self.env)); continue
+                text=self.lines_of(e,self.env)
+                lines.append(text if '\n' not in text else 'def '+self.fresh()+'_eval:\n'+ind(text)); continue
             if item[0]=='value':
                 base_env=self.env.copy()
                 for p,e in item[2]:
@@ -563,7 +606,10 @@ class Translator:
                 result_env=self.env.copy()
                 for p,e in item[2]:
                     if os.environ.get('HOL_PORT_TRACE'):lines.append('println('+string(self.module+':'+','.join(names(p)))+')')
+                    # A local module's exported names must not clash with enclosing local names.
+                    self.no_natural=has_letmodule(e)
                     line,bound=self.binding(p,e,self.env if item[1]=='rec' else base_env,top=True,recursive=item[1]=='rec')
+                    self.no_natural=False
                     result_env.update({n:bound[n] for n in names(p)})
                     lines.append(line)
                     for s in names(p): self.exports[s]=bound[s]
@@ -608,7 +654,7 @@ class Translator:
                         internal=name+'.'+n
                         self.class_values.add(internal)
                     elif key in self.modules:
-                        lines.append('import:« .'+name+'.'+ident_safe(n)+' as '+internal+' »')
+                        lines.append('import: .'+name+'.'+ident_safe(n)+' as '+internal)
                         self.namespace_values.add(internal)
                     else:lines.append('def '+internal+' = '+name+'.'+ident_safe(n))
                     self.env[n]=internal;self.exports[n]=internal
@@ -633,7 +679,7 @@ class Translator:
                         fs=[ident_safe(f) for f in record_fields]
                         self.record_defs.append((cls,record_fields,tuple(self.module_path)));self.exports[cls]=cls
                         self.class_values.add(cls)
-                        lines.append('class '+cls+'('+','.join(fs)+'):«\n  extends '+self.ident('HolVariant',self.env)+';\n  override port_view():«\n    PairList ['+','.join('this.'+f for f in fs)+']\n  »;\n  method port_update(updates):«\n    '+cls+'('+','.join('(if updates.has_key('+string(f)+') | updates['+string(f)+'] | this.'+f+')' for f in fs)+')\n  »\n»')
+                        lines.append('class '+cls+'('+', '.join(fs)+'):\n  extends '+self.ident('HolVariant',self.env)+'\n  override port_view(): PairList ['+', '.join('this.'+f for f in fs)+']\n  method port_update(updates):\n    '+cls+'('+', '.join('(if updates.has_key('+string(f)+') | updates['+string(f)+'] | this.'+f+')' for f in fs)+')')
                     for ctor,n in cs:
                         if not isinstance(n,int): continue # Host Map carries record labels directly.
                         internal=self.module+'_ctor_'+ctor
@@ -641,14 +687,14 @@ class Translator:
                         self.class_values.add(internal)
                         kind=0 if n==0 else 1;tag=counts[kind];counts[kind]+=1
                         fs=fields.get(ctor,[f'field{i}' for i in range(n)])
-                        lines.append('class '+internal+'('+','.join(fs)+'):«\n  extends '+self.ident('HolVariant',self.env)+';\n  override port_view(): ['+str(kind)+', ['+str(tag)+', PairList ['+','.join('this.'+f for f in fs)+']]]\n»')
+                        lines.append('class '+internal+'('+', '.join(fs)+'):\n  extends '+self.ident('HolVariant',self.env)+'\n  override port_view(): ['+str(kind)+', ['+str(tag)+', PairList ['+', '.join('this.'+f for f in fs)+']]]')
                         self.exports[ctor]=internal
                         self.env[ctor]=internal
                 continue
             raise ValueError(f'{self.module}: unsupported structure {item[0]}')
         for s,internal in self.exports.items():
             if s!=internal and internal not in self.class_values:
-                if internal in self.namespace_values:lines.append('import:« .'+ident_safe(internal)+' as '+ident_safe(s)+' »')
+                if internal in self.namespace_values:lines.append('import: .'+ident_safe(internal)+' as '+ident_safe(s))
                 else:lines.append('def '+ident_safe(s)+' = '+ident_safe(internal))
         if header: lines.insert(7,'export:\n'+ind('\n'.join(self.export_specs())))
         return '\n\n'.join(lines)+'\n'

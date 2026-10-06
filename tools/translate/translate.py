@@ -191,6 +191,7 @@ class Translator:
         self.modules={};self.module_path=[];self.module_exports={}
         self.call_arities={}
         self.proof_operators=False
+        self.inherited_bindings=set()
     def fresh(self): self.counter+=1; return f'port_tmp_{self.counter}'
     def ident(self,s,env):
         if s in env: return ident_safe(env[s])
@@ -383,12 +384,13 @@ class Translator:
     def internal_binding(self,name,version):
         plain=ident_safe(name)
         # Keep the HOL Light name unless it could capture a support or Rhombus binding.
-        if version==1 and plain==name and name not in SUPPORT and name not in self.other_reserved and name not in self.redefined and name not in self.used_binding_names and not name.startswith('port_') and name[0].isalpha():
+        if version==1 and plain==name and name not in SUPPORT and name not in self.other_reserved and name not in self.redefined and name not in self.used_binding_names and name not in self.inherited_bindings and not name.startswith('port_') and name[0].isalpha():
             self.used_binding_names.add(name)
             return name
         candidate=(name+'_v'+str(version) if version>1 else name+'_impl') if self.module_path else self.module+'_'+name+('_v'+str(version) if version>1 else '')
+        base=candidate;index=2
         while ident_safe(candidate) in self.reserved_names or ident_safe(candidate) in self.used_binding_names:
-            candidate='port_'+candidate
+            candidate=base+'_'+str(index);index+=1
         self.used_binding_names.add(ident_safe(candidate))
         return candidate
     def embed(self,text):
@@ -595,6 +597,8 @@ class Translator:
         child.call_arities=self.call_arities.copy()
         child.proof_operators=self.proof_operators
         child.module_path=self.module_path+[name]
+        child.inherited_bindings=self.inherited_bindings|{ident_safe(v) for v in env.values() if '.' not in v}
+        child.inherited_bindings.update(cls for cls,_,path in self.record_defs if tuple(child.module_path[:len(path)])==path)
         body=child.translate(m[1],[],header=False)
         self.module_exports['.'.join(child.module_path)]=list(child.exports)
         for public,internal in child.exports.items():
@@ -665,6 +669,7 @@ class Translator:
         self.reserved_names.update(ident_safe(i[1]) for i in ast if i[0] in ['module','exception'])
         self.reserved_names.update(ident_safe(self.module+'_ctor_'+c)
           for i in ast if i[0]=='types' for _,cs in i[1] for c,n in cs if isinstance(n,int))
+        self.reserved_names.update(self.inherited_bindings)
         counts={}
         for i in ast:
             if i[0]=='value':
@@ -787,6 +792,10 @@ class Translator:
                 lines.append(self.module_body(name,item[1],self.env))
                 for n in self.module_exports['.'.join(self.module_path+[name])]:
                     internal=('included_'+ident_safe(n)) if self.module_path else self.module+'_include_'+ident_safe(n)
+                    base=internal;ordinal=2
+                    while internal in self.used_binding_names or internal in self.inherited_bindings:
+                        internal=base+'_'+str(ordinal);ordinal+=1
+                    self.used_binding_names.add(internal)
                     key='.'.join(self.module_path+[name,n])
                     if name+'.'+n in self.class_values:
                         internal=name+'.'+n
@@ -802,6 +811,10 @@ class Translator:
                      'for_all','hd','iter','mem','mem_assoc','nth','partition','rev_append','sort','map2','assoc','concat_map','filter_map','fold_left2','fold_right2','mapi','rev_map','for_all2']
                 for n in std:
                     internal=('stdlib_'+n) if self.module_path else self.module+'_stdlib_'+n
+                    base=internal;ordinal=2
+                    while internal in self.used_binding_names or internal in self.inherited_bindings:
+                        internal=base+'_'+str(ordinal);ordinal+=1
+                    self.used_binding_names.add(internal)
                     lines.append('def '+internal+' = '+self.ident('OCamlList.'+n,self.env))
                     self.env[n]=internal;self.exports[n]=internal
                 continue
@@ -810,8 +823,8 @@ class Translator:
                     record_fields=[c for c,n in cs if not isinstance(n,int)]
                     if record_fields:
                         cls=''.join(part[:1].upper()+part[1:] for part in ty.split('_'))
-                        if cls in SUPPORT or cls in self.other_reserved or cls in self.module_env:cls+='Record'
-                        while ident_safe(cls) in self.used_binding_names: cls+='Record'
+                        if cls in SUPPORT or cls in self.other_reserved or cls in self.module_env or cls in self.inherited_bindings:cls+='Record'
+                        while ident_safe(cls) in self.used_binding_names or cls in self.inherited_bindings: cls+='Record'
                         self.used_binding_names.add(ident_safe(cls))
                         fs=[ident_safe(f) for f in record_fields]
                         self.record_defs.append((cls,record_fields,tuple(self.module_path)));self.exports[cls]=cls
@@ -821,8 +834,8 @@ class Translator:
                     for ctor,n in cs:
                         if not isinstance(n,int): continue # Host Map carries record labels directly.
                         internal=ident_safe(ctor)
-                        if internal in SUPPORT or internal in self.used_binding_names or internal in self.module_env:internal+='Value'
-                        while internal in self.used_binding_names:internal+='Value'
+                        if internal in SUPPORT or internal in self.used_binding_names or internal in self.module_env or internal in self.inherited_bindings:internal+='Value'
+                        while internal in self.used_binding_names or internal in self.inherited_bindings:internal+='Value'
                         self.used_binding_names.add(internal)
                         self.arities[ctor]=n;self.arities[internal]=n
                         self.class_values.add(internal)

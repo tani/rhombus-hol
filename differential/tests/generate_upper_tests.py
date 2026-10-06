@@ -29,7 +29,7 @@ def rh_fun(h):
     st=[('let '+x[4:] if x.startswith('def ') else x) for x in split_stmts(h[4:])]
     return 'fun():\n'+'\n'.join('  '+x for x in st)
 def add(i,m,h,api=None):
- ml.append('emit '+json.dumps(i)+' (fun () -> '+m+');;');rh.append('emit('+json.dumps(i)+','+rh_fun(h)+')');cases.append(i)
+ ml.append('emit '+json.dumps(i)+' (fun () -> '+m+');;');rh.append(d['rh_emit'](i,rh_fun(h)));cases.append(i)
  if api:coverage.add(api)
 def define(n,m,h):ml.append('let '+n+' = '+m+';;');rh.append('def '+n+' = '+h)
 def list_(xs,L):return '['+';'.join(xs)+']' if L=='ml' else 'PairList ['+','.join(xs)+']'

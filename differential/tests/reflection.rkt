@@ -1,5 +1,5 @@
 #lang racket/base
-(require racket/match)
+(require racket/match racket/treelist)
 (define m '(file "../../rhombus/hol/fusion.rhm"))
 ;; run from tests/; constructors must be unavailable even through dynamic-require.
 (for ([name '(Tyvar Tyapp Var Const Comb Abs Sequent KernelTyvar KernelTyapp KernelVar KernelConst KernelComb KernelAbs)])
@@ -9,7 +9,7 @@
 (define make-var (dynamic-require m 'mk_var))
 (define bool-ty (dynamic-require m 'bool_ty))
 (define refl (dynamic-require m 'REFL))
-(define v (make-var (cons "x" bool-ty)))
+(define v (make-var (treelist "x" bool-ty)))
 (for ([obj (list bool-ty v (refl v))] [name '(type term theorem)])
   (define-values (descriptor skipped?) (struct-info obj))
   (unless (not descriptor) (error 'privacy "descriptor exposed: ~a" name))

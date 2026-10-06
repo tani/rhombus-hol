@@ -90,9 +90,12 @@ def rh_fun(h):
     if not h.startswith('do: '):return 'fun(): '+h
     st=[('let '+x[4:] if x.startswith('def ') else x) for x in split_stmts(h[4:])]
     return 'fun():\n'+'\n'.join('  '+x for x in st)
+def rh_emit(id,callback):
+    if '\n' not in callback:return 'emit('+json.dumps(id)+', '+callback+')'
+    return 'emit(\n  '+json.dumps(id)+',\n'+'\n'.join('  '+x for x in callback.splitlines())+'\n)'
 def add(id,m,h):
  ml.append('emit '+json.dumps(id)+' (fun () -> '+m+');;')
- rh.append('emit('+json.dumps(id)+','+rh_fun(h)+')');cases.append(id)
+ rh.append(rh_emit(id,rh_fun(h)));cases.append(id)
 for i in range(180):
  t=gen(r.choice([B,A,C,F(A,A),F(B,B),F(A,B)]),3);u=gen(t[-1],2)
  for L,out in [('ml',ml),('rhm',rh)]:
@@ -124,7 +127,7 @@ add('BETA',f'sth(p_BETA({tm(red,"ml")}))',f'sth(BETA({tm(red,"rhm")}))')
 add('MK_COMB',f'sth(p_MK_COMB(p_REFL(mk_abs({xm},{xm})),p_REFL({xm})))',f'sth(MK_COMB([REFL(mk_abs([{xh},{xh}])),REFL({xh})]))')
 for nm,m,h in [('qmap','qmap (fun x->x) l == l','qmap(I)(l) === l'),('filter','filter (fun _->true) l == l','filter(fun(_): #true)(l) === l')]:
  ml.append('let l = [aty;bty] in emit "sharing-'+nm+'" (fun () -> sb('+m+'));;')
- rh.append('emit("sharing-'+nm+'",fun():\n  let l = PairList [aty,bty]\n  sb('+h+'))');cases.append('sharing-'+nm)
+ rh.append(rh_emit('sharing-'+nm,'fun():\n  let l = PairList [aty,bty]\n  sb('+h+')'));cases.append('sharing-'+nm)
 
 identity=ab(vt('x',A),vt('x',A)); im=tm(identity,'ml'); ih=tm(identity,'rhm')
 add('new_basic_definition',f'sth(new_basic_definition(mk_eq(mk_var("identity",mk_fun_ty aty aty),{im})))',f'sth(new_basic_definition(mk_eq([mk_var(["identity",mk_fun_ty(aty)(aty)]),{ih}])))')
@@ -149,7 +152,7 @@ add('type_subst-ignore-nonvariable','sty(type_subst [aty,bool_ty] bool_ty)','sty
 add('type_subst-identity','sb(type_subst [bool_ty,bty] (mk_fun_ty aty aty) == (mk_fun_ty aty aty))','sb(type_subst(PairList [[bool_ty,bty]])(mk_fun_ty(aty)(aty)) === mk_fun_ty(aty)(aty))')
 # Identity is tested using the same allocated input, not two distinct constructors.
 ml[-1]='let original = mk_fun_ty aty aty in emit "type_subst-identity" (fun () -> sb(type_subst [bool_ty,bty] original == original));;'
-rh[-1]='emit("type_subst-identity",fun():\n  let original = mk_fun_ty(aty)(aty)\n  sb(type_subst(PairList [[bool_ty,bty]])(original) === original))'
+rh[-1]=rh_emit('type_subst-identity','fun():\n  let original = mk_fun_ty(aty)(aty)\n  sb(type_subst(PairList [[bool_ty,bty]])(original) === original)')
 (p/'tests/oracle_cases.ml').write_text(mlhead+'\n'.join(ml)+'\n')
 (p/'tests/cases.rhm').write_text(rhhead+'\n'.join(rh)+'\n')
 (p/'results/cases.json').write_text(json.dumps({'seed':271828,'cases':cases,'term_pool':180},indent=2))

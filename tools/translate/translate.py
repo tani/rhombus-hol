@@ -169,17 +169,12 @@ class Translator:
             return ident_safe(s)
         raise ValueError(f'{self.module}: unknown operator/path {s}')
     def term(self,t):
+        # Constructor-shaped syntax read by the hol_term macro (never expanded as code).
         k=t[0]
-        if k=='Tyvar': return f'Fusion.mk_vartype({string(t[1])})'
-        if k=='Tyapp': return f'Fusion.mk_type([{string(t[1])}, PairList [{", ".join(self.term(x) for x in t[2])}]])'
-        if k in ['Var','Const']:
-            ctor='mk_var' if k=='Var' else 'mk_mconst'
-            namespace='Fusion' if k=='Var' else 'Basics'
-            return f'{namespace}.{ctor}([{string(t[1])}, {self.term(t[2])}])'
-        if k in ['Comb','Abs']:
-            ctor='mk_comb' if k=='Comb' else 'mk_abs'
-            return f'Fusion.{ctor}([{self.term(t[1])}, {self.term(t[2])}])'
-        raise ValueError(k)
+        if k=='Tyvar': return f'Tyvar({string(t[1])})'
+        if k=='Tyapp': return f'Tyapp({string(t[1])}, [{", ".join(self.term(x) for x in t[2])}])'
+        if k in ['Var','Const']: return f'{k}({string(t[1])}, {self.term(t[2])})'
+        return f'{k}({self.term(t[1])}, {self.term(t[2])})'
     def pattern(self,p,env):
         k=p[0]
         if k=='any': return '_'
@@ -343,8 +338,7 @@ class Translator:
         if k=='quote':
             key=f'{self.quote_module}:{e[3]}'
             if key not in self.quotes: raise ValueError(f'missing quote {key} {e[2]}')
-            encoded=json.dumps(self.quotes[key],ensure_ascii=False,separators=(',',':'))
-            return self.ident('expand_quote',env)+'('+string(encoded)+')'
+            return self.ident('hol_term',env)+'('+self.term(self.quotes[key])+')'
         if k=='tuple':
             es=e[1]
             return self.ordered_constructor('[]',es,env)

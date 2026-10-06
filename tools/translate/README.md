@@ -5,12 +5,13 @@ The original source files are under `differential/upstream`.
 
 `ast.ml` reads the compiler AST produced by the original HOL Light Camlp5
 extension. `translate.py` preserves definitions, curried calls, branches,
-pattern matching, exceptions, and proof scripts. Literal quotations become
-compact JSON data containing their offline-inferred, typed constructor ASTs.
-`private/quoted_ast.rhm` materializes those data through the existing public
-kernel term/type constructors. This avoids compiling thousands of repeated
-nested constructor expressions. JSON strings are normalized to immutable
-Rhombus strings before constructor matching. Runtime code
+pattern matching, exceptions, and proof scripts. Literal quotations become constructor-shaped syntax,
+`hol_term(Comb(Const("!", Tyapp(...)), ...))`, holding their offline-inferred,
+typed ASTs. The `hol_term` macro in `private/quoted_ast.rhm` reads that syntax
+at expansion time (it is never expanded as code, which is about 20 times
+faster to compile than nested `mk_comb` calls) and the result is materialized
+through the existing public kernel term/type constructors at run time.
+Runtime code
 never imports a recorded theorem or adds an axiom to replace a proof.
 
 `record_quotes.ml` runs only inside the original OCaml oracle. It records

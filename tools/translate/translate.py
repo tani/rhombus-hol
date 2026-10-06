@@ -65,10 +65,18 @@ def ident_safe(s):
     s=s.replace("'",'_prime')
     if s in ['values','def','cond']:s='hol_'+s
     return ''.join(c if c.isalnum() or c in '_.' else '_op'+format(ord(c),'x')+'_' for c in s)
+def modalias(n):
+    # Namespace under which a translated module is imported by later modules.
+    a=''.join(w.capitalize() for w in n.split('_'))
+    return 'Hol'+a if a in ['Int','Pair','List','Map','Set','String','Array','Box','Char'] else a
+def unalias(a):
+    for f in [*CORE,*(q.name.split('.')[0] for q in DATA.glob('*.json.gz'))]:
+        if modalias(f)==a:return f
+def is_alias(a): return unalias(a) is not None
 def string(s): return json.dumps(s,ensure_ascii=False)
 def support_names():
     names=set(OPS.values())|{'fun','let','def','if','match','block','try','for','class','import','export','when','unless','cond','values',
-        'abs','math','println','print','to_string','compare','error','begin','use','is_a','as','in','with','else','then','do','and','or','not',
+        'abs','math','println','print','to_string','max','min','sqrt','floor','ceiling','round','time','sort','error','void','displayln','Num','Char','Bytes','Path','Symbol','Keyword','Number','Boolean','Any','Function','Procedure','compare','error','begin','use','is_a','as','in','with','else','then','do','and','or','not',
         'List','Map','Array','Set','String','Int','Box','Pair','PairList'}
     for f in ['compat','theory_support','type_inference']:
         t=(ROOT/'rhombus/hol/private'/(f+'.rhm')).read_text()
@@ -116,13 +124,13 @@ class Translator:
         self.class_values=set()
         self.module_env={}
         self.top_group={}
-        self.reserved_names=set()
+        self.reserved_names=set();self.other_reserved=set();self.redefined=set()
         self.used_binding_names=set()
         self.unresolved=set()
         self.namespace_values=set()
         self.versions={}
         self.arities={"Some":1,"Tyvar":1,"Tyapp":2,"Var":2,"Const":2,"Comb":2,"Abs":2}
-        self.arities.update({'Up_fusion.'+n:k for n,k in self.arities.items() if n!='Some'})
+        self.arities.update({'Fusion.'+n:k for n,k in self.arities.items() if n!='Some'})
         self.modules={};self.module_path=[];self.module_exports={}
     def fresh(self): self.counter+=1; return f'port_tmp_{self.counter}'
     def ident(self,s,env):
@@ -142,15 +150,15 @@ class Translator:
         raise ValueError(f'{self.module}: unknown operator/path {s}')
     def term(self,t):
         k=t[0]
-        if k=='Tyvar': return f'Up_fusion.mk_vartype({string(t[1])})'
-        if k=='Tyapp': return f'Up_fusion.mk_type(Pair({string(t[1])},PairList [{",".join(self.term(x) for x in t[2])}]))'
+        if k=='Tyvar': return f'Fusion.mk_vartype({string(t[1])})'
+        if k=='Tyapp': return f'Fusion.mk_type(Pair({string(t[1])},PairList [{",".join(self.term(x) for x in t[2])}]))'
         if k in ['Var','Const']:
             ctor='mk_var' if k=='Var' else 'mk_mconst'
-            namespace='Up_fusion' if k=='Var' else 'Up_basics'
+            namespace='Fusion' if k=='Var' else 'Basics'
             return f'{namespace}.{ctor}(Pair({string(t[1])},{self.term(t[2])}))'
         if k in ['Comb','Abs']:
             ctor='mk_comb' if k=='Comb' else 'mk_abs'
-            return f'Up_fusion.{ctor}(Pair({self.term(t[1])},{self.term(t[2])}))'
+            return f'Fusion.{ctor}(Pair({self.term(t[1])},{self.term(t[2])}))'
         raise ValueError(k)
     def pattern(self,p,env):
         k=p[0]
@@ -170,7 +178,7 @@ class Translator:
             if c=='()': return '#void'
             c=self.ident(c,env)
             if arg is not None and p[1] in ['Var','Const','Comb','Abs','Tyapp'] and '.' not in p[1] and arg[0]=='tuple' and len(arg[1])==2 and self.arities.get(c,self.arities.get(c.split('.')[-1],2))!=2:
-                c='Up_fusion.'+p[1]
+                c='Fusion.'+p[1]
             if arg is None: return c+'()'
             arity=self.arities.get(c,self.arities.get(c.split('.')[-1],1))
             if arg[0]=='any':ps=[arg]*arity
@@ -211,6 +219,11 @@ class Translator:
         keyword='def' if top else 'let'
         return keyword+' '+self.pattern(p,new)+':«\n'+ind(self.expr(e,scope))+'\n»',new
     def internal_binding(self,name,version):
+        plain=ident_safe(name)
+        # Keep the HOL Light name unless it could capture a support or Rhombus binding.
+        if not self.module_path and version==1 and plain==name and name not in SUPPORT and name not in self.other_reserved and name not in self.redefined and name not in self.used_binding_names and not name.startswith('port_') and name[0].isalpha():
+            self.used_binding_names.add(name)
+            return name
         candidate=self.module+'_'+name+('_v'+str(version) if version>1 else '')
         while ident_safe(candidate) in self.reserved_names or ident_safe(candidate) in self.used_binding_names:
             candidate='port_'+candidate
@@ -250,12 +263,12 @@ class Translator:
             if c=='()': return '#void'
             c=self.ident(c,env)
             if arg is not None and e[1] in ['Var','Const','Comb','Abs','Tyapp'] and '.' not in e[1] and arg[0]=='tuple' and len(arg[1])==2 and self.arities.get(c,self.arities.get(c.split('.')[-1],2))!=2:
-                c='Up_fusion.'+e[1]
+                c='Fusion.'+e[1]
             if arg is None: return c+'()'
             es=arg[1] if arg[0]=='tuple' and self.arities.get(c,self.arities.get(c.split('.')[-1],2))!=1 else [arg]
-            kernel={'Var':'Up_fusion.mk_var','Const':'Up_basics.mk_mconst','Comb':'Up_fusion.mk_comb',
-                    'Abs':'Up_fusion.mk_abs','Tyvar':'Up_fusion.mk_vartype','Tyapp':'Up_fusion.mk_type'}
-            if c.startswith('Up_fusion.') and c.split('.')[-1] in kernel:
+            kernel={'Var':'Fusion.mk_var','Const':'Basics.mk_mconst','Comb':'Fusion.mk_comb',
+                    'Abs':'Fusion.mk_abs','Tyvar':'Fusion.mk_vartype','Tyapp':'Fusion.mk_type'}
+            if c.startswith('Fusion.') and c.split('.')[-1] in kernel:
                 args=[self.expr(x,env) for x in es]
                 return kernel[c.split('.')[-1]]+'('+(self.ordered_constructor('Pair',es,env) if len(args)==2 else args[0])+')'
             return self.ordered_constructor(c,es,env)
@@ -369,9 +382,9 @@ class Translator:
             for n in self.module_exports[key]:
                 if actual+'.'+n in self.class_values:self.class_values.add(name+'.'+n)
                 if actual+'.'+n in self.arities:self.arities[name+'.'+n]=self.arities[actual+'.'+n]
-            if actual.startswith('Up_'):
+            if '.' in actual and is_alias(actual.split('.')[0]):
                 head,rest=actual.split('.',1)
-                target='\"'+head[3:]+'.rhm\".'+rest
+                target='\"'+unalias(head)+'.rhm\".'+rest
             else:target='.'+actual
             return 'import:« '+target+' as '+name+' »'
         m=self.expand_module(m)
@@ -447,6 +460,14 @@ class Translator:
         self.reserved_names.update(ident_safe(i[1]) for i in ast if i[0] in ['module','exception'])
         self.reserved_names.update(ident_safe(self.module+'_ctor_'+c)
           for i in ast if i[0]=='types' for _,cs in i[1] for c,n in cs if isinstance(n,int))
+        counts={}
+        for i in ast:
+            if i[0]=='value':
+                for p,_ in i[2]:
+                    for n in names(p):counts[n]=counts.get(n,0)+1
+        self.redefined={n for n,c in counts.items() if c>1}
+        self.other_reserved={ident_safe(i[1]) for i in ast if i[0] in ['module','exception']}
+        self.other_reserved.update(c for i in ast if i[0]=='types' for _,cs in i[1] for c,n in cs)
         lines=['#lang rhombus', '// Direct translation of the pinned HOL Light '+self.module+'.ml.',
                source_notice(self.module),
                '// Quotations are expanded offline; every proof is replayed here.',
@@ -459,19 +480,19 @@ class Translator:
                 if re.fullmatch(r'\w+',name) and name not in OPS:self.env[name]='Host.'+name
             if self.bridge:
                 lines.append('import: "private/tuple_bridge.rhm" as Interop')
-                lines.append('import: "private/type_inference.rhm" as Up_type_inference')
+                lines.append('import: "private/type_inference.rhm" as TypeInference')
                 if self.module=='ind_types':
                     lines.append('import: "private/type_specification.rhm" as NativeTypes')
                     self.env['parse_pretype']='NativeTypes.parse_pretype'
                 source=(ROOT/'rhombus/hol/private/type_inference.rhm').read_text()
                 for name in re.search(r'^export:\n((?:[ \t]+[^\n]*\n)+)',source,re.M)[1].splitlines():
                     name=name.strip().rsplit(' as ',1)[-1]
-                    if re.fullmatch(r'\w+',name):self.env[name]='Up_type_inference.'+name
+                    if re.fullmatch(r'\w+',name):self.env[name]='TypeInference.'+name
                 aliases=dict(re.findall(r'\brename (\w+) as (\w+)',source))
                 for ctor,args in re.findall(r'^class ([A-Za-z_]\w*)\(([^)]*)\)',source,re.M):
-                    self.arities['Up_type_inference.'+aliases.get(ctor,ctor)]=len(args.split(',')) if args else 0
+                    self.arities['TypeInference.'+aliases.get(ctor,ctor)]=len(args.split(',')) if args else 0
             for n in dict.fromkeys(core+deps):
-                alias='Up_'+n
+                alias=modalias(n)
                 lines.append('import: "'+n+'.rhm" as '+alias)
                 source=(ROOT/f'rhombus/hol/{n}.rhm').read_text()
                 metadata=STAGE/(n+'.namespaces.json')
@@ -633,7 +654,7 @@ def translate(module,deps):
     t=Translator(module,quotes)
     text=t.translate(json.loads(read_data(f'{module}.json')),deps)
     write_changed(ROOT/f'rhombus/hol/{module}.rhm',text)
-    (STAGE/(module+'.namespaces.json')).write_text(json.dumps({k:v for k,v in t.module_exports.items() if not k.startswith('Up_')}))
+    (STAGE/(module+'.namespaces.json')).write_text(json.dumps({k:v for k,v in t.module_exports.items() if not is_alias(k.split('.')[0])}))
     (STAGE/(module+'.unresolved.json')).write_text(json.dumps(sorted(t.unresolved)))
 
 if __name__=='__main__':

@@ -30,16 +30,9 @@ rhombus/hol/
     atoms_map.rhm         Patricia term maps (generated from lib.ml)
     term_hash.rhm, hash_runtime.rhm, ocaml_random.rhm
     type_inference.rhm, type_specification.rhm, quoted_ast.rhm
-    curried.rhm, declarations.rhm, proof_syntax.rhm, variant_base.rhm
+    declarations.rhm, proof_syntax.rhm, variant_base.rhm
   tests/
 
-differential/
-  tests/
-  upstream/
-
-.github/workflows/
-  ci.yml
-  differential.yml
 ```
 
 The files directly under `rhombus/hol/` correspond to the HOL Light engine
@@ -74,34 +67,9 @@ and presentation belong to the Rhombus syntax and macro frontend.
 
 ## Verification
 
-The engine differential harness checks the pinned HOL Light implementation on
-3,912 cases (1,296 kernel and 2,616 upper-layer cases), including 164 OCaml hash
-compatibility cases. The `atoms` implementation preserves HOL Light's exact
-list order through its original Patricia-map insertion/fold and OCaml hashing.
-The common engine suite has 3,748 cases when `HOL_ENGINE_ONLY=1` is set.
-Removed frontend operations are outside this engine boundary.
-
-The harness is under `differential/`. It imports the live Rhombus
-implementation; there is no duplicate port tree.
-
-```sh
-python3 differential/tests/run.py
-python3 differential/tests/run_upper.py
-```
-
-The full differential suite is manual-only in GitHub Actions so ordinary CI
-remains fast.
-
-The standard theory harness compares each exported theorem with the pinned
-OCaml original. Only bound term names and polymorphic type-variable names are
-normalized; hypotheses, conclusions, constants, and free term names must agree.
-It rejects kernel axioms outside the original ETA_AX, SELECT_AX, and INFINITY_AX.
-All 2,979 exported theorems across the 34 standard modules match the original,
-and all proofs replay in the Rhombus kernel. Local engine tests also pass
-(58 tests). See [tools/translate/verification.json](tools/translate/verification.json)
-for the saved module coverage and checks,
-and [tools/translate/README.md](tools/translate/README.md) for generation and
-full-theory verification commands. Expected theorems are never runtime axioms.
+The Rhombus modules replay the translated standard-theory proofs through the
+kernel. HOL Light's original proof rules are preserved; expected theorems are
+never runtime axioms.
 
 ## Build
 
@@ -118,20 +86,6 @@ HOL Light-derived engine code and the OCaml-derived hash support retain their
 upstream notices and license terms. See `THIRD_PARTY_NOTICES` and
 `THIRD_PARTY_LICENSES/`.
 
-## Local private-core benchmark
-
-```sh
-python3 benchmarks/private_core.py /path/to/baseline /path/to/experiment
-```
-
-Apply the same current differential harness to both checkouts first. The runner
-measures three cold `equal.rhm` compiles, both complete differential harnesses,
-and three compiled warm runs of each generated probe. It records elapsed time,
-child maximum RSS, exit status, and exact differential mismatches.
-See `benchmarks/results.json` for the historical comparison before the
-`atoms` compatibility restoration. Those timings describe the fully reduced
-variant and are not measurements of the current partially restored variant.
-
 ## Build and check
 
 Requires Racket 9.3 or later with `rhombus-lib`.
@@ -142,24 +96,18 @@ racket rhombus/hol/tests/fusion.rhm       # also tests/bool.rhm, tests/engine.rh
 racket rhombus/hol/define.rhm             # replays every standard-theory proof
 ```
 
-The standard-theory modules (after `simp.rhm`) are generated; edit `tools/translate/translate.py`
-and regenerate rather than editing them (see `tools/translate/README.md`).
-OCaml tuples are Rhombus lists (`[a, b]`), OCaml lists are `PairList`, and
-record types are classes.
+The standard-theory modules (after `simp.rhm`) were generated from the pinned
+HOL Light sources. OCaml tuples are Rhombus lists (`[a, b]`), OCaml lists are
+`PairList`, and record types are classes.
 
 
 ## Generated source style
 
-The generator emits ordinary indentation, scoped names, descriptive payload
-fields, shared variant/record declarations, and compact typed term syntax.
-Curried declarations accept either grouped arguments or repeated application:
-
-```rhombus
-curried fun add(x, y): x + y
-check add(1)(2) ~is 3
-check add(1, 2) ~is 3
-```
+The translated modules use ordinary indentation, scoped names, descriptive
+payload fields, shared variant/record declarations, and compact typed term
+syntax. Multi-argument functions use explicit unary stages, such as
+`fun(x): fun(y): x + y`, and callers apply each stage separately.
 
 Standard proofs use the existing combinators through small infix operators.
 These forms are defined in `rhombus/hol/private/`; they introduce no new proof
-rules. See `tools/translate/README.md` for generation and evaluation details.
+rules.

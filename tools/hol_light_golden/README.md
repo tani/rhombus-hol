@@ -16,6 +16,7 @@ Requirements: a HOL Light checkout at the pinned revision built with `make`
 | `to_hol.py` | Rewrites `hol_term(...)` calls in place into Rhombus `hol:` quotations. |
 | `capture.ml` | Records the quotations an upstream file parses, in order. |
 | `basic_tests_terms.ml` | Expands the quotations of `UnitTests/basic_tests.ml`. |
+| `normalize_quotes.rkt` | One-time, source-location-based migration of quotation declarations to shared type schemes and escaped identifiers. |
 
 ## Golden logical state
 
@@ -30,11 +31,18 @@ column-0 bindings of the ported modules). Each line is
 `rhombus/hol/tests/golden/serial.rhm`. The generation is deterministic.
 
 `rhombus/hol/tests/golden/hol_light.rhm` loads every module and requires each
-row to match exactly, or up to the numbering of names invented at run time
-(`_<n>` genvars and `?<n>` type variables). HOL Light's parser advances both
+row to match exactly, or structurally up to bound names and bijective renaming
+of free/type variables and generated constants. Ordinary constant names are
+preserved; `_0` is explicitly excluded from generated constants. HOL Light's parser advances both
 counters while elaborating quotations; offline expansion does not, so their
 numbering drifts while the statements agree. Accepted differences go in
 `known_differences.tsv` with a reason.
+
+This historical audit is opt-in with
+`HOL_TEST_AUDIT=1 raco test rhombus/hol/tests/all.rhm`. The ordinary runner checks
+axiom contracts and proof capabilities without requiring the HOL Light printer's
+spelling. The migration tool reads only reference type schemes; runtime
+quotation constructors validate every instance against the kernel declaration.
 
 ## Upstream tests and examples
 

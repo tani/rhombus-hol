@@ -62,11 +62,33 @@ and integers, sets, iteration, and Cartesian products.
 
 HOL Light's text parser and printer are not the frontend. Literal theory
 quotations are written in the Rhombus-native `hol:` quotation, whose macros
-elaborate them at compile time into public term/type constructors; runtime
+infer types and expand directly into public term/type constructor calls; runtime
 modules replay the original proofs. For example, HOL Light's
-`` `!x:A. x = x` `` is `hol: forall x :: A: x == x`, and a name used at several
-types or shadowed by a binder is declared with an alias, as in
-`hol: const IN_num as IN :: num -> (num -> bool) -> bool; ...`. Private type-inference algorithms support Metis
+`` `!x:A. x = x` `` is `hol: forall x :: A: x == x`. A polymorphic constant
+has one declared type scheme and is instantiated separately at each occurrence:
+
+```rhombus
+hol:
+  const IN :: A -> (A -> bool) -> bool
+  var x
+  var s
+  var ss
+  IN(x, s) && IN(s, ss)
+```
+
+Free and bound variables are monomorphic within a quotation and may omit type
+annotations. Inference is first-order, occurs-checked, and local to macro
+expansion; it does not load theories. Explicit variable annotations are rigid.
+Unconstrained types become fresh HOL type variables. Numerals still require
+`(n :: num)`, `(n :: int)` or `(n :: real)`. Ambiguous overloaded arithmetic
+requires an annotation, such as `(x :: num)`. No coercions are inserted.
+
+Bound names need no HOL Light spelling aliases. Symbolic names use escaped
+identifiers; `const.#{=}` explicitly refers to a declared equality constant,
+and `const.IN` or `var.x` select declarations under a shadowing binder. Only
+unusual declaration names, such as a name containing a newline, need `as`.
+Every constructed constant is checked against the runtime kernel declaration.
+Private type-inference algorithms support Metis
 reconstruction, and a small Rhombus-native type-description frontend supports
 inductive declarations. General parsing, elaboration, notation, quotation,
 and presentation belong to the Rhombus syntax and macro frontend.
@@ -83,7 +105,7 @@ never runtime axioms.
 raco pkg install --auto --batch --no-docs --no-setup --skip-installed \
   --name rhombus-hol "$PWD"
 raco make --disable-inline rhombus/hol/define.rhm
-raco test rhombus/hol/tests/*.rhm
+raco test rhombus/hol/tests/fast.rhm
 ```
 
 ## Provenance
@@ -98,22 +120,38 @@ Requires Racket 9.3 or later with `rhombus-lib`.
 
 ```sh
 raco make -j 4 rhombus/hol/*.rhm          # compile every module
-racket rhombus/hol/tests/fusion.rhm       # also tests/bool.rhm, tests/engine.rhm
-racket rhombus/hol/define.rhm             # replays every standard-theory proof
+raco test rhombus/hol/tests/fast.rhm       # kernel, frontend and engine contracts
+raco test rhombus/hol/tests/all.rhm        # one standard-theory load, all suites
 ```
 
-The slower suites replay the whole standard theory sequence (several minutes
-each) and run in the CI `theories` job:
+The CI `theories` job uses `tests/all.rhm` as a single-process runner. It replays
+the standard theories once, verifies the exact three axiom statements, then
+runs the kernel/frontend/engine contracts and upstream examples in sequence.
+It checks that no suite adds or replaces an axiom. Example definitions are
+conservative context extensions; the runner deliberately shares mutable state
+and must not be parallelized internally.
+
+The historical HOL Light audit is optional. It runs before examples extend the
+context, and shares the same standard-theory load:
 
 ```sh
-raco test -j 4 rhombus/hol/tests/golden/hol_light.rhm rhombus/hol/tests/upstream/*.rhm
+HOL_TEST_AUDIT=1 raco test rhombus/hol/tests/all.rhm
 ```
 
-- `tests/golden/hol_light.rhm` compares every type, constant, axiom,
+- `tests/golden/hol_light.rhm` compares the recorded types, constants, axioms,
   definition and toplevel theorem with the logical state of the pinned HOL
   Light after `define.ml`, recorded in `tests/golden/hol_light.tsv.gz`.
+- `tests/support/reference.rkt` parses the historical encoding into typed trees,
+  compares binders by scope and hypotheses without regard to order, and keeps
+  separate bijections for type variables, free variables and generated constants.
+  Ordinary constants retain their identity, including the numeral constant `_0`.
 - `tests/upstream/` ports HOL Light's `UnitTests/basic_tests.ml` and
-  `Examples/{dickson,lagrange_lemma}.ml`.
+  `Examples/{dickson,lagrange_lemma}.ml`. Example contracts check their explicit
+  goals and empty hypotheses directly, without large theorem-printer strings.
+- `tests/kernel.rhm` exercises primitive inference rules, rejected side
+  conditions, capture-avoiding substitution and a bounded typed-term grammar.
+- `tests/inference_errors.rhm` checks that invalid quotations fail during
+  expansion rather than during proof execution.
 
 The data comes from `tools/hol_light_golden/` and is only compared against.
 

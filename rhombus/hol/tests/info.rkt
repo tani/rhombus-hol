@@ -2,6 +2,6 @@
 
 (define module-suffixes '(#"rhm"))
 
-;; These replay the full standard theory sequence (several minutes each);
-;; CI runs them in the separate `theories` job.
-(define test-omit-paths '("golden" "upstream"))
+;; Runners are invoked explicitly; support modules are not standalone suites.
+;; The standard theories and examples belong to the separate `theories` job.
+(define test-omit-paths '("golden" "upstream" "support" "all.rhm" "fast.rhm" "axioms.rhm"))

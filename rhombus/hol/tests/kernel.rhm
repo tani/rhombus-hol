@@ -1,0 +1,69 @@
+#lang rhombus
+// Small typed terms exercise side conditions without loading standard theories.
+import: "../fusion.rhm" open
+import: "../private/ocaml.rhm" open
+import: "support/statement.rhm" open
+
+fun rejects(action):
+  try:
+    action()
+    #false
+    ~catch Failure(_): #true
+
+let a = mk_vartype("kernel_A")
+let p = mk_var(["kernel_p", bool_ty])
+let q = mk_var(["kernel_q", bool_ty])
+let u = mk_var(["kernel_u", a])
+let f = mk_var(["kernel_f", mk_fun_ty(bool_ty)(bool_ty)])
+let g = mk_var(["kernel_g", mk_fun_ty(a)(a)])
+let id = mk_abs([p, p])
+
+check rejects(fun(): mk_comb([p, q])) ~is #true
+check rejects(fun(): mk_type(["fun", PairList [bool_ty]])) ~is #true
+check rejects(fun(): mk_type(["kernel_unknown_type", PairList []])) ~is #true
+check rejects(fun(): mk_comb([g, p])) ~is #true
+check rejects(fun(): mk_abs([id, p])) ~is #true
+check rejects(fun(): ASSUME(u)) ~is #true
+check rejects(fun(): TRANS(REFL(p))(REFL(q))) ~is #true
+check rejects(fun(): MK_COMB([REFL(g), REFL(p)])) ~is #true
+check rejects(fun(): ABS(p)(ASSUME(mk_eq([p, q])))) ~is #true
+check rejects(fun(): EQ_MP(REFL(p))(ASSUME(q))) ~is #true
+check rejects(fun(): INST(PairList [[u, p]])(REFL(p))) ~is #true
+check rejects(fun(): BETA(mk_comb([id, q]))) ~is #true
+check rejects(fun(): new_basic_definition(mk_eq([mk_var(["kernel_bad_def", bool_ty]), p]))) ~is #true
+check rejects(fun(): new_basic_type_definition("kernel_bad_type")(["kernel_bad_abs", "kernel_bad_rep"])(ASSUME(p))) ~is #true
+
+// Substitution beneath a binder must retain the free replacement variable.
+let substituted = vsubst(PairList [[q, p]])(mk_abs([q, p]))
+let [binder, body] = dest_abs(substituted)
+check binder == q ~is #false
+check body ~is q
+check vfree_in(q)(substituted) ~is #true
+
+check proves(BETA(mk_comb([id, p])), mk_eq([mk_comb([id, p]), p])) ~is #true
+check same_statement(TRANS(REFL(p))(REFL(p)), REFL(p)) ~is #true
+check same_statement(MK_COMB([REFL(f), REFL(p)]), REFL(mk_comb([f, p]))) ~is #true
+check same_statement(ABS(p)(REFL(p)), REFL(id)) ~is #true
+check same_statement(EQ_MP(REFL(p))(ASSUME(p)), ASSUME(p)) ~is #true
+check same_statement(INST(PairList [[q, p]])(REFL(p)), REFL(q)) ~is #true
+check same_statement(INST_TYPE(PairList [[bool_ty, a]])(REFL(u)), REFL(mk_var(["kernel_u", bool_ty]))) ~is #true
+let deduction = DEDUCT_ANTISYM_RULE(ASSUME(p))(ASSUME(q))
+check aconv(concl(deduction))(mk_eq([p, q])) ~is #true
+check (for all (v in PairList [p, q]): for any (h in hyp(deduction)): aconv(v)(h)) ~is #true
+check hyp(deduction).length() ~is 2
+
+// Exhaust a bounded constructor grammar, rather than a list of handpicked
+// happy paths. Every generated term is well typed by the public constructors.
+let terms = for values(ts = [p, q]) (_ in 0..2):
+  ts ++ (for List (t in ts): mk_comb([f, t]))
+    ++ (for List (t in ts): mk_comb([mk_abs([p, t]), q]))
+for (t in terms):
+  check type_of(t) ~is bool_ty
+  check proves(REFL(t), mk_eq([t, t])) ~is #true
+  check vsubst(PairList [])(t) ~is t
+  check inst(PairList [])(t) ~is t
+  check vfree_in(p)(vsubst(PairList [[q, p]])(t)) ~is #false
+
+// Rejected definition/type-extension attempts must leave the context intact.
+check (for any ([name, _] in constants()): name == "kernel_bad_def") ~is #false
+check (for any ([name, _] in types()): name == "kernel_bad_type") ~is #false

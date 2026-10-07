@@ -1,68 +1,28 @@
 #lang rhombus/and_meta
 // `hol:` — Rhombus-native HOL term quotation.
 //
-// A `hol:` block declares free variables and constants with complete HOL
-// types and ends in one HOL expression. Expressions and types are parsed
+// A `hol:` block declares free variables and typed constant schemes,
+// then ends in one HOL expression. Expressions and types are parsed
 // in their own spaces with Rhombus enforestation (operators keep their
 // native order and associativity), then elaborated at expansion time:
 // names resolve to declarations or the innermost binder, and every
-// application, operator and branch is checked against fully declared
-// types. There is no unification, inference or coercion. The result is a
-// typed quoted AST that expand_quote turns into a kernel term with the
-// public constructors; no theorem is produced.
+// application, operator and branch contributes first-order type constraints.
+// Variables can omit types; declared constant schemes are freshly instantiated
+// at each occurrence. There are no implicit coercions. The result is a
+// sequence of direct calls to public kernel term/type constructors; no theorem is produced.
 //
-// Extension: `var x2 as x :: A` / `const c as "c'" :: A` (and the same in
-// binders) give a quotation-local name to a HOL name, so one quotation
-// can mention a HOL name at several types or from under a binder that
-// shadows it.
+// Constants use one declared type scheme, even when used at several types.
+// `const.name` and `var.name` select declarations beneath a shadowing binder.
+// Escaped identifiers name symbolic constants directly. A declaration alias
+// remains available for names containing characters such as a newline.
 import:
   "ocaml.rhm" open
   "../fusion.rhm" as Kernel
   "../basics.rhm" as Basics
-  lib("json/main.rkt") open:
-    only: #{string->jsexpr}
-  lib("racket/base.rkt") open:
-    only:
-      #{string?}
-      #{string->immutable-string}
   meta:
     lib("racket/base.rkt") as Rkt:
       only:
         #{exact-nonnegative-integer?}
-// ---------------------------------------------------------------------
-// Run time: typed quoted AST (JSON) to kernel terms and types.
-
-fun immutable_ast(value):
-  if #{string?}(value)
-  | #{string->immutable-string}(value)
-  | match value
-    | PairList [ & items]: PairList.map(items, immutable_ast)
-    | _: failwith("invalid quotation data")
-fun expand_type(ast):
-  match ast
-  | PairList ["Tyvar",name]: Kernel.mk_vartype(name)
-  | PairList ["Tyapp",name,args]: Kernel.mk_type([name, PairList.map(args, expand_type)])
-  | _: failwith("invalid quoted type")
-fun expand_term(ast):
-  match ast
-  | PairList ["Var",name,ty]: Kernel.mk_var([name, expand_type(ty)])
-  | PairList ["Const",name,ty]: Basics.mk_mconst([name, expand_type(ty)])
-  | PairList ["Comb",left,right]:
-      let r = expand_term(right)
-      let l = expand_term(left)
-      Kernel.mk_comb([l, r])
-  | PairList ["Abs",variable,body]:
-      let b = expand_term(body)
-      let v = expand_term(variable)
-      Kernel.mk_abs([v, b])
-  | _: failwith("invalid quoted term")
-fun expand_quote(encoded):
-  let ast = immutable_ast(#{string->jsexpr}(encoded))
-  match ast
-  | PairList ["Tyvar",_]: expand_type(ast)
-  | PairList ["Tyapp",_,_]: expand_type(ast)
-  | _: expand_term(ast)
-
 // ---------------------------------------------------------------------
 // Spaces for HOL types and terms.
 
@@ -137,13 +97,22 @@ hol_term_space.term_macro '$left #%call ($(arg :: hol_term_meta.Parsed), ...)':
   ~stronger_than: ~other
   ~associativity: ~left
   hol_term_meta.pack('["app", $left, [$arg, ...]]')
+hol_term_space.term_macro 'const . $(id :: Identifier)':
+  hol_term_meta.pack('["declared", "const", $id]')
+hol_term_space.term_macro 'var . $(id :: Identifier)':
+  hol_term_meta.pack('["declared", "var", $id]')
+hol_term_space.term_macro '$left :: $ty ...':
+  ~weaker_than: ~other
+  let '$(t :: hol_type_meta.Parsed)' = '$ty ...'
+  hol_term_meta.pack('["annotation", $left, $t]')
 hol_term_space.term_macro
 | '#%parens ($(lit :: Term) :: $ty ...)':
     ~all_stx: stx
-    unless Rkt.#{exact-nonnegative-integer?}(lit.unwrap())
-    | syntax_meta.error("only a non-negative integer literal takes a `::` type", stx)
     let '$(t :: hol_type_meta.Parsed)' = '$ty ...'
-    hol_term_meta.pack('["numeral", $lit, $t]')
+    if Rkt.#{exact-nonnegative-integer?}(lit.unwrap())
+    | hol_term_meta.pack('["numeral", $lit, $t]')
+    | let '$(e :: hol_term_meta.Parsed)' = '$lit'
+      hol_term_meta.pack('["annotation", $e, $t]')
 | '#%parens (- $(lit :: Term) :: $_ ...)':
     ~all_stx: stx
     syntax_meta.error("negative numerals have no literal form; negate a typed numeral instead", stx)
@@ -207,24 +176,13 @@ hol_term_space.term_macro '$left >= $right':
   hol_term_meta.pack('["op2", ">=", $left, $right]')
 
 meta:
-  // A binder or declaration head: `x`, `x as y` or `x as "y'"`.
-  fun binding_head(id, name_terms, stx) :: Syntax:
-    match name_terms
-    | []: '[$id, #false]'
-    | ['as', n]:
-        unless n.unwrap() is_a Symbol || n.unwrap() is_a String
-        | syntax_meta.error("expected a HOL name after `as`", stx)
-        '[$id, $n]'
-    | _: syntax_meta.error("bad binding", stx)
   fun parse_binding(g :: Syntax) :: Syntax:
     match g
-    | '$(id :: Identifier) as $(n :: Term) :: $ty ...':
-        let '$(t :: hol_type_meta.Parsed)' = '$ty ...'
-        '[$(binding_head(id, ['as', n], g)), $t]'
     | '$(id :: Identifier) :: $ty ...':
         let '$(t :: hol_type_meta.Parsed)' = '$ty ...'
-        '[[$id, #false], $t]'
-    | _: syntax_meta.error("expected `name :: type` in a binder", g)
+        '[$id, $t]'
+    | '$(id :: Identifier)': '[$id, #false]'
+    | _: syntax_meta.error("expected `name` or `name :: type` in a binder", g)
 
 hol_term_space.term_macro
 | 'forall ($b, ...): $(body :: hol_term_meta.Parsed)':
@@ -256,6 +214,7 @@ meta:
   fun fun_ty(a, b): ["T", "fun", [a, b]]
   fun show_type(ty) :: String:
     match ty
+    | ["M", _, label]: "?" ++ label
     | ["V", n]: n
     | ["T", "fun", [a, b]]:
         let left = match a | ["T", "fun", _]: "(" ++ show_type(a) ++ ")" | _: show_type(a)
@@ -298,16 +257,112 @@ meta:
             | _: ["T", k, args]
         | _: syntax_meta.error("expected a type constructor name", f)
 
-  fun json_str(s :: String) :: String:
-    "\"" ++ s.replace("\\", "\\\\", ~all: #true).replace("\"", "\\\"", ~all: #true).replace("\n", "\\n", ~all: #true) ++ "\""
-  fun json_type(ty) :: String:
+  // A context belongs to one quotation; inference never reads runtime
+  // theories or mutates kernel state. Its substitutions are occurs-checked.
+  fun inference_context(): [Box({}), Box(0), Box({}), Box({})]
+  // Kernel variable identity includes its name. Give lexical binders names
+  // distinct from declared free variables and other binders so `var.x`
+  // remains free even beneath a surface binder named x.
+  fun binder_name(base, ctx):
+    let used = ctx[3].value
+    fun choose(n):
+      let name = if n == 0 | base | base ++ "_" +& n
+      if used.has_key(name) | choose(n + 1) | name
+    let name = choose(0)
+    ctx[3].value := used ++ {name: #true}
+    name
+  fun fresh_type(ctx, label):
+    let n = ctx[1].value
+    ctx[1].value := n + 1
+    ["M", n, label]
+  fun resolve_type(ty, ctx):
     match ty
-    | ["V", n]: "[\"Tyvar\"," ++ json_str(n) ++ "]"
-    | ["T", n, args]: "[\"Tyapp\"," ++ json_str(n) ++ ",[" ++ String.join(for List (a in args): json_type(a), ",") ++ "]]"
-  fun json_var(n, ty): "[\"Var\"," ++ json_str(n) ++ "," ++ json_type(ty) ++ "]"
-  fun json_const(n, ty): "[\"Const\"," ++ json_str(n) ++ "," ++ json_type(ty) ++ "]"
-  fun json_comb(f, x): "[\"Comb\"," ++ f ++ "," ++ x ++ "]"
-  fun json_abs(v, b): "[\"Abs\"," ++ v ++ "," ++ b ++ "]"
+    | ["M", n, _]:
+        match ctx[0].value.get(n, #false)
+        | #false: ty
+        | t: resolve_type(t, ctx)
+    | _: ty
+  fun occurs(n, ty, ctx):
+    match resolve_type(ty, ctx)
+    | ["M", m, _]: n == m
+    | ["T", _, args]: for any (a in args): occurs(n, a, ctx)
+    | _: #false
+  fun unify_type(left, right, ctx, stx, what):
+    let a = resolve_type(left, ctx)
+    let b = resolve_type(right, ctx)
+    unless a == b
+    | match [a, b]
+      | [["M", n, _], _]:
+          when occurs(n, b, ctx)
+          | syntax_meta.error(what ++ ": infinite type", stx)
+          ctx[0].value := ctx[0].value ++ {n: b}
+      | [_, ["M", _, _]]: unify_type(b, a, ctx, stx, what)
+      | [["T", name, args], ["T", other, bs]] when name == other && args.length() == bs.length():
+          for (x in args, y in bs): unify_type(x, y, ctx, stx, what)
+      | _:
+          syntax_meta.error(what ++ ": incompatible types " ++ show_type(a) ++ " and " ++ show_type(b), stx)
+  fun instantiate_scheme(ty, ctx):
+    let mutable vars :: Map = {}
+    fun walk(t):
+      match t
+      | ["V", n]:
+          unless vars.has_key(n)
+          | vars := vars ++ {n: fresh_type(ctx, n)}
+          vars[n]
+      | ["T", n, args]: ["T", n, for List (a in args): walk(a)]
+    walk(ty)
+  fun register_rigid_type(ty, ctx):
+    match ty
+    | ["V", name]: ctx[2].value := ctx[2].value ++ {name: #true}
+    | ["T", _, args]: for (a in args): register_rigid_type(a, ctx)
+    | _: #void
+  fun final_type(ty, ctx):
+    match resolve_type(ty, ctx)
+    | ["M", n, label]:
+        let used = ctx[2].value
+        let base = if label == "" | "Inferred" | label
+        fun choose(n):
+          let name = if n == 0 | base | base ++ "_" +& n
+          if used.has_key(name) | choose(n + 1) | name
+        let name = choose(0)
+        ctx[2].value := used ++ {name: #true}
+        let t = ["V", name]
+        ctx[0].value := ctx[0].value ++ {n: t}
+        t
+    | ["T", n, args]: ["T", n, for List (a in args): final_type(a, ctx)]
+    | t: t
+
+  fun type_expression(ty) :: Syntax:
+    match ty
+    | ["V", n]: 'Kernel.mk_vartype($(Syntax.make(n, 'ctx')))'
+    | ["T", n, args]:
+        let [arg, ...] = for List (a in args): type_expression(a)
+        'Kernel.mk_type([$(Syntax.make(n, 'ctx')), PairList [$arg, ...]])'
+  fun variable_expression(n, ty): ["var", n, ty]
+  fun constant_expression(n, ty): ["const", n, ty]
+  fun application_expression(f, x): ["app", f, x]
+  fun abstraction_expression(v, b): ["abs", v, b]
+
+  fun term_expression(node, ctx) :: Syntax:
+    match node
+    | ["var", n, ty]: 'Kernel.mk_var([$(Syntax.make(n, 'ctx')), $(type_expression(final_type(ty, ctx)))])'
+    | ["const", n, ty]: 'Basics.mk_mconst([$(Syntax.make(n, 'ctx')), $(type_expression(final_type(ty, ctx)))])'
+    | ["app", f, x]: 'Kernel.mk_comb([$(term_expression(f, ctx)), $(term_expression(x, ctx))])'
+    | ["abs", v, b]: 'Kernel.mk_abs([$(term_expression(v, ctx)), $(term_expression(b, ctx))])'
+    | ["arithmetic", op, ty, left, right, stx]:
+        let t = final_type(ty, ctx)
+        let k = match t | ["T", k, []]: k | _: ""
+        match arithmetic_ops.get([op, k], #false)
+        | #false: syntax_meta.error("ambiguous or unsupported " ++ op ++ "; add a type annotation", stx)
+        | name:
+            let res = if op == "<" || op == "<=" || op == ">" || op == ">=" | bool_ty | t
+            term_expression(application_expression(application_expression(constant_expression(name, fun_ty(t, fun_ty(t, res))), left), right), ctx)
+    | ["negation", ty, x, stx]:
+        let t = final_type(ty, ctx)
+        let k = match t | ["T", k, []]: k | _: ""
+        match negation_ops.get(k, #false)
+        | #false: syntax_meta.error("ambiguous or unsupported unary -; add a type annotation", stx)
+        | name: term_expression(application_expression(constant_expression(name, fun_ty(t, t)), x), ctx)
 
   // Environment entries: [kind, hol_name, type] keyed by surface symbol.
   fun hol_name(id :: Syntax, alias) :: String:
@@ -315,17 +370,15 @@ meta:
     | #false: to_string(id.unwrap())
     | n: to_string(n.unwrap())
 
-  fun expect(ty, want, stx, what):
-    unless ty == want
-    | syntax_meta.error(what ++ ": expected type " ++ show_type(want) ++ ", found " ++ show_type(ty), stx)
+  fun expect(ty, want, stx, what, ctx): unify_type(ty, want, ctx, stx, what)
 
-  fun numeral_json(n :: Int):
+  fun numeral_expression(n :: Int):
     fun bits(n):
       cond
-      | n == 0: json_const("_0", ["T", "num", []])
-      | n rem 2 == 0: json_comb(json_const("BIT0", fun_ty(["T", "num", []], ["T", "num", []])), bits(n div 2))
-      | ~else: json_comb(json_const("BIT1", fun_ty(["T", "num", []], ["T", "num", []])), bits(n div 2))
-    json_comb(json_const("NUMERAL", fun_ty(["T", "num", []], ["T", "num", []])), bits(n))
+      | n == 0: constant_expression("_0", ["T", "num", []])
+      | n rem 2 == 0: application_expression(constant_expression("BIT0", fun_ty(["T", "num", []], ["T", "num", []])), bits(n div 2))
+      | ~else: application_expression(constant_expression("BIT1", fun_ty(["T", "num", []], ["T", "num", []])), bits(n div 2))
+    application_expression(constant_expression("NUMERAL", fun_ty(["T", "num", []], ["T", "num", []])), bits(n))
 
   // Operator constants by operand type.
   def arithmetic_ops:
@@ -338,95 +391,101 @@ meta:
   def negation_ops = { "int": "int_neg", "real": "real_neg" }
   def numeral_injections = { "int": "int_of_num", "real": "real_of_num" }
 
-  fun elab(stx, env :~ Map) :~ List:
+  fun elab(stx, env :~ Map, ctx) :~ List:
     match hol_term_meta.unpack(stx)
     | '["ref", $id]':
         match env.get(id.unwrap(), #false)
         | [kind, name, ty]:
-            [if kind == "var" | json_var(name, ty) | json_const(name, ty), ty]
+            let t = if kind == "var" | ty | instantiate_scheme(ty, ctx)
+            [if kind == "var" | variable_expression(name, t) | constant_expression(name, t), t]
         | _: syntax_meta.error("unbound HOL name; declare it with `var` or `const`", id)
+    | '["declared", $kind, $id]':
+        match env.get([kind.unwrap(), id.unwrap()], #false)
+        | [k, name, ty]:
+            let t = if k == "var" | ty | instantiate_scheme(ty, ctx)
+            [if k == "var" | variable_expression(name, t) | constant_expression(name, t), t]
+        | _: syntax_meta.error("undeclared qualified HOL name", id)
     | '["truth", $v]':
-        [json_const(if v.unwrap() | "T" | "F", bool_ty), bool_ty]
+        [constant_expression(if v.unwrap() | "T" | "F", bool_ty), bool_ty]
+    | '["annotation", $e, $t]':
+        let ty = elab_type(t)
+        register_rigid_type(ty, ctx)
+        let [node, inferred] = elab(e, env, ctx)
+        expect(inferred, ty, stx, "annotation", ctx)
+        [node, ty]
     | '["numeral", $lit, $t]':
         let ty = elab_type(t)
-        let n = numeral_json(lit.unwrap())
+        let n = numeral_expression(lit.unwrap())
         match ty
         | ["T", "num", []]: [n, ty]
         | ["T", k, []] when numeral_injections.has_key(k):
-            [json_comb(json_const(numeral_injections[k], fun_ty(["T", "num", []], ty)), n), ty]
+            [application_expression(constant_expression(numeral_injections[k], fun_ty(["T", "num", []], ty)), n), ty]
         | _: syntax_meta.error("a numeral needs type num, int or real, not " ++ show_type(ty), stx)
     | '["app", $f, [$arg, ...]]':
-        for values(acc = elab(f, env)) (a in [arg, ...]):
+        for values(acc = elab(f, env, ctx)) (a in [arg, ...]):
           let [fj, fty] = acc
-          match fty
-          | ["T", "fun", [dom, cod]]:
-              let [aj, aty] = elab(a, env)
-              expect(aty, dom, a, "argument")
-              [json_comb(fj, aj), cod]
-          | _: syntax_meta.error("applied term has type " ++ show_type(fty) ++ ", not a function type", f)
+          let [aj, aty] = elab(a, env, ctx)
+          let cod = fresh_type(ctx, "Inferred")
+          expect(fty, fun_ty(aty, cod), f, "application", ctx)
+          [application_expression(fj, aj), cod]
     | '["op1", "!", $x]':
-        let [xj, xty] = elab(x, env)
-        expect(xty, bool_ty, x, "operand of !")
-        [json_comb(json_const("~", fun_ty(bool_ty, bool_ty)), xj), bool_ty]
+        let [xj, xty] = elab(x, env, ctx)
+        expect(xty, bool_ty, x, "operand of !", ctx)
+        [application_expression(constant_expression("~", fun_ty(bool_ty, bool_ty)), xj), bool_ty]
     | '["op1", "-", $x]':
-        let [xj, xty] = elab(x, env)
-        match xty
-        | ["T", k, []] when negation_ops.has_key(k):
-            [json_comb(json_const(negation_ops[k], fun_ty(xty, xty)), xj), xty]
-        | _: syntax_meta.error("unary - is not defined at type " ++ show_type(xty), stx)
+        let [xj, xty] = elab(x, env, ctx)
+        [["negation", xty, xj, stx], xty]
     | '["op2", $op, $l, $r]':
         let o = op.unwrap()
-        let [lj, lty] = elab(l, env)
-        let [rj, rty] = elab(r, env)
+        let [lj, lty] = elab(l, env, ctx)
+        let [rj, rty] = elab(r, env, ctx)
         fun binop(name, ty, res):
-          [json_comb(json_comb(json_const(name, fun_ty(ty, fun_ty(ty, res))), lj), rj), res]
+          [application_expression(application_expression(constant_expression(name, fun_ty(ty, fun_ty(ty, res))), lj), rj), res]
         match o
         | "&&" || "||" || "==>" || "<=>":
-            expect(lty, bool_ty, l, "operand of " ++ o)
-            expect(rty, bool_ty, r, "operand of " ++ o)
+            expect(lty, bool_ty, l, "operand of " ++ o, ctx)
+            expect(rty, bool_ty, r, "operand of " ++ o, ctx)
             binop({ "&&": "/\\", "||": "\\/", "==>": "==>", "<=>": "=" }[o], bool_ty, bool_ty)
         | "==":
-            expect(rty, lty, r, "right side of ==")
+            expect(rty, lty, r, "right side of ==", ctx)
             binop("=", lty, bool_ty)
         | "!=":
-            expect(rty, lty, r, "right side of !=")
+            expect(rty, lty, r, "right side of !=", ctx)
             let [eq, _] = binop("=", lty, bool_ty)
-            [json_comb(json_const("~", fun_ty(bool_ty, bool_ty)), eq), bool_ty]
+            [application_expression(constant_expression("~", fun_ty(bool_ty, bool_ty)), eq), bool_ty]
         | _:
-            expect(rty, lty, r, "right operand of " ++ o)
-            let k = match lty | ["T", k, []]: k | _: ""
-            match arithmetic_ops.get([o, k], #false)
-            | #false: syntax_meta.error(o ++ " is not defined at type " ++ show_type(lty), stx)
-            | name:
-                let res = if o == "<" || o == "<=" || o == ">" || o == ">=" | bool_ty | lty
-                binop(name, lty, res)
-    | '["binder", $kind, [[[$id, $alias], $t], ...], $body]':
+            expect(rty, lty, r, "right operand of " ++ o, ctx)
+            let res = if o == "<" || o == "<=" || o == ">" || o == ">=" | bool_ty | lty
+            [["arithmetic", o, lty, lj, rj, stx], res]
+    | '["binder", $kind, [[$id, $t], ...], $body]':
         let k = kind.unwrap()
         let vars:
-          for List (i in [id, ...], a in [alias, ...], ty in [t, ...]):
-            [i, hol_name(i, if a.unwrap() | a | #false), elab_type(ty)]
+          for List (i in [id, ...], ty in [t, ...]):
+            let t = if ty.unwrap() == #false | fresh_type(ctx, "Inferred") | elab_type(ty)
+            register_rigid_type(t, ctx)
+            [i, binder_name(to_string(i.unwrap()), ctx), t]
         let body_env:
           for values(e :~ Map = env) ([i, name, ty] in vars):
             e ++ { i.unwrap(): ["var", name, ty] }
-        let [bj, bty] = elab(body, body_env)
+        let [bj, bty] = elab(body, body_env, ctx)
         unless k == "fun"
-        | expect(bty, bool_ty, body, "body of " ++ k)
+        | expect(bty, bool_ty, body, "body of " ++ k, ctx)
         let binder = { "forall": "!", "exists": "?", "exists1": "?!" }
         for values(acc = [bj, bty]) ([_, name, ty] in vars.reverse()):
           let [j, jty] = acc
-          let abs = json_abs(json_var(name, ty), j)
+          let abs = abstraction_expression(variable_expression(name, ty), j)
           let aty = fun_ty(ty, jty)
           if k == "fun"
           | [abs, aty]
-          | [json_comb(json_const(binder[k], fun_ty(aty, bool_ty)), abs), bool_ty]
+          | [application_expression(constant_expression(binder[k], fun_ty(aty, bool_ty)), abs), bool_ty]
     | '["if", $c, $t, $e]':
-        let [cj, cty] = elab(c, env)
-        expect(cty, bool_ty, c, "condition of if")
-        let [tj, tty] = elab(t, env)
-        let [ej, ety] = elab(e, env)
-        expect(ety, tty, e, "else branch")
+        let [cj, cty] = elab(c, env, ctx)
+        expect(cty, bool_ty, c, "condition of if", ctx)
+        let [tj, tty] = elab(t, env, ctx)
+        let [ej, ety] = elab(e, env, ctx)
+        expect(ety, tty, e, "else branch", ctx)
         let cond_ty = fun_ty(bool_ty, fun_ty(tty, fun_ty(tty, tty)))
-        [json_comb(json_comb(json_comb(json_const("COND", cond_ty), cj), tj), ej), tty]
+        [application_expression(application_expression(application_expression(constant_expression("COND", cond_ty), cj), tj), ej), tty]
 
   fun parse_declaration(g :: Syntax) :~ maybe(List):
     fun decl(kind, id, alias, ty):
@@ -437,7 +496,10 @@ meta:
     | 'var $(id :: Identifier) :: $ty ...': decl("var", id, #false, '$ty ...')
     | 'const $(id :: Identifier) as $(n :: Term) :: $ty ...': decl("const", id, n, '$ty ...')
     | 'const $(id :: Identifier) :: $ty ...': decl("const", id, #false, '$ty ...')
-    | 'var $_ ...': syntax_meta.error("expected `var name :: type`", g)
+    | 'var $(id :: Identifier)': ["var", id, #false, #false]
+    | 'var . $_ ...': #false
+    | 'const . $_ ...': #false
+    | 'var $_ ...': syntax_meta.error("expected `var name` or `var name :: type`", g)
     | 'const $_ ...': syntax_meta.error("expected `const name :: type`", g)
     | _: #false
 
@@ -454,30 +516,38 @@ expr.macro 'hol: $(g :: Group); ...':
   let body = groups[groups.length() - 1]
   when parse_declaration(body)
   | syntax_meta.error("a hol: block needs a body expression after its declarations", stx)
+  let ctx = inference_context()
   let env:
     for values(e :~ Map = {}) ([kind, id, alias, ty] in decls):
-      when e.has_key(id.unwrap())
+      when e.has_key([kind, id.unwrap()])
       | syntax_meta.error("duplicate declaration", id)
-      e ++ { id.unwrap(): [kind, hol_name(id, alias), ty] }
+      let t = if ty == #false | fresh_type(ctx, "Inferred") | ty
+      when kind == "var"
+      | register_rigid_type(t, ctx)
+        ctx[3].value := ctx[3].value ++ {hol_name(id, alias): #true}
+      let entry = [kind, hol_name(id, alias), t]
+      let qualified = e ++ { [kind, id.unwrap()]: entry }
+      if kind == "const" && e.has_key(["var", id.unwrap()])
+      | qualified
+      | qualified ++ { id.unwrap(): entry }
   let '$(parsed :: hol_term_meta.Parsed)' = body
-  let [j, _] = elab(parsed, env)
-  'expand_quote($(Syntax.make(j, 'ctx')))'
+  let [j, _] = elab(parsed, env, ctx)
+  term_expression(j, ctx)
 
 // `hol_type:` quotation of a type.
 expr.macro 'hol_type: $(t :: hol_type_meta.Parsed)':
-  'expand_quote($(Syntax.make(json_type(elab_type(t)), 'ctx')))'
+  type_expression(elab_type(t))
 
 export:
   hol
   hol_type
-  expand_quote
   meta:
     hol_term_meta
     hol_type_meta
   // Forms and operators inside `hol:` and type positions.
   only_space hol_term_space:
-    && || ==> <=> == != ! + - * / < <= > >=
-    forall exists exists1 fun if
+    && || ==> <=> == != ! + - * / < <= > >= ::
+    forall exists exists1 fun if const var
     names:
       #%literal #%parens #%call
   only_space hol_type_space:

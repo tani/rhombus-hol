@@ -83,10 +83,14 @@ Unconstrained types become fresh HOL type variables. Numerals still require
 `(n :: num)`, `(n :: int)` or `(n :: real)`. Ambiguous overloaded arithmetic
 requires an annotation, such as `(x :: num)`. No coercions are inserted.
 
-Bound names need no HOL Light spelling aliases. Symbolic names use escaped
-identifiers; `const.#{=}` explicitly refers to a declared equality constant,
-and `const.IN` or `var.x` select declarations under a shadowing binder. Only
-unusual declaration names, such as a name containing a newline, need `as`.
+Bound names need no HOL Light spelling aliases. Ordinary references resolve
+from declarations and the innermost binder; symbolic names such as `#{=}` and
+`#{|x'|}` use escaped identifiers without a qualifier. Prefer distinct binder
+names when referring to a declaration inside a binding's body. Optional
+`const.IN` or `var.x` can explicitly select a declaration under a shadowing
+binder. Names that also bind term macros, such as `#{+}`, still require an
+explicit reference like `const.#{+}` when used as a declared term. Only unusual
+declaration names, such as a name containing a newline, need `as`.
 Every constructed constant is checked against the runtime kernel declaration.
 Generated constructor calls are composed as parsed syntax, so nested quotations
 do not repeatedly pass through Rhombus expression parsing.

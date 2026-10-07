@@ -16,7 +16,7 @@ Requirements: a HOL Light checkout at the pinned revision built with `make`
 | `to_hol.py` | Rewrites `hol_term(...)` calls in place into Rhombus `hol:` quotations. |
 | `capture.ml` | Records the quotations an upstream file parses, in order. |
 | `basic_tests_terms.ml` | Expands the quotations of `UnitTests/basic_tests.ml`. |
-| `normalize_quotes.rkt` | One-time, source-location-based migration of quotation declarations to shared type schemes and escaped identifiers. |
+| `normalize_quotes.rkt` | Source-location-based migration to shared type schemes and ordinary escaped references. Renames capturing binders; retains qualifiers for term-macro conflicts or same-named free variables and constants. Optional file arguments restrict the migration. |
 
 ## Golden logical state
 

@@ -37,6 +37,17 @@
 (define (end stx) (apply max (map cdr (locations stx))))
 (define (op? stx name) (equal? (syntax->datum stx) `(op ,name)))
 
+;; Escaping an identifier does not remove a binding to a term macro. These
+;; names still need an explicit declaration reference; other symbolic names
+;; can use the ordinary identifier parser.
+(define term-macro-names
+  '("var" "const" "fun" "if" "forall" "exists" "exists1"
+    "&&" "||" "==>" "<=>" "==" "!=" "!" "+" "-" "*" "/"
+    "<" "<=" ">" ">=" "::" "#%call" "#%parens" "#%literal"))
+(struct declaration (kind target name) #:transparent)
+(struct binder (id name [replacement #:mutable]) #:transparent)
+(struct reference (start finish destination scope) #:transparent)
+
 (define schemas
   (let ([out (open-output-bytes)])
     (call-with-input-file "rhombus/hol/tests/golden/hol_light.tsv.gz"
@@ -47,8 +58,17 @@
       (values (cadr fields) (type-source (decode-reference (caddr fields)))))))
 
 (define total 0)
-(for ([path (in-list (find-files (lambda (p) (regexp-match? #rx"[.]rhm$" (path->string p))) "rhombus/hol"))]
-      #:unless (regexp-match? #rx"/private/" (path->string path)))
+(define renamed-binders 0)
+(define paths
+  (if (zero? (vector-length (current-command-line-arguments)))
+      (find-files (lambda (p) (regexp-match? #rx"[.]rhm$" (path->string p))) "rhombus/hol")
+      (map string->path (vector->list (current-command-line-arguments)))))
+(for ([path (in-list paths)]
+      ;; The native frontend's hand-written tests intentionally exercise
+      ;; qualified references beneath shadowing binders.
+      #:unless (or (regexp-match? #rx"/private/" (path->string path))
+                   (and (zero? (vector-length (current-command-line-arguments)))
+                        (equal? (path->string path) "rhombus/hol/tests/hol_quote.rhm"))))
   (define text (file->string path))
   (define in (open-input-string text))
   (port-count-lines! in)
@@ -63,6 +83,7 @@
     (define groups (parts block))
     (define declarations (drop-right groups 1))
     (define names (make-hash))
+    (define qualified-names (make-hash))
     (define seen-constants (make-hash))
     (define var-counts (make-hash))
     (for ([g (in-list declarations)])
@@ -84,7 +105,12 @@
              (or (eq? kind 'const) (= (hash-ref var-counts kernel-name 0) 1))))
       (define target (if rename? (identifier kernel-name) (substring text (position id) (end id))))
       (define target-name (if rename? kernel-name (atom-name id)))
-      (hash-set! names old (list kind target target-name))
+      (define d (declaration kind target target-name))
+      (hash-set! qualified-names (list kind old) d)
+      ;; Match quotation elaboration: a free variable takes precedence over a
+      ;; constant with the same surface name, regardless of declaration order.
+      (when (or (eq? kind 'var) (not (hash-has-key? names old)))
+        (hash-set! names old d))
       (cond
         [(and (eq? kind 'const) (hash-has-key? seen-constants kernel-name))
          (edit (position g) (position (list-ref groups (add1 i))) "")]
@@ -96,49 +122,104 @@
          (when (and (eq? kind 'const) (hash-has-key? schemas kernel-name))
            (edit (end colon) (end g) (string-append " " (hash-ref schemas kernel-name))))]))
     (define declared-vars
-      (for/list ([value (in-hash-values names)] #:when (eq? (car value) 'var)) (caddr value)))
-    (define (rewrite stx scope)
+      (for/list ([d (in-hash-values qualified-names)] #:when (eq? (declaration-kind d) 'var))
+        (declaration-name d)))
+    (define (qualified? d)
+      (or (member (declaration-name d) term-macro-names)
+          (and (eq? (declaration-kind d) 'const)
+               (member (declaration-name d) declared-vars))))
+    (define binders '())
+    (define references '())
+    (define used-names (make-hash))
+    (define (reserve stx)
+      (when (symbol? (syntax-e stx))
+        (hash-set! used-names (symbol->string (syntax-e stx)) #t))
+      (for-each reserve (children stx)))
+    (reserve block)
+    (for ([d (in-hash-values qualified-names)])
+      (hash-set! used-names (declaration-name d) #t))
+    (define (record-reference a b destination scope)
+      (when destination
+        (set! references (cons (reference (position a) (end b) destination scope) references))))
+    ;; Resolve every original occurrence before scheduling any edits. In
+    ;; particular, a qualified reference bypasses lexical binders, while a
+    ;; plain reference follows the original innermost binding.
+    (define (resolve stx scope)
       (cond
         [(null? (children stx))
          (define old (syntax-e stx))
-         (when (and (symbol? old) (hash-has-key? names old) (not (member old scope)))
-           (match-define (list kind target target-name) (hash-ref names old))
-           (define qualified?
-             (or (member (string->symbol target-name) scope)
-                 (and (eq? kind 'const) (member target-name declared-vars))
-                 (not (regexp-match? #px"^[A-Za-z_][A-Za-z0-9_]*$" target-name))
-                 (member target-name '("var" "const" "fun" "if" "forall" "exists" "exists1" "as" "_"))))
-           (replace-token stx (if qualified? (format "~a.~a" kind target) target)))]
+         (when (symbol? old)
+           (define bound (findf (lambda (b) (eq? old (binder-name b))) scope))
+           (record-reference stx stx (or bound (hash-ref names old #f)) scope))]
         [(eq? (tag stx) 'group)
          (define xs (parts stx))
          (define binder-index
            (for/first ([x (in-list xs)] [i (in-naturals)]
-                        #:when (memq (syntax-e x) '(fun forall exists exists1))) i))
+                        #:when (and (memq (syntax-e x) '(fun forall exists exists1))
+                                    ;; An escaped/qualified declaration with a
+                                    ;; keyword name is not a binding form.
+                                    (equal? (substring text (position x) (end x))
+                                            (symbol->string (syntax-e x)))
+                                    (or (zero? i) (not (op? (list-ref xs (sub1 i)) '|.|)))
+                                    (< (+ i 1) (length xs))
+                                    (ormap (lambda (term) (eq? (tag term) 'block))
+                                           (drop xs (+ i 2))))) i))
          (define colon-index (index-where xs (lambda (x) (op? x '::))))
          (cond
            [binder-index
             (define binding (list-ref xs (add1 binder-index)))
-            (define bound
+            (define ids
               (if (eq? (tag binding) 'parens)
-                  (for/list ([g (in-list (parts binding))]) (syntax-e (car (parts g))))
-                  (list (syntax-e binding))))
-            (for ([x (in-list (take xs binder-index))]) (rewrite x scope))
+                  (for/list ([g (in-list (parts binding))]) (car (parts g)))
+                  (list binding)))
+            (define bound (for/list ([id (in-list ids)]) (binder id (syntax-e id) #f)))
+            (set! binders (append bound binders))
+            (for ([x (in-list (take xs binder-index))]) (resolve x scope))
             (for ([x (in-list (drop xs (add1 binder-index)))] #:when (eq? (tag x) 'block))
-              (rewrite x (append bound scope)))]
+              (resolve x (append (reverse bound) scope)))]
            [else
-            (define qualified-indices
-              (append-map
-               (lambda (i)
-                 (if (and (< (+ i 2) (length xs))
-                          (memq (syntax-e (list-ref xs i)) '(var const))
-                          (op? (list-ref xs (add1 i)) '|.|))
-                     (list i (add1 i) (+ i 2)) '()))
-               (range (length xs))))
-            (for ([x (in-list (if colon-index (take xs colon-index) xs))] [i (in-naturals)]
-                  #:unless (member i qualified-indices)) (rewrite x scope))])]
+            (let loop ([remaining (if colon-index (take xs colon-index) xs)])
+              (cond
+                [(null? remaining) (void)]
+                [(and (>= (length remaining) 3)
+                      (memq (syntax-e (car remaining)) '(var const))
+                      (op? (cadr remaining) '|.|))
+                 (define key (list (syntax-e (car remaining)) (syntax-e (caddr remaining))))
+                 (define d (hash-ref qualified-names key
+                                     (lambda () (error 'normalize "undeclared reference ~a in ~a" key path))))
+                 (record-reference (car remaining) (caddr remaining) d scope)
+                 (loop (cdddr remaining))]
+                [else (resolve (car remaining) scope) (loop (cdr remaining))]))])]
         [(eq? (tag stx) 'op) (void)]
-        [else (for ([x (in-list (parts stx))]) (rewrite x scope))]))
-    (rewrite (last groups) '()))
+        [else (for ([x (in-list (parts stx))]) (resolve x scope))]))
+    (resolve (last groups) '())
+    (define (fresh-name base)
+      (let loop ([i 2])
+        (define name (format "~a_~a" base i))
+        (if (hash-has-key? used-names name) (loop (add1 i))
+            (begin (hash-set! used-names name #t) (identifier name)))))
+    ;; Only rename binders that would capture a declaration reference after
+    ;; removing its qualifier (or after resolving an old declaration alias).
+    ;; Reserve all existing names, including names used in nested binders.
+    (for ([ref (in-list (reverse references))]
+          #:when (declaration? (reference-destination ref)))
+      (define d (reference-destination ref))
+      (unless (qualified? d)
+        (for ([b (in-list (reference-scope ref))]
+              #:when (and (equal? (symbol->string (binder-name b)) (declaration-name d))
+                          (not (binder-replacement b))))
+          (set-binder-replacement! b (fresh-name (binder-name b)))
+          (set! renamed-binders (add1 renamed-binders)))))
+    (for ([b (in-list binders)] #:when (binder-replacement b))
+      (replace-token (binder-id b) (binder-replacement b)))
+    (for ([ref (in-list references)])
+      (define destination (reference-destination ref))
+      (define replacement
+        (cond [(binder? destination) (binder-replacement destination)]
+              [(qualified? destination)
+               (format "~a.~a" (declaration-kind destination) (declaration-target destination))]
+              [else (declaration-target destination)]))
+      (when replacement (edit (reference-start ref) (reference-finish ref) replacement))))
   (define (walk stx)
     (define xs (children stx))
     (when (pair? xs)
@@ -160,4 +241,4 @@
       (set! result (string-append (substring result 0 a) replacement (substring result b))))
     (display-to-file result path #:exists 'truncate)
     (set! total (+ total (length edits)))))
-(printf "Normalized ~a quotation source spans.\n" total)
+(printf "Normalized ~a quotation source spans; renamed ~a shadowing binders.\n" total renamed-binders)

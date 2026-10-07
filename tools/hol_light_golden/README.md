@@ -16,7 +16,11 @@ Requirements: a HOL Light checkout at the pinned revision built with `make`
 | `to_hol.py` | Rewrites `hol_term(...)` calls in place into Rhombus `hol:` quotations. |
 | `capture.ml` | Records the quotations an upstream file parses, in order. |
 | `basic_tests_terms.ml` | Expands the quotations of `UnitTests/basic_tests.ml`. |
-| `normalize_quotes.rkt` | Source-location-based migration to shared type schemes and ordinary escaped references. Renames capturing binders; retains qualifiers for term-macro conflicts or same-named free variables and constants. Optional file arguments restrict the migration. |
+| `normalize_quotes.rkt` | Source-location-based migration to shared type schemes and ordinary escaped references. Preserves standalone constant instances as term annotations. Renames capturing binders; retains qualifiers for term-macro conflicts or same-named free variables and constants. Optional file arguments restrict the migration. |
+
+Replay proofs after generalizing declarations. A shared type scheme does not
+impose a shared instance: disconnected clauses and phantom type parameters
+need explicit term annotations where their type relationship matters.
 
 ## Golden logical state
 

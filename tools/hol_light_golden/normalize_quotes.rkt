@@ -44,7 +44,7 @@
   '("var" "const" "fun" "if" "forall" "exists" "exists1"
     "&&" "||" "==>" "<=>" "==" "!=" "!" "+" "-" "*" "/"
     "<" "<=" ">" ">=" "::" "#%call" "#%parens" "#%literal"))
-(struct declaration (kind target name) #:transparent)
+(struct declaration (kind target name instance-type) #:transparent)
 (struct binder (id name [replacement #:mutable]) #:transparent)
 (struct reference (start finish destination scope) #:transparent)
 
@@ -105,7 +105,11 @@
              (or (eq? kind 'const) (= (hash-ref var-counts kernel-name 0) 1))))
       (define target (if rename? (identifier kernel-name) (substring text (position id) (end id))))
       (define target-name (if rename? kernel-name (atom-name id)))
-      (define d (declaration kind target target-name))
+      (define old-type (and colon (string-trim (substring text (end colon) (end g)))))
+      (define instance-type
+        (and (eq? kind 'const) (hash-has-key? schemas kernel-name)
+             (not (equal? old-type (hash-ref schemas kernel-name))) old-type))
+      (define d (declaration kind target target-name instance-type))
       (hash-set! qualified-names (list kind old) d)
       ;; Match quotation elaboration: a free variable takes precedence over a
       ;; constant with the same surface name, regardless of declaration order.
@@ -219,7 +223,17 @@
               [(qualified? destination)
                (format "~a.~a" (declaration-kind destination) (declaration-target destination))]
               [else (declaration-target destination)]))
-      (when replacement (edit (reference-start ref) (reference-finish ref) replacement))))
+      ;; A standalone constant has no application context to recover its old
+      ;; specialization after generalizing the declaration. Keep that instance
+      ;; as a term annotation; runtime kernel APIs do not infer across quotes.
+      (define instance-type
+        (and (declaration? destination) (declaration-instance-type destination)
+             (= (reference-start ref) (position (last groups)))
+             (= (reference-finish ref) (end (last groups)))
+             (declaration-instance-type destination)))
+      (when replacement
+        (edit (reference-start ref) (reference-finish ref)
+              (if instance-type (string-append replacement " :: " instance-type) replacement)))))
   (define (walk stx)
     (define xs (children stx))
     (when (pair? xs)

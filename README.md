@@ -83,6 +83,13 @@ Unconstrained types become fresh HOL type variables. Numerals still require
 `(n :: num)`, `(n :: int)` or `(n :: real)`. Ambiguous overloaded arithmetic
 requires an annotation, such as `(x :: num)`. No coercions are inserted.
 
+A standalone polymorphic constant needs a term annotation when a kernel API
+expects a particular instance: `hol: const #{=} :: A -> A -> bool;
+#{=} :: bool -> bool -> bool`. Inference does not extend across quotations
+or through runtime kernel calls.
+Phantom type parameters and disconnected clauses also need annotations when
+their types must be linked, such as `dimindex(UNIV :: N -> bool)`.
+
 Bound names need no HOL Light spelling aliases. Ordinary references resolve
 from declarations and the innermost binder; symbolic names such as `#{=}` and
 `#{|x'|}` use escaped identifiers without a qualifier. Prefer distinct binder

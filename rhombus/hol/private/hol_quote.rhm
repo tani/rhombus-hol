@@ -263,8 +263,9 @@ meta:
   // theories or mutates kernel state. Its substitutions are occurs-checked.
   fun inference_context(): [Box({}), Box(0), Box({}), Box({})]
   // Kernel variable identity includes its name. Give lexical binders names
-  // distinct from declared free variables and other binders so `var.x`
-  // remains free even beneath a surface binder named x.
+  // distinct from declared free variables and active binders so `var.x`
+  // remains free even beneath a surface binder named x. Independent scopes
+  // can reuse names; translated tactics use those names as witness hints.
   fun binder_name(base, ctx):
     let used = ctx[3].value
     fun choose(n):
@@ -477,6 +478,7 @@ meta:
             [["arithmetic", o, lty, lj, rj, stx], res]
     | '["binder", $kind, [[$id, $t], ...], $body]':
         let k = kind.unwrap()
+        let enclosing_names = ctx[3].value
         let vars:
           for List (i in [id, ...], ty in [t, ...]):
             let t = if ty.unwrap() == #false | fresh_type(ctx, "Inferred") | elab_type(ty)
@@ -489,13 +491,16 @@ meta:
         unless k == "fun"
         | expect(bty, bool_ty, body, "body of " ++ k, ctx)
         let binder = { "forall": "!", "exists": "?", "exists1": "?!" }
-        for values(acc = [bj, bty]) ([_, name, ty] in vars.reverse()):
-          let [j, jty] = acc
-          let abs = abstraction_expression(variable_expression(name, ty), j)
-          let aty = fun_ty(ty, jty)
-          if k == "fun"
-          | [abs, aty]
-          | [application_expression(constant_expression(binder[k], fun_ty(aty, bool_ty)), abs), bool_ty]
+        let result:
+          for values(acc = [bj, bty]) ([_, name, ty] in vars.reverse()):
+            let [j, jty] = acc
+            let abs = abstraction_expression(variable_expression(name, ty), j)
+            let aty = fun_ty(ty, jty)
+            if k == "fun"
+            | [abs, aty]
+            | [application_expression(constant_expression(binder[k], fun_ty(aty, bool_ty)), abs), bool_ty]
+        ctx[3].value := enclosing_names
+        result
     | '["if", $c, $t, $e]':
         let [cj, cty] = elab(c, env, ctx)
         expect(cty, bool_ty, c, "condition of if", ctx)

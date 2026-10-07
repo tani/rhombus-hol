@@ -77,7 +77,7 @@ never runtime axioms.
 raco pkg install --auto --batch --no-docs --no-setup --skip-installed \
   --name rhombus-hol "$PWD"
 raco make --disable-inline rhombus/hol/define.rhm
-raco test rhombus/hol/tests
+raco test rhombus/hol/tests/*.rhm
 ```
 
 ## Provenance
@@ -95,6 +95,21 @@ raco make -j 4 rhombus/hol/*.rhm          # compile every module
 racket rhombus/hol/tests/fusion.rhm       # also tests/bool.rhm, tests/engine.rhm
 racket rhombus/hol/define.rhm             # replays every standard-theory proof
 ```
+
+The slower suites replay the whole standard theory sequence (several minutes
+each) and run in the CI `theories` job:
+
+```sh
+raco test -j 4 rhombus/hol/tests/golden/hol_light.rhm rhombus/hol/tests/upstream/*.rhm
+```
+
+- `tests/golden/hol_light.rhm` compares every type, constant, axiom,
+  definition and toplevel theorem with the logical state of the pinned HOL
+  Light after `define.ml`, recorded in `tests/golden/hol_light.tsv.gz`.
+- `tests/upstream/` ports HOL Light's `UnitTests/basic_tests.ml` and
+  `Examples/{dickson,lagrange_lemma}.ml`.
+
+The data comes from `tools/hol_light_golden/` and is only compared against.
 
 The standard-theory modules (after `simp.rhm`) were generated from the pinned
 HOL Light sources. OCaml tuples are Rhombus lists (`[a, b]`), OCaml lists are

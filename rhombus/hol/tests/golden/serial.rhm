@@ -1,0 +1,101 @@
+#lang rhombus
+// Canonical text encoding of types, terms and theorems.
+// Must agree byte-for-byte with tools/hol_light_golden/dump.ml.
+import: "../../fusion.rhm" open
+import: "../../private/compat.rhm" open
+import:
+  lib("racket/base.rkt") as R:
+    only:
+      #{open-output-string}
+      #{get-output-string}
+      #{string->immutable-string}
+      #{write-string}
+      #{number->string}
+export:
+  serial_type
+  serial_term
+  serial_thm
+
+fun put(out, s :: String): R.#{write-string}(s, out)
+
+fun put_quoted(out, s :: String):
+  put(out, "\"")
+  for (c in s):
+    let n = Char.to_int(c)
+    cond
+    | c == #{#\"}: put(out, "\\\"")
+    | c == #{#\\}: put(out, "\\\\")
+    | n < 0x20 || n > 0x7e:
+        let digits = R.#{number->string}(n, 16)
+        put(out, "\\u" ++ "0000".substring(0, 4 - digits.length()) ++ digits)
+    | ~else: put(out, to_string(c))
+  put(out, "\"")
+
+fun put_type(out, ty):
+  if is_vartype(ty)
+  | put(out, "V")
+    put_quoted(out, dest_vartype(ty))
+  | let [s, args] = dest_type(ty)
+    put(out, "T")
+    put_quoted(out, s)
+    put(out, "(")
+    put_list(out, args, put_type)
+    put(out, ")")
+
+fun put_list(out, l, f):
+  match l
+  | PairList []: #void
+  | PairList [h, & t]:
+      f(out, h)
+      for (x in t):
+        put(out, ",")
+        f(out, x)
+
+fun put_term(out, tm):
+  cond
+  | is_var(tm):
+      let [n, ty] = dest_var(tm)
+      put(out, "v")
+      put_quoted(out, n)
+      put(out, ":")
+      put_type(out, ty)
+  | is_const(tm):
+      let [n, ty] = dest_const(tm)
+      put(out, "c")
+      put_quoted(out, n)
+      put(out, ":")
+      put_type(out, ty)
+  | is_comb(tm):
+      let [f, x] = dest_comb(tm)
+      put(out, "(")
+      put_term(out, f)
+      put(out, " ")
+      put_term(out, x)
+      put(out, ")")
+  | ~else:
+      let [v, b] = dest_abs(tm)
+      put(out, "\\")
+      put_term(out, v)
+      put(out, ".")
+      put_term(out, b)
+
+fun render(f, x):
+  let out = R.#{open-output-string}()
+  f(out, x)
+  R.#{string->immutable-string}(R.#{get-output-string}(out))
+
+fun serial_type(ty): render(put_type, ty)
+fun serial_term(tm): render(put_term, tm)
+fun serial_thm(th):
+  render(fun(out, th):
+           put(out, "[")
+           match hyp(th)
+           | PairList []: #void
+           | PairList [h, & t]:
+               put_term(out, h)
+               for (x in t):
+                 put(out, ";")
+                 put_term(out, x)
+           put(out, "]|-")
+           put_term(out, concl(th)),
+         th)

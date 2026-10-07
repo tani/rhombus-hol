@@ -1,6 +1,6 @@
 (* ========================================================================= *)
 (* Offline quotation expansion: print a parsed HOL Light term as the        *)
-(* Rhombus hol_term(...) constructor syntax of private/quoted_ast.rhm.       *)
+(* hol_term(...) constructor syntax; to_hol.py turns it into hol: forms.     *)
 (* Used to port upstream tests; the output contains no theorems.            *)
 (* ========================================================================= *)
 

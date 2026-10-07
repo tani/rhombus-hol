@@ -5,8 +5,9 @@
 (* load the example and call capture_emit with the theorem names to check:   *)
 (*   capture_start ();; loadt "Examples/x.ml";; capture_emit ["THM"];;       *)
 (* Each distinct quotation is printed, in first-use order, as a Rhombus     *)
-(* hol_term(...) definition q<n> preceded by its source text; each named    *)
-(* theorem is printed with its serial for the golden comparison.            *)
+(* hol_term(...) definition q<n> (input of to_hol.py) preceded by its        *)
+(* source text; each named theorem is printed with its serial for the        *)
+(* golden comparison.                                                        *)
 (* ========================================================================= *)
 
 let captured = ref ([] : (string * term) list);;

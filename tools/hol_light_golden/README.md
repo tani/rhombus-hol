@@ -12,7 +12,8 @@ Requirements: a HOL Light checkout at the pinned revision built with `make`
 |---|---|
 | `dump.ml` | Serializers for types, terms and theorems, and the state dump. |
 | `generate.sh` | Writes `rhombus/hol/tests/golden/hol_light.tsv.gz`. |
-| `quote.ml` | Prints a term as Rhombus `hol_term(...)` constructor syntax. |
+| `quote.ml` | Prints a term as `hol_term(...)` constructor syntax, the input of `to_hol.py`. |
+| `to_hol.py` | Rewrites `hol_term(...)` calls in place into Rhombus `hol:` quotations. |
 | `capture.ml` | Records the quotations an upstream file parses, in order. |
 | `basic_tests_terms.ml` | Expands the quotations of `UnitTests/basic_tests.ml`. |
 
@@ -37,8 +38,9 @@ numbering drifts while the statements agree. Accepted differences go in
 
 ## Upstream tests and examples
 
-Quotations are expanded offline in a HOL Light session and pasted into the
-Rhombus test as `def q<n> = hol_term(...)`:
+Quotations are expanded offline in a HOL Light session, pasted into the
+Rhombus test as `def q<n> = hol_term(...)`, and rewritten into `hol:`
+quotations with `python3 to_hol.py FILE.rhm`:
 
 ```sh
 cd /path/to/hol-light

@@ -555,7 +555,10 @@ def replace_all(src):
         if lines[0].startswith('hol_type:'):
             text = lines[0] if bare else '(' + lines[0] + ')'
         elif bare:
-            text = 'hol:\n' + '\n'.join(' ' * (col + 2) + l[2:] for l in lines[1:])
+            # inside the enclosing parentheses, or as a whole definition
+            # right-hand side: indent from the paren or the line start
+            base = col + 2 if before.rstrip().endswith('(') else len(before) - len(before.lstrip()) + 2
+            text = 'hol:\n' + '\n'.join(' ' * base + l[2:] for l in lines[1:])
         else:
             text = '(hol:\n' + '\n'.join(' ' * (col + 3) + l[2:] for l in lines[1:]) + ')'
         out.append(src[i:j]); out.append(text); i = a1; n += 1

@@ -1,6 +1,7 @@
 (* ========================================================================= *)
 (* Expand the quotations of UnitTests/basic_tests.ml (pinned revision) into  *)
-(* Rhombus hol_term(...) definitions for rhombus/hol/tests/upstream/basic_tests.rhm.  *)
+(* hol_term(...) definitions (input of to_hol.py) for                        *)
+(* rhombus/hol/tests/upstream/basic_tests.rhm.                               *)
 (* Quotations are parsed in test order, so constants defined by earlier     *)
 (* steps (benign redefinition) are parsed as constants, as upstream does.   *)
 (* Run after hol.ml and quote.ml; prints Rhombus definitions to stdout.     *)

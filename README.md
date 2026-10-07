@@ -30,7 +30,8 @@ rhombus/hol/
     theory_support.rhm    parser.ml/printer.ml pieces: pattern combinators,
                           interface state, diagnostic printing
     data_types.rhm        options and variant comparison view
-    type_inference.rhm, type_specification.rhm, quoted_ast.rhm
+    hol_quote.rhm         `hol:` / `hol_type:` quotation macros
+    type_inference.rhm, type_specification.rhm
     declarations.rhm, proof_syntax.rhm, variant_base.rhm
   tests/
 
@@ -60,8 +61,12 @@ natural numbers and recursion, arithmetic, inductive types and lists, reals
 and integers, sets, iteration, and Cartesian products.
 
 HOL Light's text parser and printer are not the frontend. Literal theory
-quotations expand offline to public term/type constructors; runtime modules
-replay the original proofs. Private type-inference algorithms support Metis
+quotations are written in the Rhombus-native `hol:` quotation, whose macros
+elaborate them at compile time into public term/type constructors; runtime
+modules replay the original proofs. For example, HOL Light's
+`` `!x:A. x = x` `` is `hol: forall x :: A: x == x`, and a name used at several
+types or shadowed by a binder is declared with an alias, as in
+`hol: const IN_num as IN :: num -> (num -> bool) -> bool; ...`. Private type-inference algorithms support Metis
 reconstruction, and a small Rhombus-native type-description frontend supports
 inductive declarations. General parsing, elaboration, notation, quotation,
 and presentation belong to the Rhombus syntax and macro frontend.

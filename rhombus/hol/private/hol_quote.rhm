@@ -1,0 +1,486 @@
+#lang rhombus/and_meta
+// `hol:` — Rhombus-native HOL term quotation.
+//
+// A `hol:` block declares free variables and constants with complete HOL
+// types and ends in one HOL expression. Expressions and types are parsed
+// in their own spaces with Rhombus enforestation (operators keep their
+// native order and associativity), then elaborated at expansion time:
+// names resolve to declarations or the innermost binder, and every
+// application, operator and branch is checked against fully declared
+// types. There is no unification, inference or coercion. The result is a
+// typed quoted AST that expand_quote turns into a kernel term with the
+// public constructors; no theorem is produced.
+//
+// Extension: `var x2 as x :: A` / `const c as "c'" :: A` (and the same in
+// binders) give a quotation-local name to a HOL name, so one quotation
+// can mention a HOL name at several types or from under a binder that
+// shadows it.
+import:
+  "ocaml.rhm" open
+  "../fusion.rhm" as Kernel
+  "../basics.rhm" as Basics
+  lib("json/main.rkt") open:
+    only: #{string->jsexpr}
+  lib("racket/base.rkt") open:
+    only:
+      #{string?}
+      #{string->immutable-string}
+  meta:
+    lib("racket/base.rkt") as Rkt:
+      only:
+        #{exact-nonnegative-integer?}
+// ---------------------------------------------------------------------
+// Run time: typed quoted AST (JSON) to kernel terms and types.
+
+fun immutable_ast(value):
+  if #{string?}(value)
+  | #{string->immutable-string}(value)
+  | match value
+    | PairList [ & items]: PairList.map(items, immutable_ast)
+    | _: failwith("invalid quotation data")
+fun expand_type(ast):
+  match ast
+  | PairList ["Tyvar",name]: Kernel.mk_vartype(name)
+  | PairList ["Tyapp",name,args]: Kernel.mk_type([name, PairList.map(args, expand_type)])
+  | _: failwith("invalid quoted type")
+fun expand_term(ast):
+  match ast
+  | PairList ["Var",name,ty]: Kernel.mk_var([name, expand_type(ty)])
+  | PairList ["Const",name,ty]: Basics.mk_mconst([name, expand_type(ty)])
+  | PairList ["Comb",left,right]:
+      let r = expand_term(right)
+      let l = expand_term(left)
+      Kernel.mk_comb([l, r])
+  | PairList ["Abs",variable,body]:
+      let b = expand_term(body)
+      let v = expand_term(variable)
+      Kernel.mk_abs([v, b])
+  | _: failwith("invalid quoted term")
+fun expand_quote(encoded):
+  let ast = immutable_ast(#{string->jsexpr}(encoded))
+  match ast
+  | PairList ["Tyvar",_]: expand_type(ast)
+  | PairList ["Tyapp",_,_]: expand_type(ast)
+  | _: expand_term(ast)
+
+// ---------------------------------------------------------------------
+// Spaces for HOL types and terms.
+
+space.enforest hol_type_space:
+  space_path rhombus_hol/hol_type
+  macro_definer type_macro
+  meta_namespace hol_type_meta:
+    description "HOL type"
+    parse_syntax_class Parsed
+    parse_prefix_more_syntax_class AfterPrefixParsed
+    parse_infix_more_syntax_class AfterInfixParsed
+    export:
+      pack
+      unpack
+    private parsed_packer do_pack
+    private parsed_unpacker do_unpack
+    fun pack(s :: Syntax) :: Syntax: do_pack(s)
+    fun unpack(stx) :: Syntax: do_unpack(stx, #false)
+    identifier_parser: fun (id): pack('["name", $id]')
+
+space.enforest hol_term_space:
+  space_path rhombus_hol/hol_term
+  macro_definer term_macro
+  meta_namespace hol_term_meta:
+    description "HOL term"
+    parse_syntax_class Parsed
+    parse_prefix_more_syntax_class AfterPrefixParsed
+    parse_infix_more_syntax_class AfterInfixParsed
+    export:
+      pack
+      unpack
+    private parsed_packer do_pack
+    private parsed_unpacker do_unpack
+    fun pack(s :: Syntax) :: Syntax: do_pack(s)
+    fun unpack(stx) :: Syntax: do_unpack(stx, #false)
+    identifier_parser: fun (id): pack('["ref", $id]')
+
+// Types: names, constructor application, ->, grouping and the type 1.
+hol_type_space.type_macro '$left #%call ($(arg :: hol_type_meta.Parsed), ...)':
+  ~stronger_than: ~other
+  ~associativity: ~left
+  hol_type_meta.pack('["apply", $left, [$arg, ...]]')
+hol_type_space.type_macro '#%parens ($(t :: hol_type_meta.Parsed))':
+  t
+hol_type_space.type_macro '#%literal $(n :: Term)':
+  hol_type_meta.pack('["literal", $n]')
+hol_type_space.type_macro '$left -> $right':
+  ~weaker_than: ~other
+  ~associativity: ~right
+  hol_type_meta.pack('["fun", $left, $right]')
+
+// Terms.
+operator_order.def hol_implication:
+  ~associativity: ~right
+  ~weaker_than:
+    arithmetic
+    comparison
+    logical_negation
+    logical_conjunction
+    logical_disjunction
+operator_order.def hol_equivalence:
+  ~associativity: ~none
+  ~weaker_than:
+    arithmetic
+    comparison
+    logical_negation
+    logical_conjunction
+    logical_disjunction
+    hol_implication
+
+hol_term_space.term_macro '$left #%call ($(arg :: hol_term_meta.Parsed), ...)':
+  ~stronger_than: ~other
+  ~associativity: ~left
+  hol_term_meta.pack('["app", $left, [$arg, ...]]')
+hol_term_space.term_macro
+| '#%parens ($(lit :: Term) :: $ty ...)':
+    ~all_stx: stx
+    unless Rkt.#{exact-nonnegative-integer?}(lit.unwrap())
+    | syntax_meta.error("only a non-negative integer literal takes a `::` type", stx)
+    let '$(t :: hol_type_meta.Parsed)' = '$ty ...'
+    hol_term_meta.pack('["numeral", $lit, $t]')
+| '#%parens (- $(lit :: Term) :: $_ ...)':
+    ~all_stx: stx
+    syntax_meta.error("negative numerals have no literal form; negate a typed numeral instead", stx)
+| '#%parens ($(e :: hol_term_meta.Parsed))':
+    e
+hol_term_space.term_macro '#%literal $(v :: Term)':
+  ~all_stx: stx
+  match v.unwrap()
+  | b :: Boolean: hol_term_meta.pack('["truth", $v]')
+  | n :: Int: syntax_meta.error("a numeral needs a type, as in (" +& n +& " :: num)", stx)
+  | _: syntax_meta.error("not a HOL term literal", stx)
+
+hol_term_space.term_macro '$left && $right':
+  ~order: logical_conjunction
+  hol_term_meta.pack('["op2", "&&", $left, $right]')
+hol_term_space.term_macro '$left || $right':
+  ~order: logical_disjunction
+  hol_term_meta.pack('["op2", "||", $left, $right]')
+hol_term_space.term_macro '$left ==> $right':
+  ~order: hol_implication
+  hol_term_meta.pack('["op2", "==>", $left, $right]')
+hol_term_space.term_macro '$left <=> $right':
+  ~order: hol_equivalence
+  hol_term_meta.pack('["op2", "<=>", $left, $right]')
+hol_term_space.term_macro '$left == $right':
+  ~order: equivalence
+  hol_term_meta.pack('["op2", "==", $left, $right]')
+hol_term_space.term_macro '$left != $right':
+  ~order: equivalence
+  hol_term_meta.pack('["op2", "!=", $left, $right]')
+hol_term_space.term_macro '! $right':
+  ~order: logical_negation
+  hol_term_meta.pack('["op1", "!", $right]')
+hol_term_space.term_macro '$left + $right':
+  ~order: addition
+  hol_term_meta.pack('["op2", "+", $left, $right]')
+hol_term_space.term_macro
+| '- $right':
+    ~order: multiplication
+    hol_term_meta.pack('["op1", "-", $right]')
+| '$left - $right':
+    ~order: addition
+    hol_term_meta.pack('["op2", "-", $left, $right]')
+hol_term_space.term_macro '$left * $right':
+  ~order: multiplication
+  hol_term_meta.pack('["op2", "*", $left, $right]')
+hol_term_space.term_macro '$left / $right':
+  ~order: multiplication
+  hol_term_meta.pack('["op2", "/", $left, $right]')
+hol_term_space.term_macro '$left < $right':
+  ~order: order_comparison
+  hol_term_meta.pack('["op2", "<", $left, $right]')
+hol_term_space.term_macro '$left <= $right':
+  ~order: order_comparison
+  hol_term_meta.pack('["op2", "<=", $left, $right]')
+hol_term_space.term_macro '$left > $right':
+  ~order: order_comparison
+  hol_term_meta.pack('["op2", ">", $left, $right]')
+hol_term_space.term_macro '$left >= $right':
+  ~order: order_comparison
+  hol_term_meta.pack('["op2", ">=", $left, $right]')
+
+meta:
+  // A binder or declaration head: `x`, `x as y` or `x as "y'"`.
+  fun binding_head(id, name_terms, stx) :: Syntax:
+    match name_terms
+    | []: '[$id, #false]'
+    | ['as', n]:
+        unless n.unwrap() is_a Symbol || n.unwrap() is_a String
+        | syntax_meta.error("expected a HOL name after `as`", stx)
+        '[$id, $n]'
+    | _: syntax_meta.error("bad binding", stx)
+  fun parse_binding(g :: Syntax) :: Syntax:
+    match g
+    | '$(id :: Identifier) as $(n :: Term) :: $ty ...':
+        let '$(t :: hol_type_meta.Parsed)' = '$ty ...'
+        '[$(binding_head(id, ['as', n], g)), $t]'
+    | '$(id :: Identifier) :: $ty ...':
+        let '$(t :: hol_type_meta.Parsed)' = '$ty ...'
+        '[[$id, #false], $t]'
+    | _: syntax_meta.error("expected `name :: type` in a binder", g)
+
+hol_term_space.term_macro
+| 'forall ($b, ...): $(body :: hol_term_meta.Parsed)':
+    hol_term_meta.pack('["binder", "forall", [$(parse_binding(b)), ...], $body]')
+| 'forall $b ...: $(body :: hol_term_meta.Parsed)':
+    hol_term_meta.pack('["binder", "forall", [$(parse_binding('$b ...'))], $body]')
+hol_term_space.term_macro
+| 'exists ($b, ...): $(body :: hol_term_meta.Parsed)':
+    hol_term_meta.pack('["binder", "exists", [$(parse_binding(b)), ...], $body]')
+| 'exists $b ...: $(body :: hol_term_meta.Parsed)':
+    hol_term_meta.pack('["binder", "exists", [$(parse_binding('$b ...'))], $body]')
+hol_term_space.term_macro
+| 'exists1 ($b, ...): $(body :: hol_term_meta.Parsed)':
+    hol_term_meta.pack('["binder", "exists1", [$(parse_binding(b)), ...], $body]')
+| 'exists1 $b ...: $(body :: hol_term_meta.Parsed)':
+    hol_term_meta.pack('["binder", "exists1", [$(parse_binding('$b ...'))], $body]')
+hol_term_space.term_macro 'fun ($b, ...): $(body :: hol_term_meta.Parsed)':
+  hol_term_meta.pack('["binder", "fun", [$(parse_binding(b)), ...], $body]')
+hol_term_space.term_macro 'if $tst ... | $(thn :: hol_term_meta.Parsed) | $(els :: hol_term_meta.Parsed)':
+  let '$(c :: hol_term_meta.Parsed)' = '$tst ...'
+  hol_term_meta.pack('["if", $c, $thn, $els]')
+
+// ---------------------------------------------------------------------
+// Elaboration: names, types and the typed quoted AST.
+
+meta:
+  // Types are ["V", name] and ["T", name, [arg, ...]].
+  def bool_ty = ["T", "bool", []]
+  fun fun_ty(a, b): ["T", "fun", [a, b]]
+  fun show_type(ty) :: String:
+    match ty
+    | ["V", n]: n
+    | ["T", "fun", [a, b]]:
+        let left = match a | ["T", "fun", _]: "(" ++ show_type(a) ++ ")" | _: show_type(a)
+        left ++ " -> " ++ show_type(b)
+    | ["T", n, []]: n
+    | ["T", n, args]: n ++ "(" ++ String.join(for List (a in args): show_type(a), ", ") ++ ")"
+  // Surface type constructors whose kernel name differs.
+  def surface_tycons = { "pair": "prod" }
+  def builtin_arity = { "bool": 0, "num": 0, "int": 0, "real": 0, "fun": 2,
+                        "list": 1, "prod": 2 }
+  fun is_tyvar_name(s :: String):
+    s.length() > 0 && (Char.is_uppercase(s[0]) || s[0] == #{#\?})
+  fun elab_type(stx) :~ List:
+    match hol_type_meta.unpack(stx)
+    | '["name", $id]':
+        let s = to_string(id.unwrap())
+        if is_tyvar_name(s)
+        | ["V", s]
+        | let k = surface_tycons.get(s, s)
+          match builtin_arity.get(k, #false)
+          | n :: Int when n != 0:
+              syntax_meta.error("type constructor `" ++ s ++ "` expects " +& n +& " argument(s)", id)
+          | _: ["T", k, []]
+    | '["literal", $n]':
+        if n.unwrap() == 1
+        | ["T", "1", []]
+        | syntax_meta.error("not a HOL type", n)
+    | '["fun", $a, $b]': fun_ty(elab_type(a), elab_type(b))
+    | '["apply", $f, [$arg, ...]]':
+        let args = [elab_type(arg), ...]
+        match hol_type_meta.unpack(f)
+        | '["name", $id]':
+            let s = to_string(id.unwrap())
+            when is_tyvar_name(s)
+            | syntax_meta.error("a type variable cannot be applied", id)
+            let k = surface_tycons.get(s, s)
+            match builtin_arity.get(k, #false)
+            | n :: Int when n != args.length():
+                syntax_meta.error("type constructor `" ++ s ++ "` expects " +& n +& " argument(s)", id)
+            | _: ["T", k, args]
+        | _: syntax_meta.error("expected a type constructor name", f)
+
+  fun json_str(s :: String) :: String:
+    "\"" ++ s.replace("\\", "\\\\", ~all: #true).replace("\"", "\\\"", ~all: #true).replace("\n", "\\n", ~all: #true) ++ "\""
+  fun json_type(ty) :: String:
+    match ty
+    | ["V", n]: "[\"Tyvar\"," ++ json_str(n) ++ "]"
+    | ["T", n, args]: "[\"Tyapp\"," ++ json_str(n) ++ ",[" ++ String.join(for List (a in args): json_type(a), ",") ++ "]]"
+  fun json_var(n, ty): "[\"Var\"," ++ json_str(n) ++ "," ++ json_type(ty) ++ "]"
+  fun json_const(n, ty): "[\"Const\"," ++ json_str(n) ++ "," ++ json_type(ty) ++ "]"
+  fun json_comb(f, x): "[\"Comb\"," ++ f ++ "," ++ x ++ "]"
+  fun json_abs(v, b): "[\"Abs\"," ++ v ++ "," ++ b ++ "]"
+
+  // Environment entries: [kind, hol_name, type] keyed by surface symbol.
+  fun hol_name(id :: Syntax, alias) :: String:
+    match alias
+    | #false: to_string(id.unwrap())
+    | n: to_string(n.unwrap())
+
+  fun expect(ty, want, stx, what):
+    unless ty == want
+    | syntax_meta.error(what ++ ": expected type " ++ show_type(want) ++ ", found " ++ show_type(ty), stx)
+
+  fun numeral_json(n :: Int):
+    fun bits(n):
+      cond
+      | n == 0: json_const("_0", ["T", "num", []])
+      | n rem 2 == 0: json_comb(json_const("BIT0", fun_ty(["T", "num", []], ["T", "num", []])), bits(n div 2))
+      | ~else: json_comb(json_const("BIT1", fun_ty(["T", "num", []], ["T", "num", []])), bits(n div 2))
+    json_comb(json_const("NUMERAL", fun_ty(["T", "num", []], ["T", "num", []])), bits(n))
+
+  // Operator constants by operand type.
+  def arithmetic_ops:
+    { ["+", "num"]: "+", ["-", "num"]: "-", ["*", "num"]: "*",
+      ["<", "num"]: "<", ["<=", "num"]: "<=", [">", "num"]: ">", [">=", "num"]: ">=",
+      ["+", "int"]: "int_add", ["-", "int"]: "int_sub", ["*", "int"]: "int_mul",
+      ["<", "int"]: "int_lt", ["<=", "int"]: "int_le", [">", "int"]: "int_gt", [">=", "int"]: "int_ge",
+      ["+", "real"]: "real_add", ["-", "real"]: "real_sub", ["*", "real"]: "real_mul", ["/", "real"]: "real_div",
+      ["<", "real"]: "real_lt", ["<=", "real"]: "real_le", [">", "real"]: "real_gt", [">=", "real"]: "real_ge" }
+  def negation_ops = { "int": "int_neg", "real": "real_neg" }
+  def numeral_injections = { "int": "int_of_num", "real": "real_of_num" }
+
+  fun elab(stx, env :~ Map) :~ List:
+    match hol_term_meta.unpack(stx)
+    | '["ref", $id]':
+        match env.get(id.unwrap(), #false)
+        | [kind, name, ty]:
+            [if kind == "var" | json_var(name, ty) | json_const(name, ty), ty]
+        | _: syntax_meta.error("unbound HOL name; declare it with `var` or `const`", id)
+    | '["truth", $v]':
+        [json_const(if v.unwrap() | "T" | "F", bool_ty), bool_ty]
+    | '["numeral", $lit, $t]':
+        let ty = elab_type(t)
+        let n = numeral_json(lit.unwrap())
+        match ty
+        | ["T", "num", []]: [n, ty]
+        | ["T", k, []] when numeral_injections.has_key(k):
+            [json_comb(json_const(numeral_injections[k], fun_ty(["T", "num", []], ty)), n), ty]
+        | _: syntax_meta.error("a numeral needs type num, int or real, not " ++ show_type(ty), stx)
+    | '["app", $f, [$arg, ...]]':
+        for values(acc = elab(f, env)) (a in [arg, ...]):
+          let [fj, fty] = acc
+          match fty
+          | ["T", "fun", [dom, cod]]:
+              let [aj, aty] = elab(a, env)
+              expect(aty, dom, a, "argument")
+              [json_comb(fj, aj), cod]
+          | _: syntax_meta.error("applied term has type " ++ show_type(fty) ++ ", not a function type", f)
+    | '["op1", "!", $x]':
+        let [xj, xty] = elab(x, env)
+        expect(xty, bool_ty, x, "operand of !")
+        [json_comb(json_const("~", fun_ty(bool_ty, bool_ty)), xj), bool_ty]
+    | '["op1", "-", $x]':
+        let [xj, xty] = elab(x, env)
+        match xty
+        | ["T", k, []] when negation_ops.has_key(k):
+            [json_comb(json_const(negation_ops[k], fun_ty(xty, xty)), xj), xty]
+        | _: syntax_meta.error("unary - is not defined at type " ++ show_type(xty), stx)
+    | '["op2", $op, $l, $r]':
+        let o = op.unwrap()
+        let [lj, lty] = elab(l, env)
+        let [rj, rty] = elab(r, env)
+        fun binop(name, ty, res):
+          [json_comb(json_comb(json_const(name, fun_ty(ty, fun_ty(ty, res))), lj), rj), res]
+        match o
+        | "&&" || "||" || "==>" || "<=>":
+            expect(lty, bool_ty, l, "operand of " ++ o)
+            expect(rty, bool_ty, r, "operand of " ++ o)
+            binop({ "&&": "/\\", "||": "\\/", "==>": "==>", "<=>": "=" }[o], bool_ty, bool_ty)
+        | "==":
+            expect(rty, lty, r, "right side of ==")
+            binop("=", lty, bool_ty)
+        | "!=":
+            expect(rty, lty, r, "right side of !=")
+            let [eq, _] = binop("=", lty, bool_ty)
+            [json_comb(json_const("~", fun_ty(bool_ty, bool_ty)), eq), bool_ty]
+        | _:
+            expect(rty, lty, r, "right operand of " ++ o)
+            let k = match lty | ["T", k, []]: k | _: ""
+            match arithmetic_ops.get([o, k], #false)
+            | #false: syntax_meta.error(o ++ " is not defined at type " ++ show_type(lty), stx)
+            | name:
+                let res = if o == "<" || o == "<=" || o == ">" || o == ">=" | bool_ty | lty
+                binop(name, lty, res)
+    | '["binder", $kind, [[[$id, $alias], $t], ...], $body]':
+        let k = kind.unwrap()
+        let vars:
+          for List (i in [id, ...], a in [alias, ...], ty in [t, ...]):
+            [i, hol_name(i, if a.unwrap() | a | #false), elab_type(ty)]
+        let body_env:
+          for values(e :~ Map = env) ([i, name, ty] in vars):
+            e ++ { i.unwrap(): ["var", name, ty] }
+        let [bj, bty] = elab(body, body_env)
+        unless k == "fun"
+        | expect(bty, bool_ty, body, "body of " ++ k)
+        let binder = { "forall": "!", "exists": "?", "exists1": "?!" }
+        for values(acc = [bj, bty]) ([_, name, ty] in vars.reverse()):
+          let [j, jty] = acc
+          let abs = json_abs(json_var(name, ty), j)
+          let aty = fun_ty(ty, jty)
+          if k == "fun"
+          | [abs, aty]
+          | [json_comb(json_const(binder[k], fun_ty(aty, bool_ty)), abs), bool_ty]
+    | '["if", $c, $t, $e]':
+        let [cj, cty] = elab(c, env)
+        expect(cty, bool_ty, c, "condition of if")
+        let [tj, tty] = elab(t, env)
+        let [ej, ety] = elab(e, env)
+        expect(ety, tty, e, "else branch")
+        let cond_ty = fun_ty(bool_ty, fun_ty(tty, fun_ty(tty, tty)))
+        [json_comb(json_comb(json_comb(json_const("COND", cond_ty), cj), tj), ej), tty]
+
+  fun parse_declaration(g :: Syntax) :~ maybe(List):
+    fun decl(kind, id, alias, ty):
+      let '$(t :: hol_type_meta.Parsed)' = ty
+      [kind, id, alias, elab_type(t)]
+    match g
+    | 'var $(id :: Identifier) as $(n :: Term) :: $ty ...': decl("var", id, n, '$ty ...')
+    | 'var $(id :: Identifier) :: $ty ...': decl("var", id, #false, '$ty ...')
+    | 'const $(id :: Identifier) as $(n :: Term) :: $ty ...': decl("const", id, n, '$ty ...')
+    | 'const $(id :: Identifier) :: $ty ...': decl("const", id, #false, '$ty ...')
+    | 'var $_ ...': syntax_meta.error("expected `var name :: type`", g)
+    | 'const $_ ...': syntax_meta.error("expected `const name :: type`", g)
+    | _: #false
+
+// `hol:` quotation of a term.
+expr.macro 'hol: $(g :: Group); ...':
+  ~all_stx: stx
+  let groups = [g, ...]
+  when groups == []
+  | syntax_meta.error("a hol: block needs a body expression", stx)
+  let decls = for List (d in groups.take(groups.length() - 1)):
+    match parse_declaration(d)
+    | #false: syntax_meta.error("declarations must come first and be followed by exactly one expression", d)
+    | decl: decl
+  let body = groups[groups.length() - 1]
+  when parse_declaration(body)
+  | syntax_meta.error("a hol: block needs a body expression after its declarations", stx)
+  let env:
+    for values(e :~ Map = {}) ([kind, id, alias, ty] in decls):
+      when e.has_key(id.unwrap())
+      | syntax_meta.error("duplicate declaration", id)
+      e ++ { id.unwrap(): [kind, hol_name(id, alias), ty] }
+  let '$(parsed :: hol_term_meta.Parsed)' = body
+  let [j, _] = elab(parsed, env)
+  'expand_quote($(Syntax.make(j, 'ctx')))'
+
+// `hol_type:` quotation of a type.
+expr.macro 'hol_type: $(t :: hol_type_meta.Parsed)':
+  'expand_quote($(Syntax.make(json_type(elab_type(t)), 'ctx')))'
+
+export:
+  hol
+  hol_type
+  expand_quote
+  meta:
+    hol_term_meta
+    hol_type_meta
+  // Forms and operators inside `hol:` and type positions.
+  only_space hol_term_space:
+    && || ==> <=> == != ! + - * / < <= > >=
+    forall exists exists1 fun if
+    names:
+      #%literal #%parens #%call
+  only_space hol_type_space:
+    ->
+    names:
+      #%literal #%parens #%call

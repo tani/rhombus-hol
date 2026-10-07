@@ -143,7 +143,7 @@ import:
       aconv
   "lib.rhm" open
   "private/ocaml.rhm" open
-  "private/quoted_ast.rhm" open
+  "private/hol_quote.rhm" open
   "private/theory_support.rhm" as Host
   "private/declarations.rhm" open
   "private/proof_syntax.rhm" open
@@ -229,23 +229,20 @@ export:
 
 def ETA_AX:
   new_axiom(
-    hol_term(Forall(
-      "t",
-      Fun(Tvar("A"), Tvar("B")),
-      Eq(Fun(Tvar("A"), Tvar("B")), Lambda("x", Tvar("A"), App(Ref("t"), [Ref("x")])), Ref("t"))
-    ))
+    (hol:
+       forall t :: A -> B: (fun (x :: A): t(x)) == t)
   )
 
 def ETA_CONV:
-  let t = hol_term(Var("t", Fun(Tvar("A"), Tvar("B"))))
+  let t = hol:
+            var t :: A -> B
+            t
   let pth:
     prove(
       [
-        hol_term(Eq(
-          Fun(Tvar("A"), Tvar("B")),
-          Lambda("x", Tvar("A"), App(Var("t", Fun(Tvar("A"), Tvar("B"))), [Ref("x")])),
-          Var("t", Fun(Tvar("A"), Tvar("B")))
-        )),
+        (hol:
+           var t :: A -> B
+           (fun (x :: A): t(x)) == t),
         MATCH_ACCEPT_TAC(ETA_AX)
       ]
     )
@@ -269,23 +266,17 @@ def ETA_CONV:
 def EQ_EXT:
   prove(
     [
-      hol_term(Forall(
-        "f",
-        Fun(Tvar("A"), Tvar("B")),
-        Forall(
-          "g",
-          Fun(Tvar("A"), Tvar("B")),
-          Implies(
-            Forall("x", Tvar("A"), Eq(Tvar("B"), App(Ref("f"), [Ref("x")]), App(Ref("g"), [Ref("x")]))),
-            Eq(Fun(Tvar("A"), Tvar("B")), Ref("f"), Ref("g"))
-          )
-        )
-      )),
+      (hol:
+         forall (f :: A -> B, g :: A -> B): (forall x :: A: f(x) == g(x)) ==> f == g),
       (
         (
           REPEAT(GEN_TAC) then_tac \
           DISCH_THEN(
-            o(o(MP_TAC)(ABS(hol_term(Var("x", Tvar("A"))))))(SPEC(hol_term(Var("x", Tvar("A")))))
+            o(o(MP_TAC)(ABS(hol:
+                              var x :: A
+                              x)))(SPEC(hol:
+                                                                    var x :: A
+                                                                    x))
           )
         ) then_tac \
         REWRITE_TAC(PairList [ETA_AX])
@@ -296,18 +287,8 @@ def EQ_EXT:
 def FUN_EQ_THM:
   prove(
     [
-      hol_term(Forall(
-        "f",
-        Fun(Tvar("A"), Tvar("B")),
-        Forall(
-          "g",
-          Fun(Tvar("A"), Tvar("B")),
-          Iff(
-            Eq(Fun(Tvar("A"), Tvar("B")), Ref("f"), Ref("g")),
-            Forall("x", Tvar("A"), Eq(Tvar("B"), App(Ref("f"), [Ref("x")]), App(Ref("g"), [Ref("x")])))
-          )
-        )
-      )),
+      (hol:
+         forall (f :: A -> B, g :: A -> B): f == g <=> (forall x :: A: f(x) == g(x))),
       (
         (REPEAT(GEN_TAC) then_tac EQ_TAC) then_list \
         PairList [
@@ -318,7 +299,7 @@ def FUN_EQ_THM:
     ]
   )
 
-new_constant(["@", hol_term(Fun(Fun(Tvar("A"), Bool), Tvar("A")))])
+new_constant(["@", (hol_type: (A -> bool) -> A)])
 
 Host.parse_as_binder("@")
 
@@ -330,38 +311,26 @@ def mk_select = mk_binder("@")
 
 def SELECT_AX:
   new_axiom(
-    hol_term(Forall(
-      "P",
-      Fun(Tvar("A"), Bool),
-      Forall(
-        "x",
-        Tvar("A"),
-        Implies(
-          App(Ref("P"), [Ref("x")]),
-          App(Ref("P"), [App(Const("@", Fun(Fun(Tvar("A"), Bool), Tvar("A"))), [Ref("P")])])
-        )
-      )
-    ))
+    (hol:
+       const select as "@" :: (A -> bool) -> A
+       forall (P :: A -> bool, x :: A): P(x) ==> P(select(P)))
   )
 
 def EXISTS_THM:
   prove(
     [
-      hol_term(Eq(
-        Fun(Fun(Tvar("A"), Bool), Bool),
-        Const("?", Fun(Fun(Tvar("A"), Bool), Bool)),
-        Lambda(
-          "P",
-          Fun(Tvar("A"), Bool),
-          App(Ref("P"), [App(Const("@", Fun(Fun(Tvar("A"), Bool), Tvar("A"))), [Ref("P")])])
-        )
-      )),
+      (hol:
+         const exists_c as "?" :: (A -> bool) -> bool
+         const select as "@" :: (A -> bool) -> A
+         exists_c == (fun (P :: A -> bool): P(select(P)))),
       (
         (
           (
             (
               (MATCH_MP_TAC(EQ_EXT) then_tac BETA_TAC) then_tac \
-              X_GEN_TAC(hol_term(Var("P", Fun(Tvar("A"), Bool))))
+              X_GEN_TAC(hol:
+                          var P :: A -> bool
+                          P)
             ) then_tac \
             GEN_REWRITE_TAC(o(LAND_CONV)(RAND_CONV))(PairList [GSYM(ETA_AX)])
           ) then_tac \
@@ -376,7 +345,10 @@ def EXISTS_THM:
             (
               DISCH_TAC then_tac \
               EXISTS_TAC(
-                hol_term(App(Const("@", Fun(Fun(Tvar("A"), Bool), Tvar("A"))), [Var("P", Fun(Tvar("A"), Bool))]))
+                (hol:
+                   var P :: A -> bool
+                   const select as "@" :: (A -> bool) -> A
+                   select(P))
               )
             ) then_tac \
             POP_ASSUM(ACCEPT_TAC)
@@ -387,17 +359,17 @@ def EXISTS_THM:
   )
 
 def SELECT_RULE:
-  let P = hol_term(Var("P", Fun(Tvar("A"), Bool)))
+  let P = hol:
+            var P :: A -> bool
+            P
   let pth:
     prove(
       [
-        hol_term(Implies(
-          App(Const("?", Fun(Fun(Tvar("A"), Bool), Bool)), [Var("P", Fun(Tvar("A"), Bool))]),
-          App(
-            Var("P", Fun(Tvar("A"), Bool)),
-            [App(Const("@", Fun(Fun(Tvar("A"), Bool), Tvar("A"))), [Var("P", Fun(Tvar("A"), Bool))])]
-          )
-        )),
+        (hol:
+           var P :: A -> bool
+           const exists_c as "?" :: (A -> bool) -> bool
+           const select as "@" :: (A -> bool) -> A
+           exists_c(P) ==> P(select(P))),
         SIMP_TAC(PairList [SELECT_AX, ETA_AX])
       ]
     )
@@ -412,17 +384,17 @@ def SELECT_RULE:
         | exn: (throw exn)
 
 def SELECT_CONV:
-  let P = hol_term(Var("P", Fun(Tvar("A"), Bool)))
+  let P = hol:
+            var P :: A -> bool
+            P
   let pth:
     prove(
       [
-        hol_term(Iff(
-          App(
-            Var("P", Fun(Tvar("A"), Bool)),
-            [App(Const("@", Fun(Fun(Tvar("A"), Bool), Tvar("A"))), [Var("P", Fun(Tvar("A"), Bool))])]
-          ),
-          App(Const("?", Fun(Fun(Tvar("A"), Bool), Bool)), [Var("P", Fun(Tvar("A"), Bool))])
-        )),
+        (hol:
+           var P :: A -> bool
+           const select as "@" :: (A -> bool) -> A
+           const exists_c as "?" :: (A -> bool) -> bool
+           P(select(P)) <=> exists_c(P)),
         ((REWRITE_TAC(PairList [EXISTS_THM]) then_tac BETA_TAC) then_tac REFL_TAC)
       ]
     )
@@ -446,22 +418,15 @@ def SELECT_CONV:
 def SELECT_REFL:
   prove(
     [
-      hol_term(Forall(
-        "x",
-        Tvar("A"),
-        Eq(
-          Tvar("A"),
-          App(
-            Const("@", Fun(Fun(Tvar("A"), Bool), Tvar("A"))),
-            [Lambda("y", Tvar("A"), Eq(Tvar("A"), Ref("y"), Ref("x")))]
-          ),
-          Ref("x")
-        )
-      )),
+      (hol:
+         const select as "@" :: (A -> bool) -> A
+         forall x :: A: select(fun (y :: A): y == x) == x),
       (
         (
           (GEN_TAC then_tac CONV_TAC(SELECT_CONV)) then_tac \
-          EXISTS_TAC(hol_term(Var("x", Tvar("A"))))
+          EXISTS_TAC(hol:
+                       var x :: A
+                       x)
         ) then_tac \
         REFL_TAC
       )
@@ -471,18 +436,9 @@ def SELECT_REFL:
 def SELECT_UNIQUE:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Bool),
-        Forall(
-          "x",
-          Tvar("A"),
-          Implies(
-            Forall("y", Tvar("A"), Iff(App(Ref("P"), [Ref("y")]), Eq(Tvar("A"), Ref("y"), Ref("x")))),
-            Eq(Tvar("A"), App(Const("@", Fun(Fun(Tvar("A"), Bool), Tvar("A"))), [Ref("P")]), Ref("x"))
-          )
-        )
-      )),
+      (hol:
+         const select as "@" :: (A -> bool) -> A
+         forall (P :: A -> bool, x :: A): (forall y :: A: P(y) <=> y == x) ==> select(P) == x),
       (
         (
           REPEAT(STRIP_TAC) then_tac \
@@ -519,33 +475,17 @@ fun new_type_definition(tyname):
 def EXCLUDED_MIDDLE:
   prove(
     [
-      hol_term(Forall("t", Bool, Or(Ref("t"), Not(Ref("t"))))),
+      (hol:
+         forall t :: bool: t || !t),
       (
         (
           GEN_TAC then_tac \
           SUBGOAL_THEN(
-            hol_term(And(
-              Or(
-                Iff(
-                  App(
-                    Const("@", Fun(Fun(Bool, Bool), Bool)),
-                    [Lambda("x", Bool, Or(Iff(Ref("x"), False), Var("t", Bool)))]
-                  ),
-                  False
-                ),
-                Var("t", Bool)
-              ),
-              Or(
-                Iff(
-                  App(
-                    Const("@", Fun(Fun(Bool, Bool), Bool)),
-                    [Lambda("x", Bool, Or(Iff(Ref("x"), True), Var("t", Bool)))]
-                  ),
-                  True
-                ),
-                Var("t", Bool)
-              )
-            ))
+            (hol:
+               var t :: bool
+               const select as "@" :: (bool -> bool) -> bool
+               ((select(fun (x :: bool): (x <=> #false) || t) <=> #false) || t)
+                 && ((select(fun (x :: bool): (x <=> #true) || t) <=> #true) || t))
           )(MP_TAC)
         ) then_list \
         PairList [
@@ -553,7 +493,9 @@ def EXCLUDED_MIDDLE:
             (
               (
                 (CONJ_TAC then_tac CONV_TAC(SELECT_CONV)) then_list \
-                PairList [EXISTS_TAC(hol_term(False)), EXISTS_TAC(hol_term(True))]
+                PairList [EXISTS_TAC(hol:
+                                       #false), EXISTS_TAC(hol:
+                                                                    #true)]
               ) then_tac \
               DISJ1_TAC
             ) then_tac \
@@ -572,11 +514,14 @@ def EXCLUDED_MIDDLE:
                   ) then_tac \
                   DISCH_TAC
                 ) then_tac \
-                MP_TAC(ITAUT(hol_term(Not(Iff(True, False)))))
+                MP_TAC(ITAUT(hol:
+                               #true != #false))
               ) then_tac \
               PURE_ONCE_ASM_REWRITE_TAC(PairList [])
             ) then_tac \
-            ASM_REWRITE_TAC(PairList [ITAUT(hol_term(Iff(Or(Var("p", Bool), True), True)))])
+            ASM_REWRITE_TAC(PairList [ITAUT(hol:
+                                              var p :: bool
+                                              p || #true <=> #true)])
           )
         ]
       )
@@ -586,11 +531,14 @@ def EXCLUDED_MIDDLE:
 def BOOL_CASES_AX:
   prove(
     [
-      hol_term(Forall("t", Bool, Or(Iff(Ref("t"), True), Iff(Ref("t"), False)))),
+      (hol:
+         forall t :: bool: (t <=> #true) || (t <=> #false)),
       (
         (
           GEN_TAC then_tac \
-          DISJ_CASES_TAC(SPEC(hol_term(Var("t", Bool)))(EXCLUDED_MIDDLE))
+          DISJ_CASES_TAC(SPEC(hol:
+                                var t :: bool
+                                t)(EXCLUDED_MIDDLE))
         ) then_tac \
         ASM_REWRITE_TAC(PairList [])
       )
@@ -623,51 +571,37 @@ def class_TAUT:
 
 def DE_MORGAN_THM:
   class_TAUT(
-    hol_term(Forall(
-      "t1",
-      Bool,
-      Forall(
-        "t2",
-        Bool,
-        And(
-          Iff(Not(And(Ref("t1"), Ref("t2"))), Or(Not(Ref("t1")), Not(Ref("t2")))),
-          Iff(Not(Or(Ref("t1"), Ref("t2"))), And(Not(Ref("t1")), Not(Ref("t2"))))
-        )
-      )
-    ))
+    (hol:
+       forall (t1 :: bool, t2 :: bool): (!(t1 && t2) <=> !t1 || !t2) && (!(t1 || t2) <=> !t1 && !t2))
   )
 
 def NOT_CLAUSES:
   class_TAUT(
-    hol_term(And(
-      Forall("t", Bool, Iff(Not(Not(Ref("t"))), Ref("t"))),
-      And(Iff(Not(True), False), Iff(Not(False), True))
-    ))
+    (hol:
+       (forall t :: bool: !(!t) <=> t) && ((!#true <=> #false) && (!#false <=> #true)))
   )
 
 def NOT_IMP:
   class_TAUT(
-    hol_term(Forall(
-      "t1",
-      Bool,
-      Forall("t2", Bool, Iff(Not(Implies(Ref("t1"), Ref("t2"))), And(Ref("t1"), Not(Ref("t2")))))
-    ))
+    (hol:
+       forall (t1 :: bool, t2 :: bool): !(t1 ==> t2) <=> t1 && !t2)
   )
 
 def CONTRAPOS_THM:
   class_TAUT(
-    hol_term(Forall(
-      "t1",
-      Bool,
-      Forall("t2", Bool, Iff(Implies(Not(Ref("t1")), Not(Ref("t2"))), Implies(Ref("t2"), Ref("t1"))))
-    ))
+    (hol:
+       forall (t1 :: bool, t2 :: bool): !t1 ==> !t2 <=> t2 ==> t1)
   )
 
 extend_basic_rewrites(PairList [CONJUNCT1(NOT_CLAUSES)])
 
 def CCONTR:
-  let P = hol_term(Var("P", Bool))
-  let pth = class_TAUT(hol_term(Implies(Implies(Not(Var("P", Bool)), False), Var("P", Bool))))
+  let P = hol:
+            var P :: bool
+            P
+  let pth = class_TAUT(hol:
+                         var P :: bool
+                         (!P ==> #false) ==> P)
   fun(tm):
     fun(th):
       try:
@@ -679,11 +613,18 @@ def CCONTR:
           | exn: (throw exn)
 
 def CONTRAPOS_CONV:
-  let a_2 = hol_term(Var("a", Bool))
-  let b_2 = hol_term(Var("b", Bool))
+  let a_2 = hol:
+              var a :: bool
+              a
+  let b_2 = hol:
+              var b :: bool
+              b
   let pth:
     class_TAUT(
-      hol_term(Iff(Implies(Var("a", Bool), Var("b", Bool)), Implies(Not(Var("b", Bool)), Not(Var("a", Bool)))))
+      (hol:
+         var a :: bool
+         var b :: bool
+         a ==> b <=> !b ==> !a)
     )
   fun(tm):
     try:
@@ -695,8 +636,11 @@ def CONTRAPOS_CONV:
         | exn: (throw exn)
 
 def REFUTE_THEN:
-  let f_tm_2 = hol_term(False)
-  let conv_2 = REWR_CONV(class_TAUT(hol_term(Iff(Var("p", Bool), Implies(Not(Var("p", Bool)), False)))))
+  let f_tm_2 = hol:
+                 #false
+  let conv_2 = REWR_CONV(class_TAUT(hol:
+                                      var p :: bool
+                                      p <=> !p ==> #false))
   fun(ttac):
     fun([asl, w] as gl):
       if (w == f_tm_2)
@@ -706,14 +650,8 @@ def REFUTE_THEN:
 def NOT_EXISTS_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Bool),
-        Iff(
-          Not(Exists("x", Tvar("A"), App(Ref("P"), [Ref("x")]))),
-          Forall("x", Tvar("A"), Not(App(Ref("P"), [Ref("x")])))
-        )
-      )),
+      (hol:
+         forall P :: A -> bool: !(exists x :: A: P(x)) <=> (forall x :: A: !P(x))),
       (
         ((GEN_TAC then_tac EQ_TAC) then_tac DISCH_TAC) then_list \
         PairList [
@@ -722,11 +660,15 @@ def NOT_EXISTS_THM:
               (
                 (
                   (GEN_TAC then_tac DISCH_TAC) then_tac \
-                  UNDISCH_TAC(hol_term(Not(Exists("x", Tvar("A"), App(Var("P", Fun(Tvar("A"), Bool)), [Ref("x")])))))
+                  UNDISCH_TAC(hol:
+                                var P :: A -> bool
+                                !(exists x :: A: P(x)))
                 ) then_tac \
                 REWRITE_TAC(PairList [])
               ) then_tac \
-              EXISTS_TAC(hol_term(Var("x", Tvar("A"))))
+              EXISTS_TAC(hol:
+                           var x :: A
+                           x)
             ) then_tac \
             POP_ASSUM(ACCEPT_TAC)
           ),
@@ -742,19 +684,16 @@ def NOT_EXISTS_THM:
 def EXISTS_NOT_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Bool),
-        Iff(
-          Exists("x", Tvar("A"), Not(App(Ref("P"), [Ref("x")]))),
-          Not(Forall("x", Tvar("A"), App(Ref("P"), [Ref("x")])))
-        )
-      )),
+      (hol:
+         forall P :: A -> bool: (exists x :: A: !P(x)) <=> !(forall x :: A: P(x))),
       (
         ONCE_REWRITE_TAC(
           PairList [
             class_TAUT(
-              hol_term(Iff(Iff(Var("a", Bool), Not(Var("b", Bool))), Iff(Not(Var("a", Bool)), Var("b", Bool))))
+              (hol:
+                 var a :: bool
+                 var b :: bool
+                 (a <=> !b) <=> (!a <=> b))
             )
           ]
         ) then_tac \
@@ -766,14 +705,8 @@ def EXISTS_NOT_THM:
 def NOT_FORALL_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Bool),
-        Iff(
-          Not(Forall("x", Tvar("A"), App(Ref("P"), [Ref("x")]))),
-          Exists("x", Tvar("A"), Not(App(Ref("P"), [Ref("x")])))
-        )
-      )),
+      (hol:
+         forall P :: A -> bool: !(forall x :: A: P(x)) <=> (exists x :: A: !P(x))),
       MATCH_ACCEPT_TAC(GSYM(EXISTS_NOT_THM))
     ]
   )
@@ -781,14 +714,8 @@ def NOT_FORALL_THM:
 def FORALL_NOT_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Bool),
-        Iff(
-          Forall("x", Tvar("A"), Not(App(Ref("P"), [Ref("x")]))),
-          Not(Exists("x", Tvar("A"), App(Ref("P"), [Ref("x")])))
-        )
-      )),
+      (hol:
+         forall P :: A -> bool: (forall x :: A: !P(x)) <=> !(exists x :: A: P(x))),
       MATCH_ACCEPT_TAC(GSYM(NOT_EXISTS_THM))
     ]
   )
@@ -796,17 +723,18 @@ def FORALL_NOT_THM:
 def FORALL_BOOL_THM:
   prove(
     [
-      hol_term(Iff(
-        Forall("b", Bool, App(Var("P", Fun(Bool, Bool)), [Ref("b")])),
-        And(App(Var("P", Fun(Bool, Bool)), [True]), App(Var("P", Fun(Bool, Bool)), [False]))
-      )),
+      (hol:
+         var P :: bool -> bool
+         (forall b :: bool: P(b)) <=> P(#true) && P(#false)),
       (
         (
           (
             ((EQ_TAC then_tac DISCH_TAC) then_tac ASM_REWRITE_TAC(PairList [])) then_tac \
             GEN_TAC
           ) then_tac \
-          BOOL_CASES_TAC(hol_term(Var("b", Bool)))
+          BOOL_CASES_TAC(hol:
+                           var b :: bool
+                           b)
         ) then_tac \
         ASM_REWRITE_TAC(PairList [])
       )
@@ -816,14 +744,16 @@ def FORALL_BOOL_THM:
 def EXISTS_BOOL_THM:
   prove(
     [
-      hol_term(Iff(
-        Exists("b", Bool, App(Var("P", Fun(Bool, Bool)), [Ref("b")])),
-        Or(App(Var("P", Fun(Bool, Bool)), [True]), App(Var("P", Fun(Bool, Bool)), [False]))
-      )),
+      (hol:
+         var P :: bool -> bool
+         (exists b :: bool: P(b)) <=> P(#true) || P(#false)),
       (
         MATCH_MP_TAC(
           class_TAUT(
-            hol_term(Implies(Iff(Not(Var("p", Bool)), Not(Var("q", Bool))), Iff(Var("p", Bool), Var("q", Bool))))
+            (hol:
+               var p :: bool
+               var q :: bool
+               (!p <=> !q) ==> (p <=> q))
           )
         ) then_tac \
         REWRITE_TAC(PairList [DE_MORGAN_THM, NOT_EXISTS_THM, FORALL_BOOL_THM])
@@ -834,25 +764,18 @@ def EXISTS_BOOL_THM:
 def LEFT_FORALL_OR_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Bool),
-        Forall(
-          "Q",
-          Bool,
-          Iff(
-            Forall("x", Tvar("A"), Or(App(Ref("P"), [Ref("x")]), Ref("Q"))),
-            Or(Forall("x", Tvar("A"), App(Ref("P"), [Ref("x")])), Ref("Q"))
-          )
-        )
-      )),
+      (hol:
+         forall (P :: A -> bool, Q :: bool): (forall x :: A: P(x) || Q) <=> (forall x :: A: P(x)) || Q),
       (
         (
           REPEAT(GEN_TAC) then_tac \
           ONCE_REWRITE_TAC(
             PairList [
               class_TAUT(
-                hol_term(Iff(Iff(Var("a", Bool), Var("b", Bool)), Iff(Not(Var("a", Bool)), Not(Var("b", Bool)))))
+                (hol:
+                   var a :: bool
+                   var b :: bool
+                   (a <=> b) <=> (!a <=> !b))
               )
             ]
           )
@@ -865,25 +788,18 @@ def LEFT_FORALL_OR_THM:
 def RIGHT_FORALL_OR_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Bool,
-        Forall(
-          "Q",
-          Fun(Tvar("A"), Bool),
-          Iff(
-            Forall("x", Tvar("A"), Or(Ref("P"), App(Ref("Q"), [Ref("x")]))),
-            Or(Ref("P"), Forall("x", Tvar("A"), App(Ref("Q"), [Ref("x")])))
-          )
-        )
-      )),
+      (hol:
+         forall (P :: bool, Q :: A -> bool): (forall x :: A: P || Q(x)) <=> P || (forall x :: A: Q(x))),
       (
         (
           REPEAT(GEN_TAC) then_tac \
           ONCE_REWRITE_TAC(
             PairList [
               class_TAUT(
-                hol_term(Iff(Iff(Var("a", Bool), Var("b", Bool)), Iff(Not(Var("a", Bool)), Not(Var("b", Bool)))))
+                (hol:
+                   var a :: bool
+                   var b :: bool
+                   (a <=> b) <=> (!a <=> !b))
               )
             ]
           )
@@ -896,18 +812,8 @@ def RIGHT_FORALL_OR_THM:
 def LEFT_OR_FORALL_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Bool),
-        Forall(
-          "Q",
-          Bool,
-          Iff(
-            Or(Forall("x", Tvar("A"), App(Ref("P"), [Ref("x")])), Ref("Q")),
-            Forall("x", Tvar("A"), Or(App(Ref("P"), [Ref("x")]), Ref("Q")))
-          )
-        )
-      )),
+      (hol:
+         forall (P :: A -> bool, Q :: bool): (forall x :: A: P(x)) || Q <=> (forall x :: A: P(x) || Q)),
       MATCH_ACCEPT_TAC(GSYM(LEFT_FORALL_OR_THM))
     ]
   )
@@ -915,18 +821,8 @@ def LEFT_OR_FORALL_THM:
 def RIGHT_OR_FORALL_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Bool,
-        Forall(
-          "Q",
-          Fun(Tvar("A"), Bool),
-          Iff(
-            Or(Ref("P"), Forall("x", Tvar("A"), App(Ref("Q"), [Ref("x")]))),
-            Forall("x", Tvar("A"), Or(Ref("P"), App(Ref("Q"), [Ref("x")])))
-          )
-        )
-      )),
+      (hol:
+         forall (P :: bool, Q :: A -> bool): P || (forall x :: A: Q(x)) <=> (forall x :: A: P || Q(x))),
       MATCH_ACCEPT_TAC(GSYM(RIGHT_FORALL_OR_THM))
     ]
   )
@@ -934,25 +830,19 @@ def RIGHT_OR_FORALL_THM:
 def LEFT_IMP_FORALL_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Bool),
-        Forall(
-          "Q",
-          Bool,
-          Iff(
-            Implies(Forall("x", Tvar("A"), App(Ref("P"), [Ref("x")])), Ref("Q")),
-            Exists("x", Tvar("A"), Implies(App(Ref("P"), [Ref("x")]), Ref("Q")))
-          )
-        )
-      )),
+      (hol:
+         forall (P :: A -> bool, Q :: bool):
+           (forall x :: A: P(x)) ==> Q <=> (exists x :: A: P(x) ==> Q)),
       (
         (
           REPEAT(GEN_TAC) then_tac \
           ONCE_REWRITE_TAC(
             PairList [
               class_TAUT(
-                hol_term(Iff(Iff(Var("a", Bool), Var("b", Bool)), Iff(Not(Var("a", Bool)), Not(Var("b", Bool)))))
+                (hol:
+                   var a :: bool
+                   var b :: bool
+                   (a <=> b) <=> (!a <=> !b))
               )
             ]
           )
@@ -965,18 +855,9 @@ def LEFT_IMP_FORALL_THM:
 def LEFT_EXISTS_IMP_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Bool),
-        Forall(
-          "Q",
-          Bool,
-          Iff(
-            Exists("x", Tvar("A"), Implies(App(Ref("P"), [Ref("x")]), Ref("Q"))),
-            Implies(Forall("x", Tvar("A"), App(Ref("P"), [Ref("x")])), Ref("Q"))
-          )
-        )
-      )),
+      (hol:
+         forall (P :: A -> bool, Q :: bool):
+           (exists x :: A: P(x) ==> Q) <=> (forall x :: A: P(x)) ==> Q),
       MATCH_ACCEPT_TAC(GSYM(LEFT_IMP_FORALL_THM))
     ]
   )
@@ -984,25 +865,19 @@ def LEFT_EXISTS_IMP_THM:
 def RIGHT_IMP_EXISTS_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Bool,
-        Forall(
-          "Q",
-          Fun(Tvar("A"), Bool),
-          Iff(
-            Implies(Ref("P"), Exists("x", Tvar("A"), App(Ref("Q"), [Ref("x")]))),
-            Exists("x", Tvar("A"), Implies(Ref("P"), App(Ref("Q"), [Ref("x")])))
-          )
-        )
-      )),
+      (hol:
+         forall (P :: bool, Q :: A -> bool):
+           P ==> (exists x :: A: Q(x)) <=> (exists x :: A: P ==> Q(x))),
       (
         (
           REPEAT(GEN_TAC) then_tac \
           ONCE_REWRITE_TAC(
             PairList [
               class_TAUT(
-                hol_term(Iff(Iff(Var("a", Bool), Var("b", Bool)), Iff(Not(Var("a", Bool)), Not(Var("b", Bool)))))
+                (hol:
+                   var a :: bool
+                   var b :: bool
+                   (a <=> b) <=> (!a <=> !b))
               )
             ]
           )
@@ -1015,84 +890,28 @@ def RIGHT_IMP_EXISTS_THM:
 def RIGHT_EXISTS_IMP_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Bool,
-        Forall(
-          "Q",
-          Fun(Tvar("A"), Bool),
-          Iff(
-            Exists("x", Tvar("A"), Implies(Ref("P"), App(Ref("Q"), [Ref("x")]))),
-            Implies(Ref("P"), Exists("x", Tvar("A"), App(Ref("Q"), [Ref("x")])))
-          )
-        )
-      )),
+      (hol:
+         forall (P :: bool, Q :: A -> bool):
+           (exists x :: A: P ==> Q(x)) <=> P ==> (exists x :: A: Q(x))),
       MATCH_ACCEPT_TAC(GSYM(RIGHT_IMP_EXISTS_THM))
     ]
   )
 
 def COND_DEF:
   new_definition(
-    hol_term(Eq(
-      Fun(Bool, Fun(Tvar("A"), Fun(Tvar("A"), Tvar("A")))),
-      Var("COND", Fun(Bool, Fun(Tvar("A"), Fun(Tvar("A"), Tvar("A"))))),
-      Lambda(
-        "t",
-        Bool,
-        Lambda(
-          "t1",
-          Tvar("A"),
-          Lambda(
-            "t2",
-            Tvar("A"),
-            App(
-              Const("@", Fun(Fun(Tvar("A"), Bool), Tvar("A"))),
-              [
-                Lambda(
-                  "x",
-                  Tvar("A"),
-                  And(
-                    Implies(Iff(Ref("t"), True), Eq(Tvar("A"), Ref("x"), Ref("t1"))),
-                    Implies(Iff(Ref("t"), False), Eq(Tvar("A"), Ref("x"), Ref("t2")))
-                  )
-                )
-              ]
-            )
-          )
-        )
-      )
-    ))
+    (hol:
+       var COND :: bool -> A -> A -> A
+       const select as "@" :: (A -> bool) -> A
+       COND
+         == (fun (t :: bool, t1 :: A, t2 :: A):
+               select(fun (x :: A): ((t <=> #true) ==> x == t1) && ((t <=> #false) ==> x == t2))))
   )
 
 def COND_CLAUSES:
   prove(
     [
-      hol_term(Forall(
-        "t1",
-        Tvar("A"),
-        Forall(
-          "t2",
-          Tvar("A"),
-          And(
-            Eq(
-              Tvar("A"),
-              App(
-                Const("COND", Fun(Bool, Fun(Tvar("A"), Fun(Tvar("A"), Tvar("A"))))),
-                [True, Ref("t1"), Ref("t2")]
-              ),
-              Ref("t1")
-            ),
-            Eq(
-              Tvar("A"),
-              App(
-                Const("COND", Fun(Bool, Fun(Tvar("A"), Fun(Tvar("A"), Tvar("A"))))),
-                [False, Ref("t1"), Ref("t2")]
-              ),
-              Ref("t2")
-            )
-          )
-        )
-      )),
+      (hol:
+         forall (t1 :: A, t2 :: A): (if #true | t1 | t2) == t1 && (if #false | t1 | t2) == t2),
       REWRITE_TAC(PairList [COND_DEF])
     ]
   )
@@ -1130,24 +949,12 @@ extend_basic_rewrites(PairList [COND_CLAUSES])
 def COND_EXPAND:
   prove(
     [
-      hol_term(Forall(
-        "b",
-        Bool,
-        Forall(
-          "t1",
-          Bool,
-          Forall(
-            "t2",
-            Bool,
-            Iff(
-              App(Const("COND", Fun(Bool, Fun(Bool, Fun(Bool, Bool)))), [Ref("b"), Ref("t1"), Ref("t2")]),
-              And(Or(Not(Ref("b")), Ref("t1")), Or(Ref("b"), Ref("t2")))
-            )
-          )
-        )
-      )),
+      (hol:
+         forall (b :: bool, t1 :: bool, t2 :: bool): (if b | t1 | t2) <=> (!b || t1) && (b || t2)),
       (
-        (REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(hol_term(Var("b", Bool)))) then_tac \
+        (REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(hol:
+                                                   var b :: bool
+                                                   b)) then_tac \
         REWRITE_TAC(PairList [])
       )
     ]
@@ -1156,24 +963,12 @@ def COND_EXPAND:
 def COND_ID:
   prove(
     [
-      hol_term(Forall(
-        "b",
-        Bool,
-        Forall(
-          "t",
-          Tvar("A"),
-          Eq(
-            Tvar("A"),
-            App(
-              Const("COND", Fun(Bool, Fun(Tvar("A"), Fun(Tvar("A"), Tvar("A"))))),
-              [Ref("b"), Ref("t"), Ref("t")]
-            ),
-            Ref("t")
-          )
-        )
-      )),
+      (hol:
+         forall (b :: bool, t :: A): (if b | t | t) == t),
       (
-        (REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(hol_term(Var("b", Bool)))) then_tac \
+        (REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(hol:
+                                                   var b :: bool
+                                                   b)) then_tac \
         REWRITE_TAC(PairList [])
       )
     ]
@@ -1182,40 +977,12 @@ def COND_ID:
 def COND_RAND:
   prove(
     [
-      hol_term(Forall(
-        "b",
-        Bool,
-        Forall(
-          "f",
-          Fun(Tvar("A"), Tvar("B")),
-          Forall(
-            "x",
-            Tvar("A"),
-            Forall(
-              "y",
-              Tvar("A"),
-              Eq(
-                Tvar("B"),
-                App(
-                  Ref("f"),
-                  [
-                    App(
-                      Const("COND", Fun(Bool, Fun(Tvar("A"), Fun(Tvar("A"), Tvar("A"))))),
-                      [Ref("b"), Ref("x"), Ref("y")]
-                    )
-                  ]
-                ),
-                App(
-                  Const("COND", Fun(Bool, Fun(Tvar("B"), Fun(Tvar("B"), Tvar("B"))))),
-                  [Ref("b"), App(Ref("f"), [Ref("x")]), App(Ref("f"), [Ref("y")])]
-                )
-              )
-            )
-          )
-        )
-      )),
+      (hol:
+         forall (b :: bool, f :: A -> B, x :: A, y :: A): f(if b | x | y) == (if b | f(x) | f(y))),
       (
-        (REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(hol_term(Var("b", Bool)))) then_tac \
+        (REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(hol:
+                                                   var b :: bool
+                                                   b)) then_tac \
         REWRITE_TAC(PairList [])
       )
     ]
@@ -1224,41 +991,13 @@ def COND_RAND:
 def COND_RATOR:
   prove(
     [
-      hol_term(Forall(
-        "b",
-        Bool,
-        Forall(
-          "f",
-          Fun(Tvar("A"), Tvar("B")),
-          Forall(
-            "g",
-            Fun(Tvar("A"), Tvar("B")),
-            Forall(
-              "x",
-              Tvar("A"),
-              Eq(
-                Tvar("B"),
-                App(
-                  Const(
-                    "COND",
-                    Fun(
-                      Bool,
-                      Fun(Fun(Tvar("A"), Tvar("B")), Fun(Fun(Tvar("A"), Tvar("B")), Fun(Tvar("A"), Tvar("B"))))
-                    )
-                  ),
-                  [Ref("b"), Ref("f"), Ref("g"), Ref("x")]
-                ),
-                App(
-                  Const("COND", Fun(Bool, Fun(Tvar("B"), Fun(Tvar("B"), Tvar("B"))))),
-                  [Ref("b"), App(Ref("f"), [Ref("x")]), App(Ref("g"), [Ref("x")])]
-                )
-              )
-            )
-          )
-        )
-      )),
+      (hol:
+         const COND :: bool -> (A -> B) -> (A -> B) -> A -> B
+         forall (b :: bool, f :: A -> B, g :: A -> B, x :: A): COND(b, f, g, x) == (if b | f(x) | g(x))),
       (
-        (REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(hol_term(Var("b", Bool)))) then_tac \
+        (REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(hol:
+                                                   var b :: bool
+                                                   b)) then_tac \
         REWRITE_TAC(PairList [])
       )
     ]
@@ -1267,41 +1006,13 @@ def COND_RATOR:
 def COND_ABS:
   prove(
     [
-      hol_term(Forall(
-        "b",
-        Bool,
-        Forall(
-          "f",
-          Fun(Tvar("A"), Tvar("B")),
-          Forall(
-            "g",
-            Fun(Tvar("A"), Tvar("B")),
-            Eq(
-              Fun(Tvar("A"), Tvar("B")),
-              Lambda(
-                "x",
-                Tvar("A"),
-                App(
-                  Const("COND", Fun(Bool, Fun(Tvar("B"), Fun(Tvar("B"), Tvar("B"))))),
-                  [Ref("b"), App(Ref("f"), [Ref("x")]), App(Ref("g"), [Ref("x")])]
-                )
-              ),
-              App(
-                Const(
-                  "COND",
-                  Fun(
-                    Bool,
-                    Fun(Fun(Tvar("A"), Tvar("B")), Fun(Fun(Tvar("A"), Tvar("B")), Fun(Tvar("A"), Tvar("B"))))
-                  )
-                ),
-                [Ref("b"), Ref("f"), Ref("g")]
-              )
-            )
-          )
-        )
-      )),
+      (hol:
+         forall (b :: bool, f :: A -> B, g :: A -> B):
+           (fun (x :: A): if b | f(x) | g(x)) == (if b | f | g)),
       (
-        (REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(hol_term(Var("b", Bool)))) then_tac \
+        (REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(hol:
+                                                   var b :: bool
+                                                   b)) then_tac \
         REWRITE_TAC(PairList [ETA_AX])
       )
     ]
@@ -1310,31 +1021,12 @@ def COND_ABS:
 def COND_SWAP:
   prove(
     [
-      hol_term(Forall(
-        "p",
-        Bool,
-        Forall(
-          "x",
-          Tvar("A"),
-          Forall(
-            "y",
-            Tvar("A"),
-            Eq(
-              Tvar("A"),
-              App(
-                Const("COND", Fun(Bool, Fun(Tvar("A"), Fun(Tvar("A"), Tvar("A"))))),
-                [Not(Ref("p")), Ref("x"), Ref("y")]
-              ),
-              App(
-                Const("COND", Fun(Bool, Fun(Tvar("A"), Fun(Tvar("A"), Tvar("A"))))),
-                [Ref("p"), Ref("y"), Ref("x")]
-              )
-            )
-          )
-        )
-      )),
+      (hol:
+         forall (p :: bool, x :: A, y :: A): (if !p | x | y) == (if p | y | x)),
       (
-        (REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(hol_term(Var("p", Bool)))) then_tac \
+        (REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(hol:
+                                                   var p :: bool
+                                                   p)) then_tac \
         REWRITE_TAC(PairList [])
       )
     ]
@@ -1369,21 +1061,17 @@ def class_TAUT_v2:
 def MONO_COND:
   prove(
     [
-      hol_term(Implies(
-        And(Implies(Var("A", Bool), Var("B", Bool)), Implies(Var("C", Bool), Var("D", Bool))),
-        Implies(
-          App(
-            Const("COND", Fun(Bool, Fun(Bool, Fun(Bool, Bool)))),
-            [Var("b", Bool), Var("A", Bool), Var("C", Bool)]
-          ),
-          App(
-            Const("COND", Fun(Bool, Fun(Bool, Fun(Bool, Bool)))),
-            [Var("b", Bool), Var("B", Bool), Var("D", Bool)]
-          )
-        )
-      )),
+      (hol:
+         var A :: bool
+         var B :: bool
+         var C :: bool
+         var D :: bool
+         var b :: bool
+         (A ==> B) && (C ==> D) ==> (if b | A | C) ==> (if b | B | D)),
       (
-        (STRIP_TAC then_tac BOOL_CASES_TAC(hol_term(Var("b", Bool)))) then_tac \
+        (STRIP_TAC then_tac BOOL_CASES_TAC(hol:
+                                             var b :: bool
+                                             b)) then_tac \
         ASM_REWRITE_TAC(PairList [])
       )
     ]
@@ -1394,29 +1082,24 @@ monotonicity_theorems.value := PairList [MONO_COND, & monotonicity_theorems.valu
 def COND_ELIM_THM:
   prove(
     [
-      hol_term(Iff(
-        App(
-          Var("P", Fun(Tvar("A"), Bool)),
-          [
-            App(
-              Const("COND", Fun(Bool, Fun(Tvar("A"), Fun(Tvar("A"), Tvar("A"))))),
-              [Var("c", Bool), Var("x", Tvar("A")), Var("y", Tvar("A"))]
-            )
-          ]
-        ),
-        And(
-          Implies(Var("c", Bool), App(Var("P", Fun(Tvar("A"), Bool)), [Var("x", Tvar("A"))])),
-          Implies(Not(Var("c", Bool)), App(Var("P", Fun(Tvar("A"), Bool)), [Var("y", Tvar("A"))]))
-        )
-      )),
-      (BOOL_CASES_TAC(hol_term(Var("c", Bool))) then_tac REWRITE_TAC(PairList []))
+      (hol:
+         var P :: A -> bool
+         var c :: bool
+         var x :: A
+         var y :: A
+         P(if c | x | y) <=> (c ==> P(x)) && (!c ==> P(y))),
+      (BOOL_CASES_TAC(hol:
+                        var c :: bool
+                        c) then_tac REWRITE_TAC(PairList []))
     ]
   )
 
 def COND_ELIM_CONV = HIGHER_REWRITE_CONV(PairList [COND_ELIM_THM])(#true)
 
 def COND_CASES_TAC:
-  let DENEG_RULE = GEN_REWRITE_RULE(I)(PairList [class_TAUT_v2(hol_term(Iff(Not(Not(Var("p", Bool))), Var("p", Bool))))])
+  let DENEG_RULE = GEN_REWRITE_RULE(I)(PairList [class_TAUT_v2(hol:
+                                                                 var p :: bool
+                                                                 !(!p) <=> p)])
   (
     (CONV_TAC(COND_ELIM_CONV) then_tac CONJ_TAC) then_list \
     PairList [
@@ -1437,18 +1120,9 @@ def COND_CASES_TAC:
 def SKOLEM_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Fun(Tvar("B"), Bool)),
-        Iff(
-          Forall("x", Tvar("A"), Exists("y", Tvar("B"), App(Ref("P"), [Ref("x"), Ref("y")]))),
-          Exists(
-            "y",
-            Fun(Tvar("A"), Tvar("B")),
-            Forall("x", Tvar("A"), App(Ref("P"), [Ref("x"), App(Ref("y"), [Ref("x")])]))
-          )
-        )
-      )),
+      (hol:
+         forall P :: A -> B -> bool:
+           (forall x :: A: exists y :: B: P(x, y)) <=> (exists y :: A -> B: forall x :: A: P(x, y(x)))),
       (
         (
           REPEAT((STRIP_TAC or_tac EQ_TAC)) then_list \
@@ -1457,20 +1131,10 @@ def SKOLEM_THM:
               (
                 (
                   EXISTS_TAC(
-                    hol_term(Lambda(
-                      "x",
-                      Tvar("A"),
-                      App(
-                        Const("@", Fun(Fun(Tvar("B"), Bool), Tvar("B"))),
-                        [
-                          Lambda(
-                            "y",
-                            Tvar("B"),
-                            App(Var("P", Fun(Tvar("A"), Fun(Tvar("B"), Bool))), [Ref("x"), Ref("y")])
-                          )
-                        ]
-                      )
-                    ))
+                    (hol:
+                       var P :: A -> B -> bool
+                       const select as "@" :: (B -> bool) -> B
+                       fun (x :: A): select(fun (y :: B): P(x, y)))
                   ) then_tac \
                   GEN_TAC
                 ) then_tac \
@@ -1478,7 +1142,10 @@ def SKOLEM_THM:
               ) then_tac \
               CONV_TAC(SELECT_CONV)
             ),
-            EXISTS_TAC(hol_term(App(Var("y", Fun(Tvar("A"), Tvar("B"))), [Var("x", Tvar("A"))])))
+            EXISTS_TAC(hol:
+                         var y :: A -> B
+                         var x :: A
+                         y(x))
           ]
         ) then_tac \
         POP_ASSUM(MATCH_ACCEPT_TAC)
@@ -1489,30 +1156,10 @@ def SKOLEM_THM:
 def SKOLEM_THM_GEN:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Bool),
-        Forall(
-          "R",
-          Fun(Tvar("A"), Fun(Tvar("B"), Bool)),
-          Iff(
-            Forall(
-              "x",
-              Tvar("A"),
-              Implies(App(Ref("P"), [Ref("x")]), Exists("y", Tvar("B"), App(Ref("R"), [Ref("x"), Ref("y")])))
-            ),
-            Exists(
-              "f",
-              Fun(Tvar("A"), Tvar("B")),
-              Forall(
-                "x",
-                Tvar("A"),
-                Implies(App(Ref("P"), [Ref("x")]), App(Ref("R"), [Ref("x"), App(Ref("f"), [Ref("x")])]))
-              )
-            )
-          )
-        )
-      )),
+      (hol:
+         forall (P :: A -> bool, R :: A -> B -> bool):
+           (forall x :: A: P(x) ==> (exists y :: B: R(x, y)))
+             <=> (exists f :: A -> B: forall x :: A: P(x) ==> R(x, f(x)))),
       REWRITE_TAC(PairList [RIGHT_IMP_EXISTS_THM, SKOLEM_THM])
     ]
   )
@@ -1520,26 +1167,10 @@ def SKOLEM_THM_GEN:
 def UNIQUE_SKOLEM_ALT:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Fun(Tvar("B"), Bool)),
-        Iff(
-          Forall("x", Tvar("A"), ExistsUnique("y", Tvar("B"), App(Ref("P"), [Ref("x"), Ref("y")]))),
-          Exists(
-            "f",
-            Fun(Tvar("A"), Tvar("B")),
-            Forall(
-              "x",
-              Tvar("A"),
-              Forall(
-                "y",
-                Tvar("B"),
-                Iff(App(Ref("P"), [Ref("x"), Ref("y")]), Eq(Tvar("B"), App(Ref("f"), [Ref("x")]), Ref("y")))
-              )
-            )
-          )
-        )
-      )),
+      (hol:
+         forall P :: A -> B -> bool:
+           (forall x :: A: exists1 y :: B: P(x, y))
+             <=> (exists f :: A -> B: forall (x :: A, y :: B): P(x, y) <=> f(x) == y)),
       (GEN_TAC then_tac REWRITE_TAC(PairList [EXISTS_UNIQUE_ALT, SKOLEM_THM]))
     ]
   )
@@ -1547,18 +1178,10 @@ def UNIQUE_SKOLEM_ALT:
 def UNIQUE_SKOLEM_THM:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Tvar("A"), Fun(Tvar("B"), Bool)),
-        Iff(
-          Forall("x", Tvar("A"), ExistsUnique("y", Tvar("B"), App(Ref("P"), [Ref("x"), Ref("y")]))),
-          ExistsUnique(
-            "f",
-            Fun(Tvar("A"), Tvar("B")),
-            Forall("x", Tvar("A"), App(Ref("P"), [Ref("x"), App(Ref("f"), [Ref("x")])]))
-          )
-        )
-      )),
+      (hol:
+         forall P :: A -> B -> bool:
+           (forall x :: A: exists1 y :: B: P(x, y))
+             <=> (exists1 f :: A -> B: forall x :: A: P(x, f(x)))),
       (
         (
           (
@@ -1579,11 +1202,15 @@ def UNIQUE_SKOLEM_THM:
               (
                 (
                   (REPEAT(STRIP_TAC) then_tac ONCE_REWRITE_TAC(PairList [FUN_EQ_THM])) then_tac \
-                  X_GEN_TAC(hol_term(Var("x", Tvar("A"))))
+                  X_GEN_TAC(hol:
+                              var x :: A
+                              x)
                 ) then_tac \
                 FIRST_ASSUM(MATCH_MP_TAC)
               ) then_tac \
-              EXISTS_TAC(hol_term(Var("x", Tvar("A"))))
+              EXISTS_TAC(hol:
+                           var x :: A
+                           x)
             ) then_tac \
             ASM_REWRITE_TAC(PairList [])
           ),
@@ -1593,43 +1220,30 @@ def UNIQUE_SKOLEM_THM:
                 (
                   MAP_EVERY(X_GEN_TAC)(
                     PairList [
-                      hol_term(Var("x", Tvar("A"))),
-                      hol_term(Var("y1", Tvar("B"))),
-                      hol_term(Var("y2", Tvar("B")))
+                      (hol:
+                         var x :: A
+                         x),
+                      (hol:
+                         var y1 :: B
+                         y1),
+                      (hol:
+                         var y2 :: B
+                         y2)
                     ]
                   ) then_tac \
                   STRIP_TAC
                 ) then_tac \
-                FIRST_ASSUM(X_CHOOSE_TAC(hol_term(Var("f", Fun(Tvar("A"), Tvar("B"))))))
+                FIRST_ASSUM(X_CHOOSE_TAC(hol:
+                                           var f :: A -> B
+                                           f))
               ) then_tac \
               SUBGOAL_THEN(
-                hol_term(Eq(
-                  Fun(Tvar("A"), Tvar("B")),
-                  Lambda(
-                    "z",
-                    Tvar("A"),
-                    App(
-                      Const("COND", Fun(Bool, Fun(Tvar("B"), Fun(Tvar("B"), Tvar("B"))))),
-                      [
-                        Eq(Tvar("A"), Ref("z"), Var("x", Tvar("A"))),
-                        Var("y1", Tvar("B")),
-                        App(Var("f", Fun(Tvar("A"), Tvar("B"))), [Ref("z")])
-                      ]
-                    )
-                  ),
-                  Lambda(
-                    "z",
-                    Tvar("A"),
-                    App(
-                      Const("COND", Fun(Bool, Fun(Tvar("B"), Fun(Tvar("B"), Tvar("B"))))),
-                      [
-                        Eq(Tvar("A"), Ref("z"), Var("x", Tvar("A"))),
-                        Var("y2", Tvar("B")),
-                        App(Var("f", Fun(Tvar("A"), Tvar("B"))), [Ref("z")])
-                      ]
-                    )
-                  )
-                ))
+                (hol:
+                   var x :: A
+                   var y1 :: B
+                   var f :: A -> B
+                   var y2 :: B
+                   (fun (z :: A): if z == x | y1 | f(z)) == (fun (z :: A): if z == x | y2 | f(z)))
               )(MP_TAC)
             ) then_list \
             PairList [
@@ -1644,7 +1258,9 @@ def UNIQUE_SKOLEM_THM:
                 ASM_REWRITE_TAC(PairList [])
               ),
               (
-                DISCH_THEN(o(MP_TAC)(C(AP_THM)(hol_term(Var("x", Tvar("A")))))) then_tac \
+                DISCH_THEN(o(MP_TAC)(C(AP_THM)(hol:
+                                                 var x :: A
+                                                 x))) then_tac \
                 REWRITE_TAC(PairList [])
               )
             ]
@@ -1656,29 +1272,17 @@ def UNIQUE_SKOLEM_THM:
 
 def COND_CONG:
   class_TAUT_v2(
-    hol_term(Implies(
-      Iff(Var("g", Bool), Var("g'", Bool)),
-      Implies(
-        Implies(Var("g'", Bool), Eq(Tvar("?3075"), Var("t", Tvar("?3075")), Var("t'", Tvar("?3075")))),
-        Implies(
-          Implies(
-            Not(Var("g'", Bool)),
-            Eq(Tvar("?3075"), Var("e", Tvar("?3075")), Var("e'", Tvar("?3075")))
-          ),
-          Eq(
-            Tvar("?3075"),
-            App(
-              Const("COND", Fun(Bool, Fun(Tvar("?3075"), Fun(Tvar("?3075"), Tvar("?3075"))))),
-              [Var("g", Bool), Var("t", Tvar("?3075")), Var("e", Tvar("?3075"))]
-            ),
-            App(
-              Const("COND", Fun(Bool, Fun(Tvar("?3075"), Fun(Tvar("?3075"), Tvar("?3075"))))),
-              [Var("g'", Bool), Var("t'", Tvar("?3075")), Var("e'", Tvar("?3075"))]
-            )
-          )
-        )
-      )
-    ))
+    (hol:
+       var g :: bool
+       var g_prime as "g'" :: bool
+       var t :: #{?3075}
+       var t_prime as "t'" :: #{?3075}
+       var e :: #{?3075}
+       var e_prime as "e'" :: #{?3075}
+       (g <=> g_prime)
+         ==> (g_prime ==> t == t_prime)
+         ==> (!g_prime ==> e == e_prime)
+         ==> (if g | t | e) == (if g_prime | t_prime | e_prime))
   )
 
 def initialization_1:
@@ -1687,18 +1291,11 @@ def initialization_1:
 def COND_EQ_CLAUSE:
   prove(
     [
-      hol_term(Eq(
-        Tvar("?3087"),
-        App(
-          Const("COND", Fun(Bool, Fun(Tvar("?3087"), Fun(Tvar("?3087"), Tvar("?3087"))))),
-          [
-            Eq(Tvar("?3094"), Var("x", Tvar("?3094")), Var("x", Tvar("?3094"))),
-            Var("y", Tvar("?3087")),
-            Var("z", Tvar("?3087"))
-          ]
-        ),
-        Var("y", Tvar("?3087"))
-      )),
+      (hol:
+         var x :: #{?3094}
+         var y :: #{?3087}
+         var z :: #{?3087}
+         (if x == x | y | z) == y),
       REWRITE_TAC(PairList [])
     ]
   )
@@ -1709,18 +1306,14 @@ def initialization_2:
 def bool_INDUCT:
   prove(
     [
-      hol_term(Forall(
-        "P",
-        Fun(Bool, Bool),
-        Implies(
-          And(App(Ref("P"), [False]), App(Ref("P"), [True])),
-          Forall("x", Bool, App(Ref("P"), [Ref("x")]))
-        )
-      )),
+      (hol:
+         forall P :: bool -> bool: P(#false) && P(#true) ==> (forall x :: bool: P(x))),
       (
         (
           REPEAT(STRIP_TAC) then_tac \
-          DISJ_CASES_TAC(SPEC(hol_term(Var("x", Bool)))(BOOL_CASES_AX))
+          DISJ_CASES_TAC(SPEC(hol:
+                                var x :: bool
+                                x)(BOOL_CASES_AX))
         ) then_tac \
         ASM_REWRITE_TAC(PairList [])
       )
@@ -1730,34 +1323,16 @@ def bool_INDUCT:
 def bool_RECURSION:
   prove(
     [
-      hol_term(Forall(
-        "a",
-        Tvar("A"),
-        Forall(
-          "b",
-          Tvar("A"),
-          Exists(
-            "f",
-            Fun(Bool, Tvar("A")),
-            And(
-              Eq(Tvar("A"), App(Ref("f"), [False]), Ref("a")),
-              Eq(Tvar("A"), App(Ref("f"), [True]), Ref("b"))
-            )
-          )
-        )
-      )),
+      (hol:
+         forall (a :: A, b :: A): exists f :: bool -> A: f(#false) == a && f(#true) == b),
       (
         (
           REPEAT(GEN_TAC) then_tac \
           EXISTS_TAC(
-            hol_term(Lambda(
-              "x",
-              Bool,
-              App(
-                Const("COND", Fun(Bool, Fun(Tvar("A"), Fun(Tvar("A"), Tvar("A"))))),
-                [Ref("x"), Var("b", Tvar("A")), Var("a", Tvar("A"))]
-              )
-            ))
+            (hol:
+               var b :: A
+               var a :: A
+               fun (x :: bool): if x | b | a)
           )
         ) then_tac \
         REWRITE_TAC(PairList [])

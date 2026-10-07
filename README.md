@@ -23,20 +23,20 @@ rhombus/hol/
   ind_defs.rhm
   class.rhm
   ... standard theories through define.rhm
+  lib.rhm                 lib.ml (list utilities, finite partial functions)
   private/
-    compat.rhm            lib.ml helpers
-    theory_support.rhm    remaining OCaml stdlib/lib.ml support
+    ocaml.rhm             OCaml runtime: exceptions, polymorphic compare,
+                          Hashtbl.hash, Random
+    theory_support.rhm    remaining OCaml stdlib support
     data_types.rhm        options and variant comparison view
-    atoms_map.rhm         Patricia term maps (generated from lib.ml)
-    term_hash.rhm, hash_runtime.rhm, ocaml_random.rhm
     type_inference.rhm, type_specification.rhm, quoted_ast.rhm
     declarations.rhm, proof_syntax.rhm, variant_base.rhm
   tests/
 
 ```
 
-The files directly under `rhombus/hol/` correspond to the HOL Light engine
-modules. `private/` contains mechanical support needed to reproduce OCaml/HOL
+The files directly under `rhombus/hol/` correspond to HOL Light modules:
+`lib.rhm` and the engine and theory modules. `private/` contains mechanical support needed to reproduce OCaml/HOL
 Light behavior; it is not part of the intended public API.
 
 The source-to-source port includes the engine sequence:

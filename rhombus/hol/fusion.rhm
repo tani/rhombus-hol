@@ -3,7 +3,9 @@
 // Derived from HOL Light; redistribution terms and disclaimer in ../LICENSE.
 // Direct algorithm port of fusion.ml, pinned in ../upstream.
 // Private immutable constructors, explicit currying, PairList and tagged exceptions.
-import: "private/compat.rhm" open
+import:
+  "lib.rhm" open
+  "private/ocaml.rhm" open
 export:
   types
   get_type_arity
@@ -70,66 +72,41 @@ export:
   mk_eq
   aconv
   equals_thm
-  compare
 
 // Kernel objects are immutable classes, so == and hashing are structural,
-// matching OCaml's polymorphic equality, and < and friends use compare,
-// matching OCaml's polymorphic ordering. The constructors are not exported.
+// matching OCaml's polymorphic equality. Their OCaml view (constructor tag
+// and fields) gives OCaml's polymorphic ordering, used by < and friends,
+// and Hashtbl.hash. The constructors are not exported.
 class KernelObject():
   nonfinal
   implements Comparable
+  implements OcamlValue
   override compare_to(other): compare(this)(other)
 class KernelTyvar(name):
   extends KernelObject
+  override ocaml_view(): [0,name]
 class KernelTyapp(name,args):
   extends KernelObject
+  override ocaml_view(): [1,name,args]
 class KernelVar(name,ty):
   extends KernelObject
+  override ocaml_view(): [0,name,ty]
 class KernelConst(name,ty):
   extends KernelObject
+  override ocaml_view(): [1,name,ty]
 class KernelComb(rator,rand):
   extends KernelObject
+  override ocaml_view(): [2,rator,rand]
 class KernelAbs(var,body):
   extends KernelObject
+  override ocaml_view(): [3,var,body]
 class Sequent(asl,conclusion):
   extends KernelObject
+  override ocaml_view(): [0,asl,conclusion]
 class Clash(term)
 // Recreate the OCaml type boundary at the dynamically typed public API.
 annot.macro 'HolType': 'KernelTyvar || KernelTyapp'
 annot.macro 'Term': 'KernelVar || KernelConst || KernelComb || KernelAbs'
-// Typed structural comparison reproduces OCaml constructor declaration order.
-// Return sign only: callers in fusion.ml inspect sign/zero, not magnitude.
-fun cmp_scalar(x,y): if x == y | 0 | (if x < y | -1 | 1)
-fun compare(x):
-  fun(y):
-    fun view(v):
-      match v
-      | KernelTyvar(n): [0,n]
-      | KernelTyapp(n,a): [1,n,a]
-      | KernelVar(n,t): [0,n,t]
-      | KernelConst(n,t): [1,n,t]
-      | KernelComb(f,a): [2,f,a]
-      | KernelAbs(v,b): [3,v,b]
-      | Sequent(a,c): [0,a,c]
-      | _: #false
-    fun cv(a,b):
-      if a == []
-      | 0
-      | let c = compare(a.first)(b.first)
-        if c != 0 | c | cv(a.rest,b.rest)
-    let vx = view(x)
-    let vy = view(y)
-    cond
-    | vx && vy: cv(vx,vy)
-    | x == y: 0
-    | x is_a Function || y is_a Function: throw InvalidArgument("compare: functional value")
-    | x is_a List && y is_a List: cv(x,y)
-    | x is_a PairList && y is_a PairList && x != PairList [] && y != PairList []:
-        let c = compare(x.first)(y.first)
-        if c != 0 | c | compare(x.rest)(y.rest)
-    | x == PairList []: -1
-    | y == PairList []: 1
-    | ~else: cmp_scalar(x,y)
 def mutable the_type_constants = PairList [["bool", 0],["fun", 2]]
 fun types(): the_type_constants
 fun get_type_arity(s): assoc(s)(the_type_constants)

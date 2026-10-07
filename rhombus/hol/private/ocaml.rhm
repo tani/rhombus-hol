@@ -1,0 +1,174 @@
+#lang rhombus
+// OCaml runtime behavior that HOL Light relies on: Stdlib exceptions,
+// polymorphic compare, Hashtbl.hash and Random. The hash and random parts
+// are based on the OCaml 4.14.1 runtime (Copyright 1996 INRIA; Xavier Leroy,
+// runtime/hash.c and stdlib/random.ml); modified 2026-10-06 and 2026-10-07:
+// HOL data-model subset translated to Rhombus.
+// LGPL-2.1 with OCaml linking exception; see ../../../THIRD_PARTY_LICENSES/OCaml.txt.
+import: lib("racket/base.rkt") as Rkt
+import: lib("openssl/md5.rkt") as MD5
+export:
+  Failure
+  failwith
+  InvalidArgument
+  Not_found
+  fst
+  snd
+  append
+  OcamlValue
+  compare
+  polymorphic_lt
+  polymorphic_le
+  ocaml_hash
+  ocaml_random_bits
+  ocaml_random_int
+  ocaml_random_init
+
+// Stdlib exceptions.
+class Failure(message)
+fun failwith(s): throw Failure(s)
+class InvalidArgument(message)
+class Not_found()
+
+// Pairs and list concatenation (@).
+fun fst([x, y]): x
+fun snd([x, y]): y
+fun append(l1):
+  fun(l2):
+    match l1
+    | PairList []: l2
+    | PairList [h, & t]: PairList.cons(h,append(t)(l2))
+
+// Values that stand for OCaml constructor applications. ocaml_view gives
+// the value compared (and, for kernel objects, hashed) in their place:
+// [tag, field, ...] for kernel types, terms and theorems.
+interface OcamlValue:
+  method ocaml_view()
+
+// OCaml's polymorphic compare. Returns the sign only.
+fun cmp_scalar(x,y): if x == y | 0 | (if x < y | -1 | 1)
+fun compare(x):
+  fun(y):
+    if x === y | 0 | compare_distinct(x,y)
+fun compare_lists(a,b):
+  if a == []
+  | 0
+  | let c = compare(a.first)(b.first)
+    if c != 0 | c | compare_lists(a.rest,b.rest)
+fun compare_distinct(x,y):
+  cond
+  | x is_a OcamlValue && y is_a OcamlValue:
+      compare((x :~ OcamlValue).ocaml_view())((y :~ OcamlValue).ocaml_view())
+  // Structural equality first: it is native and settles equal subterms.
+  | x == y: 0
+  | x is_a Function || y is_a Function: throw InvalidArgument("compare: functional value")
+  | x is_a PairList && y is_a PairList && x != PairList [] && y != PairList []:
+      let c = compare(x.first)(y.first)
+      if c != 0 | c | compare(x.rest)(y.rest)
+  | x is_a List && y is_a List: compare_lists(x,y)
+  | x == PairList []: -1
+  | y == PairList []: 1
+  | ~else: cmp_scalar(x,y)
+
+// OCaml's polymorphic < and <= for values that are not Comparable in
+// Rhombus, such as lists and tuples.
+fun polymorphic_lt(x): fun(y): compare(x)(y) < 0
+fun polymorphic_le(x): fun(y): compare(x)(y) <= 0
+
+// Hashtbl.hash: MurmurHash3 mixing and the original bounded breadth-first
+// traversal over the OCaml representation of HOL data.
+class HashBlock(tag,fields)
+class HashImmediate(value)
+def block = HashBlock
+def immediate = HashImmediate
+
+def mask = 0xffffffff
+fun u32(v): v bits.and mask
+fun rotl(v,n): u32((v bits.(<<) n) bits.or (v bits.(>>) (32-n)))
+fun mix(h,d):
+  let d1 = u32(d * 0xcc9e2d51)
+  let d2 = u32(rotl(d1,15) * 0x1b873593)
+  u32(rotl(h bits.xor d2,13) * 5 + 0xe6546b64)
+fun mix_int(h,d):
+  mix(h,u32((d bits.(>>) 32) bits.xor (d bits.(>>) 63) bits.xor d))
+fun mix_string(h,s :: ReadableString):
+  let bs = s.utf8_bytes()
+  let len = bs.length()
+  fun chunks(i,h):
+    cond
+    | i >= len: h bits.xor len
+    | ~else:
+        let end = if i+4 < len | i+4 | len
+        fun word(j,w):
+          if j >= end
+          | w
+          | word(j+1,w bits.or (bs[j] bits.(<<) (8*(j-i))))
+        chunks(i+4,mix(h,word(i,0)))
+  chunks(0,h)
+fun finish(h):
+  let a = u32((h bits.xor (h bits.(>>) 16)) * 0x85ebca6b)
+  let b = u32((a bits.xor (a bits.(>>) 13)) * 0xc2b2ae35)
+  (b bits.xor (b bits.(>>) 16)) bits.and 0x3fffffff
+fun hash_model(obj):
+  let queue = Array.make(100,#false)
+  queue[0] := obj
+  fun loop(rd,wr,num,h):
+    cond
+    | rd == wr || num == 0: finish(h)
+    | ~else:
+        match queue[rd]
+        | HashImmediate(value):
+            loop(rd+1,wr,num-1,mix_int(h,(value bits.(<<) 1) bits.or 1))
+        | s :: ReadableString: loop(rd+1,wr,num-1,mix_string(h,s))
+        | HashBlock(tag,fields :: PairList):
+            let h1 = mix(h,(fields.length() bits.(<<) 10)+tag)
+            fun enqueue(fields,wr):
+              cond
+              | wr == 100: wr
+              | ~else:
+                  match fields
+                  | PairList []: wr
+                  | PairList [f, & rest]:
+                      queue[wr] := f
+                      enqueue(rest,wr+1)
+            loop(rd+1,enqueue(fields,wr),num,h1)
+        | _: error("hash_model: unsupported host value")
+  loop(0,1,10,0)
+fun hash_representation(v):
+  match v
+  | v :: OcamlValue:
+      let [tag, & fields] = v.ocaml_view()
+      block(tag, PairList[& for List (f in fields): hash_representation(f)])
+  | PairList []: immediate(0)
+  | PairList [h, & t]: block(0,PairList [hash_representation(h),hash_representation(t)])
+  | n :: Int: immediate(n)
+  | s :: String: s
+fun ocaml_hash(v): hash_model(hash_representation(v))
+
+// Random.State's 30-bit generator and integer seed initialization.
+def state = Array(0x3ae2522b,0x1d8d4634,0x15b4fad0,0x18b14ace,0x12f8a3c4,0x3b086c47,0x16d467d6,0x101d91c7,0x321df177,0x0176c193,0x1ff72bf1,0x1e889109,0x0b464b18,0x2b86b97c,0x0891da48,0x03137463,0x085ac5a1,0x15d61f2f,0x3bced359,0x29c1c132,0x3a86766e,0x366d8c86,0x1f5b6222,0x3ce1b59f,0x2ebf78e1,0x27cd1b86,0x258f3dc3,0x389a8194,0x02e4c44c,0x18c43f7d,0x0f6e534f,0x1e7df359,0x055d0b7e,0x10e84e7e,0x126198e4,0x0e7722cb,0x1cbede28,0x3391b964,0x3d40e92a,0x0c59933d,0x0b8cd0b7,0x24efff1c,0x2803fdaa,0x08ebc72e,0x0f522e32,0x05398edc,0x2144a04c,0x0aef3cbd,0x01ad4719,0x35b93cd6,0x2a559d4f,0x1e6fd768,0x26e27f36,0x186f18c3,0x2fbf967a)
+def index = Box(0)
+fun ocaml_random_bits():
+  index.value := (index.value+1) rem 55
+  let i=index.value
+  let cur=state[i]
+  let v=(state[(i+24) rem 55] + (cur bits.xor ((cur bits.(>>) 25) bits.and 0x1f))) bits.and 0x3fffffff
+  state[i] := v
+  v
+fun ocaml_random_int(n):
+  if n<=0 || n>0x3fffffff | throw InvalidArgument("Random.int") | #void
+  fun draw():
+    let r=ocaml_random_bits()
+    let v=r rem n
+    if r-v>0x3fffffff-n+1 | draw() | v
+  draw()
+fun ocaml_random_init(seed):
+  for (i in 0..55): state[i] := i
+  let acc=Box(#"x")
+  for (i in 0..110):
+    let j=i rem 55
+    acc.value := MD5.#{md5-bytes}(Rkt.#{open-input-bytes}(Rkt.#{bytes-append}(acc.value,Rkt.#{string->bytes/utf-8}(to_string(seed)))))
+    let d=acc.value
+    let n=Rkt.#{bytes-ref}(d,0)+(Rkt.#{bytes-ref}(d,1) bits.(<<) 8)+(Rkt.#{bytes-ref}(d,2) bits.(<<) 16)+(Rkt.#{bytes-ref}(d,3) bits.(<<) 24)
+    state[j] := (state[j] bits.xor n) bits.and 0x3fffffff
+  index.value := 0

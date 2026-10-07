@@ -23,12 +23,11 @@ import: "../../calc_num.rhm" as CalcNum
 import: "../../lists.rhm" as Lists
 import: "../../int.rhm" as Int
 import: "../../define.rhm" as Define
+import: "../support/statement.rhm" open
 
 fun assert_conv(conv, tm, tm_prime):
   let [asl, etm] = dest_thm(conv(tm))
-  asl == PairList [] && is_eq(etm) && Equal.lhs(etm) == tm && Equal.rhs(etm) == tm_prime
-
-fun result(conv, tm): Equal.rhs(concl(conv(tm)))
+  asl == PairList [] && is_eq(etm) && aconv(Equal.lhs(etm))(tm) && aconv(Equal.rhs(etm))(tm_prime)
 
 // Test COMPUTE_CONVs.
 def compute_if_open = hol:
@@ -50,12 +49,12 @@ def compute_unknown = hol:
 def compute_unknown_reduced = hol:
   var unknown_fn :: num -> num
   unknown_fn((3 :: num))
-check result(CalcNum.NUM_COMPUTE_CONV, compute_if_open) ~is compute_if_open
-check result(CalcNum.NUM_COMPUTE_CONV, compute_if_true) ~is compute_three
-check result(CalcNum.NUM_COMPUTE_CONV, compute_lambda) ~is compute_lambda
-check result(CalcNum.NUM_COMPUTE_CONV, compute_beta) ~is compute_ten
+check assert_conv(CalcNum.NUM_COMPUTE_CONV, compute_if_open, compute_if_open) ~is #true
+check assert_conv(CalcNum.NUM_COMPUTE_CONV, compute_if_true, compute_three) ~is #true
+check assert_conv(CalcNum.NUM_COMPUTE_CONV, compute_lambda, compute_lambda) ~is #true
+check assert_conv(CalcNum.NUM_COMPUTE_CONV, compute_beta, compute_ten) ~is #true
 // Arguments are reduced when the fn is a constant.
-check result(CalcNum.NUM_COMPUTE_CONV, compute_unknown) ~is compute_unknown_reduced
+check assert_conv(CalcNum.NUM_COMPUTE_CONV, compute_unknown, compute_unknown_reduced) ~is #true
 
 // Test list-specific evaluation conversions.
 def list_of_seq_in = hol:
@@ -182,17 +181,17 @@ def cs = Compute.Compute.basic_compset(#void)
 def cv = Compute.Compute.CBV_CONV(cs)
 def wcv = Compute.Compute.WEAK_CBV_CONV(cs)
 // Generalized abstraction
-check result(wcv, cbv_genabs_in) ~is cbv_genabs_out
-check result(cv, cbv_genabs_in) ~is cbv_genabs_out
+check assert_conv(wcv, cbv_genabs_in, cbv_genabs_out) ~is #true
+check assert_conv(cv, cbv_genabs_in, cbv_genabs_out) ~is #true
 // Abstraction body is not reduced if WEAK_CBV is used
-check result(wcv, cbv_body_in) ~is cbv_body_in
-check result(cv, cbv_body_in) ~is cbv_body_out
+check assert_conv(wcv, cbv_body_in, cbv_body_in) ~is #true
+check assert_conv(cv, cbv_body_in, cbv_body_out) ~is #true
 // Match
-check result(wcv, cbv_match_in) ~is cbv_match_out
-check result(cv, cbv_match_in) ~is cbv_match_out
+check assert_conv(wcv, cbv_match_in, cbv_match_out) ~is #true
+check assert_conv(cv, cbv_match_in, cbv_match_out) ~is #true
 // Let
-check result(wcv, cbv_let_in) ~is cbv_let_out
-check result(cv, cbv_let_in) ~is cbv_let_out
+check assert_conv(wcv, cbv_let_in, cbv_let_out) ~is #true
+check assert_conv(cv, cbv_let_in, cbv_let_out) ~is #true
 
 // Test benign redefinition when polymorphic type is involved.
 // The second quotation is expanded after the first definition, so it
@@ -213,7 +212,7 @@ def benign_define_second = hol:
   const CONS :: A -> list(A) -> list(A)
   h_benign(NIL) == (0 :: num) && h_benign(CONS(var.#{_}, t)) == (1 :: num) + h_benign(t)
 def benign_define_2 = Define.define(benign_define_second)
-check concl(benign_define_2) ~is concl(benign_define_1)
+check same_statement(benign_define_2, benign_define_1) ~is #true
 
 // Test benign redefinition of an inductive datatype.
 def benign_inductive_first = hol:
@@ -232,7 +231,7 @@ def benign_inductive_second = hol:
           (exists s_prime :: S: step(s, s_prime) && steps(step, n, s_prime, s_prime2))
             ==> steps(step, n + (1 :: num), s, s_prime2))
 def benign_inductive_2 = IndDefs.new_inductive_definition(benign_inductive_second)
-check map(concl)(PairList [benign_inductive_2[0], benign_inductive_2[1], benign_inductive_2[2]]) ~is map(concl)(PairList [benign_inductive_1[0], benign_inductive_1[1], benign_inductive_1[2]])
+check (for all (i in [0, 1, 2]): same_statement(benign_inductive_2[i], benign_inductive_1[i])) ~is #true
 
 // The THEN-form proofs of the 'er' subgoal-package tests.
 def er_goal_1 = hol:
@@ -245,14 +244,29 @@ def er_goal_2 = hol:
   x + (1 :: num) == (1 :: num) + x
     && x + y + z == x + (y + z)
     && (1 :: num) + (1 :: num) == (2 :: num)
-check concl(Tactics.prove([er_goal_1,
-                           Tactics.THEN(Tactics.THENL(Tactics.CONJ_TAC)(PairList [Tactics.ALL_TAC, Int.ARITH_TAC]))(
-                             Simp.REWRITE_TAC(PairList [Arith.ADD_SYM]))])) ~is er_goal_1
-check concl(Tactics.prove([er_goal_2,
-                           Tactics.THEN(Tactics.THENL(Tactics.CONJ_TAC)(PairList [Tactics.CONJ_TAC, Int.ARITH_TAC]))(
-                             Simp.REWRITE_TAC(PairList [Arith.ADD_AC]))])) ~is er_goal_2
-check concl(Tactics.prove([er_goal_1,
-                           Tactics.THENL(Tactics.CONJ_TAC)(PairList [Int.ARITH_TAC, Int.ARITH_TAC])])) ~is er_goal_1
+check proves(
+  Tactics.prove([
+    er_goal_1,
+    Tactics.THEN(Tactics.THENL(Tactics.CONJ_TAC)(PairList [Tactics.ALL_TAC, Int.ARITH_TAC]))(
+      Simp.REWRITE_TAC(PairList [Arith.ADD_SYM]))
+  ]),
+  er_goal_1
+) ~is #true
+check proves(
+  Tactics.prove([
+    er_goal_2,
+    Tactics.THEN(Tactics.THENL(Tactics.CONJ_TAC)(PairList [Tactics.CONJ_TAC, Int.ARITH_TAC]))(
+      Simp.REWRITE_TAC(PairList [Arith.ADD_AC]))
+  ]),
+  er_goal_2
+) ~is #true
+check proves(
+  Tactics.prove([
+    er_goal_1,
+    Tactics.THENL(Tactics.CONJ_TAC)(PairList [Int.ARITH_TAC, Int.ARITH_TAC])
+  ]),
+  er_goal_1
+) ~is #true
 
 // Test functions in lib.
 fun option_value(o):
@@ -284,6 +298,6 @@ def unify_refl_3 = hol:
   var y :: num
   exists f :: num -> num -> num: y + (1 :: num) == f(y, (0 :: num))
 def unify_refl_tac = Tactics.THEN(Tactics.META_EXISTS_TAC)(Itab.UNIFY_REFL_TAC)
-check concl(Tactics.prove([unify_refl_1, unify_refl_tac])) ~is unify_refl_1
-check concl(Tactics.prove([unify_refl_2, unify_refl_tac])) ~is unify_refl_2
-check concl(Tactics.prove([unify_refl_3, unify_refl_tac])) ~is unify_refl_3
+check proves(Tactics.prove([unify_refl_1, unify_refl_tac]), unify_refl_1) ~is #true
+check proves(Tactics.prove([unify_refl_2, unify_refl_tac]), unify_refl_2) ~is #true
+check proves(Tactics.prove([unify_refl_3, unify_refl_tac]), unify_refl_3) ~is #true

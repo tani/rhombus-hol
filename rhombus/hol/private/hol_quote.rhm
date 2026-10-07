@@ -332,12 +332,28 @@ meta:
     | ["T", n, args]: ["T", n, for List (a in args): final_type(a, ctx)]
     | t: t
 
+  // Parse constructor references once, then compose already parsed expressions.
+  // Re-enforesting every nested constructor/list literal is expensive in the
+  // large theory quotations. The generated code still calls the same public
+  // constructors directly; these are syntax fragments, not runtime helpers.
+  def '$(mk_vartype_ref :: expr_meta.Parsed)' = 'Kernel.mk_vartype'
+  def '$(mk_type_ref :: expr_meta.Parsed)' = 'Kernel.mk_type'
+  def '$(mk_var_ref :: expr_meta.Parsed)' = 'Kernel.mk_var'
+  def '$(mk_mconst_ref :: expr_meta.Parsed)' = 'Basics.mk_mconst'
+  def '$(mk_comb_ref :: expr_meta.Parsed)' = 'Kernel.mk_comb'
+  def '$(mk_abs_ref :: expr_meta.Parsed)' = 'Kernel.mk_abs'
+  def '$(list_ref :: expr_meta.Parsed)' = 'List'
+  def '$(pair_list_ref :: expr_meta.Parsed)' = 'PairList'
+  fun constructor_call(proc, args): expr_meta.pack_s_exp([proc, & args])
+  fun tuple_expression(args): constructor_call(list_ref, args)
+  fun name_expression(name): expr_meta.pack_expr(Syntax.make(name, 'ctx'))
+
   fun type_expression(ty) :: Syntax:
     match ty
-    | ["V", n]: 'Kernel.mk_vartype($(Syntax.make(n, 'ctx')))'
+    | ["V", n]: constructor_call(mk_vartype_ref, [name_expression(n)])
     | ["T", n, args]:
-        let [arg, ...] = for List (a in args): type_expression(a)
-        'Kernel.mk_type([$(Syntax.make(n, 'ctx')), PairList [$arg, ...]])'
+        let arg = for List (a in args): type_expression(a)
+        constructor_call(mk_type_ref, [tuple_expression([name_expression(n), constructor_call(pair_list_ref, arg)])])
   fun variable_expression(n, ty): ["var", n, ty]
   fun constant_expression(n, ty): ["const", n, ty]
   fun application_expression(f, x): ["app", f, x]
@@ -345,10 +361,10 @@ meta:
 
   fun term_expression(node, ctx) :: Syntax:
     match node
-    | ["var", n, ty]: 'Kernel.mk_var([$(Syntax.make(n, 'ctx')), $(type_expression(final_type(ty, ctx)))])'
-    | ["const", n, ty]: 'Basics.mk_mconst([$(Syntax.make(n, 'ctx')), $(type_expression(final_type(ty, ctx)))])'
-    | ["app", f, x]: 'Kernel.mk_comb([$(term_expression(f, ctx)), $(term_expression(x, ctx))])'
-    | ["abs", v, b]: 'Kernel.mk_abs([$(term_expression(v, ctx)), $(term_expression(b, ctx))])'
+    | ["var", n, ty]: constructor_call(mk_var_ref, [tuple_expression([name_expression(n), type_expression(final_type(ty, ctx))])])
+    | ["const", n, ty]: constructor_call(mk_mconst_ref, [tuple_expression([name_expression(n), type_expression(final_type(ty, ctx))])])
+    | ["app", f, x]: constructor_call(mk_comb_ref, [tuple_expression([term_expression(f, ctx), term_expression(x, ctx)])])
+    | ["abs", v, b]: constructor_call(mk_abs_ref, [tuple_expression([term_expression(v, ctx), term_expression(b, ctx)])])
     | ["arithmetic", op, ty, left, right, stx]:
         let t = final_type(ty, ctx)
         let k = match t | ["T", k, []]: k | _: ""

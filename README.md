@@ -88,6 +88,8 @@ identifiers; `const.#{=}` explicitly refers to a declared equality constant,
 and `const.IN` or `var.x` select declarations under a shadowing binder. Only
 unusual declaration names, such as a name containing a newline, need `as`.
 Every constructed constant is checked against the runtime kernel declaration.
+Generated constructor calls are composed as parsed syntax, so nested quotations
+do not repeatedly pass through Rhombus expression parsing.
 Private type-inference algorithms support Metis
 reconstruction, and a small Rhombus-native type-description frontend supports
 inductive declarations. General parsing, elaboration, notation, quotation,

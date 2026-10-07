@@ -552,8 +552,17 @@ def replace_all(src):
         bare = (before.rstrip().endswith('(') and src[a1:a1 + 1] == ')') \
             or (re.match(r'^\s*(def|let)\s+[\w\[\], ]+\s*=\s*$', before) and after_line.strip() == '')
         lines = convert(node)
+        # a quote of a single variable or constant, whose body is just the
+        # declared name, goes on one line: `hol: var x :: A; x`; it is never
+        # longer than the hol_term(Var(...)) call it replaces
+        one = 'hol: ' + lines[1][2:] + '; ' + lines[2][2:] if len(lines) == 3 \
+            and lines[1].startswith(('  var ', '  const ')) \
+            and lines[1].split()[1] == lines[2].strip() else None
+        if one and not bare: one = '(' + one + ')'
         if lines[0].startswith('hol_type:'):
             text = lines[0] if bare else '(' + lines[0] + ')'
+        elif one:
+            text = one
         elif bare:
             # inside the enclosing parentheses, or as a whole definition
             # right-hand side: indent from the paren or the line start

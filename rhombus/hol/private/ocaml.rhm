@@ -23,6 +23,38 @@ export:
   polymorphic_lt
   polymorphic_le
   ocaml_hash
+  hol_max
+  hol_min
+  hol_ignore
+  hol_int_of_string
+  hol_int_of_float
+  hol_float
+  hol_int_of_num
+  hol_char_code
+  hol_char_chr
+  hol_string_sub
+  hol_string_make
+  quo_num
+  mod_num
+  power_num
+  minus_num
+  abs_num
+  gcd_num
+  numdom
+  max_int
+  floor
+  log
+  hol_printf
+  hol_fprintf
+  hol_lazy
+  hol_force
+  hol_array_fold_left
+  hol_array_map
+  hol_string_concat
+  hol_string_escaped
+  Hashtbl
+  OCamlList
+  HolLazy
   ocaml_random_bits
   ocaml_random_int
   ocaml_random_init
@@ -194,3 +226,332 @@ fun ocaml_random_init(seed):
     let n=Rkt.#{bytes-ref}(d,0)+(Rkt.#{bytes-ref}(d,1) bits.(<<) 8)+(Rkt.#{bytes-ref}(d,2) bits.(<<) 16)+(Rkt.#{bytes-ref}(d,3) bits.(<<) 24)
     state[j] := (state[j] bits.xor n) bits.and 0x3fffffff
   index.value := 0
+
+// Stdlib values and functions used by the translated sources.
+fun hol_max(x): fun(y): if x>y | x | y
+fun hol_min(x): fun(y): if x<y | x | y
+fun hol_ignore(_): #void
+fun hol_int_of_string(s):
+  let n = s.to_int()
+  if n | n | failwith("int_of_string")
+fun hol_int_of_float(n): math.truncate(n)
+fun hol_float(n): Rkt.#{exact->inexact}(n)
+fun hol_int_of_num(n): if n==math.truncate(n) | n | failwith("int_of_num")
+fun hol_char_code(s): Char.to_int(s[0])
+fun hol_char_chr(n):
+  if n<0 || n>255 | (throw InvalidArgument("Char.chr")) | Rkt.string(Rkt.#{integer->char}(n))
+fun hol_string_sub(s): fun(i): fun(n): Rkt.substring(s,i,i+n)
+fun hol_string_make(n): fun(c): Rkt.#{make-string}(n,Rkt.#{string-ref}(c,0))
+fun quo_num(x): fun(y): math.truncate(x/y)
+fun mod_num(x): fun(y): x-y*math.truncate(x/y)
+fun power_num(x): fun(y): x ** y
+fun minus_num(x): -x
+fun abs_num(x): math.abs(x)
+fun gcd_num(x): fun(y): Rkt.gcd(x,y)
+fun numdom(x): [Rkt.numerator(x), Rkt.denominator(x)]
+def max_int = 4611686018427387903
+fun floor(x): Rkt.#{exact->inexact}(math.floor(x))
+fun log(x): Rkt.log(x)
+fun hol_printf(fmt):
+  fun emit(i,acc):
+    if i>=fmt.length()
+    | print(acc)
+    | let c=to_string(fmt[i])
+      cond
+      | c!="%": emit(i+1,acc +& c)
+      | i+1>=fmt.length(): print(acc +& "%")
+      | ~else:
+          let code=to_string(fmt[i+1])
+          cond
+          | code=="%": emit(i+2,acc +& "%")
+          | code=="!": emit(i+2,acc)
+          | code=="a": (fun(_p): fun(v): emit(i+2,acc +& to_string(v)))
+          | ~else: (fun(v): emit(i+2,acc +& to_string(v)))
+  emit(0,"")
+fun hol_fprintf(_formatter): hol_printf
+class HolLazy(thunk,state)
+fun hol_lazy(thunk): HolLazy(thunk,Box(None()))
+fun hol_force(p):
+  match p.state.value
+  | Some([#true, v]): v
+  | Some([#false, e]): (throw e)
+  | None():
+      try:
+        let v=p.thunk()
+        p.state.value:=Some([#true, v])
+        v
+        ~catch e:
+          p.state.value:=Some([#false, e])
+          (throw e)
+fun hol_array_fold_left(f):
+  fun(start):
+    fun(a):
+      fun fold(i,acc):
+        if i==a.length() | acc | fold(i+1,f(acc)(a[i]))
+      fold(0,start)
+fun hol_array_map(f):
+  fun(a):
+    let out=Array.make(a.length(),#void)
+    for (i in 0 .. a.length()):
+      out[i] := f(a[i])
+    out
+fun hol_string_concat(sep):
+  fun(l):
+    match l
+    | PairList []: ""
+    | PairList [h,&t]:
+        for values(acc = h) (x in (t :: PairList)): acc +& sep +& x
+fun hol_string_escaped(s :: String):
+  fun escape(c):
+    match c
+    | "\\": "\\\\"
+    | "\"": "\\\""
+    | "\n": "\\n"
+    | "\t": "\\t"
+    | "\r": "\\r"
+    | "\b": "\\b"
+    | _:
+        let n=hol_char_code(c)
+        if n<32 || n>126
+        | "\\" +& (if n<100 | "0" | "") +& (if n<10 | "0" | "") +& to_string(n)
+        | c
+  for values(acc = "") (i in 0..s.length()): acc +& escape(s.substring(i,i+1))
+
+// Hashtbl: bindings of one key are stacked, newest first. Each binding
+// carries a sequence number; fold visits bindings newest first.
+class HolHashTable(bindings, counter)
+namespace Hashtbl:
+  export:
+    create
+    find
+    add
+    remove
+    fold
+    clear
+    replace
+  fun create(_): HolHashTable(MutableMap(), Box(0))
+  fun clear(t):
+    for (k in t.bindings.keys().to_list()): t.bindings.remove(k)
+  fun stack(t, k): t.bindings.get(k, PairList [])
+  fun find(t):
+    fun(k):
+      match stack(t, k)
+      | PairList [[_, v], & _]: v
+      | _: (throw Not_found())
+  fun add(t):
+    fun(k):
+      fun(v):
+        t.counter.value := t.counter.value + 1
+        t.bindings[k] := PairList.cons([t.counter.value, v], stack(t, k))
+  fun replace(t):
+    fun(k):
+      fun(v):
+        match stack(t, k)
+        | PairList [[n, _], & rest]: t.bindings[k] := PairList.cons([n, v], rest)
+        | _: add(t)(k)(v)
+  fun remove(t):
+    fun(k):
+      match stack(t, k)
+      | PairList [_, & rest]:
+          if rest == PairList [] | t.bindings.remove(k) | (t.bindings[k] := rest)
+      | _: #void
+  fun fold(f):
+    fun(t):
+      fun(start):
+        let all:
+          for List ((k, st) in t.bindings):
+            each [n, v] in (st :: PairList)
+            [n, k, v]
+        let newest_first = all.sort(fun(a, b): a[0] > b[0])
+        for values(acc = start) ([_, k, v] in newest_first): f(k)(v)(acc)
+
+// List, with OCaml's argument order and exceptions.
+namespace OCamlList:
+  export:
+    map
+    concat
+    exists
+    filter
+    find
+    fold_left
+    fold_right
+    for_all
+    hd
+    iter
+    mem
+    mem_assoc
+    nth
+    partition
+    rev_append
+    sort
+    map2
+    for_all2
+    fold_left2
+    fold_right2
+    mapi
+    rev_map
+    assoc
+    concat_map
+    filter_map
+  fun map(f):
+    fun(l):
+      match l
+      | PairList []: PairList []
+      | PairList [h,&t]:
+          let v=f(h)
+          PairList.cons(v,map(f)(t))
+  fun concat(l):
+    match l
+    | PairList []: PairList []
+    | PairList [h,&t]:
+        let rest=concat(t)
+        append(h)(rest)
+  fun exists(p):
+    fun(l):
+      match l
+      | PairList []: #false
+      | PairList [h,&t]: p(h) || exists(p)(t)
+  fun filter(p):
+    fun(l):
+      match l
+      | PairList []: PairList []
+      | PairList [h,&t]:
+          let keep=p(h)
+          let rest=filter(p)(t)
+          if keep | PairList.cons(h,rest) | rest
+  fun find(p):
+    fun(l):
+      match l
+      | PairList []: (throw Not_found())
+      | PairList [h,&t]: (if p(h) | h | find(p)(t))
+  fun fold_left(f):
+    fun(a):
+      fun(l):
+        match l
+        | PairList []: a
+        | PairList [h,&t]: fold_left(f)(f(a)(h))(t)
+  fun fold_right(f):
+    fun(l):
+      fun(a):
+        match l
+        | PairList []: a
+        | PairList [h,&t]:
+            let rest=fold_right(f)(t)(a)
+            f(h)(rest)
+  fun for_all(p):
+    fun(l):
+      match l
+      | PairList []: #true
+      | PairList [h,&t]: p(h) && for_all(p)(t)
+  fun hd(l):
+    match l
+    | PairList [h,&_]: h
+    | _: failwith("hd")
+  fun tl(l):
+    match l
+    | PairList [_,&t]: t
+    | _: failwith("tl")
+  fun iter(f):
+    fun(l):
+      match l
+      | PairList []: #void
+      | PairList [h,&t]:
+          f(h)
+          iter(f)(t)
+  fun mem(x):
+    fun(l):
+      match l
+      | PairList []: #false
+      | PairList [h,&t]: x == h || mem(x)(t)
+  fun mem_assoc(x): fun(l): exists(fun([y, _]): x==y)(l)
+  // List.nth as translated: the failures are those of hd and tl.
+  fun nth(l): fun(n): if n == 0 | hd(l) | nth(tl(l))(n-1)
+  fun partition(p):
+    fun(l):
+      match l
+      | PairList []: [PairList [], PairList []]
+      | PairList [h,&t]:
+          let keep=p(h)
+          let [yes, no]=partition(p)(t)
+          if keep | [PairList.cons(h,yes), no] | [yes, PairList.cons(h,no)]
+  fun rev_append(l1): fun(l2): append(PairList.reverse(l1))(l2)
+  // Stable merge sort (lib.ml's mergesort with cmp x y <= 0).
+  fun merge(ord):
+    fun(l1):
+      fun(l2):
+        match l1
+        | PairList []: l2
+        | PairList [h1, & t1]:
+            match l2
+            | PairList []: l1
+            | PairList [h2, & t2]: (if ord(h1)(h2) | PairList [h1, & merge(ord)(t1)(l2)] | PairList [h2, & merge(ord)(l1)(t2)])
+  fun sort(cmp):
+    fun(l):
+      let ord = fun(x): fun(y): cmp(x)(y) <= 0
+      fun mergepairs(l1):
+        fun(l2):
+          match [l1, l2]
+          | [PairList [s, & PairList []], PairList []]: s
+          | [l, PairList []]: mergepairs(PairList [])(l)
+          | [l, PairList [s1, & PairList []]]: mergepairs(PairList [s1, & l])(PairList [])
+          | [l, PairList [s1, & PairList [s2, & ss]]]: mergepairs(PairList [merge(ord)(s1)(s2), & l])(ss)
+      if l == PairList [] | PairList [] | mergepairs(PairList [])(map(fun(x): PairList [x])(l))
+  fun map2(f):
+    fun(l1):
+      fun(l2):
+        match [l1, l2]
+        | [PairList [], PairList []]: PairList []
+        | [PairList [x,&xs], PairList [y,&ys]]:
+            let z=f(x)(y)
+            PairList.cons(z,map2(f)(xs)(ys))
+        | _: (throw InvalidArgument("List.map2"))
+  fun assoc(x):
+    fun(l):
+      match l
+      | PairList []: (throw Not_found())
+      | PairList [[y, v],&t]: (if x==y | v | assoc(x)(t))
+  fun concat_map(f): fun(l): concat(map(f)(l))
+  fun filter_map(f):
+    fun(l):
+      match l
+      | PairList []: PairList []
+      | PairList [h,&t]:
+          let v=f(h)
+          match v
+          | None(): filter_map(f)(t)
+          | Some(x): PairList.cons(x,filter_map(f)(t))
+  fun fold_left2(f):
+    fun(a):
+      fun(l1):
+        fun(l2):
+          match [l1, l2]
+          | [PairList [], PairList []]: a
+          | [PairList [x,&xs], PairList [y,&ys]]: fold_left2(f)(f(a)(x)(y))(xs)(ys)
+          | _: (throw InvalidArgument("List.fold_left2"))
+  fun fold_right2(f):
+    fun(l1):
+      fun(l2):
+        fun(a):
+          match [l1, l2]
+          | [PairList [], PairList []]: a
+          | [PairList [x,&xs], PairList [y,&ys]]: f(x)(y)(fold_right2(f)(xs)(ys)(a))
+          | _: (throw InvalidArgument("List.fold_right2"))
+  fun mapi(f):
+    fun(l):
+      fun go(i,rest):
+        match rest
+        | PairList []: PairList []
+        | PairList [h,&t]:
+            let v=f(i)(h)
+            PairList.cons(v,go(i+1,t))
+      go(0,l)
+  fun rev_map(f):
+    fun(l):
+      for values(acc = PairList []) (x in (l :: PairList)): PairList.cons(f(x),acc)
+  fun for_all2(p):
+    fun(l1):
+      fun(l2):
+        match [l1, l2]
+        | [PairList [], PairList []]: #true
+        | [PairList [x,&xs], PairList [y,&ys]]: p(x)(y) && for_all2(p)(xs)(ys)
+        | _: (throw InvalidArgument("List.for_all2"))

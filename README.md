@@ -27,7 +27,8 @@ rhombus/hol/
   private/
     ocaml.rhm             OCaml runtime: exceptions, polymorphic compare,
                           Hashtbl.hash, Random
-    theory_support.rhm    remaining OCaml stdlib support
+    theory_support.rhm    parser.ml/printer.ml pieces: pattern combinators,
+                          interface state, diagnostic printing
     data_types.rhm        options and variant comparison view
     type_inference.rhm, type_specification.rhm, quoted_ast.rhm
     declarations.rhm, proof_syntax.rhm, variant_base.rhm

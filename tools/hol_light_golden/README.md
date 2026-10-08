@@ -14,6 +14,7 @@ Requirements: a HOL Light checkout at the pinned revision built with `make`
 | `generate.sh` | Writes `rhombus/hol/tests/golden/hol_light.tsv.gz`. |
 | `quote.ml` | Prints a term as `hol_term(...)` constructor syntax, the input of `to_hol.py`. |
 | `to_hol.py` | Rewrites `hol_term(...)` calls in place into Rhombus `hol:` quotations. |
+| `compare_quote_dumps.py` | Compares two `HOL_QUOTE_DUMP=1` compile logs: every `hol:` site must elaborate to the same term before and after a rewrite. |
 | `capture.ml` | Records the quotations an upstream file parses, in order. |
 | `basic_tests_terms.ml` | Expands the quotations of `UnitTests/basic_tests.ml`. |
 

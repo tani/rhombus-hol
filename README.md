@@ -64,9 +64,11 @@ HOL Light's text parser and printer are not the frontend. Literal theory
 quotations are written in the Rhombus-native `hol:` quotation, whose macros
 elaborate them at compile time into public term/type constructors; runtime
 modules replay the original proofs. For example, HOL Light's
-`` `!x:A. x = x` `` is `hol: forall x :: A: x == x`, and a name used at several
-types or shadowed by a binder is declared with an alias, as in
-`hol: const IN_num as IN :: num -> (num -> bool) -> bool; ...`. Private type-inference algorithms support Metis
+`` `!x:A. x = x` `` is `hol: forall x :: A: x == x`. A HOL name that is not a
+Rhombus identifier is an escaped identifier (`#{+}`, `#{|x'|}`); a constant used
+at a second type is written `(IN :: num -> (num -> bool) -> bool)`; and a
+declaration hidden by a binder or by an operator of the same spelling is
+selected with `var.x` / `const.#{+}`. Private type-inference algorithms support Metis
 reconstruction, and a small Rhombus-native type-description frontend supports
 inductive declarations. General parsing, elaboration, notation, quotation,
 and presentation belong to the Rhombus syntax and macro frontend.
@@ -79,10 +81,10 @@ sources with every constant type and every variable name explicit. `hol:`
 therefore performs no inference at compile time: it checks the declared types
 and builds kernel constructors. This keeps the compile step cheap (about
 4 minutes for all theories, against about 12 when the macro inferred types) and
-keeps the quoted terms identical to HOL Light's. Names that are not Rhombus
-identifiers (`x'`, `<<`, `PAIR'`) are written with an `as` alias, and a
-constant used at a different type than its first declaration gets its own
-alias; neither is renamed by hand or by a mechanical rewrite.
+keeps the quoted terms identical to HOL Light's. Names are never renamed:
+those that are not Rhombus identifiers (`x'`, `<<`, `PAIR'`) are escaped
+identifiers, and a constant used at a different type than its declaration is
+written with that type at the use.
 
 A change to the quotation layer is accepted only when `theories` still passes:
 it replays every proof and compares each theorem, constant and definition

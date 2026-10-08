@@ -11,10 +11,10 @@
 // typed quoted AST that expand_quote turns into a kernel term with the
 // public constructors; no theorem is produced.
 //
-// Extension: `var x2 as x :: A` / `const c as "c'" :: A` (and the same in
-// binders) give a quotation-local name to a HOL name, so one quotation
-// can mention a HOL name at several types or from under a binder that
-// shadows it.
+// A HOL name that is not a Rhombus identifier is an escaped identifier
+// (`#{+}`, `#{|x'|}`). A constant used at a type other than its declaration
+// is written `(NAME :: type)`; a variable by `(var.x :: type)`. `var.x` /
+// `const.x` select a declaration beneath a binder of the same name.
 import:
   "ocaml.rhm" open
   "../fusion.rhm" as Kernel
@@ -29,6 +29,7 @@ import:
     lib("racket/base.rkt") as Rkt:
       only:
         #{exact-nonnegative-integer?}
+        #{getenv}
 // ---------------------------------------------------------------------
 // Run time: typed quoted AST (JSON) to kernel terms and types.
 
@@ -137,13 +138,22 @@ hol_term_space.term_macro '$left #%call ($(arg :: hol_term_meta.Parsed), ...)':
   ~stronger_than: ~other
   ~associativity: ~left
   hol_term_meta.pack('["app", $left, [$arg, ...]]')
+hol_term_space.term_macro 'const . $(id :: Identifier)':
+  hol_term_meta.pack('["declared", "const", $id]')
+hol_term_space.term_macro 'var . $(id :: Identifier)':
+  hol_term_meta.pack('["declared", "var", $id]')
 hol_term_space.term_macro
+| '#%parens (var . $(id :: Identifier) :: $ty ...)':
+    let '$(t :: hol_type_meta.Parsed)' = '$ty ...'
+    hol_term_meta.pack('["typed_var", $id, $t]')
 | '#%parens ($(lit :: Term) :: $ty ...)':
     ~all_stx: stx
-    unless Rkt.#{exact-nonnegative-integer?}(lit.unwrap())
-    | syntax_meta.error("only a non-negative integer literal takes a `::` type", stx)
     let '$(t :: hol_type_meta.Parsed)' = '$ty ...'
-    hol_term_meta.pack('["numeral", $lit, $t]')
+    if Rkt.#{exact-nonnegative-integer?}(lit.unwrap())
+    | hol_term_meta.pack('["numeral", $lit, $t]')
+    | unless lit.unwrap() is_a Symbol
+      | syntax_meta.error("expected a numeral or a constant name before `::`", stx)
+      hol_term_meta.pack('["typed_const", $lit, $t]')
 | '#%parens (- $(lit :: Term) :: $_ ...)':
     ~all_stx: stx
     syntax_meta.error("negative numerals have no literal form; negate a typed numeral instead", stx)
@@ -207,23 +217,11 @@ hol_term_space.term_macro '$left >= $right':
   hol_term_meta.pack('["op2", ">=", $left, $right]')
 
 meta:
-  // A binder or declaration head: `x`, `x as y` or `x as "y'"`.
-  fun binding_head(id, name_terms, stx) :: Syntax:
-    match name_terms
-    | []: '[$id, #false]'
-    | ['as', n]:
-        unless n.unwrap() is_a Symbol || n.unwrap() is_a String
-        | syntax_meta.error("expected a HOL name after `as`", stx)
-        '[$id, $n]'
-    | _: syntax_meta.error("bad binding", stx)
   fun parse_binding(g :: Syntax) :: Syntax:
     match g
-    | '$(id :: Identifier) as $(n :: Term) :: $ty ...':
-        let '$(t :: hol_type_meta.Parsed)' = '$ty ...'
-        '[$(binding_head(id, ['as', n], g)), $t]'
     | '$(id :: Identifier) :: $ty ...':
         let '$(t :: hol_type_meta.Parsed)' = '$ty ...'
-        '[[$id, #false], $t]'
+        '[$id, $t]'
     | _: syntax_meta.error("expected `name :: type` in a binder", g)
 
 hol_term_space.term_macro
@@ -310,10 +308,7 @@ meta:
   fun json_abs(v, b): "[\"Abs\"," ++ v ++ "," ++ b ++ "]"
 
   // Environment entries: [kind, hol_name, type] keyed by surface symbol.
-  fun hol_name(id :: Syntax, alias) :: String:
-    match alias
-    | #false: to_string(id.unwrap())
-    | n: to_string(n.unwrap())
+  fun hol_name(id :: Syntax) :: String: to_string(id.unwrap())
 
   fun expect(ty, want, stx, what):
     unless ty == want
@@ -345,6 +340,17 @@ meta:
         | [kind, name, ty]:
             [if kind == "var" | json_var(name, ty) | json_const(name, ty), ty]
         | _: syntax_meta.error("unbound HOL name; declare it with `var` or `const`", id)
+    | '["declared", $kind, $id]':
+        match env.get([kind.unwrap(), id.unwrap()], #false)
+        | [k, name, ty]:
+            [if k == "var" | json_var(name, ty) | json_const(name, ty), ty]
+        | _: syntax_meta.error("undeclared qualified HOL name", id)
+    | '["typed_var", $name, $t]':
+        let ty = elab_type(t)
+        [json_var(to_string(name.unwrap()), ty), ty]
+    | '["typed_const", $name, $t]':
+        let ty = elab_type(t)
+        [json_const(to_string(name.unwrap()), ty), ty]
     | '["truth", $v]':
         [json_const(if v.unwrap() | "T" | "F", bool_ty), bool_ty]
     | '["numeral", $lit, $t]':
@@ -400,11 +406,11 @@ meta:
             | name:
                 let res = if o == "<" || o == "<=" || o == ">" || o == ">=" | bool_ty | lty
                 binop(name, lty, res)
-    | '["binder", $kind, [[[$id, $alias], $t], ...], $body]':
+    | '["binder", $kind, [[$id, $t], ...], $body]':
         let k = kind.unwrap()
         let vars:
-          for List (i in [id, ...], a in [alias, ...], ty in [t, ...]):
-            [i, hol_name(i, if a.unwrap() | a | #false), elab_type(ty)]
+          for List (i in [id, ...], ty in [t, ...]):
+            [i, hol_name(i), elab_type(ty)]
         let body_env:
           for values(e :~ Map = env) ([i, name, ty] in vars):
             e ++ { i.unwrap(): ["var", name, ty] }
@@ -429,14 +435,14 @@ meta:
         [json_comb(json_comb(json_comb(json_const("COND", cond_ty), cj), tj), ej), tty]
 
   fun parse_declaration(g :: Syntax) :~ maybe(List):
-    fun decl(kind, id, alias, ty):
+    fun decl(kind, id, ty):
       let '$(t :: hol_type_meta.Parsed)' = ty
-      [kind, id, alias, elab_type(t)]
+      [kind, id, elab_type(t)]
     match g
-    | 'var $(id :: Identifier) as $(n :: Term) :: $ty ...': decl("var", id, n, '$ty ...')
-    | 'var $(id :: Identifier) :: $ty ...': decl("var", id, #false, '$ty ...')
-    | 'const $(id :: Identifier) as $(n :: Term) :: $ty ...': decl("const", id, n, '$ty ...')
-    | 'const $(id :: Identifier) :: $ty ...': decl("const", id, #false, '$ty ...')
+    | 'var $(id :: Identifier) :: $ty ...': decl("var", id, '$ty ...')
+    | 'const $(id :: Identifier) :: $ty ...': decl("const", id, '$ty ...')
+    | 'var . $_ ...': #false
+    | 'const . $_ ...': #false
     | 'var $_ ...': syntax_meta.error("expected `var name :: type`", g)
     | 'const $_ ...': syntax_meta.error("expected `const name :: type`", g)
     | _: #false
@@ -455,12 +461,16 @@ expr.macro 'hol: $(g :: Group); ...':
   when parse_declaration(body)
   | syntax_meta.error("a hol: block needs a body expression after its declarations", stx)
   let env:
-    for values(e :~ Map = {}) ([kind, id, alias, ty] in decls):
+    for values(e :~ Map = {}) ([kind, id, ty] in decls):
       when e.has_key(id.unwrap())
       | syntax_meta.error("duplicate declaration", id)
-      e ++ { id.unwrap(): [kind, hol_name(id, alias), ty] }
+      let entry = [kind, hol_name(id), ty]
+      e ++ { id.unwrap(): entry, [kind, id.unwrap()]: entry }
   let '$(parsed :: hol_term_meta.Parsed)' = body
   let [j, _] = elab(parsed, env)
+  // Migration aid: HOL_QUOTE_DUMP=1 prints every expansion for comparison.
+  when Rkt.#{getenv}("HOL_QUOTE_DUMP")
+  | println("HOLDUMP\t" ++ to_string(stx.srcloc()) ++ "\t" ++ j)
   'expand_quote($(Syntax.make(j, 'ctx')))'
 
 // `hol_type:` quotation of a type.
@@ -477,7 +487,7 @@ export:
   // Forms and operators inside `hol:` and type positions.
   only_space hol_term_space:
     && || ==> <=> == != ! + - * / < <= > >=
-    forall exists exists1 fun if
+    forall exists exists1 fun if const var
     names:
       #%literal #%parens #%call
   only_space hol_type_space:

@@ -9,9 +9,11 @@ quotation of rhombus/hol/private/hol_quote.rhm, in place:
     python3 tools/hol_light_golden/to_hol.py FILE.rhm ...
 
 Operators, binders, if and typed numerals are recovered from the constants
-they stand for; the remaining names are declared with var/const, using
-`as` where a HOL name is not an identifier, occurs at several types, or is
-shadowed by a binder. The elaborated hol: form denotes the same term.
+they stand for; the remaining names are declared with var/const. A HOL name
+that is not an identifier is an escaped identifier (`#{+}`, `#{|x'|}`); a
+constant at a second type is written `(NAME :: type)`; a name that a binder
+or an operator of the same spelling would hide is `const.NAME` / `var.NAME`.
+No name is invented, so the elaborated hol: form is the same term.
 """
 import re, sys
 
@@ -153,28 +155,18 @@ def find_calls(src, name='hol_term('):
         i=a1
 
 IDENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
-RESERVED = {'var', 'const', 'forall', 'exists', 'exists1', 'fun', 'if', 'as', 'hol', 'hol_type', '_'}
-SYMBOL_NAMES = {
-    '!': 'forall_c', '?': 'exists_c', '?!': 'exists1_c', '+': 'plus', '-': 'minus', '*': 'times',
-    '<': 'lt', '<=': 'le', '>': 'gt', '>=': 'ge', '/\\': 'conj', '\\/': 'disj', '==>': 'imp',
-    '=': 'eq', '~': 'neg', ',': 'comma', '$': 'dollar', '..': 'dotdot', '@': 'select',
-    '<=_c': 'le_c', '<_c': 'lt_c', '=_c': 'eq_c', '>=_c': 'ge_c', '>_c': 'gt_c', '==': 'eqeq',
-    '<<': 'll', '<<<': 'lll', '<<=': 'lle', '_': 'underscore',
-}
+RESERVED = {'var', 'const', 'forall', 'exists', 'exists1', 'fun', 'if', 'hol', 'hol_type', '_'}
+# Names that are also operators or forms of the hol: term space; a reference
+# to the constant or variable of that name is qualified (`const.#{+}`).
+OPS = {'&&', '||', '==>', '<=>', '==', '!=', '!', '+', '-', '*', '/', '<', '<=', '>', '>=',
+       'forall', 'exists', 'exists1', 'fun', 'if', 'const', 'var'}
+PLAIN = re.compile(r"^[A-Za-z0-9_<>=+*/\-.?!@~^&:$]+$")
 
-def valid_ident(n):
-    return bool(IDENT.match(n)) and n not in RESERVED
-
-def sanitize(n):
-    if n in SYMBOL_NAMES: return SYMBOL_NAMES[n]
-    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)('+)$", n)
-    if m:
-        k = len(m.group(2))
-        return m.group(1) + '_prime' + ('' if k == 1 else str(k))
-    s = re.sub(r'[^A-Za-z0-9_]+', '_', n).strip('_').lower()
-    if not s or not re.match(r'[A-Za-z_]', s): s = 'v_' + s
-    if s in RESERVED: s = s + '_'
-    return s
+def esc(n):
+    """A HOL name as a Rhombus identifier (escaped when it is not one)."""
+    if IDENT.match(n) and n not in RESERVED: return n
+    if PLAIN.match(n) and n not in RESERVED: return '#{' + n + '}'
+    return '#{|' + n + '|}'
 
 def str_lit(s):
     return '"' + s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n') + '"'
@@ -315,8 +307,15 @@ def free_refs(n):
         return free_refs(n[3]) - {('b', b[0]) for b in n[2]}
 
 def assign_names(root):
-    """Name global entities and binders; returns (names, decls)."""
-    names = {}; decls = []; used = set()
+    """Name global entities and binders; returns (names, decls, bnames).
+
+    names maps an entity to the text of a reference to it, bnames a binder
+    to its surface name, decls lists the declarations `(kind, name, type)`.
+    A HOL name is never renamed: a second constant of the same name at
+    another type is written `(NAME :: type)`, and a variable that a binder of
+    the same name would capture is written `var.NAME` or `(var.NAME :: type)`.
+    """
+    names = {}; decls = []; bnames = {}
     order = []
     def collect(n):
         k = n[0]
@@ -329,14 +328,19 @@ def assign_names(root):
         elif k == 'if': collect(n[1]); collect(n[2]); collect(n[3])
         elif k == 'binder': collect(n[3])
     collect(root)
+    primary = {}
     for ent in sorted(order, key=lambda e: 0 if e[0] == 'var' else 1):
         kind, hn, ty_ = ent
-        base = hn if valid_ident(hn) else sanitize(hn)
-        s = base; i = 2
-        while s in used:
-            s = f'{base}_{i}'; i += 1
-        used.add(s); names[ent] = s
-        decls.append((kind, s, hn, ty_))
+        taken = {k for k in ('var', 'const') if (k, hn) in primary}
+        if not taken:
+            primary[(kind, hn)] = ent
+            decls.append((kind, esc(hn), ty_))
+            names[ent] = (kind + '.' if hn in OPS else '') + esc(hn)
+        elif kind == 'const':
+            names[ent] = f'({esc(hn)} :: {show_type(ty_)})'
+        else:
+            names[ent] = f'(var.{esc(hn)} :: {show_type(ty_)})'
+    binders = {}
     def walk(n):
         k = n[0]
         if k == 'app': walk(n[1]); [walk(a) for a in n[2]]
@@ -348,17 +352,29 @@ def assign_names(root):
             body_free = free_refs(n[3])
             for i, b in enumerate(binds):
                 bid, hn, ty_ = b[0], b[1], b[2]
+                binders[('b', bid)] = (hn, ty_)
+                bnames[bid] = esc(hn)
                 later = {('b', x[0]) for x in binds[i + 1:]}
                 visible = body_free - later - {('b', bid)}
-                taken = {names[e] for e in visible if e in names}
-                base = hn if valid_ident(hn) else sanitize(hn)
-                s = base; j = 2
-                while s in taken:
-                    s = f'{base}_{j}'; j += 1
-                names[('b', bid)] = s
+                for e in visible:
+                    # an outer entity of the same surface name is captured
+                    if e[0] == 'b':
+                        ehn = binders[e][0]
+                        if esc(ehn) == esc(hn): captured.add(e)
+                    elif e in names and names[e] == esc(e[1]) and esc(e[1]) == esc(hn):
+                        captured.add(e)
             walk(n[3])
+    captured = set()
     walk(root)
-    return names, decls
+    for e in captured:
+        if e[0] == 'b':
+            hn, ty_ = binders[e]
+            names[e] = f'(var.{esc(hn)} :: {show_type(ty_)})'
+        else:
+            names[e] = e[0] + '.' + esc(e[1])
+    for e, (hn, ty_) in binders.items():
+        names.setdefault(e, esc(hn))
+    return names, decls, bnames
 
 # ---------------------------------------------------------------- printing
 CLASS = {'*': 'mul', '/': 'mul', '+': 'add', '-': 'add', '<': 'cmp', '<=': 'cmp', '>': 'cmp', '>=': 'cmp',
@@ -394,14 +410,13 @@ def needs_parens_operand(child, parent_cls, side):
 
 WIDTH = 96
 NAMES = {}
+BNAMES = {}
 
 def binder_head(n):
     kind, binds = n[1], n[2]
     def one(b):
         bid, hol, ty = b
-        s = NAMES[('b', bid)]
-        a = '' if s == hol else ' as ' + (hol if valid_ident(hol) else str_lit(hol))
-        return f'{s}{a} :: {show_type(ty)}'
+        return f'{BNAMES[bid]} :: {show_type(ty)}'
     if kind == 'fun' or len(binds) > 1:
         return f'{kind} (' + ', '.join(one(b) for b in binds) + '):'
     return f'{kind} {one(binds[0])}:'
@@ -518,14 +533,13 @@ def convert(node):
     """node: parsed hol_term argument. Returns list of lines of a `hol:` or `hol_type:` form."""
     if node[0] in ('Tvar', 'Fun', 'Bool', 'Num', 'Real', 'Int', 'Tyapp', 'Tyvar'):
         return ['hol_type: ' + show_type(ty(node))]
-    global NAMES
+    global NAMES, BNAMES
     t = term(node)
     body = Converter().surface(t, [])
-    NAMES, decls = assign_names(body)
+    NAMES, decls, BNAMES = assign_names(body)
     lines = ['hol:']
-    for kind, s, n, tyv in decls:
-        a = '' if s == n else ' as ' + (n if valid_ident(n) else str_lit(n))
-        lines.append(f'  {kind} {s}{a} :: {show_type(tyv)}')
+    for kind, s, tyv in decls:
+        lines.append(f'  {kind} {s} :: {show_type(tyv)}')
     lines += ['  ' + l for l in fmt(body, 2)]
     return lines
 
@@ -557,7 +571,7 @@ def replace_all(src):
         # longer than the hol_term(Var(...)) call it replaces
         one = 'hol: ' + lines[1][2:] + '; ' + lines[2][2:] if len(lines) == 3 \
             and lines[1].startswith(('  var ', '  const ')) \
-            and lines[1].split()[1] == lines[2].strip() else None
+            and lines[2].strip() in (lines[1].split()[1], lines[1].split()[0] + '.' + lines[1].split()[1]) else None
         if one and not bare: one = '(' + one + ')'
         if lines[0].startswith('hol_type:'):
             text = lines[0] if bare else '(' + lines[0] + ')'

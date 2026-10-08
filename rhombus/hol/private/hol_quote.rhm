@@ -7,9 +7,11 @@
 // native order and associativity), then elaborated at expansion time:
 // names resolve to declarations or the innermost binder, and every
 // application, operator and branch is checked against fully declared
-// types. There is no unification, inference or coercion. The result is a
-// call of the public kernel constructors (mk_var, mk_mconst, mk_comb,
-// mk_abs, mk_type, mk_vartype); no theorem is produced.
+// types. There is no unification, inference or coercion. The elaborated term
+// is embedded as constant data, which build_term turns into a kernel term with
+// the public constructors (mk_var, mk_mconst, mk_comb, mk_abs, mk_type,
+// mk_vartype); no theorem is produced. Constant data costs the compiler
+// nothing per node, unlike generated constructor calls.
 //
 // A HOL name that is not a Rhombus identifier is an escaped identifier
 // (`#{+}`, `#{|x'|}`); an infix operator name on its own (`#{+}(m, n)`) is that
@@ -23,11 +25,30 @@ import:
   "ocaml.rhm" open
   "../fusion.rhm" as Kernel
   "../basics.rhm" as Basics
+  lib("racket/base.rkt"):
+    expose: quote
   meta:
     lib("racket/base.rkt") as Rkt:
       only:
         #{exact-nonnegative-integer?}
+        #{datum->syntax}
         #{getenv}
+// ---------------------------------------------------------------------
+// Run time: a quoted term's constant data to a kernel term. The data is
+// ["V", name] / ["T", name, args] for types and ["v", name, type],
+// ["c", name, type], ["a", f, x], ["l", v, body] for terms.
+
+fun build_type(d):
+  match d
+  | PairList["V", n]: Kernel.mk_vartype(n)
+  | PairList["T", n, args]: Kernel.mk_type([n, PairList.map(args, build_type)])
+fun build_term(d):
+  match d
+  | PairList["v", n, ty]: Kernel.mk_var([n, build_type(ty)])
+  | PairList["c", n, ty]: Basics.mk_mconst([n, build_type(ty)])
+  | PairList["a", f, x]: Kernel.mk_comb([build_term(f), build_term(x)])
+  | PairList["l", v, b]: Kernel.mk_abs([build_term(v), build_term(b)])
+
 // ---------------------------------------------------------------------
 // Spaces for HOL types and terms.
 
@@ -310,33 +331,24 @@ meta:
     | ["app", f, x]: "[\"Comb\"," ++ node_json(f) ++ "," ++ node_json(x) ++ "]"
     | ["abs", v, b]: "[\"Abs\"," ++ node_json(v) ++ "," ++ node_json(b) ++ "]"
 
-  // Code generation. The constructor references are parsed once and the calls
-  // are composed from already parsed expressions: re-enforesting every nested
-  // call would be expensive in the large theory quotations.
-  def '$(mk_vartype_ref :: expr_meta.Parsed)' = 'Kernel.mk_vartype'
-  def '$(mk_type_ref :: expr_meta.Parsed)' = 'Kernel.mk_type'
-  def '$(mk_var_ref :: expr_meta.Parsed)' = 'Kernel.mk_var'
-  def '$(mk_mconst_ref :: expr_meta.Parsed)' = 'Basics.mk_mconst'
-  def '$(mk_comb_ref :: expr_meta.Parsed)' = 'Kernel.mk_comb'
-  def '$(mk_abs_ref :: expr_meta.Parsed)' = 'Kernel.mk_abs'
-  def '$(list_ref :: expr_meta.Parsed)' = 'List'
-  def '$(pair_list_ref :: expr_meta.Parsed)' = 'PairList'
-  fun constructor_call(proc, args): expr_meta.pack_s_exp([proc, & args])
-  fun list_expression(args): constructor_call(list_ref, args)
-  fun string_expression(s :: String): expr_meta.pack_expr(Syntax.make(s, 'ctx'))
-
-  fun type_expression(ty) :: Syntax:
+  // Constant data for build_type / build_term.
+  fun type_data(ty):
     match ty
-    | ["V", n]: constructor_call(mk_vartype_ref, [string_expression(n)])
-    | ["T", n, args]:
-        let arg = for List (a in args): type_expression(a)
-        constructor_call(mk_type_ref, [list_expression([string_expression(n), constructor_call(pair_list_ref, arg)])])
-  fun term_expression(node) :: Syntax:
+    | ["V", n]: PairList["V", n]
+    | ["T", n, args]: PairList["T", n, PairList[& (for List (a in args): type_data(a))]]
+  fun term_data(node):
     match node
-    | ["var", n, ty]: constructor_call(mk_var_ref, [list_expression([string_expression(n), type_expression(ty)])])
-    | ["const", n, ty]: constructor_call(mk_mconst_ref, [list_expression([string_expression(n), type_expression(ty)])])
-    | ["app", f, x]: constructor_call(mk_comb_ref, [list_expression([term_expression(f), term_expression(x)])])
-    | ["abs", v, b]: constructor_call(mk_abs_ref, [list_expression([term_expression(v), term_expression(b)])])
+    | ["var", n, ty]: PairList["v", n, type_data(ty)]
+    | ["const", n, ty]: PairList["c", n, type_data(ty)]
+    | ["app", f, x]: PairList["a", term_data(f), term_data(x)]
+    | ["abs", v, b]: PairList["l", term_data(v), term_data(b)]
+  fun constant(data): expr_meta.pack_s_exp(['quote', Rkt.#{datum->syntax}(#false, data)])
+  def '$(build_term_ref :: expr_meta.Parsed)' = 'build_term'
+  def '$(build_type_ref :: expr_meta.Parsed)' = 'build_type'
+  fun term_expression(node) :: Syntax:
+    expr_meta.pack_s_exp([build_term_ref, constant(term_data(node))])
+  fun type_expression(ty) :: Syntax:
+    expr_meta.pack_s_exp([build_type_ref, constant(type_data(ty))])
 
   // Environment entries: [kind, hol_name, type] keyed by surface symbol.
   fun hol_name(id :: Syntax) :: String: to_string(id.unwrap())

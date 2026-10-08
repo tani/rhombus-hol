@@ -71,6 +71,25 @@ reconstruction, and a small Rhombus-native type-description frontend supports
 inductive declarations. General parsing, elaboration, notation, quotation,
 and presentation belong to the Rhombus syntax and macro frontend.
 
+### Quotation design
+
+Type inference for theory quotations happens offline, in HOL Light itself
+(`tools/hol_light_golden/quote.ml`), and `to_hol.py` writes the result into the
+sources with every constant type and every variable name explicit. `hol:`
+therefore performs no inference at compile time: it checks the declared types
+and builds kernel constructors. This keeps the compile step cheap (about
+4 minutes for all theories, against about 12 when the macro inferred types) and
+keeps the quoted terms identical to HOL Light's. Names that are not Rhombus
+identifiers (`x'`, `<<`, `PAIR'`) are written with an `as` alias, and a
+constant used at a different type than its first declaration gets its own
+alias; neither is renamed by hand or by a mechanical rewrite.
+
+A change to the quotation layer is accepted only when `theories` still passes:
+it replays every proof and compares each theorem, constant and definition
+with the pinned HOL Light state (`tests/golden/hol_light.rhm`). Do not make
+that audit optional, and do not rewrite quotations in bulk without replaying
+the proofs.
+
 ## Verification
 
 The Rhombus modules replay the translated standard-theory proofs through the

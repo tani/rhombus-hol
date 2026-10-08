@@ -2,9 +2,8 @@
 
 A direct Rhombus translation of the HOL Light proof engine and standard theories.
 
-The repository is intentionally split at the HOL Light engine/frontend
-boundary. The proof engine and standard theories follow HOL Light; the surface language
-above it will be implemented natively with Rhombus macros.
+The proof engine and standard theories follow HOL Light, including its
+quotation parser: theory quotations are HOL Light text inside `@hol|{...}|`.
 
 ## Layout
 
@@ -23,15 +22,17 @@ rhombus/hol/
   ind_defs.rhm
   class.rhm
   ... standard theories through define.rhm
+  parser.rhm              parser.ml (lexer, type and term parsers)
   lib.rhm                 lib.ml (list utilities, finite partial functions)
   private/
     ocaml.rhm             OCaml runtime: exceptions, polymorphic compare,
                           Hashtbl.hash, Random
-    theory_support.rhm    parser.ml/printer.ml pieces: pattern combinators,
+    theory_support.rhm    printer.ml pieces: binder/prefix/infix tables,
                           interface state, diagnostic printing
     data_types.rhm        options and variant comparison view
-    hol_quote.rhm         `hol:` / `hol_type:` quotation macros
-    type_inference.rhm, type_specification.rhm
+    hol_quote.rhm         `@hol|{...}|` quotation macro
+    type_inference.rhm    preterm.ml (type inference)
+    type_specification.rhm
     declarations.rhm, proof_syntax.rhm, variant_base.rhm
   tests/
 
@@ -60,33 +61,21 @@ theorems, classical logic, inductive definitions, first-order automation,
 natural numbers and recursion, arithmetic, inductive types and lists, reals
 and integers, sets, iteration, and Cartesian products.
 
-HOL Light's text parser and printer are not the frontend. Literal theory
-quotations are written in the Rhombus-native `hol:` quotation, whose macros
-elaborate them at compile time into public term/type constructors; runtime
-modules replay the original proofs. For example, HOL Light's
-`` `!x:A. x = x` `` is `hol: forall x :: A: x == x`. A HOL name that is not a
-Rhombus identifier is an escaped identifier (`#{+}`, `#{|x'|}`), and an infix
-operator name on its own is that name (`#{+}(m, n)`). `(NAME :: type)` is a name at
-exactly that type: a second instance of a constant, a variable hidden by a binder
-of the same name, or `!` and `-`, which are also prefix forms. Private type-inference algorithms support Metis
-reconstruction, and a small Rhombus-native type-description frontend supports
-inductive declarations. General parsing, elaboration, notation, quotation,
-and presentation belong to the Rhombus syntax and macro frontend.
+Quotations are written in HOL Light's own syntax inside `@hol|{...}|`; for
+example HOL Light's `` `!x:A. x = x` `` is `@hol|{!x:A. x = x}|`, and
+`` `:num->bool` `` is `@hol|{:num->bool}|`. As in HOL Light, the text is read
+when it is evaluated, by the direct translation of `parser.ml` and
+`preterm.ml`, against the binders, infixes, overloadings and constants of the
+theories loaded at that moment; the result is built with the public kernel
+constructors and every proof is replayed. The raw `|{ }|` text keeps
+backslashes and braces literal, so quotations are copied from the HOL Light
+sources unchanged. HOL Light's printer is not ported.
 
-### Quotation design
+### Checking quotations
 
-Type inference for theory quotations happens offline, in HOL Light itself
-(`tools/hol_light_golden/quote.ml`), and `to_hol.py` writes the result into the
-sources with every constant type and every variable name explicit. `hol:`
-therefore performs no inference at compile time: it checks the declared types
-and builds kernel constructors. This keeps the compile step cheap (about
-4 minutes for all theories, against about 12 when the macro inferred types) and
-keeps the quoted terms identical to HOL Light's. Names are never renamed:
-those that are not Rhombus identifiers (`x'`, `<<`, `PAIR'`) are escaped
-identifiers, and a constant used at a different type than its declaration is
-written with that type at the use.
-
-A change to the quotation layer is accepted only when `theories` still passes:
+`HOL_QUOTE_CHECK=1` prints every term a quotation elaborates to
+(`HOLCHECK` lines, site and term as JSON). A change to the parser, type
+inference or quotation layer is accepted only when `theories` still passes:
 it replays every proof and compares each theorem, constant and definition
 with the pinned HOL Light state (`tests/golden/hol_light.rhm`). Do not make
 that audit optional, and do not rewrite quotations in bulk without replaying
@@ -139,15 +128,16 @@ raco test -j 4 rhombus/hol/tests/golden/hol_light.rhm rhombus/hol/tests/upstream
 The data comes from `tools/hol_light_golden/` and is only compared against.
 
 The standard-theory modules (after `simp.rhm`) were generated from the pinned
-HOL Light sources. OCaml tuples are Rhombus lists (`[a, b]`), OCaml lists are
-`PairList`, and record types are classes.
+HOL Light sources, with each quotation's text taken from them. OCaml tuples
+are Rhombus lists (`[a, b]`), OCaml lists are `PairList`, and record types are
+classes.
 
 
 ## Generated source style
 
 The translated modules use ordinary indentation, scoped names, descriptive
-payload fields, shared variant/record declarations, and compact typed term
-syntax. Multi-argument functions use explicit unary stages, such as
+payload fields, shared variant/record declarations, and HOL Light quotation
+text. Multi-argument functions use explicit unary stages, such as
 `fun(x): fun(y): x + y`, and callers apply each stage separately.
 
 Standard proofs use the existing combinators through small infix operators.

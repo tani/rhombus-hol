@@ -6,20 +6,20 @@ Rhombus/HOL is a direct Rhombus port of the HOL Light proof engine.
 
 The source-to-source port covers:
 
-`fusion -> basics -> nets -> equal -> bool -> drule -> tactics -> itab -> simp`,
+`fusion -> basics -> nets -> preterm -> parser -> equal -> bool -> drule -> tactics -> itab -> simp`,
 extended by the requested direct translation of the standard theory sequence
 from `theorems.ml` through `define.ml`. Track implementation and validation
 separately; generated files alone do not establish a completed port.
 
-Do not port HOL Light's text parser or printer as the frontend. The frontend
-above the engine is Rhombus-native and should use Rhombus macros and syntax
-facilities. Private type-inference data and algorithms required by the
-requested standard theories may be translated directly; they must not expose
-a HOL text frontend.
-Literal HOL quotations in the theory sources may be expanded offline into
-public term/type constructors. Replay every proof in the Rhombus kernel;
-never import recorded theorems as axioms. A native inductive-type specification
-frontend may supply the small type-description API needed by `ind_types`.
+Theory quotations are HOL Light text written as `@hol|{...}|`. They are read
+by the direct translation of HOL Light's `parser.ml` (`rhombus/hol/parser.rhm`)
+and `preterm.ml` type inference (`private/type_inference.rhm`), at run time and
+against the theory tables of that moment, exactly as HOL Light's quotation
+expander calls `parse_term` / `parse_type`. Copy quotation text from the pinned
+HOL Light sources unchanged. Do not port HOL Light's printer. Replay every
+proof in the Rhombus kernel; never import recorded theorems as axioms. A
+native inductive-type specification frontend may supply the small
+type-description API needed by `ind_types`.
 
 ## Translation policy
 

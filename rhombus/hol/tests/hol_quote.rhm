@@ -3,46 +3,34 @@ import: "../private/hol_quote.rhm" open
 import: "../fusion.rhm" as Kernel
 import: "../bool.rhm" as BoolTheory
 import: "../basics.rhm" as Basics
+import: "../parser.rhm" as Parser
 
+// `@hol|{...}|` reads HOL Light text against the theories loaded so far:
+// `:` starts a type, anything else is a term elaborated by type inference.
 let a = Kernel.mk_vartype("A")
 let x = Kernel.mk_var(["x", a])
-check (hol_type: A -> bool) ~is Kernel.mk_fun_ty(a)(Kernel.bool_ty)
-check (hol:
-         fun (x :: A): x) ~is Kernel.mk_abs([x, x])
+check @hol|{:A->bool}| ~is Kernel.mk_fun_ty(a)(Kernel.bool_ty)
+check @hol|{\x:A. x}| ~is Kernel.mk_abs([x, x])
 let eq = Kernel.mk_eq([x, x])
-check (hol:
-         var x :: A
-         x == x) ~is eq
-check (hol:
-         forall x :: A: x == x) ~is BoolTheory.mk_forall([x, eq])
+check @hol|{(x:A) = x}| ~is eq
+check @hol|{!x:A. x = x}| ~is BoolTheory.mk_forall([x, eq])
 let p = Kernel.mk_var(["p", Kernel.bool_ty])
 let q = Kernel.mk_var(["q", Kernel.bool_ty])
-check (hol:
-         var p :: bool
-         var q :: bool
-         p && q) ~is BoolTheory.mk_conj([p, q])
-check (hol:
-         var p :: bool
-         var q :: bool
-         p ==> q) ~is BoolTheory.mk_imp([p, q])
-// An infix operator name on its own is that name; `==>` is the constant.
-check (hol:
-         const #{==>} :: bool -> bool -> bool
-         #{==>}(#true, #false)) ~is (hol: #true ==> #false)
-// `(NAME :: type)` is a variable when the quotation declares one, else a constant.
-check (hol:
-         var #{-} :: bool
-         (#{-} :: bool)) ~is Kernel.mk_var(["-", Kernel.bool_ty])
-check (hol: (#{==>} :: bool -> bool -> bool)) ~is Basics.mk_mconst(["==>", Kernel.mk_fun_ty(Kernel.bool_ty)(Kernel.mk_fun_ty(Kernel.bool_ty)(Kernel.bool_ty))])
+check @hol|{p /\ q}| ~is BoolTheory.mk_conj([p, q])
+check @hol|{p ==> q}| ~is BoolTheory.mk_imp([p, q])
+// Infix precedence: /\ binds tighter than ==>, which is right associative.
+check @hol|{p /\ q ==> q ==> p}| ~is BoolTheory.mk_imp([BoolTheory.mk_conj([p, q]), BoolTheory.mk_imp([q, p])])
+// A parenthesized infix is the constant itself.
+check @hol|{(==>) T F}| ~is @hol|{T ==> F}|
+check @hol|{(==>)}| ~is Basics.mk_mconst(["==>", Kernel.mk_fun_ty(Kernel.bool_ty)(Kernel.mk_fun_ty(Kernel.bool_ty)(Kernel.bool_ty))])
+// Type inference unifies the uses of a free variable.
 let function = Kernel.mk_var(["f", Kernel.mk_fun_ty(a)(a)])
-check (hol:
-         var f :: A -> A
-         var x :: A
-         f(x)) ~is Kernel.mk_comb([function, x])
+check @hol|{(f:A->A) x}| ~is Kernel.mk_comb([function, x])
 let b = Kernel.mk_vartype("B")
 let inner = Kernel.mk_var(["x", b])
-check (hol:
-         fun (x :: A, x :: B): (x :: A)) ~is Kernel.mk_abs([x, Kernel.mk_abs([inner, x])])
-check (hol: var #{|line
-name|} :: bool; #{|line
-name|}) ~is Kernel.mk_var(["line\nname", Kernel.bool_ty])
+check @hol|{\x:A. \x:B. x}| ~is Kernel.mk_abs([x, Kernel.mk_abs([inner, inner])])
+// Quotations may span lines; `//` starts a comment as in HOL Light.
+check @hol|{p /\  // the left conjunct
+  q}| ~is BoolTheory.mk_conj([p, q])
+check Parser.parse_term("~p") ~is BoolTheory.mk_neg(p)
+check Parser.parse_type("bool->bool") ~is Kernel.mk_fun_ty(Kernel.bool_ty)(Kernel.bool_ty)

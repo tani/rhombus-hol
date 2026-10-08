@@ -12,11 +12,7 @@ Requirements: a HOL Light checkout at the pinned revision built with `make`
 |---|---|
 | `dump.ml` | Serializers for types, terms and theorems, and the state dump. |
 | `generate.sh` | Writes `rhombus/hol/tests/golden/hol_light.tsv.gz`. |
-| `quote.ml` | Prints a term as `hol_term(...)` constructor syntax, the input of `to_hol.py`. |
-| `to_hol.py` | Rewrites `hol_term(...)` calls in place into Rhombus `hol:` quotations. |
-| `compare_quote_dumps.py` | Compares two `HOL_QUOTE_DUMP=1` compile logs: every `hol:` site must elaborate to the same term before and after a rewrite. |
-| `capture.ml` | Records the quotations an upstream file parses, in order. |
-| `basic_tests_terms.ml` | Expands the quotations of `UnitTests/basic_tests.ml`. |
+| `serials.ml` | Prints the serials of an upstream example's named theorems. |
 
 ## Golden logical state
 
@@ -32,25 +28,22 @@ column-0 bindings of the ported modules). Each line is
 
 `rhombus/hol/tests/golden/hol_light.rhm` loads every module and requires each
 row to match exactly, or up to the numbering of names invented at run time
-(`_<n>` genvars and `?<n>` type variables). HOL Light's parser advances both
-counters while elaborating quotations; offline expansion does not, so their
-numbering drifts while the statements agree. Accepted differences go in
-`known_differences.tsv` with a reason.
+(`_<n>` genvars, `?<n>` type variables and the parser's `GEN%PVAR%<n>` set
+variables). A HOL Light session advances these counters over work the port
+does not replay, so their numbering drifts while the statements agree.
+Accepted differences go in `known_differences.tsv` with a reason.
 
 ## Upstream tests and examples
 
-Quotations are expanded offline in a HOL Light session, pasted into the
-Rhombus test as `def q<n> = hol_term(...)`, and rewritten into `hol:`
-quotations with `python3 to_hol.py FILE.rhm`:
+Quotations are copied verbatim from the upstream file into `@hol|{...}|` and
+parsed when the port runs, as upstream parses them. The serials of the
+example's named theorems come from a HOL Light session:
 
 ```sh
 cd /path/to/hol-light
-printf '#use "%s/quote.ml";;\n#use "%s/basic_tests_terms.ml";;\n' "$T" "$T" | LINE_EDITOR=env ./hol.sh
-
-printf '#use "%s/quote.ml";;\n#use "%s/dump.ml";;\n#use "%s/capture.ml";;\n%s\n' \
-  "$T" "$T" "$T" 'capture_start ();; loadt "Examples/dickson.ml";; capture_emit ["DICKSON"];;' |
+printf '#use "%s/dump.ml";;\n#use "%s/serials.ml";;\n%s\n' \
+  "$T" "$T" 'loadt "Examples/dickson.ml";; emit_serials ["DICKSON"];;' |
   LINE_EDITOR=env ./hol.sh
 ```
 
-where `T` is this directory. `capture_emit` also prints each named theorem's
-serial (`// golden` lines) for comparison in the ported test.
+where `T` is this directory. Paste the `// golden` lines into the ported test.

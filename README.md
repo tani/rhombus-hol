@@ -65,10 +65,10 @@ quotations are written in the Rhombus-native `hol:` quotation, whose macros
 elaborate them at compile time into public term/type constructors; runtime
 modules replay the original proofs. For example, HOL Light's
 `` `!x:A. x = x` `` is `hol: forall x :: A: x == x`. A HOL name that is not a
-Rhombus identifier is an escaped identifier (`#{+}`, `#{|x'|}`); a constant used
-at a second type is written `(IN :: num -> (num -> bool) -> bool)`; and a
-declaration hidden by a binder or by an operator of the same spelling is
-selected with `var.x` / `const.#{+}`. Private type-inference algorithms support Metis
+Rhombus identifier is an escaped identifier (`#{+}`, `#{|x'|}`), and an infix
+operator name on its own is that name (`#{+}(m, n)`). `(NAME :: type)` is a name at
+exactly that type: a second instance of a constant, a variable hidden by a binder
+of the same name, or `!` and `-`, which are also prefix forms. Private type-inference algorithms support Metis
 reconstruction, and a small Rhombus-native type-description frontend supports
 inductive declarations. General parsing, elaboration, notation, quotation,
 and presentation belong to the Rhombus syntax and macro frontend.

@@ -11,8 +11,8 @@ quotation of rhombus/hol/private/hol_quote.rhm, in place:
 Operators, binders, if and typed numerals are recovered from the constants
 they stand for; the remaining names are declared with var/const. A HOL name
 that is not an identifier is an escaped identifier (`#{+}`, `#{|x'|}`); a
-constant at a second type is written `(NAME :: type)`; a name that a binder
-or an operator of the same spelling would hide is `const.NAME` / `var.NAME`.
+constant at a second type, a variable that a binder of the same name would
+hide, and the names `!` and `-` are typed references `(NAME :: type)`.
 No name is invented, so the elaborated hol: form is the same term.
 """
 import re, sys
@@ -156,10 +156,10 @@ def find_calls(src, name='hol_term('):
 
 IDENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 RESERVED = {'var', 'const', 'forall', 'exists', 'exists1', 'fun', 'if', 'hol', 'hol_type', '_'}
-# Names that are also operators or forms of the hol: term space; a reference
-# to the constant or variable of that name is qualified (`const.#{+}`).
-OPS = {'&&', '||', '==>', '<=>', '==', '!=', '!', '+', '-', '*', '/', '<', '<=', '>', '>=',
-       'forall', 'exists', 'exists1', 'fun', 'if', 'const', 'var'}
+# Names that are also prefix forms of the hol: term space (`!x`, `-x`): a
+# reference to the constant or variable of that name is typed, `(#{!} :: T)`.
+# An infix-only operator name (`#{+}`) stands for itself when used alone.
+PREFIX_FORMS = {'!', '-'}
 PLAIN = re.compile(r"^[A-Za-z0-9_<>=+*/\-.?!@~^&:$]+$")
 
 def esc(n):
@@ -313,7 +313,7 @@ def assign_names(root):
     to its surface name, decls lists the declarations `(kind, name, type)`.
     A HOL name is never renamed: a second constant of the same name at
     another type is written `(NAME :: type)`, and a variable that a binder of
-    the same name would capture is written `var.NAME` or `(var.NAME :: type)`.
+    the same name would capture is a typed reference `(NAME :: type)`.
     """
     names = {}; decls = []; bnames = {}
     order = []
@@ -334,12 +334,18 @@ def assign_names(root):
         taken = {k for k in ('var', 'const') if (k, hn) in primary}
         if not taken:
             primary[(kind, hn)] = ent
-            decls.append((kind, esc(hn), ty_))
-            names[ent] = (kind + '.' if hn in OPS else '') + esc(hn)
+            if hn in PREFIX_FORMS:
+                # a constant needs no declaration; a variable is declared so
+                # that the typed reference resolves to a variable
+                if kind == 'var': decls.append((kind, esc(hn), ty_))
+                names[ent] = f'({esc(hn)} :: {show_type(ty_)})'
+            else:
+                decls.append((kind, esc(hn), ty_))
+                names[ent] = esc(hn)
         elif kind == 'const':
             names[ent] = f'({esc(hn)} :: {show_type(ty_)})'
         else:
-            names[ent] = f'(var.{esc(hn)} :: {show_type(ty_)})'
+            names[ent] = f'({esc(hn)} :: {show_type(ty_)})'
     binders = {}
     def walk(n):
         k = n[0]
@@ -369,9 +375,9 @@ def assign_names(root):
     for e in captured:
         if e[0] == 'b':
             hn, ty_ = binders[e]
-            names[e] = f'(var.{esc(hn)} :: {show_type(ty_)})'
+            names[e] = f'({esc(hn)} :: {show_type(ty_)})'
         else:
-            names[e] = e[0] + '.' + esc(e[1])
+            names[e] = f'({esc(e[1])} :: {show_type(e[2])})'
     for e, (hn, ty_) in binders.items():
         names.setdefault(e, esc(hn))
     return names, decls, bnames
@@ -572,6 +578,9 @@ def replace_all(src):
         one = 'hol: ' + lines[1][2:] + '; ' + lines[2][2:] if len(lines) == 3 \
             and lines[1].startswith(('  var ', '  const ')) \
             and lines[2].strip() in (lines[1].split()[1], lines[1].split()[0] + '.' + lines[1].split()[1]) else None
+        if not one and len(lines) == 2 and lines[1].strip().startswith('(') \
+                and lines[1].strip().endswith(')') and ' :: ' in lines[1]:
+            one = 'hol: ' + lines[1].strip()
         if one and not bare: one = '(' + one + ')'
         if lines[0].startswith('hol_type:'):
             text = lines[0] if bare else '(' + lines[0] + ')'

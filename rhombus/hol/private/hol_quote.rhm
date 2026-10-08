@@ -261,18 +261,20 @@ meta:
 
   // A context belongs to one quotation; inference never reads runtime
   // theories or mutates kernel state. Its substitutions are occurs-checked.
-  fun inference_context(): [Box({}), Box(0), Box({}), Box({})]
+  fun inference_context(): [Box({}), Box(0), Box({}), Box({}), Box({}), Box({})]
   // Kernel variable identity includes its name. Give lexical binders names
   // distinct from declared free variables and other binders so `var.x`
   // remains free even beneath a surface binder named x.
-  fun binder_name(base, ctx):
+  // Only declared variables and enclosing binders are avoided: sibling
+  // binders may reuse a name, as in the HOL Light source.
+  fun binder_name(base, ctx, env :~ Map):
     let used = ctx[3].value
+    fun in_scope(name):
+      used.has_key(name) || (for any (entry in env.values()): entry[0] == "var" && entry[1] == name)
     fun choose(n):
       let name = if n == 0 | base | base ++ "_" +& n
-      if used.has_key(name) | choose(n + 1) | name
-    let name = choose(0)
-    ctx[3].value := used ++ {name: #true}
-    name
+      if in_scope(name) | choose(n + 1) | name
+    choose(0)
   fun fresh_type(ctx, label):
     let n = ctx[1].value
     ctx[1].value := n + 1
@@ -308,9 +310,13 @@ meta:
     fun walk(t):
       match t
       | ["V", n]:
-          unless vars.has_key(n)
-          | vars := vars ++ {n: fresh_type(ctx, n)}
-          vars[n]
+          // A scheme variable named like a rigid variable of the quotation
+          // (see `hol:`) denotes that variable, as in the HOL Light source.
+          if ctx[5].value.has_key(n)
+          | ["V", n]
+          | unless vars.has_key(n)
+            | vars := vars ++ {n: fresh_type(ctx, n)}
+            vars[n]
       | ["T", n, args]: ["T", n, for List (a in args): walk(a)]
     walk(ty)
   fun register_rigid_type(ty, ctx):
@@ -322,6 +328,8 @@ meta:
     match resolve_type(ty, ctx)
     | ["M", n, label]:
         let used = ctx[2].value
+        when label != "" && label != "Inferred"
+        | ctx[4].value := ctx[4].value ++ {label: #true}
         let base = if label == "" | "Inferred" | label
         fun choose(n):
           let name = if n == 0 | base | base ++ "_" +& n
@@ -481,7 +489,7 @@ meta:
           for List (i in [id, ...], ty in [t, ...]):
             let t = if ty.unwrap() == #false | fresh_type(ctx, "Inferred") | elab_type(ty)
             register_rigid_type(t, ctx)
-            [i, binder_name(to_string(i.unwrap()), ctx), t]
+            [i, binder_name(to_string(i.unwrap()), ctx, env), t]
         let body_env:
           for values(e :~ Map = env) ([i, name, ty] in vars):
             e ++ { i.unwrap(): ["var", name, ty] }
@@ -534,23 +542,41 @@ expr.macro 'hol: $(g :: Group); ...':
   let body = groups[groups.length() - 1]
   when parse_declaration(body)
   | syntax_meta.error("a hol: block needs a body expression after its declarations", stx)
-  let ctx = inference_context()
-  let env:
-    for values(e :~ Map = {}) ([kind, id, alias, ty] in decls):
-      when e.has_key([kind, id.unwrap()])
-      | syntax_meta.error("duplicate declaration", id)
-      let t = if ty == #false | fresh_type(ctx, "Inferred") | ty
-      when kind == "var"
-      | register_rigid_type(t, ctx)
-        ctx[3].value := ctx[3].value ++ {hol_name(id, alias): #true}
-      let entry = [kind, hol_name(id, alias), t]
-      let qualified = e ++ { [kind, id.unwrap()]: entry }
-      if kind == "const" && e.has_key(["var", id.unwrap()])
-      | qualified
-      | qualified ++ { id.unwrap(): entry }
-  let '$(parsed :: hol_term_meta.Parsed)' = body
-  let [j, _] = elab(parsed, env, ctx)
-  term_expression(j, ctx)
+  // Elaborate once with every scheme variable fresh per occurrence. If a
+  // constant's scheme variable stays unconstrained and shares its name with a
+  // rigid variable of the quotation, elaborate again with that name shared
+  // (the HOL Light reading); keep the first result if sharing is ill-typed.
+  fun elaborate(shared):
+    let ctx = inference_context()
+    ctx[5].value := shared
+    let env:
+      for values(e :~ Map = {}) ([kind, id, alias, ty] in decls):
+        when e.has_key([kind, id.unwrap()])
+        | syntax_meta.error("duplicate declaration", id)
+        let t = if ty == #false | fresh_type(ctx, "Inferred") | ty
+        when kind == "var"
+        | register_rigid_type(t, ctx)
+          ctx[3].value := ctx[3].value ++ {hol_name(id, alias): #true}
+        let entry = [kind, hol_name(id, alias), t]
+        let qualified = e ++ { [kind, id.unwrap()]: entry }
+        if kind == "const" && e.has_key(["var", id.unwrap()])
+        | qualified
+        | qualified ++ { id.unwrap(): entry }
+    let '$(parsed :: hol_term_meta.Parsed)' = body
+    let [j, _] = elab(parsed, env, ctx)
+    let rigid = ctx[2].value
+    let result = term_expression(j, ctx)
+    let candidates:
+      for values(m :~ Map = {}) (name in ctx[4].value.keys()):
+        if rigid.has_key(name) | m ++ {name: #true} | m
+    [result, candidates]
+  let [first, candidates] = elaborate({})
+  if candidates.length() == 0
+  | first
+  | try:
+      let [second, _] = elaborate(candidates)
+      second
+      ~catch _: first
 
 // `hol_type:` quotation of a type.
 expr.macro 'hol_type: $(t :: hol_type_meta.Parsed)':

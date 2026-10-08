@@ -3,9 +3,6 @@
 // hol_light.tsv is produced by tools/hol_light_golden/dump.ml after hol.ml;
 // it is only compared against, never imported as theorems.
 import: "serial.rhm" open
-import:
-  "../support/reference.rkt" open:
-    only: #{reference-equivalent?}
 import: "../../fusion.rhm" open
 import:
   "../../lib.rhm" open:
@@ -26,6 +23,7 @@ import:
       #{getenv}
       #{symbol->string}
       #{string->immutable-string}
+      #{regexp-replace*}
       #{open-input-file}
       #{close-input-port}
       #{open-output-bytes}
@@ -100,9 +98,21 @@ def qualified_theorems :: Map:
    "Hashek.hashek_prop": Thecops.Hashek.hashek_prop,
    "Hashek.hashek_thm": Thecops.Hashek.hashek_thm}
 
-// Historical snapshots use different binder, free-variable and inferred-type
-// names. Match typed trees with consistent bijections instead of rewriting
-// their serialized text. Ordinary constants retain their kernel identity.
+// Names invented at run time: genvar variables and constants (_<n>) and
+// type inference's invented type variables (?<n>). HOL Light's parser
+// advances both counters while it elaborates quotations; offline expansion
+// does not, so the numbering differs while the statements agree. Number
+// them by first occurrence to compare up to that renaming.
+fun invented_canonical(s :: String) :: String:
+  let mutable seen :: Map = {}
+  R.#{string->immutable-string}(
+    R.#{regexp-replace*}(#{#rx"\"[?_][0-9]+\""}, s,
+                         fun(m, & _):
+                           let key = R.#{string->immutable-string}(m)
+                           unless seen.has_key(key)
+                           | seen := seen ++ { key: seen.length() }
+                           "\"#" +& seen[key] +& "\""))
+
 fun report(fmt, & args): R.#{eprintf}(fmt, & args)
 
 def golden = read_table("hol_light.tsv.gz")
@@ -128,7 +138,7 @@ fun compare_row(kind, name, expected, actual):
       if known.has_key(kind ++ "\t" ++ name)
       | failures := failures.add(kind ++ "\t" ++ name ++ "\tlisted as known difference but matches")
       | matched := matched + 1
-  | kind != "type" && #{reference-equivalent?}(expected, actual):
+  | invented_canonical(expected) == invented_canonical(actual):
       renamed := renamed.add(kind ++ "\t" ++ name)
   | ~else:
       record(kind, name, "mismatch\n  hol-light: " ++ expected ++ "\n  rhombus:   " ++ actual)
@@ -139,7 +149,7 @@ fun plist_to_list(l): for List (x in (l :: PairList)): x
 
 def actual_types = for Map ([_, a] in numbered(types())): values(a[0], to_string(a[1]))
 fun is_invented_name(name :: String):
-  name != "_0" && name.length() > 1 && name[0] == #{#\_} && (for all (c in name.substring(1, name.length())): Char.is_numeric(c))
+  name.length() > 1 && name[0] == #{#\_} && (for all (c in name.substring(1, name.length())): Char.is_numeric(c))
 def actual_consts = for Map ([_, a] in numbered(constants())):
   skip_when is_invented_name(a[0])
   values(a[0], serial_type(a[1]))
@@ -185,7 +195,7 @@ for (row in golden):
 def expected_counts:
   for values(m :: Map = {}) (row in golden):
     m ++ { row[0]: m.get(row[0], 0) + 1 }
-report("hol-light golden: ~a rows, ~a exact, ~a structurally equivalent, ~a known differences, ~a failures\n",
+report("hol-light golden: ~a rows, ~a exact, ~a up to invented names, ~a known differences, ~a failures\n",
        golden.length(), matched, renamed.length(), seen_known.length(), failures.length())
 when R.#{getenv}("HOL_GOLDEN_VERBOSE")
 | for (r in renamed):

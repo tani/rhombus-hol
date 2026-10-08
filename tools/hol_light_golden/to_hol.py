@@ -400,7 +400,8 @@ def binder_head(n):
     def one(b):
         bid, hol, ty = b
         s = NAMES[('b', bid)]
-        return f'{s} :: {show_type(ty)}'
+        a = '' if s == hol else ' as ' + (hol if valid_ident(hol) else str_lit(hol))
+        return f'{s}{a} :: {show_type(ty)}'
     if kind == 'fun' or len(binds) > 1:
         return f'{kind} (' + ', '.join(one(b) for b in binds) + '):'
     return f'{kind} {one(binds[0])}:'

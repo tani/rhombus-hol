@@ -25,8 +25,11 @@ import:
   "ocaml.rhm" open
   "../fusion.rhm" as Kernel
   "../basics.rhm" as Basics
+  "../parser.rhm" as Parser
   lib("racket/base.rkt"):
-    expose: quote
+    expose:
+      quote
+      getenv
   meta:
     lib("racket/base.rkt") as Rkt:
       only:
@@ -48,6 +51,45 @@ fun build_term(d):
   | PairList["c", n, ty]: Basics.mk_mconst([n, build_type(ty)])
   | PairList["a", f, x]: Kernel.mk_comb([build_term(f), build_term(x)])
   | PairList["l", v, b]: Kernel.mk_abs([build_term(v), build_term(b)])
+
+// ---------------------------------------------------------------------
+// Run time: `@hol|{...}|` text. HOL Light's quotation expander turns
+// `` `:ty` `` into parse_type and every other quotation into parse_term, read
+// against the theory tables of the moment; HOL_QUOTE_CHECK=1 prints each
+// result as HOLCHECK lines in the HOL_QUOTE_DUMP encoding.
+
+def quote_check = getenv("HOL_QUOTE_CHECK")
+
+fun json_string(s :: String) :: String:
+  "\"" ++ s.replace("\\", "\\\\", ~all: #true).replace("\"", "\\\"", ~all: #true).replace("\n", "\\n", ~all: #true) ++ "\""
+fun type_json(ty) :: String:
+  if Kernel.is_vartype(ty)
+  | "[\"Tyvar\"," ++ json_string(Kernel.dest_vartype(ty)) ++ "]"
+  | let [n, args] = Kernel.dest_type(ty)
+    "[\"Tyapp\"," ++ json_string(n) ++ ",[" ++ String.join(for List (a in args): type_json(a), ",") ++ "]]"
+fun term_json(tm) :: String:
+  cond
+  | Kernel.is_var(tm):
+      let [n, ty] = Kernel.dest_var(tm)
+      "[\"Var\"," ++ json_string(n) ++ "," ++ type_json(ty) ++ "]"
+  | Kernel.is_const(tm):
+      let [n, ty] = Kernel.dest_const(tm)
+      "[\"Const\"," ++ json_string(n) ++ "," ++ type_json(ty) ++ "]"
+  | Kernel.is_comb(tm):
+      let [f, x] = Kernel.dest_comb(tm)
+      "[\"Comb\"," ++ term_json(f) ++ "," ++ term_json(x) ++ "]"
+  | ~else:
+      let [v, b] = Kernel.dest_abs(tm)
+      "[\"Abs\"," ++ term_json(v) ++ "," ++ term_json(b) ++ "]"
+
+fun quote_text(site :: String, s :: String):
+  let body = s.trim(~end: #false)
+  if body.length() > 0 && body[0] == Char":"
+  | Parser.parse_type(body.substring(1, body.length()))
+  | let tm = Parser.parse_term(s)
+    when quote_check
+    | println("HOLCHECK\t" ++ site ++ "\t" ++ term_json(tm))
+    tm
 
 // ---------------------------------------------------------------------
 // Spaces for HOL types and terms.
@@ -483,30 +525,35 @@ meta:
     | 'const $_ ...': syntax_meta.error("expected `const name :: type`", g)
     | _: #false
 
-// `hol:` quotation of a term.
-expr.macro 'hol: $(g :: Group); ...':
-  ~all_stx: stx
-  let groups = [g, ...]
-  when groups == []
-  | syntax_meta.error("a hol: block needs a body expression", stx)
-  let decls = for List (d in groups.take(groups.length() - 1)):
-    match parse_declaration(d)
-    | #false: syntax_meta.error("declarations must come first and be followed by exactly one expression", d)
-    | decl: decl
-  let body = groups[groups.length() - 1]
-  when parse_declaration(body)
-  | syntax_meta.error("a hol: block needs a body expression after its declarations", stx)
-  let env:
-    for values(e :~ Map = {}) ([kind, id, ty] in decls):
-      when e.has_key(id.unwrap())
-      | syntax_meta.error("duplicate declaration", id)
-      e ++ { id.unwrap(): [kind, hol_name(id), ty] }
-  let '$(parsed :: hol_term_meta.Parsed)' = body
-  let [j, _] = elab(parsed, env)
-  // Migration aid: HOL_QUOTE_DUMP=1 prints every expansion for comparison.
-  when Rkt.#{getenv}("HOL_QUOTE_DUMP")
-  | println("HOLDUMP\t" ++ to_string(stx.srcloc()) ++ "\t" ++ node_json(j))
-  term_expression(j)
+// `hol:` quotation of a term, and `@hol|{...}|` quotation of HOL Light text.
+expr.macro
+| 'hol: $(g :: Group); ...':
+    ~all_stx: stx
+    let groups = [g, ...]
+    when groups == []
+    | syntax_meta.error("a hol: block needs a body expression", stx)
+    let decls = for List (d in groups.take(groups.length() - 1)):
+      match parse_declaration(d)
+      | #false: syntax_meta.error("declarations must come first and be followed by exactly one expression", d)
+      | decl: decl
+    let body = groups[groups.length() - 1]
+    when parse_declaration(body)
+    | syntax_meta.error("a hol: block needs a body expression after its declarations", stx)
+    let env:
+      for values(e :~ Map = {}) ([kind, id, ty] in decls):
+        when e.has_key(id.unwrap())
+        | syntax_meta.error("duplicate declaration", id)
+        e ++ { id.unwrap(): [kind, hol_name(id), ty] }
+    let '$(parsed :: hol_term_meta.Parsed)' = body
+    let [j, _] = elab(parsed, env)
+    // Migration aid: HOL_QUOTE_DUMP=1 prints every expansion for comparison.
+    when Rkt.#{getenv}("HOL_QUOTE_DUMP")
+    | println("HOLDUMP\t" ++ to_string(stx.srcloc()) ++ "\t" ++ node_json(j))
+    term_expression(j)
+| 'hol ([$(piece :: String), ...])':
+    ~all_stx: stx
+    let text = String.append(piece.unwrap(), ...)
+    'quote_text($(to_string(stx.srcloc())), $text)'
 
 // `hol_type:` quotation of a type.
 expr.macro 'hol_type: $(t :: hol_type_meta.Parsed)':

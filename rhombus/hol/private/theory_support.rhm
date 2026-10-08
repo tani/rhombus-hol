@@ -4,7 +4,7 @@
 // definitions, the interface and overload state used by type inference,
 // and diagnostic printing stubs.
 // (c) University of Cambridge 1998; John Harrison 1998-2007.
-// This module does not parse HOL terms or provide proof rules.
+// The term and type parsers built on these tables are in ../parser.rhm.
 import:
   "../lib.rhm" open
   "ocaml.rhm" open
@@ -57,8 +57,16 @@ export:
   lex
   parse_as_binder
   unparse_as_binder
-  parse_as_infix
+  parses_as_binder
+  binders
   parse_as_prefix
+  unparse_as_prefix
+  is_prefix
+  prefixes
+  parse_as_infix
+  unparse_as_infix
+  get_infix_status
+  infixes
   override_interface
   remove_interface
 
@@ -158,20 +166,35 @@ fun lex(chars):
             let tok = if mem(s)(reserved_pattern_words) | Resword(s) | Ident(s)
             PairList.cons(tok,scan(r))
   scan(chars)
-// Literal quotations have already been expanded; retain binder metadata.
-def mutable theory_binders = PairList []
-fun parse_as_binder(s): theory_binders := insert(s)(theory_binders)
-fun unparse_as_binder(s): theory_binders := subtract(theory_binders)(PairList [s])
-def mutable theory_infixes = PairList []
-def mutable theory_prefixes = PairList []
-def mutable theory_interface = PairList []
-fun parse_as_infix([s, d]):
-  theory_infixes := PairList.cons([s, d],filter(fun([n, _]): n!=s)(theory_infixes))
-fun parse_as_prefix(s): theory_prefixes := insert(s)(theory_prefixes)
-fun remove_interface(s): theory_interface := filter(fun([n, _]): n!=s)(theory_interface)
-fun override_interface([s, tm]):
-  remove_interface(s)
-  theory_interface := PairList.cons([s, tm],theory_interface)
+// printer.ml: the tables that control the special parse status of names.
+def mutable binder_list = PairList []
+fun unparse_as_binder(n): binder_list := subtract(binder_list)(PairList [n])
+fun parse_as_binder(n): binder_list := union(binder_list)(PairList [n])
+fun parses_as_binder(n): mem(n)(binder_list)
+fun binders(): binder_list
+def mutable prefix_list = PairList []
+fun unparse_as_prefix(n): prefix_list := subtract(prefix_list)(PairList [n])
+fun parse_as_prefix(n): prefix_list := union(prefix_list)(PairList [n])
+fun is_prefix(n): mem(n)(prefix_list)
+fun prefixes(): prefix_list
+def mutable infix_list = PairList []
+fun infix_cmp([s, [x, a]]):
+  fun([t, [y, b]]):
+    x < y || (x == y && polymorphic_lt(b)(a)) || (x == y && a == b && polymorphic_lt(s)(t))
+fun unparse_as_infix(n): infix_list := filter(fun([m, _]): m != n)(infix_list)
+fun parse_as_infix([n, d]):
+  infix_list := sort(infix_cmp)(PairList.cons([n, d], filter(fun([m, _]): m != n)(infix_list)))
+fun get_infix_status(n): assoc(n)(infix_list)
+fun infixes(): infix_list
+// preterm.ml's remove_interface and override_interface, on the_interface.
+fun remove_interface(sym):
+  the_interface.value := filter(fun([s, _]): s != sym)(the_interface.value)
+fun override_interface([sym, tm]):
+  let namty:
+    try:
+      dest_const(tm)
+      ~catch Failure(_): dest_var(tm)
+  the_interface.value := PairList.cons([sym, namty], filter(fun([s, _]): s != sym)(the_interface.value))
 fun hol_print_flush(): #void
 import: lib("racket/base.rkt") as Primitive
 def hol_std_formatter = #void

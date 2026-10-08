@@ -1,0 +1,620 @@
+#lang rhombus
+
+// Direct translation of the pinned HOL Light parser.ml.
+
+// =========================================================================
+// Lexical analyzer, type and preterm parsers.
+//
+//       John Harrison, University of Cambridge Computer Laboratory
+//
+//            (c) Copyright, University of Cambridge 1998
+//              (c) Copyright, John Harrison 1998-2007
+//     (c) Copyright, Andrea Gabrielli, Marco Maggesi 2017-2018
+// =========================================================================
+
+// The parser reads the text of `@hol|{...}|` quotations at run time, against
+// the binder, prefix, infix, interface and type tables of the theories loaded
+// so far, exactly as HOL Light's quotation expander calls parse_term.
+
+import:
+  "lib.rhm" open
+  "private/ocaml.rhm" open
+  "fusion.rhm" open:
+    only:
+      get_const_type
+      get_type_arity
+  "private/theory_support.rhm" as Host:
+    expose:
+      Ident
+      Resword
+      Noparse
+  "private/type_inference.rhm" as TypeInference:
+    expose:
+      Varp
+      Constp
+      Combp
+      Absp
+      Typing
+      Utv
+      Ptycon
+      dpty
+
+export:
+  lex
+  parse_pretype
+  parse_preterm
+  parse_type
+  parse_term
+  install_parser
+  delete_parser
+  installed_parsers
+  reserve_words
+  unreserve_words
+  is_reserved_word
+  reserved_words
+
+// -------------------------------------------------------------------------
+// Need to have this now for set enums, since "," isn't a reserved word.
+// -------------------------------------------------------------------------
+
+Host.parse_as_infix([",", [14, "right"]])
+
+// -------------------------------------------------------------------------
+// Basic parser combinators.
+// -------------------------------------------------------------------------
+
+// `p1 ||| p2`, `p1 ++ p2` and `p >> f` in the original.
+fun choice(p1, p2):
+  fun(input):
+    try:
+      p1(input)
+      ~catch Noparse(): p2(input)
+fun seq(p1, p2):
+  fun(input):
+    let [r1, rest1] = p1(input)
+    let [r2, rest2] = p2(rest1)
+    [[r1, r2], rest2]
+fun app(p, f):
+  fun(input):
+    let [r, rest] = p(input)
+    [f(r), rest]
+fun many(prs):
+  fun(input):
+    try:
+      let [result, next] = prs(input)
+      let [results, rest] = many(prs)(next)
+      [PairList.cons(result, results), rest]
+      ~catch Noparse(): [PairList [], input]
+fun fix(err, prs):
+  fun(input):
+    try:
+      prs(input)
+      ~catch Noparse(): failwith(err +& " expected")
+fun listof(prs, sep, err):
+  app(seq(prs, many(app(seq(sep, fix(err, prs)), snd))), fun([h, t]): PairList.cons(h, t))
+fun nothing(input): [PairList [], input]
+fun elistof(prs, sep, err): choice(listof(prs, sep, err), nothing)
+fun leftbin(prs, sep, cons, err):
+  app(seq(prs, many(seq(sep, fix(err, prs)))),
+      fun([x, opxs]):
+        let [ops, xs] = unzip(opxs)
+        itlist2(fun(op): fun(y): fun(x): cons(op, x, y))(rev(ops))(rev(xs))(x))
+fun rightbin(prs, sep, cons, err):
+  app(seq(prs, many(seq(sep, fix(err, prs)))),
+      fun([x, opxs]):
+        if opxs == PairList []
+        | x
+        | let [ops, xs] = unzip(opxs)
+          itlist2(fun(op): fun(l): fun(r): cons(op, l, r))(ops)(PairList.cons(x, butlast(xs)))(last(xs)))
+fun possibly(prs):
+  fun(input):
+    try:
+      let [x, rest] = prs(input)
+      [PairList [x], rest]
+      ~catch Noparse(): [PairList [], input]
+fun some(p):
+  fun(input):
+    match input
+    | PairList [h, & t]:
+        if p(h)
+        | [h, t]
+        | throw Noparse()
+    | _: throw Noparse()
+fun a(tok): some(fun(item): item == tok)
+fun atleast(n, prs):
+  fun(i):
+    (if n <= 0
+     | many(prs)
+     | app(seq(prs, atleast(n - 1, prs)), fun([h, t]): PairList.cons(h, t)))(i)
+fun finished(input):
+  if input == PairList [] | [0, input] | failwith("Unparsed input")
+
+// -------------------------------------------------------------------------
+// Character discrimination and reserved words (printer.ml).
+// -------------------------------------------------------------------------
+
+def spaces = " \t\n\r"
+def separators = ",;"
+def brackets = "()[]{}"
+def symbs = "\\!@#$%^&*-+|\\<=>/?~.:"
+def alphas = "'abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+def nums = "0123456789"
+fun isspace(c :: String): spaces.contains(c)
+fun issep(c :: String): separators.contains(c)
+fun isbra(c :: String): brackets.contains(c)
+fun issymb(c :: String): symbs.contains(c)
+fun isalpha(c :: String): alphas.contains(c)
+fun isnum(c :: String): nums.contains(c)
+fun isalnum(c :: String): isalpha(c) || isnum(c)
+
+def mutable reswords:
+  PairList ["(", ")", "[", "]", "{", "}", ":", ";", ".", "|",
+            "let", "in", "and", "if", "then", "else",
+            "match", "with", "function", "->", "when"]
+fun reserve_words(ns): reswords := union(reswords)(ns)
+fun unreserve_words(ns): reswords := subtract(reswords)(ns)
+fun is_reserved_word(n): mem(n)(reswords)
+fun reserved_words(): reswords
+
+// -------------------------------------------------------------------------
+// Lexical analyzer. Apart from some special bracket symbols, each
+// identifier is made up of the longest string of alphanumerics or
+// the longest string of symbolics.
+// -------------------------------------------------------------------------
+
+reserve_words(PairList ["//"])
+
+def comment_token = Box(Resword("//"))
+
+def lex:
+  let collect = fun([h, t]): end_itlist(fun(x): fun(y): x +& y)(PairList.cons(h, t))
+  let reserve:
+    fun(tok):
+      match tok
+      | Ident(n):
+          if is_reserved_word(n)
+          | Resword(n)
+          | tok
+      | t: t
+  let stringof = fun(p): app(atleast(1, p), end_itlist(fun(x): fun(y): x +& y))
+  let simple_ident = choice(stringof(some(isalnum)), stringof(some(issymb)))
+  let undertail = app(seq(stringof(a("_")), possibly(simple_ident)), collect)
+  let ident = app(seq(choice(undertail, simple_ident), many(undertail)), collect)
+  let septok = stringof(some(issep))
+  let escapecode:
+    fun(i):
+      match i
+      | PairList ["\\", & rst]: ["\\", rst]
+      | PairList ["\"", & rst]: ["\"", rst]
+      | PairList ["'", & rst]: ["'", rst]
+      | PairList ["n", & rst]: ["\n", rst]
+      | PairList ["r", & rst]: ["\r", rst]
+      | PairList ["t", & rst]: ["\t", rst]
+      | PairList ["b", & rst]: ["\b", rst]
+      | PairList [" ", & rst]: [" ", rst]
+      | PairList ["x", h, l, & rst]:
+          [hol_string_make(1)(hol_char_chr(hol_int_of_string("0x" +& h +& l))), rst]
+      | PairList [x, y, z, & rst] when forall(isnum)(PairList [x, y, z]):
+          [hol_string_make(1)(hol_char_chr(hol_int_of_string(x +& y +& z))), rst]
+      | _: failwith("lex:unrecognized OCaml-style escape in string")
+  let stringchar:
+    choice(some(fun(i): i != "\\" && i != "\""),
+           app(seq(a("\\"), escapecode), snd))
+  let string:
+    app(seq(seq(a("\""), many(stringchar)), a("\"")),
+        fun([[_, s], _]): "\"" +& implode(s) +& "\"")
+  let rawtoken:
+    app(choice(string, choice(some(isbra), choice(septok, ident))), fun(x): Ident(x))
+  let simptoken = app(seq(many(some(isspace)), rawtoken), fun([_, t]): reserve(t))
+  let skip_line:
+    many(fun(i): (if i != PairList [] && hd(i) != "\n" | [1, tl(i)] | throw Noparse()))
+  fun tokens(i):
+    try:
+      let [t, rst] = simptoken(i)
+      if t == comment_token.value
+      | app(seq(skip_line, tokens), snd)(rst)
+      | let [toks, rst1] = tokens(rst)
+        [PairList.cons(t, toks), rst1]
+      ~catch Noparse(): [PairList [], i]
+  fun(chars):
+    fst(app(seq(seq(tokens, many(some(isspace))), finished), fun([[toks, _], _]): toks)(chars))
+
+// -------------------------------------------------------------------------
+// Parser for pretypes. Concrete syntax:
+//
+// TYPE        :: SUMTYPE -> TYPE
+//              | SUMTYPE
+//
+// SUMTYPE     :: PRODTYPE + SUMTYPE
+//              | PRODTYPE
+//
+// PRODTYPE    :: POWTYPE # PRODTYPE
+//              | POWTYPE
+//
+// POWTYPE     :: APPTYPE ^ POWTYPE
+//              | APPTYPE
+//
+// APPTYPE     :: ATOMICTYPES type-constructor  [Provided arity matches]
+//              | ATOMICTYPES                   [Provided only 1 ATOMICTYPE]
+//
+// ATOMICTYPES :: type-constructor              [Provided arity zero]
+//              | type-variable
+//              | ( TYPE )
+//              | ( TYPE LIST )
+//
+// TYPELIST    :: TYPE , TYPELIST
+//              | TYPE
+//
+// Two features make this different from previous HOL type syntax:
+//
+//  o Any identifier not in use as a type constant will be parsed as a
+//    type variable; a ' is not needed and a * is not allowed.
+//
+//  o Antiquotation is not supported.
+// -------------------------------------------------------------------------
+
+def parse_pretype:
+  fun prefinty(n):
+    if n == num_1
+    | Ptycon("1", PairList [])
+    | Ptycon(if mod_num(n)(num_2) == num_0 | "tybit0" | "tybit1",
+             PairList [prefinty(quo_num(n)(num_2))])
+  let mk_prefinty:
+    fun(n):
+      if n < num_1 | failwith("mk_prefinty") | prefinty(n)
+  let btyop = fun(n): fun(_op, x, y): Ptycon(n, PairList [x, y])
+  let mk_apptype:
+    fun(arg):
+      match arg
+      | [PairList [s], PairList []]: s
+      | [tys, PairList [c]]: Ptycon(c, tys)
+      | _: failwith("Bad type construction")
+  let type_atom:
+    fun(input):
+      match input
+      | PairList [Ident(s), & rest]:
+          [try:
+             TypeInference.pretype_of_type(assoc(s)(TypeInference.type_abbrevs(#void)))
+             ~catch Failure(_):
+               try:
+                 mk_prefinty(num_of_string(s))
+                 ~catch Failure(_):
+                   if can(fun(s): if get_type_arity(s) == 0 | #void | fail())(s)
+                   | Ptycon(s, PairList [])
+                   | Utv(s),
+           rest]
+      | _: throw Noparse()
+  let type_constructor:
+    fun(input):
+      match input
+      | PairList [Ident(s), & rest]:
+          if can(fun(s): if get_type_arity(s) > 0 | #void | fail())(s)
+          | [s, rest]
+          | throw Noparse()
+      | _: throw Noparse()
+  // The type grammar is mutually recursive.
+  fun pretype(i):
+    rightbin(sumtype, a(Resword("->")), btyop("fun"), "proper use of type operator (->)")(i)
+  fun sumtype(i):
+    rightbin(prodtype, a(Ident("+")), btyop("sum"), "proper use of type operator (+)")(i)
+  fun prodtype(i):
+    rightbin(carttype, a(Ident("#")), btyop("prod"), "proper use of type operator (#)")(i)
+  fun carttype(i):
+    leftbin(apptype, a(Ident("^")), btyop("cart"), "proper use of type operator (^)")(i)
+  fun apptype(i):
+    app(seq(atomictypes, choice(app(type_constructor, fun(x): PairList [x]), nothing)),
+        mk_apptype)(i)
+  fun atomictypes(i):
+    choice(app(seq(seq(a(Resword("(")), typelist), a(Resword(")"))), fun([[_, l], _]): l),
+           app(type_atom, fun(x): PairList [x]))(i)
+  fun typelist(i):
+    listof(pretype, a(Ident(",")), "comma separated list for type constructor")(i)
+  pretype
+
+// -------------------------------------------------------------------------
+// Hook to allow installation of user parsers.
+// -------------------------------------------------------------------------
+
+def parser_list = Box(PairList [])
+fun install_parser(dat): parser_list.value := PairList.cons(dat, parser_list.value)
+fun delete_parser(key):
+  try:
+    parser_list.value := snd(remove(fun([key_prime, _]): key == key_prime)(parser_list.value))
+    ~catch Failure(_): #void
+fun installed_parsers(): parser_list.value
+fun try_parsers(ps, i):
+  if ps == PairList []
+  | throw Noparse()
+  | try:
+      snd(hd(ps))(i)
+      ~catch Noparse(): try_parsers(tl(ps), i)
+fun try_user_parser(i): try_parsers(parser_list.value, i)
+
+// -------------------------------------------------------------------------
+// Initial preterm parsing. This uses binder and precedence/associativity/
+// prefix status to guide parsing and preterm construction, but treats all
+// identifiers as variables.
+//
+// PRETERM            :: APPL_PRETERM binop APPL_PRETERM
+//                     | APPL_PRETERM
+//
+// APPL_PRETERM       :: APPL_PRETERM : type
+//                     | APPL_PRETERM BINDER_PRETERM
+//                     | BINDER_PRETERM
+//
+// BINDER_PRETERM     :: binder VARSTRUCT_PRETERMS . PRETERM
+//                     | let PRETERM and ... and PRETERM in PRETERM
+//                     | ATOMIC_PRETERM
+//
+// VARSTRUCT_PRETERMS :: TYPED_PRETERM VARSTRUCT_PRETERMS
+//                     | TYPED_PRETERM
+//
+// TYPED_PRETERM      :: TYPED_PRETERM : type
+//                     | ATOMIC_PRETERM
+//
+// ATOMIC_PRETERM     :: ( PRETERM )
+//                     | if PRETERM then PRETERM else PRETERM
+//                     | [ PRETERM; .. ; PRETERM ]
+//                     | { PRETERM, .. , PRETERM }
+//                     | { PRETERM | PRETERM }
+//                     | identifier
+//
+// Note that arbitrary preterms are allowed as varstructs. This allows
+// more general forms of matching and considerably regularizes the syntax.
+// -------------------------------------------------------------------------
+
+def gcounter = Box(0)
+
+def parse_preterm:
+  fun pairwise(r, l):
+    match l
+    | PairList []: #true
+    | PairList [h, & t]: forall(r(h))(t) && pairwise(r, t)
+  fun pfrees(ptm):
+    match ptm
+    | Varp(v, pty):
+        if v == "" && pty == dpty
+        | PairList []
+        | if can(get_const_type)(v) || can(num_of_string)(v)
+               || exists(fun([w, _]): v == w)(Host.the_interface.value)
+          | PairList []
+          | PairList [ptm]
+    | Constp(_, _): PairList []
+    | Combp(p1, p2): union(pfrees(p1))(pfrees(p2))
+    | Absp(p1, p2): subtract(pfrees(p2))(pfrees(p1))
+    | Typing(p, _): pfrees(p)
+  let pdest_eq:
+    fun(ptm):
+      match ptm
+      | Combp(Combp(Varp(n, _), l), r) when n == "=" || n == "<=>": [l, r]
+  let pmk_let:
+    fun([letbindings, body]):
+      let [vars, tms] = unzip(map(pdest_eq)(letbindings))
+      warn(!pairwise(fun(s): fun(t): intersect(pfrees(s))(pfrees(t)) == PairList [], vars))(
+        "duplicate names on left of let-binding: latest is used")
+      let lend = Combp(Varp("LET_END", dpty), body)
+      let abs = itlist(fun(v): fun(t): Absp(v, t))(vars)(lend)
+      let labs = Combp(Varp("LET", dpty), abs)
+      rev_itlist(fun(x): fun(f): Combp(f, x))(tms)(labs)
+  let pmk_vbinder:
+    fun(n, v, bod):
+      if n == "\\" | Absp(v, bod) | Combp(Varp(n, dpty), Absp(v, bod))
+  let pmk_binder:
+    fun(n, vs, bod): itlist(fun(v): fun(b): pmk_vbinder(n, v, b))(vs)(bod)
+  let pmk_set_enum:
+    fun(ptms):
+      itlist(fun(x): fun(t): Combp(Combp(Varp("INSERT", dpty), x), t))(ptms)(Varp("EMPTY", dpty))
+  let pgenvar:
+    fun():
+      let count = gcounter.value
+      gcounter.value := count + 1
+      Varp("GEN%PVAR%" +& to_string(count), dpty)
+  let pmk_exists = fun(v, ptm): Combp(Varp("?", dpty), Absp(v, ptm))
+  let pmk_list:
+    fun(els): itlist(fun(x): fun(y): Combp(Combp(Varp("CONS", dpty), x), y))(els)(Varp("NIL", dpty))
+  let tt = Varp("T", dpty)
+  let ff = Varp("F", dpty)
+  let pmk_bool = fun(b): if b | tt | ff
+  let pmk_char:
+    fun(c):
+      let lis = map(fun(i): pmk_bool(((c bits.(>>) i) mod 2) == 1))(range(0)(7))
+      itlist(fun(x): fun(y): Combp(y, x))(lis)(Varp("ASCII", dpty))
+  let pmk_string:
+    fun(s :: String):
+      let ns = map(fun(i): Char.to_int(s[i]))(range(0)(s.length() - 1))
+      pmk_list(map(pmk_char)(ns))
+  let pmk_setcompr:
+    fun(fabs, bvs, babs):
+      let v = pgenvar()
+      let bod:
+        itlist(fun(x): fun(y): pmk_exists(x, y))(bvs)(
+          Combp(Combp(Combp(Varp("SETSPEC", dpty), v), babs), fabs))
+      Combp(Varp("GSPEC", dpty), Absp(v, bod))
+  let pmk_setabs:
+    fun(fabs, babs):
+      let evs:
+        let fvs = pfrees(fabs)
+        let bvs = pfrees(babs)
+        if length(fvs) <= 1 || bvs == PairList [] | fvs | intersect(fvs)(bvs)
+      pmk_setcompr(fabs, evs, babs)
+  fun mk_precedence(infxs, prs):
+    fun(inp):
+      match infxs
+      | PairList [[s, [p, at]], & _]:
+          let [topins, rest] = partition(fun([s_prime, pat_prime]): pat_prime == [p, at])(infxs)
+          (if at == "right" | rightbin | leftbin)(
+            mk_precedence(rest, prs),
+            end_itlist(fun(x): fun(y): choice(x, y))(map(fun([s, _]): a(Ident(s)))(topins)),
+            fun(op, x, y):
+              match op
+              | Ident(o): Combp(Combp(Varp(o, dpty), x), y),
+            "term after binary operator")(inp)
+      | _: prs(inp)
+  let pmk_geq = fun(s, t): Combp(Combp(Varp("GEQ", dpty), s), t)
+  let pmk_pattern:
+    fun([[pat, guards], res]):
+      let x = pgenvar()
+      let y = pgenvar()
+      let vs = pfrees(pat)
+      let bod:
+        if guards == PairList []
+        | Combp(Combp(Varp("_UNGUARDED_PATTERN", dpty), pmk_geq(pat, x)), pmk_geq(res, y))
+        | Combp(Combp(Combp(Varp("_GUARDED_PATTERN", dpty), pmk_geq(pat, x)), hd(guards)),
+                pmk_geq(res, y))
+      Absp(x, Absp(y, itlist(fun(x): fun(y): pmk_exists(x, y))(vs)(bod)))
+  let pretype = parse_pretype
+  fun is_string_token(s :: String):
+    s.length() >= 2 && s.substring(0, 1) == "\"" && s.substring(s.length() - 1, s.length()) == "\""
+  let string:
+    fun(inp):
+      match inp
+      | PairList [Ident(s), & rst] when is_string_token(s): [s.substring(1, s.length() - 1), rst]
+      | _: throw Noparse()
+  let singleton1 = fun(x): PairList [x]
+  let lmk_ite = fun([[[[[_, b], _], l], _], r]): Combp(Combp(Combp(Varp("COND", dpty), b), l), r)
+  let lmk_typed:
+    fun(arg):
+      match arg
+      | [p, PairList []]: p
+      | [p, PairList [ty]]: Typing(p, ty)
+      | _: fail()
+  let lmk_let = fun([[[_, bnds], _], ptm]): pmk_let([bnds, ptm])
+  let lmk_binder = fun([[[[s, h], t], _], p]): pmk_binder(s, PairList.cons(h, t), p)
+  let lmk_setenum = fun([l, _]): pmk_set_enum(l)
+  let lmk_setabs = fun([[[l, _], r], _]): pmk_setabs(l, r)
+  let lmk_setcompr = fun([[[[[f, _], vs], _], b], _]): pmk_setcompr(f, pfrees(vs), b)
+  let lmk_decimal:
+    fun([[_, l0], ropt]):
+      let [l, r]:
+        if ropt == PairList []
+        | [l0, "1"]
+        | let r0 = hd(ropt)
+          let n_l = num_of_string(l0)
+          let n_r = num_of_string(r0)
+          let n_d = power_num(10)(r0.length())
+          let n_n = n_l * n_d + n_r
+          [to_string(n_n), to_string(n_d)]
+      Combp(Combp(Varp("DECIMAL", dpty), Varp(l, dpty)), Varp(r, dpty))
+  let lmk_univ:
+    fun([[_, pty], _]):
+      Typing(Varp("UNIV", dpty), Ptycon("fun", PairList [pty, Ptycon("bool", PairList [])]))
+  let any_identifier:
+    fun(inp):
+      match inp
+      | PairList [Ident(s), & rest]: [s, rest]
+      | _: throw Noparse()
+  let identifier:
+    fun(inp):
+      match inp
+      | PairList [Ident(s), & rest]:
+          if can(Host.get_infix_status)(s) || Host.is_prefix(s) || Host.parses_as_binder(s)
+          | throw Noparse()
+          | [s, rest]
+      | _: throw Noparse()
+  let binder:
+    fun(inp):
+      match inp
+      | PairList [Ident(s), & rest]:
+          if Host.parses_as_binder(s)
+          | [s, rest]
+          | throw Noparse()
+      | _: throw Noparse()
+  let pre_fix:
+    fun(inp):
+      match inp
+      | PairList [Ident(s), & rest]:
+          if Host.is_prefix(s)
+          | [s, rest]
+          | throw Noparse()
+      | _: throw Noparse()
+  fun fails(msg): fun(_): failwith(msg)
+  fun alt(ps :: List): for values(p = ps[ps.length() - 1]) (q in ps.take(ps.length() - 1).reverse()): choice(q, p)
+  // The preterm grammar is mutually recursive.
+  fun preterm(i): mk_precedence(Host.infixes(), typed_appl_preterm)(i)
+  fun nocommapreterm(i):
+    let infs = filter(fun([s, _]): s != ",")(Host.infixes())
+    mk_precedence(infs, typed_appl_preterm)(i)
+  fun typed_appl_preterm(i):
+    app(seq(appl_preterm, possibly(app(seq(a(Resword(":")), pretype), snd))), lmk_typed)(i)
+  fun appl_preterm(i):
+    choice(app(seq(pre_fix, appl_preterm), fun([x, y]): Combp(Varp(x, dpty), y)),
+           app(seq(binder_preterm, many(binder_preterm)),
+               fun([h, t]): itlist(fun(x): fun(y): Combp(y, x))(rev(t))(h)))(i)
+  fun binder_preterm(i):
+    alt([app(seq(seq(seq(a(Resword("let")),
+                         leftbin(app(preterm, singleton1), a(Resword("and")),
+                                 fun(_, x, y): append(x)(y), "binding")),
+                     a(Resword("in"))),
+                 preterm),
+             lmk_let),
+         app(seq(seq(seq(seq(binder, typed_apreterm), many(typed_apreterm)), a(Resword("."))), preterm),
+             lmk_binder),
+         atomic_preterm])(i)
+  fun typed_apreterm(i):
+    app(seq(atomic_preterm, possibly(app(seq(a(Resword(":")), pretype), snd))), lmk_typed)(i)
+  fun atomic_preterm(i):
+    let lpar = a(Resword("("))
+    let rpar = a(Resword(")"))
+    let kif = a(Resword("if"))
+    let kthen = a(Resword("then"))
+    let kelse = a(Resword("else"))
+    let terms_sc = elistof(preterm, a(Resword(";")), "semicolon separated list of terms")
+    alt([try_user_parser,
+         app(seq(seq(seq(lpar, a(Resword(":"))), pretype), rpar), fun([[[_, _], pty], _]): lmk_univ([[#void, pty], #void])),
+         app(seq(seq(lpar, a(Resword(":"))), pretype), fails("closing right parenthesis on universe expected")),
+         app(seq(lpar, a(Resword(":"))), fails("type in universe construction expected")),
+         app(string, pmk_string),
+         app(seq(seq(lpar, app(any_identifier, fun(s): Varp(s, dpty))), rpar), fun([[_, v], _]): v),
+         app(seq(seq(lpar, preterm), rpar), fun([[_, p], _]): p),
+         app(seq(seq(seq(seq(seq(kif, preterm), kthen), preterm), kelse), preterm), lmk_ite),
+         app(seq(seq(seq(seq(kif, preterm), kthen), preterm), kelse), fails("malformed else clause")),
+         app(seq(seq(seq(kif, preterm), kthen), preterm), fails("missing else following then clause")),
+         app(seq(seq(kif, preterm), kthen), fails("malformed then clause in if-then-else statement")),
+         app(seq(kif, preterm), fails("missing 'then' reserved word in if-then-else statement")),
+         app(kif, fails("malformed if-then-else")),
+         app(seq(seq(a(Resword("[")), terms_sc), a(Resword("]"))), fun([[_, l], _]): pmk_list(l)),
+         app(seq(a(Resword("[")), terms_sc), fails("closing square bracket of list expected")),
+         app(seq(a(Resword("{")),
+                 alt([app(seq(elistof(nocommapreterm, a(Ident(",")), "comma separated list of terms"),
+                              a(Resword("}"))),
+                          lmk_setenum),
+                      app(seq(seq(seq(preterm, a(Resword("|"))), preterm), a(Resword("}"))), lmk_setabs),
+                      app(seq(seq(seq(seq(seq(preterm, a(Resword("|"))), preterm), a(Resword("|"))), preterm),
+                              a(Resword("}"))),
+                          lmk_setcompr)])),
+             snd),
+         app(a(Resword("{")), fails("malformed set {}")),
+         app(seq(seq(seq(a(Resword("match")), preterm), a(Resword("with"))), clauses),
+             fun([[[_, e], _], c]): Combp(Combp(Varp("_MATCH", dpty), e), c)),
+         app(a(Resword("match")), fails("malformed match-with statement")),
+         app(seq(a(Resword("function")), clauses), fun([_, c]): Combp(Varp("_FUNCTION", dpty), c)),
+         app(a(Resword("function")), fails("malformed function and pattern clauses")),
+         app(seq(seq(a(Ident("#")), identifier), possibly(app(seq(a(Resword(".")), identifier), snd))),
+             lmk_decimal),
+         app(a(Ident("#")), fails("malformed numerical # identifier")),
+         app(identifier, fun(s): Varp(s, dpty))])(i)
+  fun pattern(i): seq(preterm, possibly(app(seq(a(Resword("when")), preterm), snd)))(i)
+  fun clause(i): app(seq(pattern, app(seq(a(Resword("->")), preterm), snd)), pmk_pattern)(i)
+  fun clauses(i):
+    app(app(seq(possibly(a(Resword("|"))), listof(clause, a(Resword("|")), "pattern-match clause")), snd),
+        end_itlist(fun(s): fun(t): Combp(Combp(Varp("_SEQPATTERN", dpty), s), t)))(i)
+  fun(inp):
+    match inp
+    | PairList [Ident(s)] when !is_string_token(s): [Varp(s, dpty), PairList []]
+    | _: preterm(inp)
+
+// -------------------------------------------------------------------------
+// Type and term parsers.
+// -------------------------------------------------------------------------
+
+fun parse_type(s):
+  let [pty, l] = parse_pretype(lex(explode(s)))
+  if l == PairList []
+  | TypeInference.type_of_pretype(pty)
+  | failwith("Unparsed input following type")
+
+fun parse_term(s):
+  let [ptm, l] = parse_preterm(lex(explode(s)))
+  if l == PairList []
+  | TypeInference.term_of_preterm(TypeInference.retypecheck(PairList [])(ptm))
+  | failwith("Unparsed input following term")

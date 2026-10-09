@@ -1,7 +1,6 @@
 #lang rhombus
-// Direct translation of the pinned HOL Light tactics.ml, up to `prove`. The
-// goal printer and the interactive goalstack commands that follow it in the
-// original (g, e, b, r, p, top_thm, ...) are not ported.
+// Direct translation of the pinned HOL Light tactics.ml. The goal printers
+// (print_goal, print_goalstack, PRINT_GOAL_TAC, ...) are not ported.
 
 // =========================================================================
 // System of tactics (slightly different from any traditional LCF method).
@@ -141,9 +140,23 @@ export:
   ANTS_TAC
   REMARK_TAC
   by
+  rotate
   mk_goalstate
   TAC_PROOF
   prove
+  current_goalstack
+  refine
+  flush_goalstack
+  e
+  r
+  er
+  set_goal
+  g
+  b
+  p
+  top_realgoal
+  top_goal
+  top_thm
 
 // -------------------------------------------------------------------------
 // The common case of trivial instantiations.
@@ -1010,6 +1023,34 @@ fun by(tac):
       [[mvs_prime, inst_prime], gls_prime, just_prime]
 
 // -------------------------------------------------------------------------
+// Rotate the goalstate either way.
+// -------------------------------------------------------------------------
+
+def rotate:
+  let rotate_p:
+    fun([meta, sgs, just]):
+      let sgs_prime = append(tl(sgs))(PairList [hd(sgs)])
+      let just_prime:
+        fun(i):
+          fun(ths):
+            let ths_prime = PairList.cons(last(ths), butlast(ths))
+            just(i)(ths_prime)
+      [meta, sgs_prime, just_prime]
+  let rotate_n:
+    fun([meta, sgs, just]):
+      let sgs_prime = PairList.cons(last(sgs), butlast(sgs))
+      let just_prime:
+        fun(i):
+          fun(ths):
+            let ths_prime = append(tl(ths))(PairList [hd(ths)])
+            just(i)(ths_prime)
+      [meta, sgs_prime, just_prime]
+  fun(n):
+    if n > 0
+    | funpow(n)(rotate_p)
+    | funpow(-n)(rotate_n)
+
+// -------------------------------------------------------------------------
 // Perform refinement proof, tactic proof etc.
 // -------------------------------------------------------------------------
 
@@ -1036,3 +1077,89 @@ fun prove([t, tac]):
     | try:
         EQ_MP(ALPHA(t_prime)(t))(th)
         ~catch Failure(_): failwith("prove: justification generated wrong theorem")
+
+// -------------------------------------------------------------------------
+// Interactive "subgoal package" stuff.
+// -------------------------------------------------------------------------
+
+def current_goalstack = Box(PairList [])
+
+fun refine(r):
+  let l = current_goalstack.value
+  if l == PairList []
+  | failwith("No current goal")
+  | let h = hd(l)
+    let res = PairList.cons(r(h), l)
+    current_goalstack.value := res
+    current_goalstack.value
+
+fun flush_goalstack(_):
+  let l = current_goalstack.value
+  current_goalstack.value := PairList [hd(l)]
+
+fun e(tac): refine(by(VALID(tac)))
+
+fun r(n): refine(rotate(n))
+
+// A sequence of 'e tac; r n' where n is the number of subgoals after e tac.
+// This command is useful when you want to interactively try a list of
+// tactics after THENL, e.g.,
+//   TAC THENL [ TAC_A; TAC_B; .. ]
+// 'e TAC;; er TAC_A;;' will execute TAC, execute TAC_A, then switch to the
+// second subgoal of 'e TAC' which will be the input goalstate of TAC_B.
+fun er(tac):
+  let e_result = e(tac)
+  let [n_subgoals_to_rotate, n_subgoals]:
+    match current_goalstack.value
+    | PairList [[_, gl, _], [_, glprev, _], & _]:
+        let n_subgoals = length(gl)
+        if n_subgoals == 0
+        | [0, 0]
+        | [n_subgoals - length(glprev) + 1, n_subgoals]
+    | _: failwith("current_goalstack must have at least 2 items after 'e'")
+  if n_subgoals_to_rotate == 0 || n_subgoals == 1
+  | remark("(Rotating zero subgoal)\n\n")
+    e_result
+  | // departure: the goalstack printer is not ported, so the
+    // `if !verbose then print_goalstack !current_goalstack` step is omitted.
+    remark("\n(Rotating " +& string_of_int(n_subgoals_to_rotate) +& " subgoal" \
+             +& (if n_subgoals_to_rotate == 1 | "" | "s") +& "...)\n\n")
+    let new_g = r(n_subgoals_to_rotate)
+    // pop the latest subgoal so that one b() can fully roll back the state
+    let cur_gs = current_goalstack.value
+    current_goalstack.value := PairList.cons(hd(cur_gs), tl(tl(cur_gs)))
+    new_g
+
+fun set_goal([asl, w]):
+  current_goalstack.value := PairList [mk_goalstate([map(fun(t): ["", ASSUME(t)])(asl), w])]
+  current_goalstack.value
+
+fun g(t):
+  let fvs = sort(fun(x): fun(y): x < y)(map(o(fst)(dest_var))(frees(t)))
+  if fvs != PairList []
+  | let errmsg = end_itlist(fun(s): fun(t): s +& ", " +& t)(fvs)
+    warn(#true)("Free variables in goal: " +& errmsg)
+  | #void
+  set_goal([PairList [], t])
+
+fun b(_):
+  let l = current_goalstack.value
+  if length(l) == 1
+  | failwith("Can't back up any more")
+  | current_goalstack.value := tl(l)
+    current_goalstack.value
+
+fun p(_):
+  current_goalstack.value
+
+fun top_realgoal(_):
+  let PairList [[_, PairList [[asl, w], & _], _], & _] = current_goalstack.value
+  [asl, w]
+
+fun top_goal(_):
+  let [asl, w] = top_realgoal(#void)
+  [map(o(concl)(snd))(asl), w]
+
+fun top_thm(_):
+  let PairList [[_, PairList [], f], & _] = current_goalstack.value
+  f(null_inst)(PairList [])

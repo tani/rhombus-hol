@@ -86,6 +86,12 @@ def norm_name(n, mod):
     return n
 
 
+def open_local_of(cur):
+    """Whether the definition being read ends in an open `let ... in`."""
+    lines = [x for x in cur[1] if x.strip()]
+    return bool(re.search(r"\bin\s*$", lines[-1])) if lines else False
+
+
 def ml_defs(src):
     """Toplevel `let` definitions, inside `module ... struct` bodies too."""
     s = strip_ml_comments(src)
@@ -107,7 +113,9 @@ def ml_defs(src):
         if stack and stack[-1][1] is None:
             stack[-1][1] = ind
         body = stack[-1][1] if stack else 0
-        m = re.match(r"^\s*let\s+(?:rec\s+)?\(?([A-Za-z_][\w']*)", l)
+        m = (re.match(r"^\s*let\s+(?:rec\s+)?\(?([A-Za-z_][\w']*)", l)
+             or re.match(r"^\s*and\s+\(?([A-Za-z_][\w']*)", l) if cur and not open_local_of(cur) else
+             re.match(r"^\s*let\s+(?:rec\s+)?\(?([A-Za-z_][\w']*)", l))
         open_local = (cur is not None and not ''.join(cur[1]).rstrip().endswith(';;')
                       and re.search(r"\bin\s*$", [x for x in cur[1] if x.strip()][-1]))
         if ind == body and m and not open_local and not re.match(r"^\s*let\s+_\s*=", l):
@@ -146,7 +154,7 @@ def rh_defs(src, mod):
                 defs.append(cur)
             name = m.group(2).split(',')[0].strip() if m.group(2) else m.group(3)
             cur = [norm_name(name, mod), [l]]
-        elif cur is not None and (ind > body or l.lstrip().startswith('//')):
+        elif cur is not None and (ind > body or l.lstrip().startswith(('//', '| '))):
             cur[1].append(l)
         elif cur is not None:
             defs.append(cur); cur = None
@@ -157,6 +165,9 @@ def rh_defs(src, mod):
 
 def toks_ml(body):
     out = []
+    # A record field bound to a variable of its own name, as in
+    # `{head = head}`, is punned on the Rhombus side.
+    body = re.sub(r"\b([a-z_][\w']*)\s*=\s*\1\b(?=\s*[;}])", r"\1", body)
     for m in re.finditer(r'`[^`]*`|"(?:[^"\\]|\\.)*"|[A-Za-z_][\w\']*', body):
         t = m.group(0)
         if t[0] == '`':

@@ -140,7 +140,7 @@ def rh_defs(src, mod):
                 defs.append(cur); cur = None
             ns.append(ind); continue
         body = ns[-1] + 2 if ns else 0
-        m = re.match(r'^ *(def|fun)\s+(?:\[([^\]]*)\]|([A-Za-z_]\w*|#\{[^}]*\}))', l)
+        m = re.match(r'^ *(def|fun)\s+(?:mutable\s+)?(?:\[([^\]]*)\]|([A-Za-z_]\w*|#\{[^}]*\}))', l)
         if m and ind == body:
             if cur:
                 defs.append(cur)

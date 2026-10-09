@@ -1,12 +1,33 @@
 #lang rhombus/and_meta
-// (c) University of Cambridge 1998; John Harrison 1998-2007.
-// Derived from HOL Light; redistribution terms and disclaimer in ../LICENSE.
-// Direct algorithm port of fusion.ml, pinned in ../upstream.
-// Private immutable constructors, explicit currying, PairList and tagged exceptions.
+// Direct translation of the pinned HOL Light fusion.ml.
+
+// =========================================================================
+// Complete HOL kernel of types, terms and theorems.
+//
+//       John Harrison, University of Cambridge Computer Laboratory
+//
+//            (c) Copyright, University of Cambridge 1998
+//              (c) Copyright, John Harrison 1998-2007
+// =========================================================================
+
+// The signature Hol_kernel makes hol_type and term `private`: other modules
+// can match on Tyvar, Tyapp, Var, Const, Comb and Abs but not build values
+// with them, and thm is abstract. Here the constructors are exported only
+// in the binding space, and Sequent not at all (`Theorem` is its annotation).
+// The annotations on the public functions stand in for OCaml's static types.
+
 import:
   "lib.rhm" open
   "private/ocaml.rhm" open
+
 export:
+  only_space bind:
+    Tyvar
+    Tyapp
+    Var
+    Const
+    Comb
+    Abs
   types
   get_type_arity
   new_type
@@ -72,391 +93,684 @@ export:
   mk_eq
   aconv
   equals_thm
+  Theorem
 
-// Kernel objects are immutable classes, so == and hashing are structural,
-// matching OCaml's polymorphic equality. Their OCaml view (constructor tag
-// and fields) gives OCaml's polymorphic ordering, used by < and friends,
-// and Hashtbl.hash. The constructors are not exported.
+// Kernel objects are immutable classes, so == and hashing are structural, as
+// OCaml's polymorphic equality. Their OCaml view (constructor tag and fields)
+// gives OCaml's polymorphic ordering, used by compare and friends, and
+// Hashtbl.hash (private/ocaml.rhm).
 class KernelObject():
   nonfinal
   implements Comparable
   implements OcamlValue
   override compare_to(other): compare(this)(other)
-class KernelTyvar(name):
+
+class Tyvar(name):
   extends KernelObject
-  override ocaml_view(): [0,name]
-class KernelTyapp(name,args):
+  override ocaml_view(): [0, name]
+class Tyapp(name, args):
   extends KernelObject
-  override ocaml_view(): [1,name,args]
-class KernelVar(name,ty):
+  override ocaml_view(): [1, name, args]
+
+class Var(name, ty):
   extends KernelObject
-  override ocaml_view(): [0,name,ty]
-class KernelConst(name,ty):
+  override ocaml_view(): [0, name, ty]
+class Const(name, ty):
   extends KernelObject
-  override ocaml_view(): [1,name,ty]
-class KernelComb(rator,rand):
+  override ocaml_view(): [1, name, ty]
+class Comb(rator, rand):
   extends KernelObject
-  override ocaml_view(): [2,rator,rand]
-class KernelAbs(var,body):
+  override ocaml_view(): [2, rator, rand]
+class Abs(bvar, body):
   extends KernelObject
-  override ocaml_view(): [3,var,body]
-class Sequent(asl,conclusion):
+  override ocaml_view(): [3, bvar, body]
+
+class Sequent(asl, conclusion):
   extends KernelObject
-  override ocaml_view(): [0,asl,conclusion]
-class Clash(term)
-// Recreate the OCaml type boundary at the dynamically typed public API.
-annot.macro 'HolType': 'KernelTyvar || KernelTyapp'
-annot.macro 'Term': 'KernelVar || KernelConst || KernelComb || KernelAbs'
-def mutable the_type_constants = PairList [["bool", 0],["fun", 2]]
+  override ocaml_view(): [0, asl, conclusion]
+
+annot.macro 'HolType': 'Tyvar || Tyapp'
+annot.macro 'Term': 'Var || Const || Comb || Abs'
+annot.macro 'Theorem': 'Sequent'
+
+// -------------------------------------------------------------------------
+// List of current type constants with their arities.
+//
+// Initially we just have the boolean type and the function space
+// constructor. Later on we add as primitive the type of individuals.
+// All other new types result from definitional extension.
+// -------------------------------------------------------------------------
+
+def mutable the_type_constants = PairList [["bool", 0], ["fun", 2]]
+
+// -------------------------------------------------------------------------
+// Return all the defined types.
+// -------------------------------------------------------------------------
+
 fun types(): the_type_constants
+
+// -------------------------------------------------------------------------
+// Lookup function for type constants. Returns arity if it succeeds.
+// -------------------------------------------------------------------------
+
 fun get_type_arity(s): assoc(s)(the_type_constants)
+
+// -------------------------------------------------------------------------
+// Declare a new type.
+// -------------------------------------------------------------------------
+
 fun new_type([name :: String, arity :: Int]):
   if can(get_type_arity)(name)
   | failwith("new_type: type " +& name +& " has already been declared")
-  | the_type_constants := PairList.cons([name, arity],the_type_constants)
+  | the_type_constants := PairList.cons([name, arity], the_type_constants)
+
+// -------------------------------------------------------------------------
+// Basic type constructors.
+// -------------------------------------------------------------------------
+
 fun mk_type([tyop :: String, args :: PairList.of(HolType)]):
   let arity:
     try:
       get_type_arity(tyop)
       ~catch Failure(_): failwith("mk_type: type " +& tyop +& " has not been defined")
   if arity == length(args)
-  | KernelTyapp(tyop,args)
+  | Tyapp(tyop, args)
   | failwith("mk_type: wrong number of arguments to " +& tyop)
-fun mk_vartype(v :: String): KernelTyvar(v)
-fun dest_type(ty):
-  match ty
-  | KernelTyapp(s,a): [s, a]
-  | KernelTyvar(_): failwith("dest_type: type variable not a constructor")
-fun dest_vartype(ty):
-  match ty
-  | KernelTyapp(_,_): failwith("dest_vartype: type constructor not a variable")
-  | KernelTyvar(s): s
+
+fun mk_vartype(v :: String): Tyvar(v)
+
+// -------------------------------------------------------------------------
+// Basic type destructors.
+// -------------------------------------------------------------------------
+
+fun dest_type(arg):
+  match arg
+  | Tyapp(s, ty): [s, ty]
+  | Tyvar(_): failwith("dest_type: type variable not a constructor")
+
+fun dest_vartype(arg):
+  match arg
+  | Tyapp(_, _): failwith("dest_vartype: type constructor not a variable")
+  | Tyvar(s): s
+
+// -------------------------------------------------------------------------
+// Basic type discriminators.
+// -------------------------------------------------------------------------
+
 def is_type = can(dest_type)
+
 def is_vartype = can(dest_vartype)
-fun tyvars(ty):
-  match ty
-  | KernelTyapp(_,args): itlist(o(union)(tyvars))(args)(PairList [])
-  | KernelTyvar(_): PairList [ty]
+
+// -------------------------------------------------------------------------
+// Return the type variables in a type and in a list of types.
+// -------------------------------------------------------------------------
+
+fun tyvars(arg):
+  match arg
+  | Tyapp(_, args): itlist(o(union)(tyvars))(args)(PairList [])
+  | Tyvar(v) && tv: PairList [tv]
+
+// -------------------------------------------------------------------------
+// Substitute types for type variables.
+//
+// NB: non-variables in subst list are just ignored (a check would be
+// repeated many times), as are repetitions (first possibility is taken).
+// -------------------------------------------------------------------------
+
 fun type_subst(i :: PairList.of(matching([_ :: HolType, _ :: HolType]))):
   fun(ty):
     match ty
-    | KernelTyapp(tycon,args):
-        let args1 = qmap(type_subst(i))(args)
-        if args1 === args | ty | KernelTyapp(tycon,args1)
+    | Tyapp(tycon, args):
+        let args_prime = qmap(type_subst(i))(args)
+        if args_prime === args | ty | Tyapp(tycon, args_prime)
     | _: rev_assocd(ty)(i)(ty)
-def bool_ty = KernelTyapp("bool",PairList [])
-def aty = KernelTyvar("A")
-def mutable the_term_constants = PairList [["=", KernelTyapp("fun",PairList [aty,KernelTyapp("fun",PairList [aty,bool_ty])])]]
+
+def bool_ty = Tyapp("bool", PairList [])
+
+def aty = Tyvar("A")
+
+// -------------------------------------------------------------------------
+// List of term constants and their types.
+//
+// We begin with just equality (over all types). Later, the Hilbert choice
+// operator is added. All other new constants are defined.
+// -------------------------------------------------------------------------
+
+def mutable the_term_constants:
+  PairList [["=", Tyapp("fun", PairList [aty, Tyapp("fun", PairList [aty, bool_ty])])]]
+
+// -------------------------------------------------------------------------
+// Return all the defined constants with generic types.
+// -------------------------------------------------------------------------
+
 fun constants(): the_term_constants
+
+// -------------------------------------------------------------------------
+// Gets type of constant if it succeeds.
+// -------------------------------------------------------------------------
+
 fun get_const_type(s): assoc(s)(the_term_constants)
+
+// -------------------------------------------------------------------------
+// Declare a new constant.
+// -------------------------------------------------------------------------
+
 fun new_constant([name :: String, ty :: HolType]):
   if can(get_const_type)(name)
   | failwith("new_constant: constant " +& name +& " has already been declared")
-  | the_term_constants := PairList.cons([name, ty],the_term_constants)
+  | the_term_constants := PairList.cons([name, ty], the_term_constants)
+
+// -------------------------------------------------------------------------
+// Finds the type of a term (assumes it is well-typed).
+// -------------------------------------------------------------------------
+
 fun type_of(tm :: Term):
   match tm
-  | KernelVar(_,ty): ty
-  | KernelConst(_,ty): ty
-  | KernelComb(s,_):
-      let KernelTyapp("fun",PairList [_,rty]) = type_of(s)
+  | Var(_, ty): ty
+  | Const(_, ty): ty
+  | Comb(s, _):
+      let Tyapp("fun", PairList [dty, rty]) = type_of(s)
       rty
-  | KernelAbs(KernelVar(_,ty),t): KernelTyapp("fun",PairList [ty,type_of(t)])
-fun is_var(t): match t | KernelVar(_,_): #true | _: #false
-fun is_const(t): match t | KernelConst(_,_): #true | _: #false
-fun is_abs(t): match t | KernelAbs(_,_): #true | _: #false
-fun is_comb(t): match t | KernelComb(_,_): #true | _: #false
-fun mk_var([v :: String, ty :: HolType]): KernelVar(v,ty)
+  | Abs(Var(_, ty), t): Tyapp("fun", PairList [ty, type_of(t)])
+
+// -------------------------------------------------------------------------
+// Primitive discriminators.
+// -------------------------------------------------------------------------
+
+fun is_var(arg):
+  match arg
+  | Var(_, _): #true
+  | _: #false
+
+fun is_const(arg):
+  match arg
+  | Const(_, _): #true
+  | _: #false
+
+fun is_abs(arg):
+  match arg
+  | Abs(_, _): #true
+  | _: #false
+
+fun is_comb(arg):
+  match arg
+  | Comb(_, _): #true
+  | _: #false
+
+// -------------------------------------------------------------------------
+// Primitive constructors.
+// -------------------------------------------------------------------------
+
+fun mk_var([v :: String, ty :: HolType]): Var(v, ty)
+
 fun mk_const([name :: String, theta :: PairList.of(matching([_ :: HolType, _ :: HolType]))]):
   let uty:
     try:
       get_const_type(name)
       ~catch Failure(_): failwith("mk_const: not a constant name")
-  KernelConst(name,type_subst(theta)(uty))
-fun mk_abs([v :: Term, b :: Term]):
-  match v
-  | KernelVar(_,_): KernelAbs(v,b)
+  Const(name, type_subst(theta)(uty))
+
+fun mk_abs([bvar :: Term, bod :: Term]):
+  match bvar
+  | Var(_, _): Abs(bvar, bod)
   | _: failwith("mk_abs: not a variable")
+
 fun mk_comb([f :: Term, a :: Term]):
   match type_of(f)
-  | KernelTyapp("fun",PairList [ty,_]):
-      if compare(ty)(type_of(a)) == 0 | KernelComb(f,a) | failwith("mk_comb: types do not agree")
+  | Tyapp("fun", PairList [ty, _]) when compare(ty)(type_of(a)) == 0:
+      Comb(f, a)
   | _: failwith("mk_comb: types do not agree")
-fun dest_var(t): match t | KernelVar(s,ty): [s, ty] | _: failwith("dest_var: not a variable")
-fun dest_const(t): match t | KernelConst(s,ty): [s, ty] | _: failwith("dest_const: not a constant")
-fun dest_comb(t): match t | KernelComb(f,x): [f, x] | _: failwith("dest_comb: not a combination")
-fun dest_abs(t): match t | KernelAbs(v,b): [v, b] | _: failwith("dest_abs: not an abstraction")
+
+// -------------------------------------------------------------------------
+// Primitive destructors.
+// -------------------------------------------------------------------------
+
+fun dest_var(arg):
+  match arg
+  | Var(s, ty): [s, ty]
+  | _: failwith("dest_var: not a variable")
+
+fun dest_const(arg):
+  match arg
+  | Const(s, ty): [s, ty]
+  | _: failwith("dest_const: not a constant")
+
+fun dest_comb(arg):
+  match arg
+  | Comb(f, x): [f, x]
+  | _: failwith("dest_comb: not a combination")
+
+fun dest_abs(arg):
+  match arg
+  | Abs(v, b): [v, b]
+  | _: failwith("dest_abs: not an abstraction")
+
+// -------------------------------------------------------------------------
+// Finds the variables free in a term (list of terms).
+// -------------------------------------------------------------------------
+
 fun frees(tm :: Term):
   match tm
-  | KernelVar(_,_): PairList [tm]
-  | KernelConst(_,_): PairList []
-  | KernelAbs(v,b): subtract(frees(b))(PairList [v])
-  | KernelComb(s,t): union(frees(s))(frees(t))
-fun freesl(l :: PairList.of(Term)): itlist(o(union)(frees))(l)(PairList [])
+  | Var(_, _): PairList [tm]
+  | Const(_, _): PairList []
+  | Abs(bv, bod): subtract(frees(bod))(PairList [bv])
+  | Comb(s, t): union(frees(s))(frees(t))
+
+fun freesl(tml :: PairList.of(Term)): itlist(o(union)(frees))(tml)(PairList [])
+
+// -------------------------------------------------------------------------
+// Whether all free variables in a term appear in a list.
+// -------------------------------------------------------------------------
+
 fun freesin(acc :: PairList.of(Term)):
   fun(tm):
     match tm
-    | KernelVar(_,_): mem(tm)(acc)
-    | KernelConst(_,_): #true
-    | KernelAbs(v,b): freesin(PairList.cons(v,acc))(b)
-    | KernelComb(s,t): freesin(acc)(s) && freesin(acc)(t)
+    | Var(_, _): mem(tm)(acc)
+    | Const(_, _): #true
+    | Abs(bv, bod): freesin(PairList.cons(bv, acc))(bod)
+    | Comb(s, t): freesin(acc)(s) && freesin(acc)(t)
+
+// -------------------------------------------------------------------------
+// Whether a variable (or constant in fact) is free in a term.
+// -------------------------------------------------------------------------
+
 fun vfree_in(v :: Term):
   fun(tm):
     match tm
-    | KernelAbs(bv,b): v != bv && vfree_in(v)(b)
-    | KernelComb(s,t): vfree_in(v)(s) || vfree_in(v)(t)
+    | Abs(bv, bod): v != bv && vfree_in(v)(bod)
+    | Comb(s, t): vfree_in(v)(s) || vfree_in(v)(t)
     | _: compare(tm)(v) == 0
+
+// -------------------------------------------------------------------------
+// Finds the type variables (free) in a term.
+// -------------------------------------------------------------------------
+
 fun type_vars_in_term(tm :: Term):
   match tm
-  | KernelVar(_,ty): tyvars(ty)
-  | KernelConst(_,ty): tyvars(ty)
-  | KernelComb(s,t): union(type_vars_in_term(s))(type_vars_in_term(t))
-  | KernelAbs(KernelVar(_,ty),t): union(tyvars(ty))(type_vars_in_term(t))
+  | Var(_, ty): tyvars(ty)
+  | Const(_, ty): tyvars(ty)
+  | Comb(s, t): union(type_vars_in_term(s))(type_vars_in_term(t))
+  | Abs(Var(_, ty), t): union(tyvars(ty))(type_vars_in_term(t))
+
+// -------------------------------------------------------------------------
+// For name-carrying syntax, we need this early.
+// -------------------------------------------------------------------------
+
 fun variant(avoid :: PairList.of(Term)):
   fun(v):
     if !exists(vfree_in(v))(avoid)
     | v
     | match v
-      | KernelVar(s,ty): variant(avoid)(KernelVar(s +& "'",ty))
+      | Var(s, ty): variant(avoid)(Var(s +& "'", ty))
       | _: failwith("variant: not a variable")
-fun vsubst(theta :: PairList.of(matching([_ :: Term, _ :: Term]))):
-  fun vs(ilist,tm):
-    match tm
-    | KernelVar(_,_): rev_assocd(tm)(ilist)(tm)
-    | KernelConst(_,_): tm
-    | KernelComb(s,t):
-        let s1 = vs(ilist,s)
-        let t1 = vs(ilist,t)
-        if s1 === s && t1 === t | tm | KernelComb(s1,t1)
-    | KernelAbs(v,s):
-        let ilist1 = filter(fun([t, x]): x != v)(ilist)
-        if ilist1 == PairList []
-        | tm
-        | let s1 = vs(ilist1,s)
-          cond
-          | s1 === s: tm
-          | exists(fun([t, x]): vfree_in(v)(t) && vfree_in(x)(s))(ilist1):
-              let v1 = variant(PairList [s1])(v)
-              KernelAbs(v1,vs(PairList.cons([v1, v],ilist1),s))
-          | ~else: KernelAbs(v,s1)
-  cond
-  | theta == PairList []: I
-  | forall(fun(p):
-             match p
-             | [t, KernelVar(_,y)]: compare(type_of(t))(y) == 0
-             | _: #false)(theta): fun(tm): vs(theta,tm)
-  | ~else: failwith("vsubst: Bad substitution list")
-fun inst(tyin :: PairList.of(matching([_ :: HolType, _ :: HolType]))):
-  fun ins(env,ti,tm):
-    match tm
-    | KernelVar(n,ty):
-        let ty1 = type_subst(ti)(ty)
-        let tm1 = if ty1 === ty | tm | KernelVar(n,ty1)
-        if compare(rev_assocd(tm1)(env)(tm))(tm) == 0 | tm1 | throw Clash(tm1)
-    | KernelConst(c,ty):
-        let ty1 = type_subst(ti)(ty)
-        if ty1 === ty | tm | KernelConst(c,ty1)
-    | KernelComb(f,x):
-        let f1 = ins(env,ti,f)
-        let x1 = ins(env,ti,x)
-        if f1 === f && x1 === x | tm | KernelComb(f1,x1)
-    | KernelAbs(y,t):
-        let y1 = ins(PairList [],ti,y)
-        let env1 = PairList.cons([y, y1],env)
-        try:
-          let t1 = ins(env1,ti,t)
-          if y1 === y && t1 === t | tm | KernelAbs(y1,t1)
-          ~catch ex :: Clash:
-            let w1 = ex.term
-            if w1 != y1
-            | throw ex
-            | let ifrees = map(fun(t): ins(PairList [],ti,t))(frees(t))
-              let y2 = variant(ifrees)(y1)
-              let z = KernelVar(fst(dest_var(y2)),snd(dest_var(y)))
-              ins(env,ti,KernelAbs(z,vsubst(PairList [[z, y]])(t)))
-  if tyin == PairList [] | I | fun(tm): ins(PairList [],tyin,tm)
-fun rator(t): match t | KernelComb(l,r): l | _: failwith("rator: Not a combination")
-fun rand(t): match t | KernelComb(l,r): r | _: failwith("rand: Not a combination")
-fun safe_mk_eq(l,r):
-  let ty = type_of(l)
-  KernelComb(KernelComb(KernelConst("=",KernelTyapp("fun",PairList [ty,KernelTyapp("fun",PairList [ty,bool_ty])])),l),r)
-fun dest_eq(t):
-  match t
-  | KernelComb(KernelComb(KernelConst("=",_),l),r): [l, r]
+
+// -------------------------------------------------------------------------
+// Substitution primitive (substitution for variables only!)
+// -------------------------------------------------------------------------
+
+def vsubst:
+  fun vsubst(ilist):
+    fun(tm):
+      match tm
+      | Var(_, _): rev_assocd(tm)(ilist)(tm)
+      | Const(_, _): tm
+      | Comb(s, t):
+          let s_prime = vsubst(ilist)(s)
+          let t_prime = vsubst(ilist)(t)
+          if s_prime === s && t_prime === t | tm | Comb(s_prime, t_prime)
+      | Abs(v, s):
+          let ilist_prime = filter(fun([t, x]): x != v)(ilist)
+          if ilist_prime == PairList []
+          | tm
+          | let s_prime = vsubst(ilist_prime)(s)
+            if s_prime === s
+            | tm
+            | if exists(fun([t, x]): vfree_in(v)(t) && vfree_in(x)(s))(ilist_prime)
+              | let v_prime = variant(PairList [s_prime])(v)
+                Abs(v_prime, vsubst(PairList.cons([v_prime, v], ilist_prime))(s))
+              | Abs(v, s_prime)
+  fun(theta :: PairList.of(matching([_ :: Term, _ :: Term]))):
+    if theta == PairList []
+    | fun(tm): tm
+    | if forall(fun
+                | ([t, Var(_, y)]): compare(type_of(t))(y) == 0
+                | (_): #false)(theta)
+      | vsubst(theta)
+      | failwith("vsubst: Bad substitution list")
+
+// -------------------------------------------------------------------------
+// Type instantiation primitive.
+// -------------------------------------------------------------------------
+
+class Clash(term)
+
+def inst:
+  fun inst(env):
+    fun(tyin):
+      fun(tm):
+        match tm
+        | Var(n, ty):
+            let ty_prime = type_subst(tyin)(ty)
+            let tm_prime = if ty_prime === ty | tm | Var(n, ty_prime)
+            if compare(rev_assocd(tm_prime)(env)(tm))(tm) == 0
+            | tm_prime
+            | throw Clash(tm_prime)
+        | Const(c, ty):
+            let ty_prime = type_subst(tyin)(ty)
+            if ty_prime === ty | tm | Const(c, ty_prime)
+        | Comb(f, x):
+            let f_prime = inst(env)(tyin)(f)
+            let x_prime = inst(env)(tyin)(x)
+            if f_prime === f && x_prime === x | tm | Comb(f_prime, x_prime)
+        | Abs(y, t):
+            let y_prime = inst(PairList [])(tyin)(y)
+            let env_prime = PairList.cons([y, y_prime], env)
+            try:
+              let t_prime = inst(env_prime)(tyin)(t)
+              if y_prime === y && t_prime === t | tm | Abs(y_prime, t_prime)
+              ~catch (Clash(w_prime) && ex):
+                if w_prime != y_prime
+                | throw ex
+                | let ifrees = map(inst(PairList [])(tyin))(frees(t))
+                  let y_prime_prime = variant(ifrees)(y_prime)
+                  let z = Var(fst(dest_var(y_prime_prime)), snd(dest_var(y)))
+                  inst(env)(tyin)(Abs(z, vsubst(PairList [[z, y]])(t)))
+  fun(tyin :: PairList.of(matching([_ :: HolType, _ :: HolType]))):
+    if tyin == PairList [] | fun(tm): tm | inst(PairList [])(tyin)
+
+// -------------------------------------------------------------------------
+// A few bits of general derived syntax.
+// -------------------------------------------------------------------------
+
+fun rator(tm):
+  match tm
+  | Comb(l, r): l
+  | _: failwith("rator: Not a combination")
+
+fun rand(tm):
+  match tm
+  | Comb(l, r): r
+  | _: failwith("rand: Not a combination")
+
+// -------------------------------------------------------------------------
+// Syntax operations for equations.
+// -------------------------------------------------------------------------
+
+fun safe_mk_eq(l):
+  fun(r):
+    let ty = type_of(l)
+    Comb(Comb(Const("=", Tyapp("fun", PairList [ty, Tyapp("fun", PairList [ty, bool_ty])])), l), r)
+
+fun dest_eq(tm):
+  match tm
+  | Comb(Comb(Const("=", _), l), r): [l, r]
   | _: failwith("dest_eq")
-fun ordav(env,x1,x2):
-  match env
-  | PairList []: compare(x1)(x2)
-  | PairList [[t1, t2], & rest]:
-      cond
-      | compare(x1)(t1) == 0: (if compare(x2)(t2) == 0 | 0 | -1)
-      | compare(x2)(t2) == 0: 1
-      | ~else: ordav(rest,x1,x2)
-fun orda(env,tm1,tm2):
-  if tm1 === tm2 && forall(fun([x, y]): x == y)(env)
-  | 0
-  | match [tm1, tm2]
-    | [KernelVar(_,_), KernelVar(_,_)]: ordav(env,tm1,tm2)
-    | [KernelConst(_,_), KernelConst(_,_)]: compare(tm1)(tm2)
-    | [KernelComb(s1,t1), KernelComb(s2,t2)]:
-        let c = orda(env,s1,s2)
-        if c != 0 | c | orda(env,t1,t2)
-    | [KernelAbs(x1 :: KernelVar,t1), KernelAbs(x2 :: KernelVar,t2)]:
-        let c = compare(x1.ty)(x2.ty)
-        if c != 0 | c | orda(PairList.cons([x1, x2],env),t1,t2)
-    | [KernelConst(_,_), _]: -1
-    | [_, KernelConst(_,_)]: 1
-    | [KernelVar(_,_), _]: -1
-    | [_, KernelVar(_,_)]: 1
-    | [KernelComb(_,_), _]: -1
-    | [_, KernelComb(_,_)]: 1
-fun alphaorder(x :: Term): fun(y): orda(PairList [],x,y)
-fun term_union(l1,l2):
-  match [l1, l2]
-  | [PairList [], _]: l2
-  | [_, PairList []]: l1
-  | [PairList [h1, & t1], PairList [h2, & t2]]:
-      let c = alphaorder(h1)(h2)
-      cond
-      | c == 0: PairList.cons(h1,term_union(t1,t2))
-      | c < 0: PairList.cons(h1,term_union(t1,l2))
-      | ~else: PairList.cons(h2,term_union(l1,t2))
-fun term_remove(t,l):
-  match l
-  | PairList [s, & ss]:
-      let c = alphaorder(t)(s)
-      cond
-      | c > 0:
-          let ss1 = term_remove(t,ss)
-          if ss1 === ss | l | PairList.cons(s,ss1)
-      | c == 0: ss
-      | ~else: l
-  | PairList []: l
-fun term_image(f,l):
-  match l
-  | PairList [h, & t]:
-      let h1 = f(h)
-      let t1 = term_image(f,t)
-      if h1 === h && t1 === t | l | term_union(PairList [h1],t1)
-  | PairList []: l
-fun dest_thm(Sequent(a,c)): [a, c]
-fun hyp(Sequent(a,c)): a
-fun concl(Sequent(a,c)): c
-fun REFL(tm :: Term): Sequent(PairList [],safe_mk_eq(tm,tm))
-fun TRANS(Sequent(a1,c1)):
-  fun(Sequent(a2,c2)):
+
+// -------------------------------------------------------------------------
+// Useful to have term union modulo alpha-conversion for assumption lists.
+// -------------------------------------------------------------------------
+
+fun ordav(env):
+  fun(x1):
+    fun(x2):
+      match env
+      | PairList []: compare(x1)(x2)
+      | PairList [[t1, t2], & oenv]:
+          if compare(x1)(t1) == 0
+          | if compare(x2)(t2) == 0
+            | 0
+            | -1
+          | if compare(x2)(t2) == 0
+            | 1
+            | ordav(oenv)(x1)(x2)
+
+fun orda(env):
+  fun(tm1):
+    fun(tm2):
+      if tm1 === tm2 && forall(fun([x, y]): x == y)(env)
+      | 0
+      | match [tm1, tm2]
+        | [Var(x1, ty1), Var(x2, ty2)]: ordav(env)(tm1)(tm2)
+        | [Const(x1, ty1), Const(x2, ty2)]: compare(tm1)(tm2)
+        | [Comb(s1, t1), Comb(s2, t2)]:
+            let c = orda(env)(s1)(s2)
+            if c != 0 | c | orda(env)(t1)(t2)
+        | [Abs(Var(_, ty1) && x1, t1), Abs(Var(_, ty2) && x2, t2)]:
+            let c = compare(ty1)(ty2)
+            if c != 0 | c | orda(PairList.cons([x1, x2], env))(t1)(t2)
+        | [Const(_, _), _]: -1
+        | [_, Const(_, _)]: 1
+        | [Var(_, _), _]: -1
+        | [_, Var(_, _)]: 1
+        | [Comb(_, _), _]: -1
+        | [_, Comb(_, _)]: 1
+
+def alphaorder = orda(PairList [])
+
+fun term_union(l1):
+  fun(l2):
+    match [l1, l2]
+    | [PairList [], l2]: l2
+    | [l1, PairList []]: l1
+    | [PairList [h1, & t1], PairList [h2, & t2]]:
+        let c = alphaorder(h1)(h2)
+        if c == 0
+        | PairList.cons(h1, term_union(t1)(t2))
+        | if c < 0
+          | PairList.cons(h1, term_union(t1)(l2))
+          | PairList.cons(h2, term_union(l1)(t2))
+
+fun term_remove(t):
+  fun(l):
+    match l
+    | PairList [s, & ss]:
+        let c = alphaorder(t)(s)
+        if c > 0
+        | let ss_prime = term_remove(t)(ss)
+          if ss_prime === ss | l | PairList.cons(s, ss_prime)
+        | (if c == 0 | ss | l)
+    | PairList []: l
+
+fun term_image(f):
+  fun(l):
+    match l
+    | PairList [h, & t]:
+        let h_prime = f(h)
+        let t_prime = term_image(f)(t)
+        if h_prime === h && t_prime === t | l | term_union(PairList [h_prime])(t_prime)
+    | PairList []: l
+
+// -------------------------------------------------------------------------
+// Basic theorem destructors.
+// -------------------------------------------------------------------------
+
+fun dest_thm(Sequent(asl, c)): [asl, c]
+
+fun hyp(Sequent(asl, c)): asl
+
+fun concl(Sequent(asl, c)): c
+
+// -------------------------------------------------------------------------
+// Basic equality properties; TRANS is derivable but included for efficiency
+// -------------------------------------------------------------------------
+
+fun REFL(tm :: Term):
+  Sequent(PairList [], safe_mk_eq(tm)(tm))
+
+fun TRANS(Sequent(asl1, c1)):
+  fun(Sequent(asl2, c2)):
     match [c1, c2]
-    | [KernelComb(eql :: KernelComb,m1), KernelComb(KernelComb(KernelConst("=",_),m2),r)]:
-        match eql
-        | KernelComb(KernelConst("=",_),_):
-            if alphaorder(m1)(m2) == 0 | Sequent(term_union(a1,a2),KernelComb(eql,r)) | failwith("TRANS")
-        | _: failwith("TRANS")
+    | [Comb(Comb(Const("=", _), _) && eql, m1), Comb(Comb(Const("=", _), m2), r)] when alphaorder(m1)(m2) == 0:
+        Sequent(term_union(asl1)(asl2), Comb(eql, r))
     | _: failwith("TRANS")
-fun MK_COMB([Sequent(a1,c1), Sequent(a2,c2)]):
+
+// -------------------------------------------------------------------------
+// Congruence properties of equality.
+// -------------------------------------------------------------------------
+
+fun MK_COMB([Sequent(asl1, c1), Sequent(asl2, c2)]):
   match [c1, c2]
-  | [KernelComb(KernelComb(KernelConst("=",_),l1),r1), KernelComb(KernelComb(KernelConst("=",_),l2),r2)]:
+  | [Comb(Comb(Const("=", _), l1), r1), Comb(Comb(Const("=", _), l2), r2)]:
       match type_of(r1)
-      | KernelTyapp("fun",PairList [ty,_]):
-          if compare(ty)(type_of(r2)) == 0
-          | Sequent(term_union(a1,a2),safe_mk_eq(KernelComb(l1,l2),KernelComb(r1,r2)))
-          | failwith("MK_COMB: types do not agree")
+      | Tyapp("fun", PairList [ty, _]) when compare(ty)(type_of(r2)) == 0:
+          Sequent(term_union(asl1)(asl2),
+                  safe_mk_eq(Comb(l1, l2))(Comb(r1, r2)))
       | _: failwith("MK_COMB: types do not agree")
   | _: failwith("MK_COMB: not both equations")
+
 fun ABS(v :: Term):
-  fun(Sequent(a,c)):
+  fun(Sequent(asl, c)):
     match [v, c]
-    | [KernelVar(_,_), KernelComb(KernelComb(KernelConst("=",_),l),r)]:
-        if !exists(vfree_in(v))(a) | Sequent(a,safe_mk_eq(KernelAbs(v,l),KernelAbs(v,r))) | failwith("ABS")
+    | [Var(_, _), Comb(Comb(Const("=", _), l), r)] when !exists(vfree_in(v))(asl):
+        Sequent(asl, safe_mk_eq(Abs(v, l))(Abs(v, r)))
     | _: failwith("ABS")
+
+// -------------------------------------------------------------------------
+// Trivial case of lambda calculus beta-conversion.
+// -------------------------------------------------------------------------
+
 fun BETA(tm :: Term):
   match tm
-  | KernelComb(KernelAbs(v,b),arg):
-      if compare(arg)(v) == 0 | Sequent(PairList [],safe_mk_eq(tm,b)) | failwith("BETA: not a trivial beta-redex")
+  | Comb(Abs(v, bod), arg) when compare(arg)(v) == 0:
+      Sequent(PairList [], safe_mk_eq(tm)(bod))
   | _: failwith("BETA: not a trivial beta-redex")
+
+// -------------------------------------------------------------------------
+// Rules connected with deduction.
+// -------------------------------------------------------------------------
+
 fun ASSUME(tm :: Term):
-  if compare(type_of(tm))(bool_ty) == 0 | Sequent(PairList [tm],tm) | failwith("ASSUME: not a proposition")
-fun EQ_MP(Sequent(a1,eq)):
-  fun(Sequent(a2,c)):
+  if compare(type_of(tm))(bool_ty) == 0
+  | Sequent(PairList [tm], tm)
+  | failwith("ASSUME: not a proposition")
+
+fun EQ_MP(Sequent(asl1, eq)):
+  fun(Sequent(asl2, c)):
     match eq
-    | KernelComb(KernelComb(KernelConst("=",_),l),r):
-        if alphaorder(l)(c) == 0 | Sequent(term_union(a1,a2),r) | failwith("EQ_MP")
+    | Comb(Comb(Const("=", _), l), r) when alphaorder(l)(c) == 0:
+        Sequent(term_union(asl1)(asl2), r)
     | _: failwith("EQ_MP")
-fun DEDUCT_ANTISYM_RULE(Sequent(a1,c1)):
-  fun(Sequent(a2,c2)):
-    let b1 = term_remove(c2,a1)
-    let b2 = term_remove(c1,a2)
-    Sequent(term_union(b1,b2),safe_mk_eq(c1,c2))
+
+fun DEDUCT_ANTISYM_RULE(Sequent(asl1, c1)):
+  fun(Sequent(asl2, c2)):
+    let asl1_prime = term_remove(c2)(asl1)
+    let asl2_prime = term_remove(c1)(asl2)
+    Sequent(term_union(asl1_prime)(asl2_prime), safe_mk_eq(c1)(c2))
+
+// -------------------------------------------------------------------------
+// Type and term instantiation.
+// -------------------------------------------------------------------------
+
 fun INST_TYPE(theta):
-  fun(Sequent(a,c)):
-    let f = inst(theta)
-    Sequent(term_image(f,a),f(c))
+  fun(Sequent(asl, c)):
+    let inst_fn = inst(theta)
+    Sequent(term_image(inst_fn)(asl), inst_fn(c))
+
 fun INST(theta):
-  fun(Sequent(a,c)):
-    let f = vsubst(theta)
-    Sequent(term_image(f,a),f(c))
+  fun(Sequent(asl, c)):
+    let inst_fun = vsubst(theta)
+    Sequent(term_image(inst_fun)(asl), inst_fun(c))
+
+// -------------------------------------------------------------------------
+// Handling of axioms.
+// -------------------------------------------------------------------------
+
 def mutable the_axioms = PairList []
+
 fun axioms(): the_axioms
+
 fun new_axiom(tm :: Term):
   if compare(type_of(tm))(bool_ty) == 0
-  | let th = Sequent(PairList [],tm)
-    the_axioms := PairList.cons(th,the_axioms)
+  | let th = Sequent(PairList [], tm)
+    the_axioms := PairList.cons(th, the_axioms)
     th
   | failwith("new_axiom: Not a proposition")
+
+// -------------------------------------------------------------------------
+// Handling of (term) definitions.
+// -------------------------------------------------------------------------
+
 def mutable the_definitions = PairList []
+
 fun definitions(): the_definitions
+
 fun new_basic_definition(tm :: Term):
   match tm
-  | KernelComb(KernelComb(KernelConst("=",_),KernelVar(cname,ty)),r):
-      cond
-      | !freesin(PairList [])(r):
-          fun join(l):
-            match l
-            | PairList []: ""
-            | PairList [KernelVar(n,_)]: n
-            | PairList [KernelVar(n,_), & t]: n +& ", " +& join(t)
-          failwith("new_definition: term not closed: " +& join(frees(r)))
-      | !subset(type_vars_in_term(r))(tyvars(ty)):
-          failwith("new_definition: Type variables not reflected in constant")
-      | ~else:
-          new_constant([cname, ty])
-          let c = KernelConst(cname,ty)
-          let dth = Sequent(PairList [],safe_mk_eq(c,r))
-          the_definitions := PairList.cons(dth,the_definitions)
+  | Comb(Comb(Const("=", _), Var(cname, ty)), r):
+      if !freesin(PairList [])(r)
+      | failwith("new_definition: term not closed: "
+                   +& hol_string_concat(", ")(map(fun(Var(name, _)): name)(frees(r))))
+      | if !subset(type_vars_in_term(r))(tyvars(ty))
+        | failwith("new_definition: Type variables not reflected in constant")
+        | let c:
+            new_constant([cname, ty])
+            Const(cname, ty)
+          let dth = Sequent(PairList [], safe_mk_eq(c)(r))
+          the_definitions := PairList.cons(dth, the_definitions)
           dth
-  | KernelComb(KernelComb(KernelConst("=",_),KernelConst(cname,ty)),r):
+  | Comb(Comb(Const("=", _), Const(cname, ty)), r):
       failwith("new_basic_definition: '" +& cname +& "' is already defined")
   | _: failwith("new_basic_definition")
+
+// -------------------------------------------------------------------------
+// Handling of type definitions.
+//
+// This function now involves no logical constants beyond equality.
+//
+//             |- P t
+//    ---------------------------
+//        |- abs(rep a) = a
+//     |- P r = (rep(abs r) = r)
+//
+// Where "abs" and "rep" are new constants with the nominated names.
+// -------------------------------------------------------------------------
+
 fun new_basic_type_definition(tyname :: String):
   fun([absname :: String, repname :: String]):
-    fun(Sequent(asl,c)):
-      cond
-      | exists(can(get_const_type))(PairList [absname,repname]):
-          failwith("new_basic_type_definition: Constant(s) already in use")
-      | asl != PairList []: failwith("new_basic_type_definition: Assumptions in theorem")
-      | ~else:
-          let [pred, x]:
+    fun(Sequent(asl, c)):
+      if exists(can(get_const_type))(PairList [absname, repname])
+      | failwith("new_basic_type_definition: Constant(s) already in use")
+      | if !(asl == PairList [])
+        | failwith("new_basic_type_definition: Assumptions in theorem")
+        | let [P, x]:
             try:
               dest_comb(c)
               ~catch Failure(_): failwith("new_basic_type_definition: Not a combination")
-          if !freesin(PairList [])(pred)
+          if !freesin(PairList [])(P)
           | failwith("new_basic_type_definition: Predicate is not closed")
-          | let tvs = sort(fun(x): fun(y): compare(x)(y) <= 0)(type_vars_in_term(pred))
+          | let tyvars = sort(polymorphic_le)(type_vars_in_term(P))
             try:
-              new_type([tyname, length(tvs)])
+              new_type([tyname, length(tyvars)])
               ~catch Failure(_): failwith("new_basic_type_definition: Type already defined")
-            let at = KernelTyapp(tyname,tvs)
-            let rt = type_of(x)
-            let abst = KernelTyapp("fun",PairList [rt,at])
-            let rept = KernelTyapp("fun",PairList [at,rt])
-            new_constant([absname, abst])
-            let abs = KernelConst(absname,abst)
-            new_constant([repname, rept])
-            let rep = KernelConst(repname,rept)
-            let av = KernelVar("a",at)
-            let rv = KernelVar("r",rt)
-            [Sequent(PairList [],safe_mk_eq(KernelComb(abs,mk_comb([rep, av])),av)), Sequent(PairList [],safe_mk_eq(KernelComb(pred,rv),safe_mk_eq(mk_comb([rep, mk_comb([abs, rv])]),rv)))]
-fun mk_fun_ty(a): fun(b): mk_type(["fun", PairList [a,b]])
+            let aty = Tyapp(tyname, tyvars)
+            let rty = type_of(x)
+            let absty = Tyapp("fun", PairList [rty, aty])
+            let repty = Tyapp("fun", PairList [aty, rty])
+            let abs:
+              new_constant([absname, absty])
+              Const(absname, absty)
+            let rep:
+              new_constant([repname, repty])
+              Const(repname, repty)
+            let a = Var("a", aty)
+            let r = Var("r", rty)
+            [Sequent(PairList [], safe_mk_eq(Comb(abs, mk_comb([rep, a])))(a)),
+             Sequent(PairList [],
+                     safe_mk_eq(Comb(P, r))(safe_mk_eq(mk_comb([rep, mk_comb([abs, r])]))(r)))]
+
+// -------------------------------------------------------------------------
+// Stuff that didn't seem worth putting in.
+// -------------------------------------------------------------------------
+
+fun mk_fun_ty(ty1): fun(ty2): mk_type(["fun", PairList [ty1, ty2]])
+
 def bty = mk_vartype("B")
-fun is_eq(tm): match tm | KernelComb(KernelComb(KernelConst("=",_),_),_): #true | _: #false
+
+fun is_eq(tm):
+  match tm
+  | Comb(Comb(Const("=", _), _), _): #true
+  | _: #false
+
 def mk_eq:
   let eq = mk_const(["=", PairList []])
   fun([l :: Term, r :: Term]):
@@ -465,16 +779,16 @@ def mk_eq:
       let eq_tm = inst(PairList [[ty, aty]])(eq)
       mk_comb([mk_comb([eq_tm, l]), r])
       ~catch Failure(_): failwith("mk_eq")
+
+// -------------------------------------------------------------------------
+// Tests for alpha-convertibility (equality ignoring names in abstractions).
+// -------------------------------------------------------------------------
+
 fun aconv(s): fun(t): alphaorder(s)(t) == 0
 
-fun equals_thm(th): fun(other): dest_thm(th) == dest_thm(other)
+// -------------------------------------------------------------------------
+// Comparison function on theorems. Currently the same as equality, but
+// it's useful to separate because in the proof-recording version it isn't.
+// -------------------------------------------------------------------------
 
-// Read-only pattern exports preserve the private OCaml variant boundary.
-export bind.macro 'Tyvar($n)': 'KernelTyvar($n)'
-export bind.macro 'Tyapp($n, $a)': 'KernelTyapp($n, $a)'
-export bind.macro 'Var($n, $t)': 'KernelVar($n, $t)'
-export bind.macro 'Const($n, $t)': 'KernelConst($n, $t)'
-export bind.macro 'Comb($f, $x)': 'KernelComb($f, $x)'
-export bind.macro 'Abs($v, $b)': 'KernelAbs($v, $b)'
-// A predicate annotation exposes the abstract theorem type without its constructor.
-export annot.macro 'Theorem': 'Sequent'
+fun equals_thm(th): fun(th_prime): dest_thm(th) == dest_thm(th_prime)

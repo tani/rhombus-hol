@@ -27,6 +27,26 @@ export:
   hol_min
   hol_ignore
   hol_int_of_string
+  not
+  abs
+  max
+  min
+  ignore
+  int_of_string
+  int_of_float
+  float_of_int
+  string_of_float
+  lnot
+  incr
+  decr
+  invalid_arg
+  print_string
+  print_endline
+  print_newline
+  num
+  succ_num
+  is_integer_num
+  string_of_num
   string_of_int
   hol_int_of_float
   hol_float
@@ -56,6 +76,10 @@ export:
   OCamlString
   OCamlInt
   OCamlList
+  OCamlChar
+  OCamlArray
+  Printf
+  Format
   ocaml_random_bits
   ocaml_random_int
   ocaml_random_init
@@ -271,6 +295,29 @@ fun power_num(x): fun(y): x ** y
 fun minus_num(x): -x
 fun abs_num(x): math.abs(x)
 fun gcd_num(x): fun(y): Rkt.gcd(x,y)
+
+// OCaml Stdlib and Num functions under their OCaml names, as the code that
+// tools/ml2rhm generates calls them.
+fun not(b): !b
+fun abs(n): if n < 0 | -n | n
+def max = hol_max
+def min = hol_min
+def ignore = hol_ignore
+def int_of_string = hol_int_of_string
+def int_of_float = hol_int_of_float
+def float_of_int = hol_float
+fun string_of_float(x): to_string(x)
+fun lnot(n): Rkt.#{bitwise-not}(n)
+fun incr(r): r.value := r.value + 1
+fun decr(r): r.value := r.value - 1
+fun invalid_arg(s): throw InvalidArgument(s)
+fun print_string(s): print(s)
+fun print_endline(s): println(s)
+fun print_newline(_): println("")
+fun num(n): n
+fun succ_num(n): n + 1
+fun is_integer_num(n): n is_a Int
+fun string_of_num(n): to_string(n)
 fun numdom(x): [Rkt.numerator(x), Rkt.denominator(x)]
 def max_int = 4611686018427387903
 fun floor(x): Rkt.#{exact->inexact}(math.floor(x))
@@ -344,8 +391,151 @@ fun hol_string_escaped(s :: String):
 class HolHashTable(bindings, counter)
 // String.compare and compare at type int.
 namespace OCamlString:
-  export: compare
+  export:
+    compare
+    length
+    get
+    sub
+    make
+    concat
+    escaped
+    trim
+    uppercase_ascii
+    lowercase_ascii
+    starts_with
+    index
+    contains
   fun compare(s1 :: String): fun(s2 :: String): if s1 < s2 | -1 | (if s1 == s2 | 0 | 1)
+  // Characters are one-character strings, as elsewhere in the port.
+  fun length(s :: String): s.length()
+  fun get(s :: String):
+    fun(i):
+      if i < 0 || i >= s.length() | throw InvalidArgument("index out of bounds") | s.substring(i, i + 1)
+  fun sub(s :: String):
+    fun(i):
+      fun(n):
+        if i < 0 || n < 0 || i + n > s.length()
+        | throw InvalidArgument("String.sub / Bytes.sub")
+        | s.substring(i, i + n)
+  def make = hol_string_make
+  def concat = hol_string_concat
+  def escaped = hol_string_escaped
+  fun trim(s :: String):
+    fun blank(i): s.substring(i, i + 1) in [" ", "\n", "\r", "\t", "\f"]
+    fun first(i): if i < s.length() && blank(i) | first(i + 1) | i
+    fun last(i): if i > 0 && blank(i - 1) | last(i - 1) | i
+    let a = first(0)
+    if a == s.length() | "" | s.substring(a, last(s.length()))
+  fun uppercase_ascii(s :: String): Rkt.#{string-upcase}(s)
+  fun lowercase_ascii(s :: String): Rkt.#{string-downcase}(s)
+  fun starts_with(~prefix: p :: String, s :: String):
+    p.length() <= s.length() && s.substring(0, p.length()) == p
+  fun index(s :: String):
+    fun(c :: String):
+      fun loop(i):
+        cond
+        | i >= s.length(): throw Not_found()
+        | s.substring(i, i + 1) == c: i
+        | ~else: loop(i + 1)
+      loop(0)
+  fun contains(s :: String):
+    fun(c :: String):
+      for any (i in 0 .. s.length()): s.substring(i, i + 1) == c
+
+// Char: characters are one-character strings.
+namespace OCamlChar:
+  export:
+    code
+    chr
+  def code = hol_char_code
+  fun chr(n): Rkt.#{string->immutable-string}(hol_char_chr(n))
+
+// Array, curried as in OCaml, over Rhombus mutable arrays.
+namespace OCamlArray:
+  export:
+    make
+    get
+    set
+    length
+    of_list
+    to_list
+    map
+    fold_left
+    make_matrix
+  fun make(n):
+    fun(x):
+      if n < 0 | throw InvalidArgument("Array.make") | Array.make(n, x)
+  fun get(a :: Array): fun(i): a[i]
+  fun set(a :: Array): fun(i): fun(x): a[i] := x
+  fun length(a :: Array): a.length()
+  fun of_list(l :: PairList): Array(& l)
+  fun to_list(a :: Array): PairList[& a]
+  fun map(f): fun(a :: Array): Array(& (for List (x in a): f(x)))
+  fun fold_left(f): fun(init): fun(a :: Array): for values(acc = init) (x in a): f(acc)(x)
+  fun make_matrix(n): fun(m): fun(x): Array(& (for List (i in 0 .. n): Array.make(m, x)))
+
+// Printf and the parts of Format that HOL Light uses outside its printer:
+// %d %i %s %c %f %b and %%, with the arguments taken one at a time.
+fun format_directives(fmt :: String):
+  fun loop(i, n):
+    cond
+    | i + 1 >= fmt.length(): n
+    | fmt.substring(i, i + 1) != "%": loop(i + 1, n)
+    | fmt.substring(i + 1, i + 2) == "%": loop(i + 2, n)
+    | ~else: loop(i + 2, n + 1)
+  loop(0, 0)
+fun format_apply(fmt :: String, args :: List):
+  let out = Rkt.#{open-output-string}()
+  fun loop(i, args :: List):
+    when i < fmt.length()
+    | let c = fmt.substring(i, i + 1)
+      if c == "%" && i + 1 < fmt.length()
+      | let d = fmt.substring(i + 1, i + 2)
+        if d == "%"
+        | Rkt.#{write-string}("%", out)
+          loop(i + 2, args)
+        | let v = args[0]
+          Rkt.#{write-string}(if v is_a String | v | to_string(v), out)
+          loop(i + 2, args.drop(1))
+      | Rkt.#{write-string}(c, out)
+        loop(i + 1, args)
+  loop(0, args)
+  Rkt.#{string->immutable-string}(Rkt.#{get-output-string}(out))
+fun format_curried(fmt :: String, k):
+  let n = format_directives(fmt)
+  fun collect(args :: List):
+    if args.length() == n | k(format_apply(fmt, args)) | fun(x): collect(args.add(x))
+  collect([])
+
+namespace Printf:
+  export:
+    printf
+    sprintf
+    eprintf
+  fun printf(fmt): format_curried(fmt, fun(s): print(s))
+  fun sprintf(fmt): format_curried(fmt, fun(s): s)
+  fun eprintf(fmt): format_curried(fmt, fun(s): Rkt.#{write-string}(s, Rkt.#{current-error-port}()))
+
+namespace Format:
+  export:
+    printf
+    print_string
+    print_newline
+    print_flush
+    std_formatter
+    pp_print_string
+    pp_print_newline
+    pp_open_hbox
+    pp_close_box
+  def std_formatter = #void
+  fun printf(fmt): format_curried(fmt, fun(s): print(s))
+  fun print_string(s): print(s)
+  fun print_newline(_): println("")
+  fun print_flush(_): Rkt.#{flush-output}()
+  fun pp_print_string(_): fun(s): print(s)
+  fun pp_print_newline(_): fun(_): println("")
+  fun pp_open_hbox(_): fun(_): #void
+  fun pp_close_box(_): fun(_): #void
 namespace OCamlInt:
   export: compare
   fun compare(i1 :: Int): fun(i2 :: Int): if i1 < i2 | -1 | (if i1 == i2 | 0 | 1)
@@ -423,6 +613,9 @@ namespace Hashtbl:
 // List, with OCaml's argument order and exceptions.
 namespace OCamlList:
   export:
+    length
+    rev
+    iteri
     map
     concat
     exists
@@ -610,3 +803,8 @@ namespace OCamlList:
         | [PairList [], PairList []]: #true
         | [PairList [x,&xs], PairList [y,&ys]]: p(x)(y) && for_all2(p)(xs)(ys)
         | _: (throw InvalidArgument("List.for_all2"))
+  fun length(l :: PairList): l.length()
+  fun rev(l :: PairList): l.reverse()
+  fun iteri(f):
+    fun(l :: PairList):
+      for (x in l, i in 0 ..): f(i)(x)

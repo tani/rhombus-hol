@@ -7,4 +7,4 @@
 (define version "0.1")
 (define language-families '("Rhombus"))
 
-(define compile-omit-paths '("differential"))
+(define compile-omit-paths '("differential" "tools"))

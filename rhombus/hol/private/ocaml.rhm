@@ -88,6 +88,21 @@ export:
   OCamlChar
   OCamlArray
   Printf
+  Random
+  OCamlLazy
+  float_sqrt
+  Printexc
+  Sys_error
+  End_of_file
+  open_in
+  open_in_bin
+  input_line
+  close_in
+  in_channel_length
+  really_input_string
+  open_out
+  output_string
+  close_out
   Sys
   Format
   OCamlBuffer
@@ -271,6 +286,28 @@ fun ocaml_random_init(seed):
     state[j] := (state[j] bits.xor n) bits.and 0x3fffffff
   index.value := 0
 
+namespace Random:
+  export:
+    int
+    bits
+    init
+  fun int(n): ocaml_random_int(n)
+  fun bits(_): ocaml_random_bits()
+  fun init(seed): ocaml_random_init(seed)
+
+// Lazy values: lazy e is OCamlLazy.from_fun(fun(_): e).
+namespace OCamlLazy:
+  export:
+    from_fun
+    force
+  class T(mutable thunk, mutable value)
+  fun from_fun(f): T(f, #false)
+  fun force(l :: T):
+    when l.thunk
+    | l.value := l.thunk(#void)
+      l.thunk := #false
+    l.value
+
 // Stdlib values and functions used by the translated sources.
 fun hol_max(x): fun(y): if x>y | x | y
 fun hol_min(x): fun(y): if x<y | x | y
@@ -329,6 +366,7 @@ fun num(n): n
 fun succ_num(n): n + 1
 fun is_integer_num(n): n is_a Int
 fun string_of_num(n): to_string(n)
+fun float_sqrt(x): math.sqrt(x)
 class Assert_failure()
 fun assert(b): if b | #void | throw Assert_failure()
 fun lsl(n): fun(k): Rkt.#{arithmetic-shift}(n, k)
@@ -526,6 +564,38 @@ fun format_curried(fmt :: String, k):
     if args.length() == n | k(format_apply(fmt, args)) | fun(x): collect(args.add(x))
   collect([])
 
+// Channels: files as Racket ports, with OCaml's exceptions.
+class Sys_error(message)
+class End_of_file()
+fun open_in(name):
+  try:
+    Rkt.#{open-input-file}(name)
+    ~catch e :: Exn.Fail: throw Sys_error(name +& ": No such file or directory")
+def open_in_bin = open_in
+fun input_line(ic):
+  let l = Rkt.#{read-line}(ic, #'linefeed)
+  if Rkt.#{eof-object?}(l) | throw End_of_file() | Rkt.#{string->immutable-string}(l)
+fun close_in(ic): Rkt.#{close-input-port}(ic)
+fun in_channel_length(ic): Rkt.#{file-size}(Rkt.#{object-name}(ic))
+fun really_input_string(ic):
+  fun(n):
+    let s = Rkt.#{read-string}(n, ic)
+    if Rkt.#{eof-object?}(s) || s.length() < n
+    | throw End_of_file()
+    | Rkt.#{string->immutable-string}(s)
+fun open_out(name): Rkt.#{open-output-file}(name, ~exists: #'truncate)
+fun output_string(oc): fun(s :: String): Rkt.#{write-string}(s, oc)
+fun close_out(oc): Rkt.#{close-output-port}(oc)
+
+// Printexc.to_string: the printed form of an exception.
+namespace Printexc:
+  export: to_string
+  fun to_string(e):
+    match e
+    | Failure(m): "Failure(\"" +& m +& "\")"
+    | Exn(m, _): m
+    | _: "" +& e
+
 // Sys.time: processor time in seconds.
 namespace Sys:
   export: time
@@ -571,6 +641,7 @@ namespace OCamlMap:
 
 namespace Hashtbl:
   export:
+    hash
     create
     find
     add
@@ -578,6 +649,7 @@ namespace Hashtbl:
     fold
     clear
     replace
+  fun hash(v): ocaml_hash(v)
   fun create(_): HolHashTable(MutableMap(), Box(0))
   fun clear(t):
     for (k in t.bindings.keys().to_list()): t.bindings.remove(k)
@@ -636,6 +708,7 @@ namespace OCamlList:
     partition
     rev_append
     sort
+    sort_uniq
     map2
     for_all2
     fold_left2
@@ -727,27 +800,18 @@ namespace OCamlList:
           let [yes, no]=partition(p)(t)
           if keep | [PairList.cons(h,yes), no] | [yes, PairList.cons(h,no)]
   fun rev_append(l1): fun(l2): append(PairList.reverse(l1))(l2)
-  // Stable merge sort (lib.ml's mergesort with cmp x y <= 0).
-  fun merge(ord):
-    fun(l1):
-      fun(l2):
-        match l1
-        | PairList []: l2
-        | PairList [h1, & t1]:
-            match l2
-            | PairList []: l1
-            | PairList [h2, & t2]: (if ord(h1)(h2) | PairList [h1, & merge(ord)(t1)(l2)] | PairList [h2, & merge(ord)(l1)(t2)])
+  // List.sort: a stable sort, as OCaml's; Racket's sort is stable.
   fun sort(cmp):
+    fun(l): Rkt.sort(l, fun(x, y): cmp(x)(y) < 0)
+  // sort, then drop each element equal (by cmp) to the one before it
+  fun sort_uniq(cmp):
     fun(l):
-      let ord = fun(x): fun(y): cmp(x)(y) <= 0
-      fun mergepairs(l1):
-        fun(l2):
-          match [l1, l2]
-          | [PairList [s, & PairList []], PairList []]: s
-          | [l, PairList []]: mergepairs(PairList [])(l)
-          | [l, PairList [s1, & PairList []]]: mergepairs(PairList [s1, & l])(PairList [])
-          | [l, PairList [s1, & PairList [s2, & ss]]]: mergepairs(PairList [merge(ord)(s1)(s2), & l])(ss)
-      if l == PairList [] | PairList [] | mergepairs(PairList [])(map(fun(x): PairList [x])(l))
+      fun uniq(l):
+        match l
+        | PairList [x, & PairList [y, & t]] when cmp(x)(y) == 0: uniq(PairList [x, & t])
+        | PairList [x, & t]: PairList.cons(x, uniq(t))
+        | _: l
+      uniq(sort(cmp)(l))
   fun map2(f):
     fun(l1):
       fun(l2):

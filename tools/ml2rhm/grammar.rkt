@@ -322,7 +322,9 @@
     (type_parameter
      [(QUOTE ident) $2]
      [(PLUS QUOTE ident) $3]
-     [(MINUS QUOTE ident) $3])
+     [(MINUS QUOTE ident) $3]
+     [(BANG QUOTE ident) $3]
+     [(PREFIXOP QUOTE ident) $3])
     (type_parameter_list
      [(type_parameter) (list $1)]
      [(type_parameter_list COMMA type_parameter) (cons $3 $1)])
@@ -350,7 +352,9 @@
      [(TRUE) "true"])
     (constructor_arguments
      [() '()]
-     [(OF core_type_list) (reverse $2)])
+     [(OF core_type_list) (reverse $2)]
+     ;; an inline record: Node of {l: t; v: elt; ...}
+     [(OF LBRACE label_declarations opt_semi RBRACE) (list (cons 'record (reverse $3)))])
     (label_declarations
      [(label_declaration) (list $1)]
      [(label_declarations SEMI label_declaration) (cons $3 $1)])
@@ -424,7 +428,7 @@
   (define items
     (parameterize ([comment-sink sink] [jrh-lexer (box jrh)])
       (ml-parser (lambda () (ml-lexer in)))))
-  (values items (reverse (unbox sink))))
+  (values (rename-module-ctors items) (reverse (unbox sink))))
 
 ;; parse-ml-file : path -> (values items comments jrh?)
 ;; Tries pa_j's lexer first and plain OCaml lexing if that fails.

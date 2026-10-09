@@ -158,6 +158,6 @@ rules.
 
 `tools/ml2rhm` translates HOL Light's OCaml sources to Rhombus in the style
 of this port, with a `parser-tools` lexer and LALR parser for HOL Light's
-OCaml dialect. It translates every OCaml file of the pinned checkout, and 38
-of the 44 ported modules compile in place of the hand-maintained ones. See
+OCaml dialect. It translates every OCaml file of the pinned checkout, and all
+45 ported modules compile in place of the hand-maintained ones. See
 `tools/ml2rhm/README.md`.

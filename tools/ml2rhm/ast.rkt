@@ -1,6 +1,7 @@
 #lang racket/base
 ;; Abstract syntax of the OCaml subset that HOL Light uses.
 (provide (all-defined-out))
+(require racket/match)
 
 ;; Expressions
 (struct e:var (name) #:prefab)              ; value path, "List.map" or "x"
@@ -85,3 +86,43 @@
 (struct m:app (f arg) #:prefab)             ; functor application
 (struct m:struct (items) #:prefab)
 (struct m:functor (param body) #:prefab)
+
+;; OCaml keeps constructors and modules apart, Rhombus does not: a class
+;; named like a namespace hides it. Constructors and exceptions named like a
+;; module of the same file are renamed NameValue, as in the port
+;; (metis.ml's `Atom of atom` beside `module Atom`).
+(define (rename-module-ctors items)
+  (define modules (make-hash))
+  (let collect ([x items])
+    (cond
+      [(t:module? x) (hash-set! modules (t:module-name x) #t) (collect (t:module-body x))]
+      [(e:letmodule? x) (hash-set! modules (e:letmodule-name x) #t)
+                        (collect (e:letmodule-module x)) (collect (e:letmodule-body x))]
+      [(pair? x) (collect (car x)) (collect (cdr x))]
+      [(prefab-struct-key x) (for ([y (cdr (vector->list (struct->vector x)))]) (collect y))]
+      [else (void)]))
+  (define (rn n)
+    (define parts (regexp-split #rx"[.]" n))
+    (define base (car (reverse parts)))
+    (if (hash-ref modules base #f)
+        (apply string-append
+               (append (for/list ([p (reverse (cdr (reverse parts)))]) (string-append p "."))
+                       (list base "Value")))
+        n))
+  (define (walk x)
+    (cond
+      [(hash-empty? modules) x]
+      [(p:constr? x) (p:constr (rn (p:constr-name x)) (walk (p:constr-arg x)))]
+      [(e:constr? x) (e:constr (rn (e:constr-name x)) (walk (e:constr-arg x)))]
+      [(t:exception? x) (t:exception (t:exception-pos x) (rn (t:exception-name x)) (t:exception-args x))]
+      [(tydecl? x)
+       (match (tydecl-kind x)
+         [(list 'variant ctors)
+          (tydecl (tydecl-name x) (tydecl-params x)
+                  (list 'variant (for/list ([c ctors]) (cons (rn (car c)) (cdr c)))))]
+         [_ x])]
+      [(pair? x) (cons (walk (car x)) (walk (cdr x)))]
+      [(prefab-struct-key x)
+       => (lambda (k) (apply make-prefab-struct k (map walk (cdr (vector->list (struct->vector x))))))]
+      [else x]))
+  (if (hash-empty? modules) items (walk items)))

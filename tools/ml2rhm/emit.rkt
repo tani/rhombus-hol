@@ -8,6 +8,7 @@
          racket/match
          "ast.rkt")
 (provide emit-module
+         stdlib-functors
          format-api
          ctor-arities
          flatten-includes
@@ -15,6 +16,7 @@
          operator-aliases
          (struct-out env)
          defined-names
+         declared-names
          free-names)
 
 (define WIDTH 92)
@@ -85,8 +87,13 @@
         "|>" "|>" "++" "++" "|||" "|||" ">>" ">>"
         "lsl" "lsl" "lsr" "lsr" "asr" "asr" "land" "land" "lor" "lor" "lxor" "lxor"))
 
+;; other operators are named by their characters' codes, as in the port:
+;; (>>=) is _op3e__op3e__op3d_
 (define (op-function-name op)
-  (hash-ref operator-names op (lambda () (format "#{~a}" op))))
+  (hash-ref operator-names op
+            (lambda ()
+              (string-append*
+               (for/list ([c op]) (format "_op~a_" (string-pad (number->string (char->integer c) 16))))))))
 
 ;; the Rhombus infix operator a module exports for an OCaml operator it
 ;; defines: `let (THEN) = ...` in tactics.ml goes with then_tac
@@ -134,11 +141,19 @@
           (map (lambda (l) (string-append "  " l)) precs)
           (list (format "  ~a(~a)(~a)" name a b))))
 
+;; an operator bound by a local `let`: by its characters' codes when the port
+;; has a module-level infix operator of that name
+(define (local-op-name op)
+  (if (hash-ref infix-declarations op #f)
+      (string-append* (for/list ([c op]) (format "_op~a_" (string-pad (number->string (char->integer c) 16)))))
+      (mangle-id (string-append "(" op ")"))))
+
 ;; reference to an operator used as a function: a definition of this module
 ;; or an import
 (define (op-ref op)
   (define key (string-append "(" op ")"))
   (cond
+    [(hash-ref (locals) key #f) (local-op-name op)]
     [(scope-lookup key) => values]
     [else ((env-use! (current-env)) key) (op-function-name op)]))
 
@@ -150,7 +165,7 @@
 
 (define module-renames
   (hash "List" "OCamlList" "String" "OCamlString" "Char" "OCamlChar"
-        "Int" "OCamlInt" "Array" "OCamlArray" "Hashtbl" "Hashtbl" "Buffer" "OCamlBuffer"))
+        "Int" "OCamlInt" "Array" "OCamlArray" "Hashtbl" "Hashtbl" "Buffer" "OCamlBuffer" "Lazy" "OCamlLazy"))
 
 (define (mangle-path s)
   (define parts (string-split s "."))
@@ -179,16 +194,36 @@
 ;;   use!      records a free name the module takes from elsewhere
 ;;   records   field name -> (cons RecordName (listof field))
 ;;   counts    name -> number of toplevel definitions of that name
-(struct env (modname resolve use! records counts line-of ctor-arity included) #:transparent)
+(struct env (modname resolve use! records counts line-of ctor-arity included module-members)
+  #:transparent)
 
 ;; The functions of OCaml's Format, as private/format.rhm provides them.
 ;; printer.ml's `include Format` makes them part of the printer.
 (define format-api
   '("formatter" "std_formatter" "err_formatter" "str_formatter" "flush_str_formatter" "formatter_of_buffer" "make_formatter" "pp_print_string" "pp_print_as" "pp_print_int" "pp_print_char" "pp_print_bool" "pp_print_float" "pp_print_break" "pp_print_custom_break" "pp_print_space" "pp_print_cut" "pp_force_newline" "pp_print_if_newline" "pp_print_newline" "pp_print_flush" "pp_open_box" "pp_open_hbox" "pp_open_vbox" "pp_open_hvbox" "pp_open_hovbox" "pp_close_box" "pp_open_tbox" "pp_close_tbox" "pp_print_tbreak" "pp_print_tab" "pp_set_tab" "pp_set_margin" "pp_get_margin" "pp_set_max_indent" "pp_get_max_indent" "pp_set_max_boxes" "pp_get_max_boxes" "pp_over_max_boxes" "pp_set_ellipsis_text" "pp_get_ellipsis_text" "print_string" "print_as" "print_int" "print_char" "print_break" "print_space" "print_cut" "print_newline" "print_flush" "force_newline" "open_box" "open_hbox" "open_vbox" "open_hvbox" "open_hovbox" "close_box" "set_margin" "get_margin" "set_max_indent" "get_max_indent" "set_max_boxes" "get_max_boxes" "printf" "fprintf" "asprintf"))
 
+;; constructors with an inline record argument -> their labels, in order
+(define inline-records (make-parameter (make-hash)))
+(define (inline-record-args? tys)
+  (and (pair? tys) (pair? (car tys)) (eq? (caar tys) 'record)))
+
 ;; a constructor declared `C of (a * b)` has one field holding a tuple
 (define (tuple-field? n)
-  (eqv? 1 (hash-ref (env-ctor-arity (current-env)) n #f)))
+  (eqv? 1 (ctor-arity n #f)))
+
+;; constructors declared by an enclosing `let module`, over the module's own
+(define local-ctor-arities (make-parameter (hash)))
+(define (ctor-arity n default)
+  (define parts (string-split n "."))
+  (cond
+    [(and (> (length parts) 1)
+          (hash-ref (namespace-arities) (list-ref parts (- (length parts) 2)) #f))
+     => (lambda (h) (hash-ref h (last parts) default))]
+    [else
+     (hash-ref (local-ctor-arities) (last parts)
+               (lambda () (hash-ref (env-ctor-arity (current-env)) (last parts) default)))]))
+;; namespace -> its constructors' arities
+(define namespace-arities (make-parameter (make-hash)))
 
 (define current-env (make-parameter #f))
 (define locals (make-parameter (hash)))       ; locally bound names
@@ -199,6 +234,7 @@
 (struct scope (defined counts) #:transparent)
 (define scopes (make-parameter '()))
 (define namespaces (make-parameter (make-hash)))   ; namespace -> exported names
+(define namespace-ctors (make-parameter (make-hash)))   ; namespace -> constructors, exceptions
 (define (defined) (scope-defined (car (scopes))))
 
 (define (versioned name k [sc (car (scopes))])
@@ -238,7 +274,11 @@
   (define parts (string-split name "."))
   (define m (car parts))
   (cond
-    [(scope-lookup m) (mangle-path name)]
+    [(scope-lookup m)
+     => (lambda (q)
+          ;; M opened from a namespace N reads as N.M.x
+          (define full (string-append q (substring name (string-length m))))
+          (mangle-path full))]
     [(and (equal? m "Num") (= (length parts) 2)) (ref-name (cadr parts))]
     [else
      ((env-use! (current-env)) (hash-ref module-renames m m))
@@ -311,7 +351,7 @@
 ;; constructors resolve like values: a module's own, imported, or OCaml's
 (define (constr-name n)
   (cond
-    [(regexp-match? #rx"[.]" n) (mangle-path n)]
+    [(regexp-match? #rx"[.]" n) (path-ref n)]
     [else
      (define m (hash-ref constructor-renames n n))
      (cond
@@ -322,6 +362,9 @@
 
 (define (pat p)
   (match p
+    [(p:var n)
+     #:when (let ([op (operator-name-of n)]) (and op (hash-ref infix-declarations op #f)))
+     (local-op-name (operator-name-of n))]
     [(p:var n) (mangle-id n)]
     [(p:any) "_"]
     [(p:const k v) (lit k v)]
@@ -332,8 +375,16 @@
     [(p:constr n #f) (string-append (constr-name n) "()")]
     ;; `C _` matches every field of a constructor with several
     [(p:constr n (p:any))
-     (define k (hash-ref (env-ctor-arity (current-env)) n 1))
+     (define k (ctor-arity n 1))
      (format "~a(~a)" (constr-name n) (string-join (make-list (max k 1) "_") ", "))]
+    [(p:constr n (p:record fs))
+     #:when (hash-ref (inline-records) n #f)
+     (define by-name (for/list ([f fs]) (cons (last (string-split (car f) ".")) (cdr f))))
+     (format "~a(~a)" (constr-name n)
+             (string-join (for/list ([l (hash-ref (inline-records) n)])
+                            (define hit (assoc l by-name))
+                            (if hit (pat (cdr hit)) "_"))
+                          ", "))]
     [(p:constr n (p:tuple ps))
      (if (tuple-field? n)
          (format "~a([~a])" (constr-name n) (string-join (map pat ps) ", "))
@@ -361,10 +412,26 @@
     [(p:cons h t) (let-values ([(hs tl) (cons-chain-pat t)]) (values (cons h hs) tl))]
     [_ (values '() p)]))
 
+;; record types declared so far, latest first: (cons Name fields)
+(define records-in-scope (make-parameter (box '())))
+
+;; the latest record type declared so far that has all these fields
 (define (record-info field-names)
-  (define recs (env-records (current-env)))
-  (for/or ([f field-names])
-    (hash-ref recs (last (string-split f ".")) #f)))
+  (define fs (map (lambda (f) (last (string-split f "."))) field-names))
+  (or (for/first ([r (unbox (records-in-scope))]
+                  #:when (andmap (lambda (f) (member f (cdr r))) fs))
+        ;; bare inside the declaring namespace, qualified elsewhere
+        (define parts (string-split (car r) "."))
+        (define decl-ns (drop-right parts 1))
+        ;; relative to the namespace shared with the current one
+        (define common
+          (let loop ([a decl-ns] [b (ns-path)] [n 0])
+            (if (and (pair? a) (pair? b) (equal? (car a) (car b)))
+                (loop (cdr a) (cdr b) (add1 n))
+                n)))
+        (cons (string-join (drop parts common) ".") (cdr r)))
+      (let ([recs (env-records (current-env))])
+        (for/or ([f fs]) (hash-ref recs f #f)))))
 
 (define (record-pattern fs)
   (define info (record-info (map car fs)))
@@ -522,6 +589,13 @@
     [(e:constr "()" #f) (atom "#void")]
     [(e:constr "[]" #f) (atom "PairList []")]
     [(e:constr n #f) (atom (string-append (constr-name n) "()"))]
+    [(e:constr n (e:record #f fs))
+     #:when (hash-ref (inline-records) n #f)
+     (define by-name (for/list ([f fs]) (cons (last (string-split (car f) ".")) (cdr f))))
+     (call-doc (constr-name n)
+               (list (for/list ([l (hash-ref (inline-records) n)])
+                       (define hit (assoc l by-name))
+                       (if hit (ex (cdr hit)) (atom "#void")))))]
     [(e:constr n (e:tuple items))
      (if (tuple-field? n)
          (call-doc (constr-name n) (list (list (bracket "[" "]" (map ex items)))))
@@ -568,7 +642,9 @@
     [(e:opname op) (atom (op-value op))]
     [(e:label _ e) (ex e)]
     [(e:assert e) ((env-use! (current-env)) "assert") (call-doc "assert" (list (list (ex e))))]
-    [(e:lazy e) (call-doc "lazy" (list (list (ex e))))]
+    [(e:lazy e)
+     ((env-use! (current-env)) "OCamlLazy")
+     (call-doc "OCamlLazy.from_fun" (list (list (fun-doc (list (p:any)) e))))]
     [(e:fun params body) (fun-doc params body)]
     [(e:function cases) (function-doc cases)]
     [(e:if c t f) (if-doc c t f)]
@@ -612,6 +688,7 @@
               (format "fun(x): fun(y): x ~a y" rop)
               (op-ref op)))]
     [(member op '("::")) "fun(x): fun(y): PairList.cons(x, y)"]
+    [(member op '("!=")) "fun(x): fun(y): !(x === y)"]
     [(member op '("!")) "fun(x): x.value"]
     [(member op '(":=")) "fun(x): fun(y): x.value := y"]
     [else (op-ref op)]))
@@ -645,6 +722,8 @@
      (open* (wrap (string-append (line1 (if (eq? (r-kind x) 'atom) x (paren x))) ".value := ")
                   (r-lines y) ""))]
     [(equal? op "!=") (unary "!" (paren (binop "===" (ex a) (ex b))))]
+    [(hash-ref (locals) (string-append "(" op ")") #f)
+     (call-doc (local-op-name op) (list (list (ex a)) (list (ex b))))]
     [(and rop (op-info rop)) (use-operator! rop) (binop rop (ex a) (ex b))]
     [else (call-doc (op-ref op) (list (list (ex a)) (list (ex b))))]))
 
@@ -816,7 +895,15 @@
     [(e:seq a b) (append (stmts a) (stmts b))]
     [(e:letopen _ body) (stmts body)]
     [(e:letmodule name m body)
-     (append (module-lines m) (stmts body))]
+     ;; a block of its own, so that the namespace's definitions shadow the
+     ;; enclosing block's names instead of clashing with them
+     (parameterize ([local-ctor-arities
+                     (match m
+                       [(t:module _ _ _ (m:struct items))
+                        (for/fold ([h (local-ctor-arities)]) ([(k v) (ctor-arities items)])
+                          (hash-set h k v))]
+                       [_ (local-ctor-arities)])])
+       (cons "block:" (indent (append (module-lines m) (stmts body)))))]
     [(e:setfield obj name v)
      (define x (ex obj))
      (r-lines (atom* (wrap (string-append (line1 (if (eq? (r-kind x) 'atom) x (paren x))) "."
@@ -848,7 +935,8 @@
 
 ;; `let rec f x = ...` -> fun f(x): ...;  `let f x = ...` -> let f = fun(x): ...
 (define (local-binding b rec?)
-  (define name (binding-name b))
+  (define name0 (binding-name b))
+  (define name (cond [(and name0 (operator-name-of name0)) => local-op-name] [else name0]))
   (define params (binding-params b))
   (define body (unparen (binding-body b)))
   (cond
@@ -936,6 +1024,9 @@
   (define (this-name n) (versioned n (if rec? (current n) (add1 (current n)))))
   (define op (and name (operator-name-of name)))
   (cond
+    [(equal? op "|>")
+     (bump! name)
+     (list "// (|>) is Rhombus's own |> operator")]
     [(and op (member op '("|||" "++" ">>")) (>= (length params) 2))
      (begin0 (operator-def-lines op params body) (bump! name))]
     [(and name (or (pair? params) (and rec? (or (e:fun? body) (e:function? body)))))
@@ -990,18 +1081,33 @@
     [(t:type _ decls)
      (for* ([d decls])
        (match (tydecl-kind d)
-         [(list 'variant ctors) (for ([c ctors]) (hash-set! (defined) (car c) (car c)))]
-         [(list 'record _) (hash-set! (defined) (camel (tydecl-name d)) (camel (tydecl-name d)))]
+         [(list 'variant ctors)
+          (for ([c ctors])
+            (hash-set! (defined) (car c) (car c))
+            (when (inline-record-args? (cadr c))
+              (hash-set! (inline-records) (car c) (map cadr (cdar (cadr c))))))]
+         [(list 'record fields)
+          (hash-set! (defined) (camel (tydecl-name d)) (camel (tydecl-name d)))
+          (set-box! (records-in-scope)
+                    (cons (cons (string-join (append (ns-path) (list (camel (tydecl-name d)))) ".")
+                                (map cadr fields))
+                          (unbox (records-in-scope))))]
          [_ (void)]))
      (append* (add-between (filter pair? (map type-lines decls)) (list "")))]
     [(t:exception _ name args)
      (hash-set! (defined) name name)
      (list (format "class ~a(~a)" name (string-join (field-names args) ", ")))]
-    [(t:module _ name params body) (hash-set! (defined) name name) (module-item name params body)]
+    [(t:module _ name params body)
+     (unless (m:path? body) (hash-set! (defined) name name))
+     (module-item name params body)]
     [(t:modtype _ name) (list (format "// module type ~a: signature not translated" name))]
     [(t:open _ path)
-     ;; a namespace of this module: its names become visible unqualified
-     (define names (hash-ref (namespaces) path #f))
+     ;; a namespace of this module, or of an earlier one: its names become
+     ;; visible unqualified, as path.name
+     (define names
+       (or (hash-ref (namespaces) path #f)
+           (let ([ext ((env-module-members (current-env)) path)])
+             (and ext (begin ((env-use! (current-env)) path) ext)))))
      (when names
        (for ([n names]) (hash-set! (defined) n (string-append path "." (mangle-id n)))))
      (list (format "// open ~a" path))]
@@ -1016,22 +1122,126 @@
 (define (module-lines m)
   (item-lines m))
 
+;; OCaml Stdlib functors translated from vendored sources (Map.Make, Set.Make)
+(define stdlib-functors (make-parameter (hash)))
+(define (stdlib-functor f) (hash-ref (stdlib-functors) f #f))
+
+;; -------------------------------------------------------------------------
+;; Functors are expanded where they are applied, as the hand-maintained port
+;; does: `module X = F(A)` is a namespace holding F's body with the parameter
+;; module renamed to A, and `include F(A)` splices that body in place.
+;; -------------------------------------------------------------------------
+
+(define functors (make-parameter (make-hash)))   ; full path -> (cons param items)
+(define ns-path (make-parameter '()))            ; enclosing namespaces
+
+(define (functor-lookup f)
+  (let loop ([prefix (ns-path)])
+    (define key (string-join (append prefix (list f)) "."))
+    (cond [(hash-ref (functors) key #f) => values]
+          [(null? prefix) (stdlib-functor f)]
+          [else (loop (drop-right prefix 1))])))
+
+(define (register-functor! name params items)
+  (hash-set! (functors) (string-join (append (ns-path) (list name)) ".")
+             (cons (car params) items)))
+
+;; rename the module path `from` (and from.x) to `to` in module references
+(define (rename-module x from to)
+  (define (r s)
+    (cond [(equal? s from) to]
+          [(and (> (string-length s) (string-length from))
+                (string=? (substring s 0 (add1 (string-length from))) (string-append from ".")))
+           (string-append to (substring s (string-length from)))]
+          [else s]))
+  (let walk ([x x])
+    (cond
+      [(e:var? x) (e:var (r (e:var-name x)))]
+      [(e:constr? x) (e:constr (r (e:constr-name x)) (walk (e:constr-arg x)))]
+      [(p:constr? x) (p:constr (r (p:constr-name x)) (walk (p:constr-arg x)))]
+      [(m:path? x) (m:path (r (m:path-name x)))]
+      [(t:open? x) (t:open (t:open-pos x) (r (t:open-path x)))]
+      [(e:letopen? x) (e:letopen (r (e:letopen-path x)) (walk (e:letopen-body x)))]
+      [(pair? x) (cons (walk (car x)) (walk (cdr x)))]
+      [(prefab-struct-key x)
+       => (lambda (k) (apply make-prefab-struct k (map walk (cdr (vector->list (struct->vector x))))))]
+      [else x])))
+
+(define (apply-functor f a)
+  (define fn (functor-lookup f))
+  (and fn (rename-module (cdr fn) (car fn) a)))
+
+;; items with `include F(A)` expanded and `include M` of a namespace of this
+;; module turned into definitions that re-export M's values
+(define (expand-includes items)
+  (define local-names (make-hash))   ; namespace defined in these items -> names
+  (append*
+   (for/list ([it items])
+     (match it
+       [(t:module _ name (list p _ ...) (m:struct inner))
+        (register-functor! name (t:module-params it) inner)
+        (list it)]
+       [(t:module _ name '() (m:struct inner))
+        (hash-set! local-names name (remove-duplicates (defined-names (expand-includes inner))))
+        (list it)]
+       [(t:include pos (m:app (m:path f) (m:path a)))
+        (define body (apply-functor f a))
+        (if body (expand-includes body) (list it))]
+       [(t:include pos (m:path m))
+        (define names (or (hash-ref local-names m #f) (hash-ref (namespaces) m #f)))
+        (if names
+            (cons (t:open pos m)
+                  (for/list ([n names] #:unless (regexp-match? #rx"^[A-Z]" n))
+                    (t:let pos #f (list (binding (p:var n) '() (e:var (string-append m "." n)))))))
+            (list it))]
+       [_ (list it)]))))
+
 (define (module-item name params body)
   (match body
-    [(m:struct items)
+    [_ #:when (pair? params)
+       (match body
+         [(m:struct items) (register-functor! name params items)]
+         [_ (void)])
+       (list (format "// functor ~a(~a): expanded where it is applied" name (car params)))]
+    [(m:app (m:path f) (m:path a))
+     #:when (functor-lookup f)
+     (module-item name '() (m:struct (apply-functor f a)))]
+    [(m:struct items0)
+     (define items (expand-includes items0))
      (define counts (make-hash))
      (for ([n (defined-names items)]) (hash-update! counts n add1 0))
+     (define arities (ctor-arities items #:nested #f))
+     (hash-set! (namespace-arities) name arities)
      (define inner
-       (parameterize ([scopes (cons (scope (make-hash) counts) (scopes))])
+       (parameterize ([scopes (cons (scope (make-hash) counts) (scopes))]
+                      [local-ctor-arities
+                       (for/fold ([h (local-ctor-arities)]) ([(k v) arities]) (hash-set h k v))]
+                      [ns-path (append (ns-path) (list name))])
          (items-lines items '())))
      (define names (remove-duplicates (defined-names items)))
      (hash-set! (namespaces) name (append names (declared-names items)))
      (hash-set! (defined) name name)
+     ;; constructors and exceptions of an included namespace of this module
+     (define included
+       (append*
+        (for/list ([it items0])
+          (match it
+            [(t:include _ (m:path m))
+             (for/list ([n (hash-ref (namespace-ctors) m '())])
+               (format "rename: ~a.~a as ~a" m n n))]
+            [_ '()]))))
+     (hash-set! (namespace-ctors) name
+                (filter (lambda (n) (not (member n (module-names items)))) (declared-names items)))
      (define exports (remove-duplicates (append (map mangle-id names) (declared-names items))))
+     (if (and (null? exports) (null? included)
+              (andmap (lambda (l) (regexp-match? #rx"^ *(//.*)?$" l)) inner))
+         ;; only comments (functor definitions): an empty namespace
+         (append inner (list (format "namespace ~a:«»" name)))
      (append (list (format "namespace ~a:" name))
              (indent (if (null? exports) '()
                          (list (string-append "export: " (string-join exports " ")))))
-             (indent inner))]
+             (indent (for/list ([r included]) (string-append "export: " r)))
+             (indent inner)))]
     [(m:app (m:path f) (m:path arg))
      (cond
        [(member f '("Map.Make" "Set.Make"))
@@ -1039,7 +1249,10 @@
         (list (format "def ~a = ~a(~a.compare)" name
                       (if (equal? f "Map.Make") "OCamlMap.Make" "OCamlSet.Make") arg))]
        [else (list (format "def ~a = ~a(~a)" name f arg))])]
-    [(m:path p) (list (format "def ~a = ~a" name p))]
+    [(m:path p)
+     ;; a module alias: references to name.x read p.x
+     (hash-set! (defined) name (or (scope-lookup (car (string-split p "."))) p))
+     (list (format "// module ~a = ~a" name p))]
     [_ (list (format "// module ~a: not translated" name))]))
 
 (define (field-names tys)
@@ -1062,7 +1275,12 @@
     [(list 'variant ctors)
      (cons (format "variant ~a:" (mangle-id (tydecl-name d)))
            (indent (for/list ([c ctors])
-                     (format "~a(~a)" (car c) (string-join (field-names (cadr c)) ", ")))))]
+                     (format "~a(~a)" (car c)
+                             (string-join
+                              (if (inline-record-args? (cadr c))
+                                  (map (lambda (f) (mangle-id (cadr f))) (cdar (cadr c)))
+                                  (field-names (cadr c)))
+                              ", ")))))]
     [(list 'record fields)
      (list (format "record ~a(~a)" (camel (tydecl-name d))
                    (string-join (map (lambda (f) (mangle-id (cadr f))) fields) ", ")))]
@@ -1081,8 +1299,12 @@
              [(list 'record _) (list (camel (tydecl-name d)))]
              [_ '()])))]
        [(t:exception _ n _) (list n)]
-       [(t:module _ n _ _) (list n)]
+       [(t:module _ n '() (or (m:struct _) (m:app _ _))) (list n)]
        [_ '()]))))
+
+;; modules the items declare
+(define (module-names items)
+  (for/list ([it items] #:when (t:module? it)) (t:module-name it)))
 
 ;; constructor -> number of declared fields, over items and their modules
 (define (ctor-arities items #:nested [nested? #t])
@@ -1093,7 +1315,11 @@
         [(t:type _ decls)
          (for ([d decls])
            (match (tydecl-kind d)
-             [(list 'variant ctors) (for ([c ctors]) (hash-set! h (car c) (length (cadr c))))]
+             [(list 'variant ctors)
+              (for ([c ctors])
+                (hash-set! h (car c) (if (inline-record-args? (cadr c))
+                                         (length (cdar (cadr c)))
+                                         (length (cadr c)))))]
              [_ (void)]))]
         [(t:exception _ n args) (hash-set! h n (length args))]
         [(t:module _ _ _ (m:struct inner)) (when nested? (walk inner #f))]
@@ -1198,12 +1424,16 @@
 
 ;; emit-module : items comments env header-lines -> (values body-lines exports)
 (define (emit-module items0 comments e)
-  (define items (flatten-includes items0))
+  (parameterize ([functors (make-hash)] [namespaces (make-hash)] [namespace-ctors (make-hash)] [namespace-arities (make-hash)] [ns-path '()]
+                 [inline-records (make-hash)] [records-in-scope (box '())] [current-env e])
+    (emit-module* (expand-includes (flatten-includes items0)) comments e)))
+
+(define (emit-module* items comments e)
   (define counts (make-hash))
   (for ([n (defined-names items)]) (hash-update! counts n add1 0))
   (define e* (struct-copy env e [records (collect-records items)] [counts counts]))
   (parameterize ([current-env e*] [scopes (list (scope (make-hash) counts))]
-                 [namespaces (make-hash)] [locals (hash)])
+                 [locals (hash)])
     ;; the leading comments (banner) go before the imports
     (define first-pos (if (pair? items) (item-pos (car items)) +inf.0))
     (define-values (lead rest) (splitf-at comments (lambda (c) (< (car c) first-pos))))

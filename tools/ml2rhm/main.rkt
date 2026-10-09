@@ -9,7 +9,8 @@
 ;; sequence of hol_lib.ml, then the file's `needs` closure. A free name
 ;; imports from the latest earlier module that defines it, as an `only:`
 ;; list; names no HOL Light module defines come from private/ocaml.rhm.
-(require racket/cmdline
+(require racket/runtime-path
+         racket/cmdline
          racket/list
          racket/string
          racket/path
@@ -128,6 +129,41 @@
                                  (simplify-path (path->complete-path target-rhm (current-directory)))))
   (path->string rp))
 
+;; ------------------------------------------------- Stdlib functors (vendored)
+;; Map.Make and Set.Make of OCaml 4.14.1 (tools/ml2rhm/stdlib), expanded where
+;; a module applies them, as the port does. Definitions over Seq are left out.
+(define-runtime-path stdlib-dir "stdlib")
+(define (mentions-seq? x)
+  (let walk ([x x])
+    (cond [(string? x) (regexp-match? #rx"^Seq[.]" x)]
+          [(pair? x) (or (walk (car x)) (walk (cdr x)))]
+          [(prefab-struct-key x) (walk (cdr (vector->list (struct->vector x))))]
+          [else #f])))
+;; whether x refers to one of the names
+(define (mentions-any? x names)
+  (and (pair? names)
+       (let walk ([x x])
+         (cond [(e:var? x) (and (member (e:var-name x) names) #t)]
+               [(pair? x) (or (walk (car x)) (walk (cdr x)))]
+               [(prefab-struct-key x) (walk (cdr (vector->list (struct->vector x))))]
+               [else #f]))))
+
+(define stdlib-functor-table
+  (for/hash ([name '("Map" "Set")])
+    (define-values (items comments)
+      (call-with-input-file (build-path stdlib-dir (string-append (string-downcase name) ".ml"))
+        (lambda (in) (parse-ml in #:jrh #f))))
+    (define make
+      (for/first ([it items] #:when (and (t:module? it) (equal? (t:module-name it) "Make"))) it))
+    ;; leave out definitions over Seq and, transitively, those using them
+    (define kept
+      (let loop ([items (m:struct-items (t:module-body make))] [dropped '()])
+        (define-values (out gone)
+          (partition (lambda (it) (not (or (mentions-seq? it) (mentions-any? it dropped)))) items))
+        (if (null? gone) out (loop out (append dropped (defined-names gone))))))
+    (values (string-append name ".Make")
+            (cons (car (t:module-params make)) kept))))
+
 ;; ----------------------------------------------------------------- translate
 (define (translate rel)
   (define p (parse rel))
@@ -171,8 +207,21 @@
                                                   #:nested (equal? m rel))])
                          (hash-set! h k v))))
                    h)
-                 (box #f)))
-  (define-values (lead body exports) (emit-module items comments e))
+                 (box #f)
+                 ;; names of a module of an earlier file, for `open M`
+                 (lambda (m)
+                   (for/or ([b (reverse before)])
+                     (define pb (parse b))
+                     (and (ok? pb)
+                          (for/or ([it (car pb)])
+                            (match it
+                              [(t:module _ (== m) '() (m:struct inner))
+                               (define flat (flatten-includes inner))
+                               (remove-duplicates (append (defined-names flat) (declared-names flat)))]
+                              [_ #f])))))))
+  (define-values (lead body exports)
+    (parameterize ([stdlib-functors stdlib-functor-table])
+      (emit-module items comments e)))
   (define format-included? (unbox (env-included e)))
   (define text (string-join (append body) "\n"))
   (define quotes? (regexp-match? #rx"@hol[|][{]" text))

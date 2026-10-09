@@ -32,16 +32,11 @@ these against the pinned HOL Light.
 ## Results
 
 - All 569 OCaml files of the pinned checkout translate.
-- On the 44 modules of the port, the generated code scores 97.6% literal
+- On the 45 modules of the port, the generated code scores 97.6% literal
   (`tools/literalness`; the hand-maintained modules score 95.0%) and is 88%
   token-similar to the hand-maintained modules.
-- 38 of the 44 compile in place of the hand-maintained module. The six that
-  do not are:
-  - `equal`, `tactics`, `metis` and `thecops`, which call printer functions
-    that the port does not have;
-  - `lib`, which uses `Printexc` and file I/O;
-  - `impconv`, whose `let module Tset = struct ... end in` defines names its
-    enclosing block already binds.
+- All 45 compile in place of the hand-maintained module (`dropin.sh`, run by
+  the CI job `ml2rhm`).
 
 The output mirrors the checkout: `Library/card.ml` becomes
 `OUT/Library/card.rhm`, and `printer.ml` becomes `OUT/printer.rhm`, as in
@@ -95,8 +90,15 @@ its own definition, the import is qualified (`IndTypes.list_INDUCT`).
   `Mizarlight/pa_f.ml` is a camlp5 extension in revised syntax, and two
   `RichterHilbertAxiomGeometry` files are Mizar-style proof texts.
 - Constructor arities come from the declarations of the module and of the
-  modules loaded before it; a module that redeclares a constructor name
-  (compute.ml's `Const`) uses its own arity throughout.
+  modules loaded before it; inside a `module ... struct` or `let module`, its
+  own declarations come first, and `M.C` uses the arity declared in `M`.
+- OCaml keeps constructors and modules apart; Rhombus does not. A constructor
+  or exception named like a module of the same file is renamed `NameValue`,
+  as in the port (metis.ml's `Atom` beside `module Atom`).
+- Functors are expanded where they are applied, `Map.Make` and `Set.Make`
+  from the vendored OCaml 4.14.1 `stdlib/map.ml` and `stdlib/set.ml`
+  (definitions that need `Seq` are left out). `include M` of a namespace of
+  the same file re-exports M's values, constructors and exceptions.
 - `let ... and ...` becomes sequential bindings; a right-hand side that
   refers to a shadowed outer name is not detected.
 - Comments inside a definition are dropped.

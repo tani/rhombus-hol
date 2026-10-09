@@ -1,7 +1,5 @@
 #lang rhombus
 
-// Generated translation of HOL Light source.
-
 // Direct translation of the pinned HOL Light preterm.ml.
 
 // =========================================================================
@@ -15,7 +13,8 @@
 // (c) Copyright, Vincent Aravantinos 2012
 // =========================================================================
 
-// Quotations are written as `hol:` terms; every proof is replayed here.
+// parse_term (../parser.rhm) elaborates every `@hol|{...}|` quotation with
+// retypecheck and term_of_preterm below.
 
 import:
   "../basics.rhm" open:
@@ -304,189 +303,52 @@ def [preterm_type_of_pretype_v2, preterm_term_of_preterm_v2, preterm_retypecheck
   fun istrivial(ptm):
     fun(env):
       fun(x):
-        fun(arg_2):
-          match arg_2
-          | StvValue(y): ((y == x) || (defined(env)(y) && istrivial(ptm)(env)(x)(apply(env)(y))))
-          | PtyconValue(f,args):
-              if exists(istrivial(ptm)(env)(x))(args)
-              | failwith(string_of_ty_error(env)(ptm))
-              | match arg_2
-                | PtyconValue(_,_): #false
-                | UtvValue(_): #false
-          | PtyconValue(_,_): #false
-          | UtvValue(_): #false
-  let unify = fun(ptm):
-    fun(env):
-      fun(ty1):
-        fun(ty2):
-          // This recursive helper needs a definition for self-reference.
-          fun unify_2(env):
-            fun(arg_3):
-              match arg_3
-              | PairList []: env
-              | PairList [[ty1, ty2, _], & oth]:
-                  if (ty1 == ty2)
-                  | unify_2(env)(oth)
-                  | match arg_3
-                    | PairList [[PtyconValue(f,fargs), PtyconValue(g,gargs), ptm], & oth]: (if ((f == g) && (length(fargs) == length(gargs))) | unify_2(env)(append(map2(fun(x): fun(y): [x, y, ptm])(fargs)(gargs))(oth)) | failwith(string_of_ty_error(env)(ptm)))
-                    | PairList [[StvValue(x), t, ptm], & oth]:
-                        if defined(env)(x)
-                        | unify_2(env)(PairList [[apply(env)(x), t, ptm], & oth])
-                        | unify_2((if istrivial(ptm)(env)(x)(t) | env | fpf_define(x)(t)(env)))(oth)
-                    | PairList [[t, StvValue(x), ptm], & oth]: unify_2(env)(PairList [[StvValue(x), t, ptm], & oth])
-                    | PairList [[_, _, ptm], & oth]: failwith(string_of_ty_error(env)(ptm))
-              | PairList [[PtyconValue(f,fargs), PtyconValue(g,gargs), ptm], & oth]: (if ((f == g) && (length(fargs) == length(gargs))) | unify_2(env)(append(map2(fun(x): fun(y): [x, y, ptm])(fargs)(gargs))(oth)) | failwith(string_of_ty_error(env)(ptm)))
-              | PairList [[StvValue(x), t, ptm], & oth]:
-                  if defined(env)(x)
-                  | unify_2(env)(PairList [[apply(env)(x), t, ptm], & oth])
-                  | unify_2((if istrivial(ptm)(env)(x)(t) | env | fpf_define(x)(t)(env)))(oth)
-              | PairList [[t, StvValue(x), ptm], & oth]: unify_2(env)(PairList [[StvValue(x), t, ptm], & oth])
-              | PairList [[_, _, ptm], & oth]: failwith(string_of_ty_error(env)(ptm))
-          unify_2(env)(
-            PairList [
-              [
-                ty1,
-                ty2,
-                match ptm
-                | None(): None()
-                | Some(t): Some([t, ty1, ty2])
-              ]
-            ]
-          )
+        fun(ty):
+          match ty
+          | StvValue(y): y == x || (defined(env)(y) && istrivial(ptm)(env)(x)(apply(env)(y)))
+          | PtyconValue(f, args) when exists(istrivial(ptm)(env)(x))(args):
+              failwith(string_of_ty_error(env)(ptm))
+          | _: #false
+  let unify:
+    fun(ptm):
+      fun(env):
+        fun(ty1):
+          fun(ty2):
+            // The original shadows unify with its recursive worker.
+            fun unify(env):
+              fun(constraints):
+                match constraints
+                | PairList []: env
+                | PairList [[ty1, ty2, _], & oth] when ty1 == ty2: unify(env)(oth)
+                | PairList [[PtyconValue(f, fargs), PtyconValue(g, gargs), ptm], & oth]:
+                    if f == g && length(fargs) == length(gargs)
+                    | unify(env)(append(map2(fun(x): fun(y): [x, y, ptm])(fargs)(gargs))(oth))
+                    | failwith(string_of_ty_error(env)(ptm))
+                | PairList [[StvValue(x), t, ptm], & oth]:
+                    if defined(env)(x)
+                    | unify(env)(PairList.cons([apply(env)(x), t, ptm], oth))
+                    | unify(if istrivial(ptm)(env)(x)(t) | env | fpf_define(x)(t)(env))(oth)
+                | PairList [[t, StvValue(x), ptm], & oth]:
+                    unify(env)(PairList.cons([StvValue(x), t, ptm], oth))
+                | PairList [[_, _, ptm], & oth]: failwith(string_of_ty_error(env)(ptm))
+            let origin:
+              match ptm
+              | None(): None()
+              | Some(t): Some([t, ty1, ty2])
+            unify(env)(PairList [[ty1, ty2, origin]])
   fun typify(ty):
     fun([ptm, venv, uenv]):
       match ptm
-      | VarpValue(s,_):
-          if can(assoc(s))(venv)
-          | let ty_prime = assoc(s)(venv)
-            [VarpValue(s, ty_prime), PairList [], unify(Some(ptm))(uenv)(ty_prime)(ty)]
-          | match ptm
-            | VarpValue(s,_):
-                if can(num_of_string)(s)
-                | let t = pmk_numeral(num_of_string(s))
-                  let ty_prime = PtyconValue("num", PairList [])
-                  [t, PairList [], unify(Some(ptm))(uenv)(ty_prime)(ty)]
-                | match ptm
-                  | VarpValue(s,_):
-                      warn(((s != "") && Host.isnum(s)))("Non-numeral begins with a digit")
-                      if (!preterm_is_hidden(s) && can(get_generic_type)(s))
-                      | let pty = pretype_instance(get_generic_type(s))
-                        let ptm = ConstpValue(s, pty)
-                        [ptm, PairList [], unify(Some(ptm))(uenv)(pty)(ty)]
-                      | let ptm = VarpValue(s, ty)
-                        if !can(get_var_type)(s)
-                        | [ptm, PairList [[s, ty]], uenv]
-                        | let pty = pretype_instance(get_var_type(s))
-                          [ptm, PairList [[s, ty]], unify(Some(ptm))(uenv)(pty)(ty)]
-                  | CombpValue(f,x):
-                      let ty_prime_prime = new_type_var(#void)
-                      let ty_prime = PtyconValue("fun", PairList [ty_prime_prime, ty])
-                      let [f_prime, venv1, uenv1] = typify(ty_prime)([f, venv, uenv])
-                      let [x_prime, venv2, uenv2] = typify(ty_prime_prime)([x, append(venv1)(venv), uenv1])
-                      [CombpValue(f_prime, x_prime), append(venv1)(venv2), uenv2]
-                  | TypingValue(tm,pty): typify(ty)([tm, venv, unify(Some(tm))(uenv)(ty)(pty)])
-                  | AbspValue(v,bod):
-                      let [ty_prime, ty_prime_prime]:
-                        match ty
-                        | PtyconValue("fun",PairList [ty_prime, & PairList [ty_prime_prime, & PairList []]]): [ty_prime, ty_prime_prime]
-                        | _: [new_type_var(#void), new_type_var(#void)]
-                      let ty_prime_prime_prime = PtyconValue("fun", PairList [ty_prime, ty_prime_prime])
-                      let uenv0 = unify(Some(ptm))(uenv)(ty_prime_prime_prime)(ty)
-                      let [v_prime, venv1, uenv1] = typify(ty_prime)([v, PairList [], uenv0])
-                      let [v_prime, venv1, uenv1]:
-                        match v_prime
-                        | ConstpValue(s,_):
-                            if preterm_ignore_constant_varstruct.value
-                            | [VarpValue(s, ty_prime), PairList [[s, ty_prime]], uenv0]
-                            | match v_prime
-                              | _: [v_prime, venv1, uenv1]
-                        | _: [v_prime, venv1, uenv1]
-                      let [bod_prime, venv2, uenv2] = typify(ty_prime_prime)([bod, append(venv1)(venv), uenv1])
-                      [AbspValue(v_prime, bod_prime), venv2, uenv2]
-                  | _: failwith("typify: unexpected constant at this stage")
-            | VarpValue(s,_):
-                warn(((s != "") && Host.isnum(s)))("Non-numeral begins with a digit")
-                if (!preterm_is_hidden(s) && can(get_generic_type)(s))
-                | let pty = pretype_instance(get_generic_type(s))
-                  let ptm = ConstpValue(s, pty)
-                  [ptm, PairList [], unify(Some(ptm))(uenv)(pty)(ty)]
-                | let ptm = VarpValue(s, ty)
-                  if !can(get_var_type)(s)
-                  | [ptm, PairList [[s, ty]], uenv]
-                  | let pty = pretype_instance(get_var_type(s))
-                    [ptm, PairList [[s, ty]], unify(Some(ptm))(uenv)(pty)(ty)]
-            | CombpValue(f,x):
-                let ty_prime_prime = new_type_var(#void)
-                let ty_prime = PtyconValue("fun", PairList [ty_prime_prime, ty])
-                let [f_prime, venv1, uenv1] = typify(ty_prime)([f, venv, uenv])
-                let [x_prime, venv2, uenv2] = typify(ty_prime_prime)([x, append(venv1)(venv), uenv1])
-                [CombpValue(f_prime, x_prime), append(venv1)(venv2), uenv2]
-            | TypingValue(tm,pty): typify(ty)([tm, venv, unify(Some(tm))(uenv)(ty)(pty)])
-            | AbspValue(v,bod):
-                let [ty_prime, ty_prime_prime]:
-                  match ty
-                  | PtyconValue("fun",PairList [ty_prime, & PairList [ty_prime_prime, & PairList []]]): [ty_prime, ty_prime_prime]
-                  | _: [new_type_var(#void), new_type_var(#void)]
-                let ty_prime_prime_prime = PtyconValue("fun", PairList [ty_prime, ty_prime_prime])
-                let uenv0 = unify(Some(ptm))(uenv)(ty_prime_prime_prime)(ty)
-                let [v_prime, venv1, uenv1] = typify(ty_prime)([v, PairList [], uenv0])
-                let [v_prime, venv1, uenv1]:
-                  match v_prime
-                  | ConstpValue(s,_):
-                      if preterm_ignore_constant_varstruct.value
-                      | [VarpValue(s, ty_prime), PairList [[s, ty_prime]], uenv0]
-                      | match v_prime
-                        | _: [v_prime, venv1, uenv1]
-                  | _: [v_prime, venv1, uenv1]
-                let [bod_prime, venv2, uenv2] = typify(ty_prime_prime)([bod, append(venv1)(venv), uenv1])
-                [AbspValue(v_prime, bod_prime), venv2, uenv2]
-            | _: failwith("typify: unexpected constant at this stage")
-      | VarpValue(s,_):
-          if can(num_of_string)(s)
-          | let t = pmk_numeral(num_of_string(s))
-            let ty_prime = PtyconValue("num", PairList [])
-            [t, PairList [], unify(Some(ptm))(uenv)(ty_prime)(ty)]
-          | match ptm
-            | VarpValue(s,_):
-                warn(((s != "") && Host.isnum(s)))("Non-numeral begins with a digit")
-                if (!preterm_is_hidden(s) && can(get_generic_type)(s))
-                | let pty = pretype_instance(get_generic_type(s))
-                  let ptm = ConstpValue(s, pty)
-                  [ptm, PairList [], unify(Some(ptm))(uenv)(pty)(ty)]
-                | let ptm = VarpValue(s, ty)
-                  if !can(get_var_type)(s)
-                  | [ptm, PairList [[s, ty]], uenv]
-                  | let pty = pretype_instance(get_var_type(s))
-                    [ptm, PairList [[s, ty]], unify(Some(ptm))(uenv)(pty)(ty)]
-            | CombpValue(f,x):
-                let ty_prime_prime = new_type_var(#void)
-                let ty_prime = PtyconValue("fun", PairList [ty_prime_prime, ty])
-                let [f_prime, venv1, uenv1] = typify(ty_prime)([f, venv, uenv])
-                let [x_prime, venv2, uenv2] = typify(ty_prime_prime)([x, append(venv1)(venv), uenv1])
-                [CombpValue(f_prime, x_prime), append(venv1)(venv2), uenv2]
-            | TypingValue(tm,pty): typify(ty)([tm, venv, unify(Some(tm))(uenv)(ty)(pty)])
-            | AbspValue(v,bod):
-                let [ty_prime, ty_prime_prime]:
-                  match ty
-                  | PtyconValue("fun",PairList [ty_prime, & PairList [ty_prime_prime, & PairList []]]): [ty_prime, ty_prime_prime]
-                  | _: [new_type_var(#void), new_type_var(#void)]
-                let ty_prime_prime_prime = PtyconValue("fun", PairList [ty_prime, ty_prime_prime])
-                let uenv0 = unify(Some(ptm))(uenv)(ty_prime_prime_prime)(ty)
-                let [v_prime, venv1, uenv1] = typify(ty_prime)([v, PairList [], uenv0])
-                let [v_prime, venv1, uenv1]:
-                  match v_prime
-                  | ConstpValue(s,_):
-                      if preterm_ignore_constant_varstruct.value
-                      | [VarpValue(s, ty_prime), PairList [[s, ty_prime]], uenv0]
-                      | match v_prime
-                        | _: [v_prime, venv1, uenv1]
-                  | _: [v_prime, venv1, uenv1]
-                let [bod_prime, venv2, uenv2] = typify(ty_prime_prime)([bod, append(venv1)(venv), uenv1])
-                [AbspValue(v_prime, bod_prime), venv2, uenv2]
-            | _: failwith("typify: unexpected constant at this stage")
-      | VarpValue(s,_):
-          warn(((s != "") && Host.isnum(s)))("Non-numeral begins with a digit")
-          if (!preterm_is_hidden(s) && can(get_generic_type)(s))
+      | VarpValue(s, _) when can(assoc(s))(venv):
+          let ty_prime = assoc(s)(venv)
+          [VarpValue(s, ty_prime), PairList [], unify(Some(ptm))(uenv)(ty_prime)(ty)]
+      | VarpValue(s, _) when can(num_of_string)(s):
+          let t = pmk_numeral(num_of_string(s))
+          let ty_prime = PtyconValue("num", PairList [])
+          [t, PairList [], unify(Some(ptm))(uenv)(ty_prime)(ty)]
+      | VarpValue(s, _):
+          warn(s != "" && Host.isnum(s))("Non-numeral begins with a digit")
+          if !preterm_is_hidden(s) && can(get_generic_type)(s)
           | let pty = pretype_instance(get_generic_type(s))
             let ptm = ConstpValue(s, pty)
             [ptm, PairList [], unify(Some(ptm))(uenv)(pty)(ty)]
@@ -495,28 +357,25 @@ def [preterm_type_of_pretype_v2, preterm_term_of_preterm_v2, preterm_retypecheck
             | [ptm, PairList [[s, ty]], uenv]
             | let pty = pretype_instance(get_var_type(s))
               [ptm, PairList [[s, ty]], unify(Some(ptm))(uenv)(pty)(ty)]
-      | CombpValue(f,x):
+      | CombpValue(f, x):
           let ty_prime_prime = new_type_var(#void)
           let ty_prime = PtyconValue("fun", PairList [ty_prime_prime, ty])
           let [f_prime, venv1, uenv1] = typify(ty_prime)([f, venv, uenv])
           let [x_prime, venv2, uenv2] = typify(ty_prime_prime)([x, append(venv1)(venv), uenv1])
           [CombpValue(f_prime, x_prime), append(venv1)(venv2), uenv2]
-      | TypingValue(tm,pty): typify(ty)([tm, venv, unify(Some(tm))(uenv)(ty)(pty)])
-      | AbspValue(v,bod):
+      | TypingValue(tm, pty): typify(ty)([tm, venv, unify(Some(tm))(uenv)(ty)(pty)])
+      | AbspValue(v, bod):
           let [ty_prime, ty_prime_prime]:
             match ty
-            | PtyconValue("fun",PairList [ty_prime, & PairList [ty_prime_prime, & PairList []]]): [ty_prime, ty_prime_prime]
+            | PtyconValue("fun", PairList [ty_prime, ty_prime_prime]): [ty_prime, ty_prime_prime]
             | _: [new_type_var(#void), new_type_var(#void)]
           let ty_prime_prime_prime = PtyconValue("fun", PairList [ty_prime, ty_prime_prime])
           let uenv0 = unify(Some(ptm))(uenv)(ty_prime_prime_prime)(ty)
-          let [v_prime, venv1, uenv1] = typify(ty_prime)([v, PairList [], uenv0])
           let [v_prime, venv1, uenv1]:
+            let [v_prime, venv1, uenv1] = typify(ty_prime)([v, PairList [], uenv0])
             match v_prime
-            | ConstpValue(s,_):
-                if preterm_ignore_constant_varstruct.value
-                | [VarpValue(s, ty_prime), PairList [[s, ty_prime]], uenv0]
-                | match v_prime
-                  | _: [v_prime, venv1, uenv1]
+            | ConstpValue(s, _) when preterm_ignore_constant_varstruct.value:
+                [VarpValue(s, ty_prime), PairList [[s, ty_prime]], uenv0]
             | _: [v_prime, venv1, uenv1]
           let [bod_prime, venv2, uenv2] = typify(ty_prime_prime)([bod, append(venv1)(venv), uenv1])
           [AbspValue(v_prime, bod_prime), venv2, uenv2]

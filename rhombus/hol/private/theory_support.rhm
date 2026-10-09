@@ -1,10 +1,10 @@
 #lang rhombus
-// The parts of HOL Light's parser.ml and printer.ml that the theories call:
-// the parser combinators behind string patterns of tactics and type
-// definitions, the interface and overload state used by type inference,
-// and diagnostic printing stubs.
+// The parts of HOL Light's printer.ml that the parser and the theories use:
+// the character classes, reserved words, binder/prefix/infix tables, the
+// interface and overload state, and diagnostic printing stubs (the printer
+// itself is not ported).
 // (c) University of Cambridge 1998; John Harrison 1998-2007.
-// The term and type parsers built on these tables are in ../parser.rhm.
+// The lexer and the term and type parsers are in ../parser.rhm.
 import:
   "../lib.rhm" open
   "ocaml.rhm" open
@@ -25,36 +25,27 @@ export:
   std_formatter
   print_goal
   OCamlFormat
-  isnum
   string_of_type
   pp_print_type
-  the_interface
-  the_overload_skeletons
   install_user_printer
   delete_user_printer
-  OCamlFormat
   hol_std_formatter
   string_of_thm
   print_thm
   hol_print_flush
   name_of
   string_of_term
-  Ident
-  Resword
-  Noparse
-  parser_sequence
-  parser_map
-  parser_choice
-  many
-  possibly
-  a
-  fix
-  atleast
-  listof
-  elistof
+  isspace
+  issep
+  isbra
+  issymb
   isalpha
+  isnum
   isalnum
-  lex
+  reserve_words
+  unreserve_words
+  is_reserved_word
+  reserved_words
   parse_as_binder
   unparse_as_binder
   parses_as_binder
@@ -67,8 +58,8 @@ export:
   unparse_as_infix
   get_infix_status
   infixes
-  override_interface
-  remove_interface
+  the_interface
+  the_overload_skeletons
 
 fun name_of(tm):
   try:
@@ -82,90 +73,43 @@ fun string_of_term(tm):
   | Comb(f,x): "(" +& string_of_term(f) +& " " +& string_of_term(x) +& ")"
   | Abs(v,b): "(lambda " +& string_of_term(v) +& ". " +& string_of_term(b) +& ")"
 
-// The original tactic-pattern parser combinators; tokens are not HOL terms.
-class Ident(name):
-  extends HolVariant
-  override ocaml_view(): [0, PairList [this.name]]
-class Resword(name):
-  extends HolVariant
-  override ocaml_view(): [1, PairList [this.name]]
-class Noparse()
-fun parser_choice(p):
-  fun(q):
-    fun(inp):
-      try:
-        p(inp)
-        ~catch Noparse(): q(inp)
-fun parser_sequence(p):
-  fun(q):
-    fun(inp):
-      let [a, r]=p(inp)
-      let [b, s]=q(r)
-      [[a, b], s]
-fun parser_map(p):
-  fun(f):
-    fun(inp):
-      let [a, r]=p(inp)
-      [f(a), r]
-fun many(p):
-  fun(inp):
-    try:
-      let [a, r]=p(inp)
-      let [xs, s]=many(p)(r)
-      [PairList.cons(a,xs), s]
-      ~catch Noparse(): [PairList [], inp]
-fun possibly(p):
-  fun(inp):
-    try:
-      let [a, r]=p(inp)
-      [PairList [a], r]
-      ~catch Noparse(): [PairList [], inp]
-fun some(p):
-  fun(inp):
-    match inp
-    | PairList [h,&t]: (if p(h) | [h, t] | throw Noparse())
-    | _: throw Noparse()
-fun a(tok): some(fun(t): t==tok)
-fun fix(err):
-  fun(p):
-    fun(inp):
-      try:
-        p(inp)
-        ~catch Noparse(): failwith(err+&" expected")
-fun atleast(n):
-  fun(p):
-    if n<=0
-    | many(p)
-    | parser_map(parser_sequence(p)(atleast(n-1)(p)))(fun([h, t]): PairList.cons(h,t))
-fun listof(p):
-  fun(sep):
-    fun(err):
-      parser_map(parser_sequence(p)(many(parser_map(parser_sequence(sep)(fix(err)(p)))(snd))))(fun([h, t]): PairList.cons(h,t))
-fun elistof(p): fun(sep): fun(err): parser_choice(listof(p)(sep)(err))(fun(inp): [PairList [], inp])
-def alpha_chars = "'abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-def num_chars = "0123456789"
-def symbol_chars = "\\!@#$%^&*-+|\\<=>/?~.:"
-fun isalpha(c): c.length()>0 && alpha_chars.contains(to_string(c[0]))
-fun isalnum(c): c.length()>0 && (isalpha(c) || num_chars.contains(to_string(c[0])))
-def reserved_pattern_words = PairList ["(",")","[","]","{","}",":",";",".","|","let","in","and","if","then","else","match","with","function","->","when"]
-fun lex(chars):
-  fun take(p,xs,acc):
-    match xs
-    | PairList [h,&t]: (if p(h) | take(p,t,PairList.cons(h,acc)) | [implode(rev(acc)), xs])
-    | _: [implode(rev(acc)), xs]
-  fun scan(xs):
-    match xs
-    | PairList []: PairList []
-    | PairList [h,&t]:
-        cond
-        | " \t\n\r".contains(h): scan(t)
-        | "()[]{};,".contains(h): PairList.cons(Resword(h),scan(t))
-        | ~else:
-            let pred = if isalnum(h) | isalnum | (fun(c): symbol_chars.contains(c))
-            let [s, r]=take(pred,t,PairList [h])
-            let tok = if mem(s)(reserved_pattern_words) | Resword(s) | Ident(s)
-            PairList.cons(tok,scan(r))
-  scan(chars)
+// printer.ml: character classes of the lexer, by the first character of a
+// string as in the original's lookup table.
+def spaces = " \t\n\r"
+def separators = ",;"
+def brackets = "()[]{}"
+def symbs = "\\!@#$%^&*-+|\\<=>/?~.:"
+def alphas = "'abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+def nums = "0123456789"
+fun char_class(c :: String):
+  let ch = c.substring(0, 1)
+  cond
+  | spaces.contains(ch): 1
+  | separators.contains(ch): 2
+  | brackets.contains(ch): 4
+  | symbs.contains(ch): 8
+  | alphas.contains(ch): 16
+  | nums.contains(ch): 32
+  | ~else: 0
+fun isspace(c): char_class(c) == 1
+fun issep(c): char_class(c) == 2
+fun isbra(c): char_class(c) == 4
+fun issymb(c): char_class(c) == 8
+fun isalpha(c): char_class(c) == 16
+fun isnum(c): char_class(c) == 32
+fun isalnum(c): char_class(c) >= 16
+
+// printer.ml: reserved words.
+def mutable reswords:
+  PairList ["(", ")", "[", "]", "{", "}",
+            ":", ";", ".", "|",
+            "let", "in", "and", "if", "then", "else",
+            "match", "with", "function", "->", "when"]
+fun reserve_words(ns): reswords := union(reswords)(ns)
+fun unreserve_words(ns): reswords := subtract(reswords)(ns)
+fun is_reserved_word(n): mem(n)(reswords)
+fun reserved_words(): reswords
+
 // printer.ml: the tables that control the special parse status of names.
 def mutable binder_list = PairList []
 fun unparse_as_binder(n): binder_list := subtract(binder_list)(PairList [n])
@@ -186,15 +130,6 @@ fun parse_as_infix([n, d]):
   infix_list := sort(infix_cmp)(PairList.cons([n, d], filter(fun([m, _]): m != n)(infix_list)))
 fun get_infix_status(n): assoc(n)(infix_list)
 fun infixes(): infix_list
-// preterm.ml's remove_interface and override_interface, on the_interface.
-fun remove_interface(sym):
-  the_interface.value := filter(fun([s, _]): s != sym)(the_interface.value)
-fun override_interface([sym, tm]):
-  let namty:
-    try:
-      dest_const(tm)
-      ~catch Failure(_): dest_var(tm)
-  the_interface.value := PairList.cons([sym, namty], filter(fun([s, _]): s != sym)(the_interface.value))
 fun hol_print_flush(): #void
 import: lib("racket/base.rkt") as Primitive
 def hol_std_formatter = #void
@@ -228,8 +163,6 @@ namespace OCamlFormat:
   fun print_break(_n): fun(_i): print(" ")
   fun pp_print_string(_fmt): fun(s): print(s)
   def pp_print_type = fun(_fmt): fun(ty): print(string_of_type(ty))
-
-fun isnum(c): c.length()>0 && num_chars.contains(to_string(c[0]))
 
 fun print_goal([_assumptions, g]): println(string_of_term(g))
 

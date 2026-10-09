@@ -17,9 +17,9 @@ and `preterm.ml` type inference (`private/type_inference.rhm`), at run time and
 against the theory tables of that moment, exactly as HOL Light's quotation
 expander calls `parse_term` / `parse_type`. Copy quotation text from the pinned
 HOL Light sources unchanged. Do not port HOL Light's printer. Replay every
-proof in the Rhombus kernel; never import recorded theorems as axioms. A
-native inductive-type specification frontend may supply the small
-type-description API needed by `ind_types`.
+proof in the Rhombus kernel; never import recorded theorems as axioms.
+String patterns (`define_type`, `INTRO_TAC` and the like) go through the same
+`parser.rhm` lexer and combinators as upstream; keep no second parser.
 
 ## Translation policy
 

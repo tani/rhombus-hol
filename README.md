@@ -25,15 +25,15 @@ rhombus/hol/
   parser.rhm              parser.ml (lexer, type and term parsers)
   lib.rhm                 lib.ml (list utilities, finite partial functions)
   private/
-    ocaml.rhm             OCaml runtime: exceptions, polymorphic compare,
-                          Hashtbl.hash, Random
-    theory_support.rhm    printer.ml pieces: binder/prefix/infix tables,
-                          interface state, diagnostic printing
-    data_types.rhm        options and variant comparison view
+    ocaml.rhm             OCaml runtime: exceptions, options, polymorphic
+                          compare, Hashtbl.hash, int_of_string, Random
+    theory_support.rhm    printer.ml pieces: character classes, reserved
+                          words, binder/prefix/infix tables, interface
+                          state, diagnostic printing
     hol_quote.rhm         `@hol|{...}|` quotation macro
     type_inference.rhm    preterm.ml (type inference)
-    type_specification.rhm
-    declarations.rhm, proof_syntax.rhm, variant_base.rhm
+    declarations.rhm      variant and record declarations
+    proof_syntax.rhm      then_tac / then_list / or_tac / then_conv / or_conv
   tests/
 
 ```

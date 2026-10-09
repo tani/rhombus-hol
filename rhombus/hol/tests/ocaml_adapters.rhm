@@ -1,0 +1,68 @@
+#lang rhombus
+// Differential tests: each OCaml module adapter of private/ocaml.rhm against
+// a literal model of the OCaml semantics it replaces.
+import: "../private/ocaml.rhm" open
+import:
+  "../lib.rhm" open:
+    except: check
+
+// Map.Make over (string * int) keys, modelled as an association list.
+fun model_find(k):
+  fun(m):
+    match assoc_opt(k, m)
+    | Some(v): v
+    | None(): throw Not_found()
+fun assoc_opt(k, m):
+  match m
+  | PairList []: None()
+  | PairList [[k2, v], & rest]:
+      if k == k2 | Some(v) | assoc_opt(k, rest)
+fun model_add(k): fun(v): fun(m): PairList.cons([k, v], filter(fun([k2, _]): k2 != k)(m))
+fun model_union(f):
+  fun(m1):
+    fun(m2):
+      itlist(fun([k, v2]):
+               fun(acc):
+                 match assoc_opt(k, acc)
+                 | Some(v1):
+                     match f(k)(v1)(v2)
+                     | Some(v): model_add(k)(v)(acc)
+                     | None(): filter(fun([k3, _]): k3 != k)(acc)
+                 | None(): model_add(k)(v2)(acc))(m2)(m1)
+
+def M = OCamlMap.Make(fun(a): fun(b): compare(a)(b))
+def keys = PairList [["a", 1], ["a", 2], ["b", 1], ["c", 3]]
+
+fun same(m, model):
+  for values(ok = #true) (k in keys):
+    ok && (try:
+             M.find(k)(m) == model_find(k)(model)
+             ~catch Not_found():
+               try:
+                 model_find(k)(model)
+                 #false
+                 ~catch Not_found(): #true)
+
+// A deterministic sequence of insertions and unions.
+let values(m1, model1):
+  for values(m = M.empty, model = PairList []) (i in 0 .. 40):
+    let k = el(i mod 4)(keys)
+    values(M.add(k)(i)(m), model_add(k)(i)(model))
+let values(m2, model2):
+  for values(m = M.empty, model = PairList []) (i in 0 .. 10):
+    let k = el((3 * i) mod 4)(keys)
+    values(M.add(k)(100 + i)(m), model_add(k)(100 + i)(model))
+check same(m1, model1) ~is #true
+check same(m2, model2) ~is #true
+let plus = fun(_): fun(a): fun(b): Some(a + b)
+check same(M.union(plus)(m1)(m2), model_union(plus)(model1)(model2)) ~is #true
+let drop = fun(_): fun(_): fun(_): None()
+check same(M.union(drop)(m1)(m2), model_union(drop)(model1)(model2)) ~is #true
+check (try:
+         M.find(["z", 0])(m1)
+         "found"
+         ~catch Not_found(): "Not_found") ~is "Not_found"
+
+// String.compare and integer compare.
+check [OCamlString.compare("a")("b"), OCamlString.compare("b")("b"), OCamlString.compare("c")("b")] ~is [-1, 0, 1]
+check [OCamlInt.compare(1)(2), OCamlInt.compare(2)(2), OCamlInt.compare(3)(2)] ~is [-1, 0, 1]

@@ -1,109 +1,253 @@
 #lang rhombus
-// (c) University of Cambridge 1998; John Harrison 1998-2007. See ../LICENSE.
+// Direct translation of the pinned HOL Light nets.ml.
+
+// =========================================================================
+// Term nets: reasonably fast lookup based on term matchability.
+//
+//       John Harrison, University of Cambridge Computer Laboratory
+//
+//            (c) Copyright, University of Cambridge 1998
+//              (c) Copyright, John Harrison 1998-2007
+// =========================================================================
+
 import:
   "lib.rhm" open
   "private/ocaml.rhm" open
-import: "fusion.rhm" open
-import: "basics.rhm" open
+  "fusion.rhm" open
+  "basics.rhm" open
+
 export:
   empty_net
   enter
   lookup
   merge_nets
-class Vnet()
-class Cnet(k)
-class Lcnet(k)
-class Lnet(k)
-class Netnode(vnet,cnets,lcnets,lnets,tips)
-def empty_net = Netnode(#false,Map.empty,Map.empty,Map.empty,PairList [])
-fun canon_eq(x,y):
-  try:
-    compare(x)(y) == 0
-    ~catch InvalidArgument(_): #false
-fun canon_lt(x,y):
-  try:
-    compare(x)(y) < 0
-    ~catch InvalidArgument(_): #false
-fun sinsert(x,l):
-  if l == PairList []
-  | PairList [x]
-  | let h = hd(l)
-    cond
-    | canon_eq(h,x): failwith("sinsert")
-    | canon_lt(x,h): PairList.cons(x,l)
-    | ~else: PairList.cons(h,sinsert(x,tl(l)))
-fun set_insert(x,l):
-  try:
-    sinsert(x,l)
-    ~catch Failure("sinsert"): l
-fun label_to_store(lconsts,tm):
-  let [op, args] = strip_comb(tm)
-  cond
-  | is_const(op): [Cnet([fst(dest_const(op)), length(args)]), args]
-  | is_abs(op):
-      let [bv, bod] = dest_abs(op)
-      let bod1 = if mem(bv)(lconsts) | vsubst(PairList [[genvar(type_of(bv)), bv]])(bod) | bod
-      [Lnet(length(args)), PairList.cons(bod1,args)]
-  | mem(op)(lconsts): [Lcnet([fst(dest_var(op)), length(args)]), args]
-  | ~else: [Vnet(), PairList []]
-fun update(k,upd,m):
-  let child = if k in m | m[k] | empty_net
-  m.set(k,upd(child))
-fun net_update(lconsts,elem,tms,net):
-  let Netnode(v,c,lc,l,tips) = net
-  match tms
-  | PairList []: Netnode(v,c,lc,l,set_insert(elem,tips))
-  | PairList [tm, & rtms]:
-      let [label, ntms] = label_to_store(lconsts,tm)
-      fun upd(child): net_update(lconsts,elem,append(ntms)(rtms),child)
-      match label
-      | Vnet(): Netnode(upd(if v | v | empty_net),c,lc,l,tips)
-      | Cnet(k): Netnode(v,update(k,upd,c),lc,l,tips)
-      | Lcnet(k): Netnode(v,c,update(k,upd,lc),l,tips)
-      | Lnet(k): Netnode(v,c,lc,update(k,upd,l),tips)
-fun enter(lconsts): fun([tm, elem]): fun(net): net_update(lconsts,elem,PairList [tm],net)
-fun label_for_lookup(tm):
-  let [op, args] = strip_comb(tm)
-  cond
-  | is_const(op): [Cnet([fst(dest_const(op)), length(args)]), args]
-  | is_abs(op): [Lnet(length(args)), PairList.cons(body(op),args)]
-  | ~else: [Lcnet([fst(dest_var(op)), length(args)]), args]
-fun follow(tms,net):
-  let Netnode(v,c,lc,l,tips) = net
-  match tms
-  | PairList []: tips
-  | PairList [tm, & rtms]:
-      let [label, ntms] = label_for_lookup(tm)
-      fun collect(k,m):
-        if k in m
-        | follow(append(ntms)(rtms),m[k])
-        | PairList []
-      let collection:
-        match label
-        | Cnet(k): collect(k,c)
-        | Lcnet(k): collect(k,lc)
-        | Lnet(k): collect(k,l)
-        | Vnet(): PairList []
-      if v | append(collection)(follow(rtms,v)) | collection
-fun lookup(tm): fun(net): follow(PairList [tm],net)
-fun set_merge(l1,l2):
-  cond
-  | l1 == PairList []: l2
-  | l2 == PairList []: l1
-  | ~else:
-      let h1 = hd(l1)
-      let h2 = hd(l2)
+
+// -------------------------------------------------------------------------
+// Term nets are a finitely branching tree structure; at each level we
+// have a set of branches and a set of "values". Linearization is
+// performed from the left of a combination; even in iterated
+// combinations we look at the head first. This is probably fastest, and
+// anyway it's useful to allow our restricted second order matches: if
+// the head is a variable then then whole term is treated as a variable.
+// -------------------------------------------------------------------------
+
+class Vnet()                   // variable (instantiable)
+class Lcnet(name_arity)        // local constant
+class Cnet(name_arity)         // constant
+class Lnet(arity)              // lambda term (abstraction)
+
+// -------------------------------------------------------------------------
+// Edges out of a net node are split by label kind. The Vnet edge is unique
+// (so it's a direct field, looked up in O(1)); the others are persistent
+// balanced trees keyed by (string * int) or int with monomorphic
+// comparators. This gives O(log n) per-edge lookup.
+// -------------------------------------------------------------------------
+
+namespace Sikey:
+  export: compare
+  fun compare([s1, i1]):
+    fun([s2, i2]):
+      let c = OCamlString.compare(s1)(s2)
+      if c != 0 | c | OCamlInt.compare(i1)(i2)
+
+namespace Intkey:
+  export: compare
+  fun compare(i1): fun(i2): OCamlInt.compare(i1)(i2)
+
+def Si_map = OCamlMap.Make(Sikey.compare)
+def I_map = OCamlMap.Make(Intkey.compare)
+
+class NetnodeData(vnet, cnets, lcnets, lnets, tips)
+class Netnode(data)
+
+// -------------------------------------------------------------------------
+// The empty net.
+// -------------------------------------------------------------------------
+
+def empty_net:
+  Netnode(NetnodeData(None(),
+                      Si_map.empty,
+                      Si_map.empty,
+                      I_map.empty,
+                      PairList []))
+
+// -------------------------------------------------------------------------
+// Insert a new element into a net.
+// -------------------------------------------------------------------------
+
+def enter:
+  let label_to_store:
+    fun(lconsts):
+      fun(tm):
+          let [op, args] = strip_comb(tm)
+          cond
+          | is_const(op): [Cnet([fst(dest_const(op)), length(args)]), args]
+          | is_abs(op):
+              let [bv, bod] = dest_abs(op)
+              let bod_prime:
+                if mem(bv)(lconsts)
+                | vsubst(PairList [[genvar(type_of(bv)), bv]])(bod)
+                | bod
+              [Lnet(length(args)), PairList.cons(bod_prime, args)]
+          | mem(op)(lconsts): [Lcnet([fst(dest_var(op)), length(args)]), args]
+          | ~else: [Vnet(), PairList []]
+  let canon_eq:
+    fun(x):
+      fun(y):
+        try:
+          compare(x)(y) == 0
+          ~catch InvalidArgument(_): #false
+  let canon_lt:
+    fun(x):
+      fun(y):
+        try:
+          compare(x)(y) < 0
+          ~catch InvalidArgument(_): #false
+  fun sinsert(x):
+    fun(l):
+      if l == PairList []
+      | PairList [x]
+      | let h = hd(l)
+        if canon_eq(h)(x)
+        | failwith("sinsert")
+        | if canon_lt(x)(h)
+          | PairList.cons(x, l)
+          | PairList.cons(h, sinsert(x)(tl(l)))
+  let set_insert:
+    fun(x):
+      fun(l):
+        try:
+          sinsert(x)(l)
+          ~catch Failure("sinsert"): l
+  let update_si:
+    fun(k):
+      fun(upd):
+        fun(m):
+          let child0:
+            try:
+              Si_map.find(k)(m)
+              ~catch Not_found(): empty_net
+          Si_map.add(k)(upd(child0))(m)
+  let update_int:
+    fun(k):
+      fun(upd):
+        fun(m):
+          let child0:
+            try:
+              I_map.find(k)(m)
+              ~catch Not_found(): empty_net
+          I_map.add(k)(upd(child0))(m)
+  fun net_update(lconsts):
+    fun(elem):
+      fun(tms):
+        fun(net):
+              let Netnode(r :: NetnodeData) = net
+              match tms
+              | PairList []: Netnode(r with (tips = set_insert(elem)(r.tips)))
+              | PairList [tm, & rtms]:
+                  let [label, ntms] = label_to_store(lconsts)(tm)
+                  let upd = fun(child): net_update(lconsts)(elem)(append(ntms)(rtms))(child)
+                  match label
+                  | Vnet():
+                      let child0:
+                        match r.vnet
+                        | Some(c): c
+                        | None(): empty_net
+                      Netnode(r with (vnet = Some(upd(child0))))
+                  | Cnet(k):
+                      Netnode(r with (cnets = update_si(k)(upd)(r.cnets)))
+                  | Lcnet(k):
+                      Netnode(r with (lcnets = update_si(k)(upd)(r.lcnets)))
+                  | Lnet(k):
+                      Netnode(r with (lnets = update_int(k)(upd)(r.lnets)))
+  fun(lconsts): fun([tm, elem]): fun(net): net_update(lconsts)(elem)(PairList [tm])(net)
+
+// -------------------------------------------------------------------------
+// Look up a term in a net and return possible matches.
+// -------------------------------------------------------------------------
+
+def lookup:
+  let label_for_lookup:
+    fun(tm):
+      let [op, args] = strip_comb(tm)
       cond
-      | canon_eq(h1,h2): PairList.cons(h1,set_merge(tl(l1),tl(l2)))
-      | canon_lt(h1,h2): PairList.cons(h1,set_merge(tl(l1),l2))
-      | ~else: PairList.cons(h2,set_merge(l1,tl(l2)))
-fun merge_nets([n1, n2]):
-  let Netnode(v1,c1,lc1,l1,t1) = n1
-  let Netnode(v2,c2,lc2,l2,t2) = n2
-  let v = cond | v1 && v2: merge_nets([v1, v2]) | v1: v1 | ~else: v2
-  fun merge_map(a,b):
-    let mutable out = a
-    for ((k,y) in b):
-      out := out.set(k,if k in out | merge_nets([out[k], y]) | y)
-    out
-  Netnode(v,merge_map(c1,c2),merge_map(lc1,lc2),merge_map(l1,l2),set_merge(t1,t2))
+      | is_const(op): [Cnet([fst(dest_const(op)), length(args)]), args]
+      | is_abs(op): [Lnet(length(args)), PairList.cons(body(op), args)]
+      | ~else: [Lcnet([fst(dest_var(op)), length(args)]), args]
+  fun follow(tms):
+    fun(net):
+      let Netnode(r :: NetnodeData) = net
+      match tms
+      | PairList []: r.tips
+      | PairList [tm, & rtms]:
+          let [label, ntms] = label_for_lookup(tm)
+          let collection:
+            match label
+            | Cnet(k):
+                try:
+                  follow(append(ntms)(rtms))(Si_map.find(k)(r.cnets))
+                  ~catch Not_found(): PairList []
+            | Lcnet(k):
+                try:
+                  follow(append(ntms)(rtms))(Si_map.find(k)(r.lcnets))
+                  ~catch Not_found(): PairList []
+            | Lnet(k):
+                try:
+                  follow(append(ntms)(rtms))(I_map.find(k)(r.lnets))
+                  ~catch Not_found(): PairList []
+            | Vnet(): PairList []
+          match r.vnet
+          | None(): collection
+          | Some(vchild): append(collection)(follow(rtms)(vchild))
+  fun(tm): fun(net): follow(PairList [tm])(net)
+
+// -------------------------------------------------------------------------
+// Function to merge two nets (code from Don Syme's hol-lite).
+// -------------------------------------------------------------------------
+
+def merge_nets:
+  let canon_eq:
+    fun(x):
+      fun(y):
+        try:
+          compare(x)(y) == 0
+          ~catch InvalidArgument(_): #false
+  let canon_lt:
+    fun(x):
+      fun(y):
+        try:
+          compare(x)(y) < 0
+          ~catch InvalidArgument(_): #false
+  fun set_merge(l1):
+    fun(l2):
+      if l1 == PairList []
+      | l2
+      | if l2 == PairList []
+        | l1
+        | let h1 = hd(l1)
+          let t1 = tl(l1)
+          let h2 = hd(l2)
+          let t2 = tl(l2)
+          if canon_eq(h1)(h2)
+          | PairList.cons(h1, set_merge(t1)(t2))
+          | if canon_lt(h1)(h2)
+            | PairList.cons(h1, set_merge(t1)(l2))
+            | PairList.cons(h2, set_merge(l1)(t2))
+  fun merge_nets([n1, n2]):
+    let Netnode(r1 :: NetnodeData) = n1
+    let Netnode(r2 :: NetnodeData) = n2
+    let merge_opt:
+      fun(a):
+        fun(b):
+          match [a, b]
+          | [Some(x), Some(y)]: Some(merge_nets([x, y]))
+          | [Some(_), None()]: a
+          | [None(), _]: b
+    let merge_si = Si_map.union(fun(_): fun(a): fun(b): Some(merge_nets([a, b])))
+    let merge_int = I_map.union(fun(_): fun(a): fun(b): Some(merge_nets([a, b])))
+    Netnode(NetnodeData(merge_opt(r1.vnet)(r2.vnet),
+                        merge_si(r1.cnets)(r2.cnets),
+                        merge_si(r1.lcnets)(r2.lcnets),
+                        merge_int(r1.lnets)(r2.lnets),
+                        set_merge(r1.tips)(r2.tips)))
+  merge_nets

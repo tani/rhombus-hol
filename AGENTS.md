@@ -37,6 +37,30 @@ Rhombus/HOL frontend, executable-language layer, or multi-package layout.
 Prefer direct translations over redesigns inside the engine. Every semantic
 departure from HOL Light should be local and documented.
 
+The port has three layers with different rules:
+
+- Logic layer: the kernel rules, derived rules, tactics, conversions and every
+  theory module. Translate literally: the same toplevel definitions in the same
+  order, with the same names, local `let ... in` structure, currying and
+  quotations. Mark an unavoidable structural change with a
+  `// departure: <reason>` comment.
+- Library layer: `lib.ml` and the OCaml standard library functions it relies
+  on. Keep the interface literal (names, argument order, currying, raised
+  exceptions, and the order of every result), but implement it with
+  Rhombus/Racket standard functions where they are faster or simpler. OCaml
+  lists are `PairList`, which are Racket lists, so Racket list functions apply
+  directly.
+- Module adapters: OCaml library modules such as `Map.Make`, `Hashtbl` and
+  `Array` are thin adapters under `rhombus/hol/private/` with the OCaml names
+  and API over Rhombus/Racket data structures, so the logic layer keeps the
+  upstream call sites.
+
+A library or adapter function that replaces a literal translation must keep
+any order a proof can observe (stable sorting, set and union order, traversal
+order) and comes with a differential test against the literal version.
+`tools/literalness/measure.py` reports how closely each module follows the
+pinned HOL Light source; do not let the logic layer's score drop.
+
 ## Binding style
 
 Use `let` for sequential local value bindings, including destructuring and

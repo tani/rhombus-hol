@@ -127,6 +127,12 @@ raco test -j 4 rhombus/hol/tests/golden/hol_light.rhm rhombus/hol/tests/upstream
 
 The data comes from `tools/hol_light_golden/` and is only compared against.
 
+`tools/literalness/measure.py /path/to/hol-light` reports, per module, how
+closely the port follows the pinned HOL Light source (identifiers and
+quotations in the same order, toplevel definitions found and in order). The
+CI `literalness` job fails when a logic-layer module drops below
+`tools/literalness/baseline.json`; see AGENTS.md for the layers.
+
 The standard-theory modules (after `simp.rhm`) were generated from the pinned
 HOL Light sources, with each quotation's text taken from them. OCaml tuples
 are Rhombus lists (`[a, b]`), OCaml lists are `PairList`, and record types are

@@ -6,6 +6,8 @@
                                          on a logic-layer drop below baseline.json
     python3 tools/literalness/measure.py /path/to/hol-light --update   # rewrite
                                          baseline.json from the current sources
+    python3 tools/literalness/measure.py /path/to/hol-light --defs MODULE
+                                         # per-definition scores of one module
 
 For each module it compares the sequence of identifiers, string literals and
 quotations of the OCaml source with that of the Rhombus port, after removing
@@ -233,9 +235,33 @@ def report(rows):
           f"{tot['quotes_same']:6}/{tot['quotes']:<6}")
 
 
+def defs_report(hol, mod, threshold=100.0):
+    """Toplevel definitions of one module: missing ones, then the least literal."""
+    ml_src = open(os.path.join(hol, mod + '.ml')).read()
+    rh_src = open(os.path.join(RH, RHFILE.get(mod, mod + '.rhm'))).read()
+    names = set(toks_ml(strip_ml_comments(ml_src)))
+    rmap = collections.defaultdict(list)
+    for n, b in rh_defs(rh_src, mod):
+        rmap[n].append(b)
+    used = collections.Counter(); rows = []; missing = []
+    for n, b in ml_defs(ml_src):
+        if used[n] >= len(rmap[n]):
+            missing.append(n); continue
+        a = toks_ml(strip_ml_comments(b)); c = toks_rh(rmap[n][used[n]], mod, names)
+        used[n] += 1
+        rows.append((round(100 * lcs(a, c) / max(len(a), 1), 1), len(a), n))
+    print('not found in the port:', ' '.join(missing) or '-')
+    for score, size, n in sorted(rows):
+        if score < threshold:
+            print(f'{score:6.1f}% {size:5} tokens  {n}')
+
+
 def main(argv):
     if not argv or argv[0].startswith('-'):
         print(__doc__); return 2
+    if '--defs' in argv:
+        defs_report(argv[0], argv[argv.index('--defs') + 1], 90.0)
+        return 0
     rows = measure(argv[0])
     report(rows)
     if '--update' in argv:

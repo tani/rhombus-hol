@@ -1,30 +1,55 @@
 #lang rhombus
-// (c) University of Cambridge 1998; John Harrison 1998-2007.
-// (c) Marco Maggesi 2012.
-// Direct translation of the proof-state and tactic core of HOL Light tactics.ml.
-// Printing/interactive goalstack commands are deferred until printer.rhm.
+// Direct translation of the pinned HOL Light tactics.ml, up to `prove`. The
+// goal printer and the interactive goalstack commands that follow it in the
+// original (g, e, b, r, p, top_thm, ...) are not ported.
+
+// =========================================================================
+// System of tactics (slightly different from any traditional LCF method).
+//
+//       John Harrison, University of Cambridge Computer Laboratory
+//
+//            (c) Copyright, University of Cambridge 1998
+//              (c) Copyright, John Harrison 1998-2007
+//                 (c) Copyright, Marco Maggesi 2012
+// =========================================================================
+
 import:
   "lib.rhm" open
   "private/ocaml.rhm" open
-import: "fusion.rhm" open
-import: "basics.rhm" open
-import: "equal.rhm" open
-import: "bool.rhm" open
-import: "drule.rhm" open
+  "private/hol_quote.rhm" open
+  "fusion.rhm" open
+  "basics.rhm" open
+  "equal.rhm" open
+  "bool.rhm" open
+  "drule.rhm" open
+  "parser.rhm" as Parser:
+    expose:
+      Ident
+      Noparse
+      many
+      fix
+      lex
+  "private/theory_support.rhm" as Host:
+    expose:
+      isalnum
+      string_of_type
 
 export:
-  TRANS_TAC
-  ANTS_TAC
-  HYP
   null_inst
   null_meta
   equals_goal
   inst_goal
   compose_insts
+  _FALSITY_
+  mk_fthm
   VALID
   THEN
   THENL
+  then1_
+  then_tac
+  then_list
   ORELSE
+  or_tac
   FAIL_TAC
   NO_TAC
   ALL_TAC
@@ -55,7 +80,9 @@ export:
   RULE_ASSUM_TAC
   USE_THEN
   REMOVE_THEN
+  NAME_ASSUMS_TAC
   ASM
+  HYP
   ACCEPT_TAC
   CONV_TAC
   REFL_TAC
@@ -85,6 +112,7 @@ export:
   CONTR_TAC
   MATCH_ACCEPT_TAC
   MATCH_MP_TAC
+  TRANS_TAC
   CONJUNCTS_THEN2
   CONJUNCTS_THEN
   DISJ_CASES_THEN2
@@ -103,118 +131,173 @@ export:
   UNDISCH_THEN
   FIRST_X_ASSUM
   SUBGOAL_THEN
+  SUBGOAL_TAC
   FREEZE_THEN
   X_META_EXISTS_TAC
   META_EXISTS_TAC
   META_SPEC_TAC
   CHEAT_TAC
   RECALL_ACCEPT_TAC
+  ANTS_TAC
   REMARK_TAC
-  SUBGOAL_TAC
-  NAME_ASSUMS_TAC
-  then1_
-  prove
+  by
+  mk_goalstate
   TAC_PROOF
-  _FALSITY_
+  prove
+
+// -------------------------------------------------------------------------
+// The common case of trivial instantiations.
+// -------------------------------------------------------------------------
 
 def null_inst = [PairList [], PairList [], PairList []]
+
 def null_meta = [PairList [], null_inst]
 
-fun plist_rev(l): rev_itlist(fun(x): fun(a): PairList.cons(x,a))(l)(PairList [])
-
+// -------------------------------------------------------------------------
+// A goal has labelled assumptions, and the hyps are now thms.
+// -------------------------------------------------------------------------
 
 fun equals_goal([a, w]):
-  fun([a1, w1]):
-    forall2(fun([s, th]): fun([s1, th1]): s == s1 && equals_thm(th)(th1))(a)(a1)
-      && w == w1
+  fun([a_prime, w_prime]):
+    forall2(fun([s, th]): fun([s_prime, th_prime]): s == s_prime && equals_thm(th)(th_prime))(a)(a_prime)
+      && w == w_prime
 
-fun inst_goal(i):
+// -------------------------------------------------------------------------
+// A justification function for a goalstate [A1 ?- g1; ...; An ?- gn],
+// starting from an initial goal A ?- g, is a function f such that for any
+// instantiation @:
+//
+//   f(@) [A1@ |- g1@; ...; An@ |- gn@] = A@ |- g@
+//
+// The goalstate stores the subgoals, justification, current instantiation,
+// and a list of metavariables. A tactic, applied to a goal A ?- g, returns:
+//
+//  o A list of new metavariables introduced
+//  o An instantiation (%)
+//  o A list of subgoals
+//  o A justification f such that for any instantiation @ we have
+//    f(@) [A1@  |- g1@; ...; An@ |- gn@] = A(%;@) |- g(%;@)
+// -------------------------------------------------------------------------
+
+// -------------------------------------------------------------------------
+// Apply instantiation to a goal.
+// -------------------------------------------------------------------------
+
+fun inst_goal(p):
   fun([thms, w]):
-    [map(fun([s, th]): [s, INSTANTIATE_ALL(i)(th)])(thms), instantiate(i)(w)]
+    [map(F_F(I)(INSTANTIATE_ALL(p)))(thms), instantiate(p)(w)]
 
-fun compose_insts([bcs1, tmin1, tyin1] as i1):
-  fun([bcs2, tmin2_, tyin2_] as i2):
-    let tmin = map(
-      fun([t, v]): [instantiate(i2)(t), inst(tyin2_)(v)]
-    )(tmin1)
-    let tyin = map(
-      fun([t, v]): [type_subst(tyin2_)(t), v]
-    )(tyin1)
-    let tmin2 = filter(fun([_, x]): !can(rev_assoc(x))(tmin))(tmin2_)
-    let tyin2 = filter(fun([_, a]): !can(rev_assoc(a))(tyin))(tyin2_)
-    [append(bcs1)(bcs2),append(tmin)(tmin2),append(tyin)(tyin2)]
+// -------------------------------------------------------------------------
+// Perform a sequential composition (left first) of instantiations.
+// -------------------------------------------------------------------------
 
-def falsity_var = mk_var(["_FALSITY_", bool_ty])
-def _FALSITY_ = new_definition(mk_eq([falsity_var, lhs(concl(F_DEF))]))
-def falsity_tm = lhs(concl(_FALSITY_))
+fun compose_insts([pats1, tmin1, tyin1]):
+  fun([pats2, tmin2, tyin2] && i2):
+    let tmin = map(F_F(instantiate(i2))(inst(tyin2)))(tmin1)
+    let tyin = map(F_F(type_subst(tyin2))(I))(tyin1)
+    let tmin_prime = filter(fun([_, x]): !can(rev_assoc(x))(tmin))(tmin2)
+    let tyin_prime = filter(fun([_, a]): !can(rev_assoc(a))(tyin))(tyin2)
+    [append(pats1)(pats2), append(tmin)(tmin_prime), append(tyin)(tyin_prime)]
 
-fun mk_fthm([asl, c]):
+// -------------------------------------------------------------------------
+// Construct A,_FALSITY_ |- p; contortion so falsity is the last element.
+// -------------------------------------------------------------------------
+
+def _FALSITY_ = new_definition(@hol|{_FALSITY_ = F}|)
+
+def mk_fthm:
   let pth = UNDISCH(fst(EQ_IMP_RULE(_FALSITY_)))
-  let qth = ASSUME(falsity_tm)
-  PROVE_HYP(qth)(
-    itlist(ADD_ASSUM)(plist_rev(asl))(CONTR(c)(pth)))
+  let qth = ASSUME(@hol|{_FALSITY_}|)
+  fun([asl, c]): PROVE_HYP(qth)(itlist(ADD_ASSUM)(rev(asl))(CONTR(c)(pth)))
 
-fun fake_thm([asl, w]):
-  let asms = itlist(fun([_, th]): fun(a): union(hyp(th))(a))(asl)(PairList [])
-  mk_fthm([asms, w])
+// -------------------------------------------------------------------------
+// Validity checking of tactics. This cannot be 100% accurate without making
+// arbitrary theorems, but "mk_fthm" brings us quite close.
+// -------------------------------------------------------------------------
 
-fun VALID(tac):
-  fun([asl, w] as g):
-    let res = tac(g)
-    let [[mvs, i],gls,just] = res
-    let ths = map(fake_thm)(gls)
-    let [asl1, w1] = dest_thm(just(null_inst)(ths))
-    let [asl2, w2] = inst_goal(i)(g)
-    let maxasms:
-      itlist(fun([_, th]): fun(a): union(insert(concl(th))(hyp(th)))(a))(asl2)(PairList [])
-    if aconv(w1)(w2)
-       && forall(fun(t): exists(aconv(t))(maxasms))(subtract(asl1)(PairList [falsity_tm]))
-    | res
-    | failwith("VALID: Invalid tactic")
+def VALID:
+  let fake_thm:
+    fun([asl, w]):
+      let asms = itlist(o(o(union)(hyp))(snd))(asl)(PairList [])
+      mk_fthm([asms, w])
+  let false_tm = @hol|{_FALSITY_}|
+  fun(tac):
+    fun([asl, w]):
+      let [[mvs, i], gls, just] && res = tac([asl, w])
+      let ths = map(fake_thm)(gls)
+      let [asl_prime, w_prime] = dest_thm(just(null_inst)(ths))
+      let [asl_prime_prime, w_prime_prime] = inst_goal(i)([asl, w])
+      let maxasms:
+        itlist(fun([_, th]): union(insert(concl(th))(hyp(th))))(asl_prime_prime)(PairList [])
+      if aconv(w_prime)(w_prime_prime)
+           && forall(fun(t): exists(aconv(t))(maxasms))(subtract(asl_prime)(PairList [false_tm]))
+      | res
+      | failwith("VALID: Invalid tactic")
 
-fun propagate_empty(_i):
-  fun(ths): if ths == PairList [] | PairList [] | failwith("propagate_empty")
-fun propagate_thm(th):
-  fun(i):
-    fun(ths): if ths == PairList [] | INSTANTIATE_ALL(i)(th) | failwith("propagate_thm")
-fun compose_justs(n,just1,just2,insts2):
-  fun(i):
-    fun(ths):
-      let [ths1, ths2] = chop_list(n)(ths)
-      PairList.cons(just1(compose_insts(insts2)(i))(ths1),just2(i)(ths2))
-fun seqapply(tacs):
-  fun(goals):
-    match [tacs, goals]
-    | [PairList [], PairList []]:
-        [null_meta,PairList [],propagate_empty]
-    | [PairList [tac, & ts], PairList [goal, & gs]]:
-        let [[mvs1, insts1],gls1,just1] = tac(goal)
-        let goals1 = map(inst_goal(insts1))(gs)
-        let [[mvs2, insts2],gls2,just2] = seqapply(ts)(goals1)
-        [
-          [union(mvs1)(mvs2), compose_insts(insts1)(insts2)],
-          append(map(inst_goal(insts2))(gls1))(gls2),
-          compose_justs(length(gls1),just1,just2,insts2)]
-    | _: failwith("seqapply: Length mismatch")
+// -------------------------------------------------------------------------
+// Various simple combinators for tactics, identity tactic etc.
+// -------------------------------------------------------------------------
 
-fun tacsequence(gstate):
-  fun(tacl):
-    let [[mvs1, insts1],gls1,just1] = gstate
-    let [[mvs2, insts2],gls2,just2] = seqapply(tacl)(gls1)
-    fun jst(i): fun(ths): just1(compose_insts(insts2)(i))(just2(i)(ths))
-    let just = if gls2 == PairList [] | propagate_thm(jst(null_inst)(PairList [])) | jst
-    [[union(mvs1)(mvs2), compose_insts(insts1)(insts2)],gls2,just]
-fun THEN(tac1):
-  fun(tac2):
-    fun(g):
-      let [_,gls,_] as gs = tac1(g)
-      tacsequence(gs)(replicate(tac2)(length(gls)))
-
-fun THENL(tac1):
-  fun(tacl):
-    fun(g):
-      let [_,gls,_] as gs = tac1(g)
-      if gls == PairList [] | tacsequence(gs)(PairList []) | tacsequence(gs)(tacl)
+def [THEN, THENL, then1_]:
+  let propagate_empty:
+    fun(i):
+      fun
+      | (PairList []): PairList []
+  let propagate_thm:
+    fun(th):
+      fun(i):
+        fun
+        | (PairList []): INSTANTIATE_ALL(i)(th)
+  let compose_justs:
+    fun(n):
+      fun(just1):
+        fun(just2):
+          fun(insts2):
+            fun(i):
+              fun(ths):
+                let [ths1, ths2] = chop_list(n)(ths)
+                PairList.cons(just1(compose_insts(insts2)(i))(ths1), just2(i)(ths2))
+  fun seqapply(l1):
+    fun(l2):
+      match [l1, l2]
+      | [PairList [], PairList []]: [null_meta, PairList [], propagate_empty]
+      | [PairList [tac, & tacs], PairList [goal, & goals]]:
+          let [[mvs1, insts1], gls1, just1] = tac(goal)
+          let goals_prime = map(inst_goal(insts1))(goals)
+          let [[mvs2, insts2], gls2, just2] = seqapply(tacs)(goals_prime)
+          [[union(mvs1)(mvs2), compose_insts(insts1)(insts2)],
+           append(map(inst_goal(insts2))(gls1))(gls2),
+           compose_justs(length(gls1))(just1)(just2)(insts2)]
+      | _: failwith("seqapply: Length mismatch")
+  let justsequence:
+    fun(just1):
+      fun(just2):
+        fun(insts2):
+          fun(i):
+            fun(ths):
+              just1(compose_insts(insts2)(i))(just2(i)(ths))
+  let tacsequence:
+    fun([[mvs1, insts1], gls1, just1]):
+      fun(tacl):
+        let [[mvs2, insts2], gls2, just2] = seqapply(tacl)(gls1)
+        let jst = justsequence(just1)(just2)(insts2)
+        let just = if gls2 == PairList [] | propagate_thm(jst(null_inst)(PairList [])) | jst
+        [[union(mvs1)(mvs2), compose_insts(insts1)(insts2)], gls2, just]
+  let then_:
+    fun(tac1):
+      fun(tac2):
+        fun(g):
+          let [_, gls, _] && gstate = tac1(g)
+          tacsequence(gstate)(replicate(tac2)(length(gls)))
+  let thenl_:
+    fun(tac1):
+      fun(tac2l):
+        fun(g):
+          let [_, gls, _] && gstate = tac1(g)
+          if gls == PairList []
+          | tacsequence(gstate)(PairList [])
+          | tacsequence(gstate)(tac2l)
+  [then_, thenl_, fun(tac1): fun(tac2): thenl_(tac1)(PairList [tac2])]
 
 fun ORELSE(tac1):
   fun(tac2):
@@ -223,24 +306,56 @@ fun ORELSE(tac1):
         tac1(g)
         ~catch Failure(_): tac2(g)
 
-fun FAIL_TAC(tok): fun(_g): failwith(tok)
+// OCaml's infix THEN, THENL and ORELSE: one left-associative level, shared
+// with THENC and ORELSEC (equal.rhm).
+operator (tac1 then_tac tac2):
+  ~associativity: ~left
+  ~same_as: then_conv or_conv
+  THEN(tac1)(tac2)
+operator (tac1 then_list tac2l):
+  ~associativity: ~left
+  ~same_as: then_tac then_conv or_conv
+  THENL(tac1)(tac2l)
+operator (tac1 or_tac tac2):
+  ~associativity: ~left
+  ~same_as: then_tac then_list then_conv or_conv
+  ORELSE(tac1)(tac2)
+
+fun FAIL_TAC(tok): fun(g): failwith(tok)
+
 def NO_TAC = FAIL_TAC("NO_TAC")
-fun ALL_TAC(g): [null_meta,PairList [g],fun(_i): fun(PairList [th]): th]
-fun TRY(tac): ORELSE(tac)(ALL_TAC)
-fun REPEAT(tac):
-  fun(g): ORELSE(THEN(tac)(REPEAT(tac)))(ALL_TAC)(g)
-fun EVERY(tacl): itlist(fun(t1): fun(t2): THEN(t1)(t2))(tacl)(ALL_TAC)
-fun FIRST(tacl): fun(g): end_itlist(fun(t1): fun(t2): ORELSE(t1)(t2))(tacl)(g)
+
+fun ALL_TAC(g): [null_meta, PairList [g], fun(_): fun(PairList [th]): th]
+
+fun TRY(tac): tac or_tac ALL_TAC
+
+fun REPEAT(tac): fun(g): ((tac then_tac REPEAT(tac)) or_tac ALL_TAC)(g)
+
+fun EVERY(tacl): itlist(fun(t1): fun(t2): t1 then_tac t2)(tacl)(ALL_TAC)
+
+fun FIRST(tacl): fun(g): end_itlist(fun(t1): fun(t2): t1 or_tac t2)(tacl)(g)
+
 fun MAP_EVERY(tacf): fun(lst): EVERY(map(tacf)(lst))
+
 fun MAP_FIRST(tacf): fun(lst): FIRST(map(tacf)(lst))
+
 fun CHANGED_TAC(tac):
   fun(g):
-    let [meta,gls,_] as gs = tac(g)
-    if meta == null_meta && length(gls) == 1 && equals_goal(hd(gls))(g)
+    let [meta, gl, _] && gstate = tac(g)
+    if meta == null_meta && length(gl) == 1 && equals_goal(hd(gl))(g)
     | failwith("CHANGED_TAC")
-    | gs
-fun REPLICATE_TAC(n): fun(tac): if n <= 0 | ALL_TAC | THEN(tac)(REPLICATE_TAC(n-1)(tac))
+    | gstate
+
+fun REPLICATE_TAC(n):
+  fun(tac):
+    if n <= 0 | ALL_TAC | tac then_tac (REPLICATE_TAC(n - 1)(tac))
+
+// -------------------------------------------------------------------------
+// Combinators for theorem continuations / "theorem tacticals".
+// -------------------------------------------------------------------------
+
 fun THEN_TCL(ttcl1): fun(ttcl2): fun(ttac): ttcl1(ttcl2(ttac))
+
 fun ORELSE_TCL(ttcl1):
   fun(ttcl2):
     fun(ttac):
@@ -248,99 +363,175 @@ fun ORELSE_TCL(ttcl1):
         try:
           ttcl1(ttac)(th)
           ~catch Failure(_): ttcl2(ttac)(th)
+
 fun REPEAT_TCL(ttcl):
   fun(ttac):
-    fun(th): ORELSE_TCL(THEN_TCL(ttcl)(REPEAT_TCL(ttcl)))(I)(ttac)(th)
-fun REPEAT_GTCL(ttcl):
-  fun(ttac):
     fun(th):
-      fun(g):
-        try:
-          ttcl(REPEAT_GTCL(ttcl)(ttac))(th)(g)
-          ~catch Failure(_): ttac(th)(g)
+      ORELSE_TCL(THEN_TCL(ttcl)(REPEAT_TCL(ttcl)))(I)(ttac)(th)
+
+def REPEAT_GTCL:
+  fun REPEAT_GTCL(ttcl):
+    fun(ttac):
+      fun(th):
+        fun(g):
+          try:
+            ttcl(REPEAT_GTCL(ttcl)(ttac))(th)(g)
+            ~catch Failure(_): ttac(th)(g)
+  REPEAT_GTCL
+
 def ALL_THEN = I
-fun NO_THEN(_ttac): fun(_th): failwith("NO_THEN")
-fun EVERY_TCL(xs): itlist(fun(a): fun(b): THEN_TCL(a)(b))(xs)(ALL_THEN)
-fun FIRST_TCL(xs): end_itlist(fun(a): fun(b): ORELSE_TCL(a)(b))(xs)
+
+fun NO_THEN(ttac): fun(th): failwith("NO_THEN")
+
+fun EVERY_TCL(ttcll): itlist(fun(t1): fun(t2): THEN_TCL(t1)(t2))(ttcll)(ALL_THEN)
+
+fun FIRST_TCL(ttcll): end_itlist(fun(t1): fun(t2): ORELSE_TCL(t1)(t2))(ttcll)
+
+// -------------------------------------------------------------------------
+// Tactics to augment assumption list. Note that to allow "ASSUME p" for
+// any assumption "p", these add a PROVE_HYP in the justification function,
+// just in case.
+// -------------------------------------------------------------------------
+
 fun LABEL_TAC(s):
   fun(thm):
     fun([asl, w]):
-      [null_meta,PairList [[PairList.cons([s, thm],asl), w]], fun(i): fun(PairList [th]): PROVE_HYP(INSTANTIATE_ALL(i)(thm))(th)]
+      [null_meta, PairList [[PairList.cons([s, thm], asl), w]],
+       fun(i): fun(PairList [th]): PROVE_HYP(INSTANTIATE_ALL(i)(thm))(th)]
+
 def ASSUME_TAC = LABEL_TAC("")
+
+// -------------------------------------------------------------------------
+// Manipulation of assumption list.
+// -------------------------------------------------------------------------
 
 fun FIND_ASSUM(ttac):
   fun(t):
-    fun([asl, w] as g):
+    fun([asl, w] && g):
       ttac(snd(find(fun([_, th]): concl(th) == t)(asl)))(g)
+
 fun POP_ASSUM(ttac):
-  fun(g):
-    match g
-    | [PairList [[_, th], & asl], w]: ttac(th)([asl, w])
-    | _: failwith("POP_ASSUM: No assumption to pop")
-fun ASSUM_LIST(aslfun):
-  fun([asl, w] as g): aslfun(map(snd)(asl))(g)
-fun POP_ASSUM_LIST(aslfun):
-  fun([asl, w]): aslfun(map(snd)(asl))([PairList [], w])
+  fun
+  | ([PairList [[_, th], & asl], w]): ttac(th)([asl, w])
+  | (_): failwith("POP_ASSUM: No assumption to pop")
+
+fun ASSUM_LIST(aslfun): fun([asl, w]): aslfun(map(snd)(asl))([asl, w])
+
+fun POP_ASSUM_LIST(asltac): fun([asl, w]): asltac(map(snd)(asl))([PairList [], w])
+
 fun EVERY_ASSUM(ttac): ASSUM_LIST(MAP_EVERY(ttac))
-fun FIRST_ASSUM(ttac):
-  fun([asl, _] as g): tryfind(fun([_, th]): ttac(th)(g))(asl)
+
+fun FIRST_ASSUM(ttac): fun([asl, w] && g): tryfind(fun([_, th]): ttac(th)(g))(asl)
+
 fun RULE_ASSUM_TAC(rule):
-  fun([asl, _] as g):
-    THEN(POP_ASSUM_LIST(K(ALL_TAC)))(
-      MAP_EVERY(fun([s, th]): LABEL_TAC(s)(rule(th)))(plist_rev(asl)))(g)
+  fun([asl, w]):
+    (POP_ASSUM_LIST(K(ALL_TAC)) then_tac \
+       MAP_EVERY(fun([s, th]): LABEL_TAC(s)(rule(th)))(rev(asl)))([asl, w])
+
+// -------------------------------------------------------------------------
+// Operate on assumption identified by a label.
+// -------------------------------------------------------------------------
 
 fun USE_THEN(s):
   fun(ttac):
-    fun([asl, _] as g):
+    fun([asl, w] && gl):
       let th:
         try:
           assoc(s)(asl)
           ~catch Failure(_): failwith("USE_TAC: didn't find assumption " +& s)
-      ttac(th)(g)
-
-fun remove_label(s,l):
-  match l
-  | PairList []: failwith("REMOVE_THEN")
-  | PairList [[n, th] as h, & t]:
-      if n == s
-      | [th, t]
-      | let [found, rest] = remove_label(s,t)
-        [found, PairList.cons(h,rest)]
+      ttac(th)(gl)
 
 fun REMOVE_THEN(s):
   fun(ttac):
     fun([asl, w]):
-      let [th, asl1] = remove_label(s,asl)
-      ttac(th)([asl1, w])
+      let th:
+        try:
+          assoc(s)(asl)
+          ~catch Failure(_): failwith("USE_TAC: didn't find assumption " +& s)
+      let [asl1, asl2] = chop_list(index(s)(map(fst)(asl)))(asl)
+      let asl_prime = append(asl1)(tl(asl2))
+      ttac(th)([asl_prime, w])
+
+def NAME_ASSUMS_TAC:
+  fun([asl, g]):
+    let mutable idx = 0
+    let has = fun(name): exists(fun([name_prime, _]): name == name_prime)(asl)
+    fun next_hyp_name():
+      let n = "H" +& idx
+      idx := idx + 1
+      if has(n) | next_hyp_name() | n
+    let asl = map(fun([name, a]): if name == "" | [next_hyp_name(), a] | [name, a])(asl)
+    ALL_TAC([asl, g])
+
+// -------------------------------------------------------------------------
+// General tools to augment a required set of theorems with assumptions.
+// Here ASM uses all current hypotheses of the goal, while HYP uses only
+// those whose labels are given in the string argument.
+// -------------------------------------------------------------------------
 
 fun ASM(tltac):
-  fun(ths):
-    fun([asl, _] as g): tltac(append(map(snd)(asl))(ths))(g)
-fun ACCEPT_TAC(th):
-  fun([_, w]):
-    if aconv(concl(th))(w)
-    | [null_meta,PairList [],propagate_thm(th)]
-    | failwith("ACCEPT_TAC")
+  fun(ths): fun([asl, w] && g): tltac(append(map(snd)(asl))(ths))(g)
 
-fun CONV_TAC(conv):
-  fun([asl, w] as g):
-    let th = conv(w)
-    let tm = concl(th)
-    if aconv(tm)(w)
-    | ACCEPT_TAC(th)(g)
-    | let [l, r] = dest_eq(tm)
-      if !aconv(l)(w)
-      | failwith("CONV_TAC: bad equation")
-      | if aconv(r)(lhs(concl(T_DEF)))
-        | ACCEPT_TAC(EQT_ELIM(th))(g)
-        | let th1 = SYM(th)
-          [
-            null_meta,PairList [[asl, r]],
-            fun(i):
-              fun(PairList [sth]):
-                EQ_MP(INSTANTIATE_ALL(i)(th1))(sth)]
+def HYP:
+  let ident:
+    fun(src):
+      match src
+      | PairList [Ident(s), & rest] when isalnum(s): [s, rest]
+      | _: throw Noparse()
+  let parse_using = many(ident)
+  let HYP_LIST:
+    fun(tac):
+      fun(l):
+        rev_itlist(fun(s): fun(k): fun(l): USE_THEN(s)(fun(th): k(PairList.cons(th, l))))(l)(tac)
+  fun(tac):
+    fun(s):
+      let [l, rest] = o(o(fix("Using pattern")(parse_using))(lex))(explode)(s)
+      if rest == PairList [] | HYP_LIST(tac)(l) | failwith("Invalid using pattern")
 
-fun REFL_TAC([_, w] as g):
+// -------------------------------------------------------------------------
+// Basic tactic to use a theorem equal to the goal. Does *no* matching.
+// -------------------------------------------------------------------------
+
+def ACCEPT_TAC:
+  let propagate_thm:
+    fun(th):
+      fun(i):
+        fun
+        | (PairList []): INSTANTIATE_ALL(i)(th)
+  fun(th):
+    fun([asl, w]):
+      if aconv(concl(th))(w)
+      | [null_meta, PairList [], propagate_thm(th)]
+      | failwith("ACCEPT_TAC")
+
+// -------------------------------------------------------------------------
+// Create tactic from a conversion. This allows the conversion to return
+// |- p rather than |- p = T on a term "p". It also eliminates any goals of
+// the form "T" automatically.
+// -------------------------------------------------------------------------
+
+def CONV_TAC:
+  let t_tm = @hol|{T}|
+  fun(conv):
+    fun([asl, w] && g):
+      let th = conv(w)
+      let tm = concl(th)
+      if aconv(tm)(w)
+      | ACCEPT_TAC(th)(g)
+      | let [l, r] = dest_eq(tm)
+        if !aconv(l)(w)
+        | failwith("CONV_TAC: bad equation")
+        | if r == t_tm
+          | ACCEPT_TAC(EQT_ELIM(th))(g)
+          | let th_prime = SYM(th)
+            [null_meta, PairList [[asl, r]],
+             fun(i): fun(PairList [th]): EQ_MP(INSTANTIATE_ALL(i)(th_prime))(th)]
+
+// -------------------------------------------------------------------------
+// Tactics for equality reasoning.
+// -------------------------------------------------------------------------
+
+fun REFL_TAC([asl, w] && g):
   try:
     ACCEPT_TAC(REFL(rand(w)))(g)
     ~catch Failure(_): failwith("REFL_TAC")
@@ -350,15 +541,13 @@ fun ABS_TAC([asl, w]):
     let [l, r] = dest_eq(w)
     let [lv, lb] = dest_abs(l)
     let [rv, rb] = dest_abs(r)
-    let avoids = itlist(fun([_, th]): fun(a): union(thm_frees(th))(a))(asl)(frees(w))
+    let avoids = itlist(o(o(union)(thm_frees))(snd))(asl)(frees(w))
     let v = mk_primed_var(avoids)(lv)
-    let goal = mk_eq([vsubst(PairList [[v, lv]])(lb), vsubst(PairList [[v, rv]])(rb)])
-    [
-      null_meta,PairList [[asl, goal]],
-      fun(i):
-        fun(PairList [th]):
-          let ath = ABS(v)(th)
-          EQ_MP(ALPHA(concl(ath))(instantiate(i)(w)))(ath)]
+    [null_meta, PairList [[asl, mk_eq([vsubst(PairList [[v, lv]])(lb), vsubst(PairList [[v, rv]])(rb)])]],
+     fun(i):
+       fun(PairList [th]):
+         let ath = ABS(v)(th)
+         EQ_MP(ALPHA(concl(ath))(instantiate(i)(w)))(ath)]
     ~catch Failure(_): failwith("ABS_TAC")
 
 fun MK_COMB_TAC([asl, gl]):
@@ -366,199 +555,232 @@ fun MK_COMB_TAC([asl, gl]):
     let [l, r] = dest_eq(gl)
     let [f, x] = dest_comb(l)
     let [g, y] = dest_comb(r)
-    [
-      null_meta,PairList [[asl, mk_eq([f, g])],[asl, mk_eq([x, y])]],
-      fun(_i): fun(PairList [th1,th2]): MK_COMB([th1, th2])]
+    [null_meta, PairList [[asl, mk_eq([f, g])], [asl, mk_eq([x, y])]],
+     fun(_): fun(PairList [th1, th2]): MK_COMB([th1, th2])]
     ~catch Failure(_): failwith("MK_COMB_TAC")
 
-def AP_TERM_TAC = THENL(MK_COMB_TAC)(PairList [REFL_TAC,ALL_TAC])
-def AP_THM_TAC = THENL(MK_COMB_TAC)(PairList [ALL_TAC,REFL_TAC])
-def BINOP_TAC = THENL(MK_COMB_TAC)(PairList [AP_TERM_TAC,ALL_TAC])
+def AP_TERM_TAC:
+  let tac = MK_COMB_TAC then_list PairList [REFL_TAC, ALL_TAC]
+  fun(gl):
+    try:
+      tac(gl)
+      ~catch Failure(_): failwith("AP_TERM_TAC")
+
+def AP_THM_TAC:
+  let tac = MK_COMB_TAC then_list PairList [ALL_TAC, REFL_TAC]
+  fun(gl):
+    try:
+      tac(gl)
+      ~catch Failure(_): failwith("AP_THM_TAC")
+
+def BINOP_TAC:
+  let tac = MK_COMB_TAC then_list PairList [AP_TERM_TAC, ALL_TAC]
+  fun(gl):
+    try:
+      tac(gl)
+      ~catch Failure(_): failwith("AP_THM_TAC")
+
 fun SUBST1_TAC(th): CONV_TAC(SUBS_CONV(PairList [th]))
-fun SUBST_ALL_TAC(rth): THEN(SUBST1_TAC(rth))(RULE_ASSUM_TAC(SUBS(PairList [rth])))
+
+fun SUBST_ALL_TAC(rth): SUBST1_TAC(rth) then_tac RULE_ASSUM_TAC(SUBS(PairList [rth]))
+
 def BETA_TAC = CONV_TAC(REDEPTH_CONV(BETA_CONV))
+
+// -------------------------------------------------------------------------
+// Just use an equation to substitute if possible and uninstantiable.
+// -------------------------------------------------------------------------
 
 fun SUBST_VAR_TAC(th):
   try:
-    let [asl, eq] = dest_thm(th)
+    let [asm, eq] = dest_thm(th)
     let [l, r] = dest_eq(eq)
     cond
     | aconv(l)(r): ALL_TAC
-    | !subset(frees(eq))(freesl(asl)): fail()
+    | !subset(frees(eq))(freesl(asm)): fail()
     | (is_const(l) || is_var(l)) && !free_in(l)(r): SUBST_ALL_TAC(th)
     | (is_const(r) || is_var(r)) && !free_in(r)(l): SUBST_ALL_TAC(SYM(th))
     | ~else: fail()
     ~catch Failure(_): failwith("SUBST_VAR_TAC")
-def f_tm = lhs(concl(F_DEF))
-fun DISCH_TAC([asl, w]):
-  try:
-    let [ant, c] = dest_imp(w)
-    let th1 = ASSUME(ant)
-    [
-      null_meta,PairList [[PairList.cons(["", th1],asl), c]],
-      fun(i): fun(PairList [th]): DISCH(instantiate(i)(ant))(th)]
-    ~catch Failure(_):
-      try:
-        let ant = dest_neg(w)
-        let th1 = ASSUME(ant)
-        [
-          null_meta,PairList [[PairList.cons(["", th1],asl), f_tm]],
-          fun(i): fun(PairList [th]): NOT_INTRO(DISCH(instantiate(i)(ant))(th))]
-        ~catch Failure(_): failwith("DISCH_TAC")
+
+// -------------------------------------------------------------------------
+// Basic logical tactics.
+// -------------------------------------------------------------------------
+
+def DISCH_TAC:
+  let f_tm = @hol|{F}|
+  fun([asl, w]):
+    try:
+      let [ant, c] = dest_imp(w)
+      let th1 = ASSUME(ant)
+      [null_meta, PairList [[PairList.cons(["", th1], asl), c]],
+       fun(i): fun(PairList [th]): DISCH(instantiate(i)(ant))(th)]
+      ~catch Failure(_):
+        try:
+          let ant = dest_neg(w)
+          let th1 = ASSUME(ant)
+          [null_meta, PairList [[PairList.cons(["", th1], asl), f_tm]],
+           fun(i): fun(PairList [th]): NOT_INTRO(DISCH(instantiate(i)(ant))(th))]
+          ~catch Failure(_): failwith("DISCH_TAC")
 
 fun MP_TAC(thm):
   fun([asl, w]):
-    [
-      null_meta,PairList [[asl, mk_imp([concl(thm), w])]],
-      fun(i): fun(PairList [th]): MP(th)(INSTANTIATE_ALL(i)(thm))]
+    [null_meta, PairList [[asl, mk_imp([concl(thm), w])]],
+     fun(i): fun(PairList [th]): MP(th)(INSTANTIATE_ALL(i)(thm))]
 
 fun EQ_TAC([asl, w]):
   try:
     let [l, r] = dest_eq(w)
-    [
-      null_meta,
-      PairList [[asl, mk_imp([l, r])],[asl, mk_imp([r, l])]],
-      fun(_i): fun(PairList [th1,th2]): IMP_ANTISYM_RULE(th1)(th2)]
+    [null_meta, PairList [[asl, mk_imp([l, r])], [asl, mk_imp([r, l])]],
+     fun(_): fun(PairList [th1, th2]): IMP_ANTISYM_RULE(th1)(th2)]
     ~catch Failure(_): failwith("EQ_TAC")
 
 fun UNDISCH_TAC(tm):
   fun([asl, w]):
-    let [thm, asl1]:
-      fun loop(l):
-        match l
-        | PairList []: failwith("UNDISCH_TAC")
-        | PairList [[_, asm] as h, & t]:
-            if aconv(concl(asm))(tm)
-            | [asm, t]
-            | let [x, rest] = loop(t)
-              [x, PairList.cons(h,rest)]
-      loop(asl)
-    [
-      null_meta,PairList [[asl1, mk_imp([tm, w])]],
-      fun(i): fun(PairList [th]): MP(th)(INSTANTIATE_ALL(i)(thm))]
+    try:
+      let [sthm, asl_prime] = remove(fun([_, asm]): aconv(concl(asm))(tm))(asl)
+      let thm = snd(sthm)
+      [null_meta, PairList [[asl_prime, mk_imp([tm, w])]],
+       fun(i): fun(PairList [th]): MP(th)(INSTANTIATE_ALL(i)(thm))]
+      ~catch Failure(_): failwith("UNDISCH_TAC")
 
 fun SPEC_TAC([t, x]):
   fun([asl, w]):
     try:
-      [
-        null_meta,PairList [[asl, mk_forall([x, subst(PairList [[x, t]])(w)])]],
-        fun(i): fun(PairList [th]): SPEC(instantiate(i)(t))(th)]
+      [null_meta, PairList [[asl, mk_forall([x, subst(PairList [[x, t]])(w)])]],
+       fun(i): fun(PairList [th]): SPEC(instantiate(i)(t))(th)]
       ~catch Failure(_): failwith("SPEC_TAC")
 
-fun X_GEN_TAC(x1):
-  if !is_var(x1)
-  | failwith("X_GEN_TAC: not a variable")
-  | fun([asl, w]):
-      let [x, bod]:
-        try:
-          dest_forall(w)
-          ~catch Failure(_): failwith("X_GEN_TAC: Not universally quantified")
-      if type_of(x) != type_of(x1)
-      | failwith("X_GEN_TAC: wrong type")
-      | let avoids = itlist(fun([_, th]): fun(a): union(thm_frees(th))(a))(asl)(frees(w))
-        if mem(x1)(avoids)
-        | failwith("X_GEN_TAC: invalid variable")
-        | let afn = CONV_RULE(GEN_ALPHA_CONV(x))
-          [
-            null_meta,PairList [[asl, vsubst(PairList [[x1, x]])(bod)]],
-            fun(_i): fun(PairList [th]): afn(GEN(x1)(th))]
-fun X_CHOOSE_TAC(x1):
-  fun(xth):
-    let [x, bod]:
-      try:
-        dest_exists(concl(xth))
-        ~catch Failure(_): failwith("X_CHOOSE_TAC: not existential")
-    if type_of(x) != type_of(x1)
-    | failwith("X_CHOOSE_TAC: wrong type")
-    | let pat = vsubst(PairList [[x1, x]])(bod)
-      let xth1 = ASSUME(pat)
+def [X_GEN_TAC, X_CHOOSE_TAC, EXISTS_TAC]:
+  let tactic_type_compatibility_check:
+    fun(pfx):
+      fun(e):
+        fun(g):
+          let et = type_of(e)
+          let gt = type_of(g)
+          if et == gt
+          | #void
+          | failwith(pfx +& ": expected type :" +& string_of_type(et) +& " but got :"
+                       +& string_of_type(gt))
+  let X_GEN_TAC:
+    fun(x_prime):
+      if !is_var(x_prime)
+      | failwith("X_GEN_TAC: not a variable")
+      | fun([asl, w]):
+          let [x, bod]:
+            try:
+              dest_forall(w)
+              ~catch Failure(_): failwith("X_GEN_TAC: Not universally quantified")
+          tactic_type_compatibility_check("X_GEN_TAC")(x)(x_prime)
+          let avoids = itlist(o(o(union)(thm_frees))(snd))(asl)(frees(w))
+          if mem(x_prime)(avoids)
+          | failwith("X_GEN_TAC: invalid variable")
+          | let afn = CONV_RULE(GEN_ALPHA_CONV(x))
+            [null_meta, PairList [[asl, vsubst(PairList [[x_prime, x]])(bod)]],
+             fun(i): fun(PairList [th]): afn(GEN(x_prime)(th))]
+  let X_CHOOSE_TAC:
+    fun(x_prime):
+      fun(xth):
+        let xtm = concl(xth)
+        let [x, bod]:
+          try:
+            dest_exists(xtm)
+            ~catch Failure(_): failwith("X_CHOOSE_TAC: not existential")
+        tactic_type_compatibility_check("X_CHOOSE_TAC")(x)(x_prime)
+        let pat = vsubst(PairList [[x_prime, x]])(bod)
+        let xth_prime = ASSUME(pat)
+        fun([asl, w]):
+          let avoids:
+            itlist(o(o(o(union)(frees))(concl))(snd))(asl)(union(frees(w))(thm_frees(xth)))
+          if mem(x_prime)(avoids)
+          | failwith("X_CHOOSE_TAC: invalid variable")
+          | [null_meta, PairList [[PairList.cons(["", xth_prime], asl), w]],
+             fun(i): fun(PairList [th]): CHOOSE([x_prime, INSTANTIATE_ALL(i)(xth)])(th)]
+  let EXISTS_TAC:
+    fun(t):
       fun([asl, w]):
-        let avoids = itlist(fun([_, th]): fun(a): union(thm_frees(th))(a))(asl)(union(frees(w))(thm_frees(xth)))
-        if mem(x1)(avoids)
-        | failwith("X_CHOOSE_TAC: invalid variable")
-        | [
-            null_meta,PairList [[PairList.cons(["", xth1],asl), w]],
-            fun(i): fun(PairList [th]): CHOOSE([x1, INSTANTIATE_ALL(i)(xth)])(th)]
-fun EXISTS_TAC(t):
-  fun([asl, w]):
-    let [v, bod]:
-      try:
-        dest_exists(w)
-        ~catch Failure(_): failwith("EXISTS_TAC: Goal not existentially quantified")
-    if type_of(v) != type_of(t)
-    | failwith("EXISTS_TAC: wrong type")
-    | [
-        null_meta,PairList [[asl, vsubst(PairList [[t, v]])(bod)]],
-        fun(i): fun(PairList [th]): EXISTS([instantiate(i)(w), instantiate(i)(t)])(th)]
+        let [v, bod]:
+          try:
+            dest_exists(w)
+            ~catch Failure(_): failwith("EXISTS_TAC: Goal not existentially quantified")
+        tactic_type_compatibility_check("EXISTS_TAC")(v)(t)
+        [null_meta, PairList [[asl, vsubst(PairList [[t, v]])(bod)]],
+         fun(i): fun(PairList [th]): EXISTS([instantiate(i)(w), instantiate(i)(t)])(th)]
+  [X_GEN_TAC, X_CHOOSE_TAC, EXISTS_TAC]
 
-fun GEN_TAC([asl, w] as g):
+fun GEN_TAC([asl, w]):
   try:
     let x = fst(dest_forall(w))
-    let avoids = itlist(fun([_, th]): fun(a): union(thm_frees(th))(a))(asl)(frees(w))
-    X_GEN_TAC(mk_primed_var(avoids)(x))(g)
+    let avoids = itlist(o(o(union)(thm_frees))(snd))(asl)(frees(w))
+    let x_prime = mk_primed_var(avoids)(x)
+    X_GEN_TAC(x_prime)([asl, w])
     ~catch Failure(_): failwith("GEN_TAC")
 
 fun CHOOSE_TAC(xth):
-  // Fail while constructing the theorem tactic, as in tactics.ml.
-  // REPEAT_TCL relies on this failure to try its continuation.
   try:
     let x = fst(dest_exists(concl(xth)))
-    fun([asl, w] as g):
-      let avoids = itlist(fun([_, th]): fun(a): union(thm_frees(th))(a))(asl)(union(frees(w))(thm_frees(xth)))
-      X_CHOOSE_TAC(mk_primed_var(avoids)(x))(xth)(g)
+    fun([asl, w]):
+      let avoids = itlist(o(o(union)(thm_frees))(snd))(asl)(union(frees(w))(thm_frees(xth)))
+      let x_prime = mk_primed_var(avoids)(x)
+      X_CHOOSE_TAC(x_prime)(xth)([asl, w])
     ~catch Failure(_): failwith("CHOOSE_TAC")
+
 fun CONJ_TAC([asl, w]):
   try:
     let [l, r] = dest_conj(w)
-    [
-      null_meta,PairList [[asl, l],[asl, r]],
-      fun(_i): fun(PairList [th1,th2]): CONJ(th1)(th2)]
+    [null_meta, PairList [[asl, l], [asl, r]], fun(_): fun(PairList [th1, th2]): CONJ(th1)(th2)]
     ~catch Failure(_): failwith("CONJ_TAC")
 
 fun DISJ1_TAC([asl, w]):
   try:
     let [l, r] = dest_disj(w)
-    [
-      null_meta,PairList [[asl, l]],
-      fun(i): fun(PairList [th]): DISJ1(th)(instantiate(i)(r))]
+    [null_meta, PairList [[asl, l]], fun(i): fun(PairList [th]): DISJ1(th)(instantiate(i)(r))]
     ~catch Failure(_): failwith("DISJ1_TAC")
 
 fun DISJ2_TAC([asl, w]):
   try:
     let [l, r] = dest_disj(w)
-    [
-      null_meta,PairList [[asl, r]],
-      fun(i): fun(PairList [th]): DISJ2(instantiate(i)(l))(th)]
+    [null_meta, PairList [[asl, r]], fun(i): fun(PairList [th]): DISJ2(instantiate(i)(l))(th)]
     ~catch Failure(_): failwith("DISJ2_TAC")
 
 fun DISJ_CASES_TAC(dth):
-  let [l, r]:
-    try:
-      dest_disj(concl(dth))
-      ~catch Failure(_): failwith("DISJ_CASES_TAC")
-  let thl = ASSUME(l)
-  let thr = ASSUME(r)
-  fun([asl, w]):
-    [
-      null_meta,
-      PairList [[PairList.cons(["", thl],asl), w],
-                [PairList.cons(["", thr],asl), w]],
-      fun(i): fun(PairList [th1,th2]): DISJ_CASES(INSTANTIATE_ALL(i)(dth))(th1)(th2)]
-fun CONTR_TAC(cth):
-  fun([_, w]):
-    try:
-      let th = CONTR(w)(cth)
-      [null_meta,PairList [],propagate_thm(th)]
-      ~catch Failure(_): failwith("CONTR_TAC")
+  try:
+    let dtm = concl(dth)
+    let [l, r] = dest_disj(dtm)
+    let thl = ASSUME(l)
+    let thr = ASSUME(r)
+    fun([asl, w]):
+      [null_meta, PairList [[PairList.cons(["", thl], asl), w], [PairList.cons(["", thr], asl), w]],
+       fun(i): fun(PairList [th1, th2]): DISJ_CASES(INSTANTIATE_ALL(i)(dth))(th1)(th2)]
+    ~catch Failure(_): failwith("DISJ_CASES_TAC")
 
-fun MATCH_ACCEPT_TAC(th):
-  let raw:
-    fun([_, w]):
+def CONTR_TAC:
+  let propagate_thm:
+    fun(th):
+      fun(i):
+        fun
+        | (PairList []): INSTANTIATE_ALL(i)(th)
+  fun(cth):
+    fun([asl, w]):
       try:
-        let ith = PART_MATCH(I)(th)(w)
-        [null_meta,PairList [],propagate_thm(ith)]
-        ~catch Failure(_): failwith("ACCEPT_TAC")
-  THEN(REPEAT(GEN_TAC))(raw)
+        let th = CONTR(w)(cth)
+        [null_meta, PairList [], propagate_thm(th)]
+        ~catch Failure(_): failwith("CONTR_TAC")
+
+def MATCH_ACCEPT_TAC:
+  let propagate_thm:
+    fun(th):
+      fun(i):
+        fun
+        | (PairList []): INSTANTIATE_ALL(i)(th)
+  let rawtac:
+    fun(th):
+      fun([asl, w]):
+        try:
+          let ith = PART_MATCH(I)(th)(w)
+          [null_meta, PairList [], propagate_thm(ith)]
+          ~catch Failure(_): failwith("ACCEPT_TAC")
+  fun(th): REPEAT(GEN_TAC) then_tac rawtac(th)
+
 fun MATCH_MP_TAC(th):
   let sth:
     try:
@@ -577,57 +799,94 @@ fun MATCH_MP_TAC(th):
     try:
       let xth = match_fun(w)
       let lant = fst(dest_imp(concl(xth)))
-      [
-        null_meta,PairList [[asl, lant]],
-        fun(i): fun(PairList [sth]): MP(INSTANTIATE_ALL(i)(xth))(sth)]
+      [null_meta, PairList [[asl, lant]],
+       fun(i): fun(PairList [th]): MP(INSTANTIATE_ALL(i)(xth))(th)]
       ~catch Failure(_): failwith("MATCH_MP_TAC: No match")
+
+fun TRANS_TAC(th):
+  let ctm = snd(strip_forall(concl(th)))
+  let [cl, cr] = dest_conj(lhand(ctm))
+  let x = lhand(cl)
+  let y = rand(cl)
+  let z = rand(cr)
+  fun(tm):
+    fun([asl, w] && gl):
+      let [lop, r] = dest_comb(w)
+      let [op, l] = dest_comb(lop)
+      let ilist:
+        itlist2(type_match)(map(type_of)(PairList [x, y, z]))(map(type_of)(PairList [l, tm, r]))(PairList [])
+      let th_prime = INST_TYPE(ilist)(th)
+      (MATCH_MP_TAC(th_prime) then_tac EXISTS_TAC(tm))(gl)
+
+// -------------------------------------------------------------------------
+// Theorem continuations.
+// -------------------------------------------------------------------------
+
 fun CONJUNCTS_THEN2(ttac1):
   fun(ttac2):
     fun(cth):
       let [c1, c2] = dest_conj(concl(cth))
       fun(gl):
-        let [meta,gls,jfn]:
-          THEN(ttac1(ASSUME(c1)))(ttac2(ASSUME(c2)))(gl)
-        [
-          meta,gls,
+        let [ti, gls, jfn] = (ttac1(ASSUME(c1)) then_tac ttac2(ASSUME(c2)))(gl)
+        let jfn_prime:
           fun(i):
             fun(ths):
               let [th1, th2] = CONJ_PAIR(INSTANTIATE_ALL(i)(cth))
-              PROVE_HYP(th1)(PROVE_HYP(th2)(jfn(i)(ths)))]
+              PROVE_HYP(th1)(PROVE_HYP(th2)(jfn(i)(ths)))
+        [ti, gls, jfn_prime]
+
 def CONJUNCTS_THEN = W(CONJUNCTS_THEN2)
+
 fun DISJ_CASES_THEN2(ttac1):
   fun(ttac2):
-    fun(cth): THENL(DISJ_CASES_TAC(cth))(PairList [POP_ASSUM(ttac1),POP_ASSUM(ttac2)])
+    fun(cth):
+      DISJ_CASES_TAC(cth) then_list PairList [POP_ASSUM(ttac1), POP_ASSUM(ttac2)]
+
 def DISJ_CASES_THEN = W(DISJ_CASES_THEN2)
-fun DISCH_THEN(ttac): THEN(DISCH_TAC)(POP_ASSUM(ttac))
-fun X_CHOOSE_THEN(x): fun(ttac): fun(th): THEN(X_CHOOSE_TAC(x)(th))(POP_ASSUM(ttac))
-fun CHOOSE_THEN(ttac): fun(th): THEN(CHOOSE_TAC(th))(POP_ASSUM(ttac))
-def STRIP_THM_THEN = FIRST_TCL(PairList [CONJUNCTS_THEN,DISJ_CASES_THEN,CHOOSE_THEN])
+
+fun DISCH_THEN(ttac): DISCH_TAC then_tac POP_ASSUM(ttac)
+
+fun X_CHOOSE_THEN(x): fun(ttac): fun(th): X_CHOOSE_TAC(x)(th) then_tac POP_ASSUM(ttac)
+
+fun CHOOSE_THEN(ttac): fun(th): CHOOSE_TAC(th) then_tac POP_ASSUM(ttac)
+
+// -------------------------------------------------------------------------
+// Various derived tactics and theorem continuations.
+// -------------------------------------------------------------------------
+
+def STRIP_THM_THEN = FIRST_TCL(PairList [CONJUNCTS_THEN, DISJ_CASES_THEN, CHOOSE_THEN])
 
 fun ANTE_RES_THEN(ttac):
   fun(ante):
-    ASSUM_LIST(
-      fun(asl):
-        let tacs = mapfilter(fun(imp): ttac(MATCH_MP(imp)(ante)))(asl)
-        if tacs == PairList [] | failwith("IMP_RES_THEN") | EVERY(tacs))
+    ASSUM_LIST(fun(asl):
+                 let tacs = mapfilter(fun(imp): ttac(MATCH_MP(imp)(ante)))(asl)
+                 if tacs == PairList [] | failwith("IMP_RES_THEN") | EVERY(tacs))
+
 fun IMP_RES_THEN(ttac):
   fun(imp):
-    ASSUM_LIST(
-      fun(asl):
-        let tacs = mapfilter(fun(ante): ttac(MATCH_MP(imp)(ante)))(asl)
-        if tacs == PairList [] | failwith("IMP_RES_THEN") | EVERY(tacs))
-fun STRIP_ASSUME_TAC(gth):
-  let tm = concl(gth)
-  fun DISCARD_TAC(th):
-    fun([asl, _] as g):
-      if exists(fun([_, a]): aconv(concl(a))(concl(th)))(asl)
-      | ALL_TAC(g)
-      | failwith("DISCARD_TAC")
-  REPEAT_TCL(STRIP_THM_THEN)(
-    fun(th): FIRST(PairList [CONTR_TAC(th),ACCEPT_TAC(th),DISCARD_TAC(th),ASSUME_TAC(th)]))(gth)
+    ASSUM_LIST(fun(asl):
+                 let tacs = mapfilter(fun(ante): ttac(MATCH_MP(imp)(ante)))(asl)
+                 if tacs == PairList [] | failwith("IMP_RES_THEN") | EVERY(tacs))
+
+def STRIP_ASSUME_TAC:
+  let DISCARD_TAC:
+    fun(th):
+      let tm = concl(th)
+      fun([asl, w] && g):
+        if exists(fun(a): aconv(tm)(concl(snd(a))))(asl)
+        | ALL_TAC(g)
+        | failwith("DISCARD_TAC: not already present")
+  (REPEAT_TCL(STRIP_THM_THEN))(
+    fun(gth): FIRST(PairList [CONTR_TAC(gth), ACCEPT_TAC(gth),
+                              DISCARD_TAC(gth), ASSUME_TAC(gth)]))
+
 fun STRUCT_CASES_THEN(ttac): REPEAT_TCL(STRIP_THM_THEN)(ttac)
-def STRUCT_CASES_TAC = STRUCT_CASES_THEN(fun(th): ORELSE(SUBST1_TAC(th))(ASSUME_TAC(th)))
-fun STRIP_GOAL_THEN(ttac): FIRST(PairList [GEN_TAC,CONJ_TAC,DISCH_THEN(ttac)])
+
+def STRUCT_CASES_TAC:
+  STRUCT_CASES_THEN(fun(th): SUBST1_TAC(th) or_tac ASSUME_TAC(th))
+
+fun STRIP_GOAL_THEN(ttac): FIRST(PairList [GEN_TAC, CONJ_TAC, DISCH_THEN(ttac)])
+
 fun STRIP_TAC(g):
   try:
     STRIP_GOAL_THEN(STRIP_ASSUME_TAC)(g)
@@ -636,132 +895,145 @@ fun STRIP_TAC(g):
 fun UNDISCH_THEN(tm):
   fun(ttac):
     fun([asl, w]):
-      // Rebuild with the matching theorem first; its label is irrelevant.
-      let [th, asl1] = remove_label("",PairList.cons(["", snd(find(fun([_, x]): aconv(concl(x))(tm))(asl))],filter(fun([_, x]): !aconv(concl(x))(tm))(asl)))
-      ttac(th)([asl1, w])
+      let [thp, asl_prime] = remove(fun([_, th]): aconv(concl(th))(tm))(asl)
+      ttac(snd(thp))([asl_prime, w])
 
 fun FIRST_X_ASSUM(ttac):
   FIRST_ASSUM(fun(th): UNDISCH_THEN(concl(th))(ttac))
+
+// -------------------------------------------------------------------------
+// Subgoaling and freezing variables (latter is especially useful now).
+// -------------------------------------------------------------------------
+
 fun SUBGOAL_THEN(wa):
   fun(ttac):
     fun([asl, w]):
-      let [meta,gls,just] = ttac(ASSUME(wa))([asl, w])
-      [
-        meta,PairList.cons([asl, wa],gls),
-        fun(i): fun(l): PROVE_HYP(hd(l))(just(i)(tl(l)))]
+      let [meta, gl, just] = ttac(ASSUME(wa))([asl, w])
+      [meta, PairList.cons([asl, wa], gl), fun(i): fun(l): PROVE_HYP(hd(l))(just(i)(tl(l)))]
 
-fun FREEZE_THEN(ttac):
-  fun(th):
-    fun([asl, w]):
-      let [meta,gls,just] = ttac(ASSUME(concl(th)))([asl, w])
-      [meta,gls,fun(i): fun(l): PROVE_HYP(th)(just(i)(l))]
-
-fun X_META_EXISTS_TAC(t):
-  fun([asl, w]):
-    try:
-      if !is_var(t) | fail() | #void
-      let [v, bod] = dest_exists(w)
-      [
-        [PairList [t], null_inst],
-        PairList [[asl, vsubst(PairList [[t, v]])(bod)]],
-        fun(i): fun(PairList [th]): EXISTS([instantiate(i)(w), instantiate(i)(t)])(th)]
-      ~catch Failure(_): failwith("X_META_EXISTS_TAC")
-
-fun META_EXISTS_TAC([asl, w] as gl):
-  let v = fst(dest_exists(w))
-  let avoids = itlist(fun([_, th]): fun(a): union(frees(concl(th)))(a))(asl)(frees(w))
-  X_META_EXISTS_TAC(mk_primed_var(avoids)(v))(gl)
-
-fun META_SPEC_TAC(t):
-  fun(thm):
-    fun([asl, w]):
-      let sth = SPEC(t)(thm)
-      [
-        [PairList [t], null_inst],
-        PairList [[PairList.cons(["", sth],asl), w]],
-        fun(i): fun(PairList [th]): PROVE_HYP(SPEC(instantiate(i)(t))(thm))(th)]
-
-fun CHEAT_TAC([_, w] as g): ACCEPT_TAC(mk_thm([PairList [], w]))(g)
-
-fun prove([t, tac]):
-  let th = TAC_PROOF([[PairList [], t], tac])
-  let [asl, t_prime] = dest_thm(th)
-  cond
-  | asl != PairList []: failwith("prove: additional assumptions in result")
-  | t_prime == t: th
-  | ~else:
-      try:
-        EQ_MP(ALPHA(t_prime)(t))(th)
-        ~catch Failure(_): failwith("prove: justification generated wrong theorem")
-
-fun TAC_PROOF([[asl, w] as g, tac]):
-  if type_of(w) != bool_ty | failwith("mk_goalstate: Non-boolean goal") | #void
-  let gs = [null_meta,PairList [g],fun(inst): fun(PairList [th]): INSTANTIATE_ALL(inst)(th)]
-  let [_,sgs,just] = tacsequence(gs)(PairList [tac])
-  if sgs == PairList [] | just(null_inst)(PairList []) | failwith("TAC_PROOF: Unsolved goals")
-
-// Original tactics.ml derived tactics used by the standard theory sequence.
-fun TRANS_TAC(th):
-  let ctm=snd(strip_forall(concl(th)))
-  let [cl, cr]=dest_conj(lhand(ctm))
-  let x=lhand(cl)
-  let y=rand(cl)
-  let z=rand(cr)
-  fun(tm):
-    fun([asl, w] as gl):
-      let [lop, r]=dest_comb(w)
-      let [_op, l]=dest_comb(lop)
-      let ilist=itlist2(type_match)(map(type_of)(PairList [x,y,z]))(map(type_of)(PairList [l,tm,r]))(PairList [])
-      let th_prime=INST_TYPE(ilist)(th)
-      THEN(MATCH_MP_TAC(th_prime))(EXISTS_TAC(tm))(gl)
-def ANTS_TAC:
-  let p=mk_var(["p", bool_ty])
-  let q=mk_var(["q", bool_ty])
-  let r=mk_var(["r", bool_ty])
-  let tm1=mk_conj([p, mk_imp([q, r])])
-  let tm2=mk_imp([p, q])
-  let [th1, th2]=CONJ_PAIR(ASSUME(tm1))
-  let th=itlist(DISCH)(PairList [tm1,tm2])(MP(th2)(MP(ASSUME(tm2))(th1)))
-  THEN(MATCH_MP_TAC(th))(CONJ_TAC)
-import:
-  "private/theory_support.rhm" as Support
-  "parser.rhm" as Parser
-fun then1_(tac1): fun(tac2): THENL(tac1)(PairList [tac2])
-def NAME_ASSUMS_TAC:
-  fun([asl, g]):
-    let mutable idx = 0
-    let has = fun(name): exists(fun([name_prime, _]): name == name_prime)(asl)
-    fun next_hyp_name():
-      let n = "H" +& idx
-      idx := idx + 1
-      if has(n) | next_hyp_name() | n
-    let asl_prime = map(fun([name, a]): if name == "" | [next_hyp_name(), a] | [name, a])(asl)
-    ALL_TAC([asl_prime, g])
 fun SUBGOAL_TAC(s):
   fun(tm):
     fun(prfs):
       match prfs
       | PairList [p, & ps]:
           warn(ps != PairList [])("SUBGOAL_TAC: additional subproofs ignored")
-          THENL(SUBGOAL_THEN(tm)(LABEL_TAC(s)))(PairList [p, ALL_TAC])
-      | _: failwith("SUBGOAL_TAC: no subproof given")
+          SUBGOAL_THEN(tm)(LABEL_TAC(s)) then_list PairList [p, ALL_TAC]
+      | PairList []: failwith("SUBGOAL_TAC: no subproof given")
+
+fun FREEZE_THEN(ttac):
+  fun(th):
+    fun([asl, w]):
+      let [meta, gl, just] = ttac(ASSUME(concl(th)))([asl, w])
+      [meta, gl, fun(i): fun(l): PROVE_HYP(th)(just(i)(l))]
+
+// -------------------------------------------------------------------------
+// Metavariable tactics.
+// -------------------------------------------------------------------------
+
+fun X_META_EXISTS_TAC(t):
+  fun([asl, w]):
+    try:
+      if !is_var(t)
+      | fail()
+      | let [v, bod] = dest_exists(w)
+        [[PairList [t], null_inst], PairList [[asl, vsubst(PairList [[t, v]])(bod)]],
+         fun(i): fun(PairList [th]): EXISTS([instantiate(i)(w), instantiate(i)(t)])(th)]
+      ~catch Failure(_): failwith("X_META_EXISTS_TAC")
+
+fun META_EXISTS_TAC([asl, w] && gl):
+  let v = fst(dest_exists(w))
+  let avoids = itlist(o(o(o(union)(frees))(concl))(snd))(asl)(frees(w))
+  let v_prime = mk_primed_var(avoids)(v)
+  X_META_EXISTS_TAC(v_prime)(gl)
+
+fun META_SPEC_TAC(t):
+  fun(thm):
+    fun([asl, w]):
+      let sth = SPEC(t)(thm)
+      [[PairList [t], null_inst], PairList [[PairList.cons(["", sth], asl), w]],
+       fun(i): fun(PairList [th]): PROVE_HYP(SPEC(instantiate(i)(t))(thm))(th)]
+
+// -------------------------------------------------------------------------
+// If all else fails!
+// -------------------------------------------------------------------------
+
+fun CHEAT_TAC([asl, w]): ACCEPT_TAC(mk_thm([PairList [], w]))([asl, w])
+
+// -------------------------------------------------------------------------
+// Intended for time-consuming rules; delays evaluation till it sees goal.
+// -------------------------------------------------------------------------
+
 fun RECALL_ACCEPT_TAC(r): fun(a): fun(g): ACCEPT_TAC(time(r)(a))(g)
+
+// -------------------------------------------------------------------------
+// Split off antecedent of antecedent as a subgoal.
+// -------------------------------------------------------------------------
+
+def ANTS_TAC:
+  let tm1 = @hol|{p /\ (q ==> r)}|
+  let tm2 = @hol|{p ==> q}|
+  let [th1, th2] = CONJ_PAIR(ASSUME(tm1))
+  let th = itlist(DISCH)(PairList [tm1, tm2])(MP(th2)(MP(ASSUME(tm2))(th1)))
+  MATCH_MP_TAC(th) then_tac CONJ_TAC
+
+// -------------------------------------------------------------------------
+// The goal printers that follow here in the original are not ported; the
+// remark of REMARK_TAC is lib.ml's (`if !verbose then report s`).
+// -------------------------------------------------------------------------
+
 fun REMARK_TAC(s):
   fun(gl):
     if verbose.value | report(s) | #void
     ALL_TAC(gl)
-def HYP:
-  let ident:
-    fun(src):
-      match src
-      | PairList [Parser.Ident(s), & rest] when Support.isalnum(s): [s, rest]
-      | _: throw Parser.Noparse()
-  let parse_using = Parser.many(ident)
-  let HYP_LIST:
-    fun(tac):
-      fun(l):
-        rev_itlist(fun(s): fun(k): fun(l): USE_THEN(s)(fun(th): k(PairList.cons(th, l))))(l)(tac)
-  fun(tac):
-    fun(s):
-      let [l, rest] = o(o(Parser.fix("Using pattern")(parse_using))(Parser.lex))(explode)(s)
-      if rest == PairList [] | HYP_LIST(tac)(l) | failwith("Invalid using pattern")
+
+// -------------------------------------------------------------------------
+// Convert a tactic into a refinement on head subgoal in current state.
+// -------------------------------------------------------------------------
+
+fun by(tac):
+  fun([[mvs, inst], gls, just]):
+    if gls == PairList []
+    | failwith("No goal set")
+    | let g = hd(gls)
+      let ogls = tl(gls)
+      let [[newmvs, newinst], subgls, subjust] = tac(g)
+      let n = length(subgls)
+      let mvs_prime = union(newmvs)(mvs)
+      let inst_prime = compose_insts(inst)(newinst)
+      let gls_prime = append(subgls)(map(inst_goal(newinst))(ogls))
+      let just_prime:
+        fun(i):
+          fun(ths):
+            let i_prime = compose_insts(inst_prime)(i)
+            let [cths, oths] = chop_list(n)(ths)
+            let sths = PairList.cons(subjust(i)(cths), oths)
+            just(i_prime)(sths)
+      [[mvs_prime, inst_prime], gls_prime, just_prime]
+
+// -------------------------------------------------------------------------
+// Perform refinement proof, tactic proof etc.
+// -------------------------------------------------------------------------
+
+fun mk_goalstate([asl, w]):
+  if type_of(w) == bool_ty
+  | [null_meta, PairList [[asl, w]],
+     fun(inst): fun(PairList [th]): INSTANTIATE_ALL(inst)(th)]
+  | failwith("mk_goalstate: Non-boolean goal")
+
+fun TAC_PROOF([g, tac]):
+  let gstate = mk_goalstate(g)
+  let [_, sgs, just] = by(tac)(gstate)
+  if sgs == PairList []
+  | just(null_inst)(PairList [])
+  | failwith("TAC_PROOF: Unsolved goals")
+
+fun prove([t, tac]):
+  let th = TAC_PROOF([[PairList [], t], tac])
+  let [asl, t_prime] = dest_thm(th)
+  if asl != PairList []
+  | failwith("prove: additional assumptions in result")
+  | if t_prime == t
+    | th
+    | try:
+        EQ_MP(ALPHA(t_prime)(t))(th)
+        ~catch Failure(_): failwith("prove: justification generated wrong theorem")

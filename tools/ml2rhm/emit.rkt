@@ -49,6 +49,10 @@
   (define body (cons (string-append prefix (car lines)) (indent (cdr lines) n)))
   (append (drop-right body 1) (list (string-append (last body) suffix))))
 
+;; a document on one line: `\` continuations and aligned arguments joined
+(define (flat-line x)
+  (string-join (for/list ([l (r-lines x)]) (string-trim (regexp-replace #rx" [\\]$" l ""))) " "))
+
 (define (paren x)
   (atom* (wrap "(" (r-lines x) ")")))
 
@@ -77,7 +81,8 @@
         "ORELSE" "ORELSE" "THENC" "THENC" "ORELSEC" "ORELSEC"
         "THEN_TCL" "THEN_TCL" "ORELSE_TCL" "ORELSE_TCL"
         "--" "range" "|->" "fpf_define" "|=>" "fpf_singleton" "@" "append"
-        "|>" "|>" "++" "++" "|||" "|||" ">>" ">>"))
+        "|>" "|>" "++" "++" "|||" "|||" ">>" ">>"
+        "lsl" "lsl" "lsr" "lsr" "asr" "asr" "land" "land" "lor" "lor" "lxor" "lxor"))
 
 (define (op-function-name op)
   (hash-ref operator-names op (lambda () (format "#{~a}" op))))
@@ -88,6 +93,45 @@
   (hash "(THEN)" "then_tac" "(THENL)" "then_list" "(ORELSE)" "or_tac"
         "(THENC)" "then_conv" "(ORELSEC)" "or_conv"
         "(|||)" "|||" "(++)" "++" "(>>)" ">>"))
+
+;; Rhombus infix operators the port declares for OCaml infix definitions:
+;; OCaml name -> (list rhombus-op left right precedence-lines)
+(define infix-declarations
+  (hash "|||" (list "|||" #f #f '())
+        "++" (list "++" #f #f '("~stronger_than: |||"))
+        ">>" (list ">>" #f #f '("~same_as: |||" "~weaker_than: ++"))
+        "THENC" (list "then_conv" "conv1" "conv2" '())
+        "ORELSEC" (list "or_conv" "conv1" "conv2" '("~same_as: then_conv"))
+        "THEN" (list "then_tac" "tac1" "tac2" '("~same_as: then_conv or_conv"))
+        "THENL" (list "then_list" "tac1" "tac2l" '("~same_as: then_tac then_conv or_conv"))
+        "ORELSE" (list "or_tac" "tac1" "tac2" '("~same_as: then_tac then_list then_conv or_conv"))))
+
+(define (operator-name-of n)
+  (cond [(regexp-match #rx"^[(] *(.*[^ ]) *[)]$" n) => cadr] [else #f]))
+
+;; operator (a OP b): ... for `let (|||) a b ... = body`
+(define (operator-def-lines op params body)
+  (match-define (list rop _ _ precs) (hash-ref infix-declarations op))
+  (for ([p precs]) (for ([o (cdr (string-split p))]) (use-operator! o)))
+  (define a (car params))
+  (define b (cadr params))
+  (with-locals (append (pat-vars a) (pat-vars b))
+    (lambda ()
+      (append (list (format "operator (~a ~a ~a):" (param a) rop (param b))
+                    "  ~associativity: ~left")
+              (map (lambda (l) (string-append "  " l)) precs)
+              (indent
+               (if (null? (cddr params))
+                   (stmts body)
+                   (r-lines (fun-doc (cddr params) body))))))))
+
+;; after `let (THEN) = ...`: the infix operator that calls it
+(define (operator-alias-lines name)
+  (match-define (list rop a b precs) (hash-ref infix-declarations name))
+  (for ([p precs]) (for ([o (cdr (string-split p))]) (use-operator! o)))
+  (append (list (format "operator (~a ~a ~a):" a rop b) "  ~associativity: ~left")
+          (map (lambda (l) (string-append "  " l)) precs)
+          (list (format "  ~a(~a)(~a)" name a b))))
 
 ;; reference to an operator used as a function: a definition of this module
 ;; or an import
@@ -164,6 +208,10 @@
           [(string? v) v]
           [else #f])))
 
+;; OCaml Stdlib names that HOL Light theories also define: the adapter
+;; provides the Stdlib function under another name
+(define stdlib-renames (hash "int_of_num" "hol_int_of_num"))
+
 (define (ref-name name)
   (cond
     [(regexp-match #rx"^[(] *(.*[^ ]) *[)]$" name) => (lambda (m) (op-value (cadr m)))]
@@ -171,11 +219,12 @@
     [(hash-ref (locals) name #f) (mangle-id name)]
     [(scope-lookup name) => values]
     [else
-     ((env-use! (current-env)) name)
+     (define name* (if ((env-resolve (current-env)) name) name (hash-ref stdlib-renames name name)))
+     ((env-use! (current-env)) name*)
      (define alias ((env-resolve (current-env)) name))
      (if alias
          (string-append alias "." (mangle-id name))
-         (mangle-id name))]))
+         (mangle-id name*))]))
 
 ;; M.x: a namespace of this module, Num (whose functions the port defines
 ;; unqualified), or a module to import, renamed to its adapter if it has one
@@ -275,6 +324,10 @@
     [(p:constr "()" #f) "_"]
     [(p:constr "[]" #f) "PairList []"]
     [(p:constr n #f) (string-append (constr-name n) "()")]
+    ;; `C _` matches every field of a constructor with several
+    [(p:constr n (p:any))
+     (define k (hash-ref (env-ctor-arity (current-env)) n 1))
+     (format "~a(~a)" (constr-name n) (string-join (make-list (max k 1) "_") ", "))]
     [(p:constr n (p:tuple ps))
      (if (tuple-field? n)
          (format "~a([~a])" (constr-name n) (string-join (map pat ps) ", "))
@@ -291,6 +344,7 @@
     [(p:or a b) (format "~a || ~a" (pat a) (pat b))]
     [(p:alias q n) (format "~a as ~a" (pat q) (mangle-id n))]
     [(p:typed q _) (pat q)]
+    [(p:record (list (cons "contents" q))) (format "Box(~a)" (pat q))]
     [(p:record fs) (record-pattern fs)]
     [(p:range a b) "_"]
     [(p:array ps) (format "Array(~a)" (string-join (map pat ps) ", "))]
@@ -490,7 +544,7 @@
     [(e:field obj name)
      (define x (ex obj))
      (atom* (wrap "" (r-lines (if (eq? (r-kind x) 'atom) x (paren x)))
-                  (string-append "." (mangle-id (last (string-split name "."))))))]
+                  (string-append "." (field-name name))))]
     [(e:index obj idx kind)
      (if (eq? kind 'string)
          (call-doc "OCamlString.get" (list (list (ex obj)) (list (ex idx))))
@@ -507,7 +561,7 @@
      y]
     [(e:opname op) (atom (op-value op))]
     [(e:label _ e) (ex e)]
-    [(e:assert e) (call-doc "assert" (list (list (ex e))))]
+    [(e:assert e) ((env-use! (current-env)) "assert") (call-doc "assert" (list (list (ex e))))]
     [(e:lazy e) (call-doc "lazy" (list (list (ex e))))]
     [(e:fun params body) (fun-doc params body)]
     [(e:function cases) (function-doc cases)]
@@ -520,6 +574,11 @@
      (if (= (length lines) 1)
          (atom* lines)
          (open* (cons "block:" (indent lines))))]))
+
+;; a reference's only field is `contents`; Box calls it value
+(define (field-name n)
+  (define b (last (string-split n ".")))
+  (if (equal? b "contents") "value" (mangle-id b)))
 
 (define (cons-chain e)
   (match (if (and (e:paren? e) (e:cons? (unparen e))) (unparen e) e)
@@ -585,6 +644,8 @@
 
 (define (record-expr base fields)
   (cond
+    [(and (not base) (= (length fields) 1) (equal? (car (car fields)) "contents"))
+     (call-doc "Box" (list (list (ex (cdr (car fields))))))]
     [base
      (define x (ex base))
      (define assigns
@@ -646,7 +707,7 @@
                [else (cons (string-append "| " label) (indent body 4))])))))
 
 (define (if-doc c t f)
-  (define cx (ex c))
+  (define cx (let ([x (ex c)]) (if (eq? (r-kind x) 'open) (paren x) x)))
   (define cline (if (single? cx) (line1 cx) (line1 (paren cx))))
   (define tl (stmts t))
   (define fl (if f (stmts f) (list "#void")))
@@ -666,7 +727,7 @@
   (define p (pat (mcase-pat c)))
   (with-locals (pat-vars (mcase-pat c))
     (lambda ()
-      (define guard (and (mcase-guard c) (line1 (let ([g (ex (mcase-guard c))]) (if (single? g) g (paren g))))))
+      (define guard (and (mcase-guard c) (flat-line (let ([g (ex (mcase-guard c))]) (if (eq? (r-kind g) 'open) (paren g) g)))))
       (values (string-append p (if guard (string-append " when " guard) "") ":")
               (stmts (mcase-body c))))))
 
@@ -693,7 +754,7 @@
                          (cons label body)))))
 
 (define (match-doc s cases)
-  (define sx (ex s))
+  (define sx (let ([x (ex s)]) (if (eq? (r-kind x) 'open) (paren x) x)))
   (match-doc* (if (single? sx) (line1 sx) (r-lines (paren sx))) cases))
 
 (define (try-doc b cases0)
@@ -723,10 +784,22 @@
     [(e:let rec? bindings body)
      (define names (append-map binding-names bindings))
      (if rec?
-         (with-locals names
-           (lambda ()
-             (append (append-map (lambda (b) (local-binding b #t)) bindings)
-                     (stmts body))))
+         ;; a `let rec f` that shadows an f of the same block cannot be a
+         ;; second `fun f` there: it becomes `let f:` around its own `fun f`
+         (let ([shadowing (filter (lambda (n) (hash-ref (locals) n #f)) names)])
+           (with-locals names
+             (lambda ()
+               (append (append-map
+                        (lambda (b)
+                          (define n (binding-name b))
+                          (define lines (local-binding b #t))
+                          (if (and n (member n shadowing))
+                              (append (list (format "let ~a:" (mangle-id n)))
+                                      (indent lines)
+                                      (list (string-append "  " (mangle-id n))))
+                              lines))
+                        bindings)
+                       (stmts body)))))
          (let loop ([bs bindings] [acc '()])
            (cond
              [(null? bs) (with-locals names (lambda () (append acc (stmts body))))]
@@ -741,7 +814,7 @@
     [(e:setfield obj name v)
      (define x (ex obj))
      (r-lines (atom* (wrap (string-append (line1 (if (eq? (r-kind x) 'atom) x (paren x))) "."
-                                          (mangle-id (last (string-split name "."))) " := ")
+                                          (field-name name) " := ")
                            (r-lines (ex v)) "")))]
     [(e:setindex obj idx kind v)
      (define x (ex obj))
@@ -855,7 +928,10 @@
   (define body (unparen (binding-body b)))
   (define (current n) (let ([v (hash-ref (defined) n 0)]) (if (number? v) v 0)))
   (define (this-name n) (versioned n (if rec? (current n) (add1 (current n)))))
+  (define op (and name (operator-name-of name)))
   (cond
+    [(and op (member op '("|||" "++" ">>")) (>= (length params) 2))
+     (begin0 (operator-def-lines op params body) (bump! name))]
     [(and name (or (pair? params) (and rec? (or (e:fun? body) (e:function? body)))))
      (define target (this-name name))
      (begin0
@@ -893,7 +969,16 @@
   (match it
     [(t:let _ rec? bs)
      (when rec? (for ([b bs]) (define n (binding-name b)) (when n (bump! n))))
-     (append* (add-between (for/list ([b bs]) (def-item b rec?)) (list "")))]
+     (define defs (append* (add-between (for/list ([b bs]) (def-item b rec?)) (list ""))))
+     ;; THEN, THENL, ORELSE, THENC and ORELSEC get their infix operators
+     (define ops
+       (for*/list ([b bs]
+                   [n (in-list (pat-vars (binding-pat b)))]
+                   [op (in-value (operator-name-of n))]
+                   #:when (and op (hash-ref infix-declarations op #f)
+                               (not (member op '("|||" "++" ">>")))))
+         (operator-alias-lines op)))
+     (append defs (append* (for/list ([o ops]) (cons "" o))))]
     [(t:expr _ (e:app (e:var (or "needs" "loads" "loadt")) _)) '()]
     [(t:expr _ e) (stmts e)]
     [(t:type _ decls)
@@ -930,9 +1015,9 @@
        (parameterize ([scopes (cons (scope (make-hash) counts) (scopes))])
          (items-lines items '())))
      (define names (remove-duplicates (defined-names items)))
-     (hash-set! (namespaces) name names)
+     (hash-set! (namespaces) name (append names (declared-names items)))
      (hash-set! (defined) name name)
-     (define exports (map mangle-id names))
+     (define exports (remove-duplicates (append (map mangle-id names) (declared-names items))))
      (append (list (format "namespace ~a:" name))
              (indent (if (null? exports) '()
                          (list (string-append "export: " (string-join exports " ")))))
@@ -973,10 +1058,26 @@
                    (string-join (map (lambda (f) (mangle-id (cadr f))) fields) ", ")))]
     [_ '()]))
 
+;; constructors, records, exceptions and modules the items declare
+(define (declared-names items)
+  (append*
+   (for/list ([it items])
+     (match it
+       [(t:type _ decls)
+        (append*
+         (for/list ([d decls])
+           (match (tydecl-kind d)
+             [(list 'variant ctors) (map car ctors)]
+             [(list 'record _) (list (camel (tydecl-name d)))]
+             [_ '()])))]
+       [(t:exception _ n _) (list n)]
+       [(t:module _ n _ _) (list n)]
+       [_ '()]))))
+
 ;; constructor -> number of declared fields, over items and their modules
-(define (ctor-arities items)
+(define (ctor-arities items #:nested [nested? #t])
   (define h (make-hash))
-  (let walk ([items items])
+  (let walk ([items items] [top? #t])
     (for ([it items])
       (match it
         [(t:type _ decls)
@@ -985,7 +1086,7 @@
              [(list 'variant ctors) (for ([c ctors]) (hash-set! h (car c) (length (cadr c))))]
              [_ (void)]))]
         [(t:exception _ n args) (hash-set! h n (length args))]
-        [(t:module _ _ _ (m:struct inner)) (walk inner)]
+        [(t:module _ _ _ (m:struct inner)) (when nested? (walk inner #f))]
         [_ (void)])))
   h)
 
@@ -1095,21 +1196,11 @@
     (define-values (lead rest) (splitf-at comments (lambda (c) (< (car c) first-pos))))
     (define body (items-lines items rest))
     (define exports
-      (remove-duplicates
-       (append (map mangle-id (defined-names items))
-               (append*
-                (for/list ([it items])
-                  (match it
-                    [(t:type _ decls)
-                     (append*
-                      (for/list ([d decls])
-                        (match (tydecl-kind d)
-                          [(list 'variant ctors) (map car ctors)]
-                          [(list 'record _) (list (camel (tydecl-name d)))]
-                          [_ '()])))]
-                    [(t:exception _ n _) (list n)]
-                    [(t:module _ n _ _) (list n)]
-                    [_ '()]))))))
+      (remove-duplicates (append (map mangle-id (defined-names items))
+                                 (for/list ([n (defined-names items)]
+                                            #:when (hash-ref operator-aliases n #f))
+                                   (hash-ref operator-aliases n))
+                                 (declared-names items))))
     (values (comment-block lead)
             body
             exports)))

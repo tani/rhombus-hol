@@ -58,3 +58,36 @@ jobs:
           git -C hol-light checkout -q FETCH_HEAD
       - name: Measure
         run: python3 tools/literalness/measure.py hol-light --check
+
+  ml2rhm:
+    # Translates all of pinned HOL Light with tools/ml2rhm, compares the
+    # result with the port, and compiles the generated modules that are
+    # known to work in place of the hand-maintained ones.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Bogdanp/setup-racket@v1.11
+        with:
+          version: 9.3
+          variant: CS
+      - name: Install
+        run: raco pkg install --auto --batch --no-docs --no-setup --skip-installed --name rhombus-hol "$PWD"
+      - name: Fetch pinned HOL Light
+        run: |
+          git init -q hol-light
+          git -C hol-light fetch -q --depth 1 https://github.com/jrh13/hol-light.git cba9198db76e9dfb89cbd653df9412d01f65b22a
+          git -C hol-light checkout -q FETCH_HEAD
+      - name: Parse
+        run: racket tools/ml2rhm/coverage.rkt hol-light 569
+      - name: Translate
+        run: racket tools/ml2rhm/main.rkt --out ml2rhm-out hol-light
+      - name: Compare with the port
+        run: python3 tools/ml2rhm/compare.py hol-light ml2rhm-out
+      - name: Compile in place of the port
+        run: |
+          raco make -j 4 rhombus/hol/define.rhm
+          tools/ml2rhm/dropin.sh ml2rhm-out fusion basics nets preterm parser bool drule itab simp \
+            theorems ind_defs class trivia canon meson firstorder quot pair compute nums \
+            recursion arith wf calc_num normalizer grobner ind_types lists realax calc_int \
+            realarith real calc_rat int sets iterate cart define

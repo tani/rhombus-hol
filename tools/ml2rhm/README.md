@@ -22,7 +22,26 @@ racket tools/ml2rhm/main.rkt --out OUT HOL-LIGHT-DIR            # every file
 racket tools/ml2rhm/main.rkt --out OUT HOL-LIGHT-DIR itab.ml    # some files
 racket tools/ml2rhm/coverage.rkt HOL-LIGHT-DIR                  # parse report
 python3 tools/ml2rhm/compare.py HOL-LIGHT-DIR OUT                # vs rhombus/hol
+tools/ml2rhm/dropin.sh OUT bool drule ...                        # compile in place
 ```
+
+`dropin.sh` compiles each generated module in place of the hand-maintained
+one, in a scratch copy of the repository. The CI job `ml2rhm` runs all of
+these against the pinned HOL Light.
+
+## Results
+
+- All 569 OCaml files of the pinned checkout translate.
+- On the 44 modules of the port, the generated code scores 97.6% literal
+  (`tools/literalness`; the hand-maintained modules score 95.0%) and is 88%
+  token-similar to the hand-maintained modules.
+- 38 of the 44 compile in place of the hand-maintained module. The six that
+  do not are:
+  - `equal`, `tactics`, `metis` and `thecops`, which call printer functions
+    that the port does not have;
+  - `lib`, which uses `Printexc` and file I/O;
+  - `impconv`, whose `let module Tset = struct ... end in` defines names its
+    enclosing block already binds.
 
 The output mirrors the checkout: `Library/card.ml` becomes
 `OUT/Library/card.rhm`. Where the port keeps a module elsewhere the output
@@ -77,6 +96,9 @@ its own definition, the import is qualified (`IndTypes.list_INDUCT`).
 - HOL Light's printer is not part of the port, so generated code that calls
   printer functions (goal printing in `tactics.ml`, for example) names
   functions the port does not define.
+- Constructor arities come from the declarations of the module and of the
+  modules loaded before it; a module that redeclares a constructor name
+  (compute.ml's `Const`) uses its own arity throughout.
 - `let ... and ...` becomes sequential bindings; a right-hand side that
   refers to a shadowed outer name is not detected.
 - Comments inside a definition are dropped.

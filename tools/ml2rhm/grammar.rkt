@@ -17,7 +17,6 @@
 (define ml-parser
   (parser
    (src-pos)
-   (debug "/tmp/claude-0/-home-user-rhombus-hol/f8cf9599-de7b-55a9-b575-ecf48a5fa2ba/scratchpad/yacc.txt")
    (start implementation)
    (end EOF)
    (tokens value-tokens punct-tokens)

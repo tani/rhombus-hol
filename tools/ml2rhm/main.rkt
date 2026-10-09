@@ -165,10 +165,13 @@
                  resolve use! #f #f line-of
                  (let ([h (make-hash '(("Some" . 1) ("Failure" . 1) ("Not_found" . 0)
                                        ("Invalid_argument" . 1) ("None" . 0)))])
+                   ;; earlier modules' toplevel constructors, then this module's own
                    (for ([m (append before (list rel))])
                      (define pm (parse m))
                      (when (ok? pm)
-                       (for ([(k v) (ctor-arities (flatten-includes (car pm)))]) (hash-set! h k v))))
+                       (for ([(k v) (ctor-arities (flatten-includes (car pm))
+                                                  #:nested (equal? m rel))])
+                         (hash-set! h k v))))
                    h)))
   (define-values (lead body exports) (emit-module items comments e))
   (define text (string-join (append body) "\n"))

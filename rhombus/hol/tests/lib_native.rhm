@@ -1,0 +1,89 @@
+#lang rhombus
+// Differential tests for lib.rhm's library-layer functions that use Racket's
+// list functions: each must give the literal translation's result and call
+// its function argument on the same elements in the same order.
+import:
+  "../lib.rhm" as Lib
+  "../private/ocaml.rhm" open
+
+// The literal translations of lib.ml.
+fun lit_map(f):
+  fun mapf(l):
+    match l
+    | PairList []: PairList []
+    | PairList [x, & t]:
+        let y = f(x)
+        PairList.cons(y, mapf(t))
+  mapf
+fun lit_itlist(f):
+  fun(l):
+    fun(b):
+      match l
+      | PairList []: b
+      | PairList [h, & t]:
+          let rest = lit_itlist(f)(t)(b)
+          f(h)(rest)
+fun lit_rev_itlist(f):
+  fun(l):
+    fun(b):
+      match l
+      | PairList []: b
+      | PairList [h, & t]: lit_rev_itlist(f)(t)(f(h)(b))
+fun lit_rev(l): lit_rev_itlist(fun(x): fun(a): PairList.cons(x, a))(l)(PairList [])
+fun lit_forall(p):
+  fun(l):
+    match l
+    | PairList []: #true
+    | PairList [h, & t]: p(h) && lit_forall(p)(t)
+fun lit_exists(p):
+  fun(l):
+    match l
+    | PairList []: #false
+    | PairList [h, & t]: p(h) || lit_exists(p)(t)
+fun lit_length(l):
+  fun len(k, l):
+    if l == PairList [] | k | len(k + 1, Lib.tl(l))
+  len(0, l)
+fun lit_mem(x):
+  fun(l):
+    match l
+    | PairList []: #false
+    | PairList [h, & t]: x == h || lit_mem(x)(t)
+
+// Run f with a logging callback; return the result and the call log.
+fun traced(run):
+  let log = Box(PairList [])
+  let note = fun(x): log.value := PairList.cons(x, log.value)
+  let result:
+    try:
+      run(note)
+      ~catch Failure(m): "Failure " +& m
+  [result, Lib.rev(log.value)]
+
+def lists:
+  for List (n in 0 .. 12):
+    PairList[& for List (i in 0 .. n): [(i * 7 + n) mod 5, "e" +& i]]
+
+fun same(name, native, literal):
+  for values(bad = PairList []) (l in lists):
+    if traced(fun(note): native(note, l)) == traced(fun(note): literal(note, l))
+    | bad
+    | PairList.cons([name, l], bad)
+
+check same("map", fun(note, l): Lib.map(fun(x): note(x); x[0] + 1)(l),
+           fun(note, l): lit_map(fun(x): note(x); x[0] + 1)(l)) ~is PairList []
+check same("itlist", fun(note, l): Lib.itlist(fun(x): fun(a): note(x); PairList.cons(x[0], a))(l)(PairList []),
+           fun(note, l): lit_itlist(fun(x): fun(a): note(x); PairList.cons(x[0], a))(l)(PairList [])) ~is PairList []
+check same("rev_itlist", fun(note, l): Lib.rev_itlist(fun(x): fun(a): note(x); x[0] + a)(l)(0),
+           fun(note, l): lit_rev_itlist(fun(x): fun(a): note(x); x[0] + a)(l)(0)) ~is PairList []
+check same("forall", fun(note, l): Lib.forall(fun(x): note(x); x[0] != 3)(l),
+           fun(note, l): lit_forall(fun(x): note(x); x[0] != 3)(l)) ~is PairList []
+check same("exists", fun(note, l): Lib.exists(fun(x): note(x); x[0] == 3 && x[1])(l),
+           fun(note, l): lit_exists(fun(x): note(x); x[0] == 3 && x[1])(l)) ~is PairList []
+check same("failure", fun(note, l): Lib.map(fun(x): note(x); if x[0] == 4 | failwith("four") | x)(l),
+           fun(note, l): lit_map(fun(x): note(x); if x[0] == 4 | failwith("four") | x)(l)) ~is PairList []
+check (for values(bad = 0) (l in lists):
+         let ok = Lib.rev(l) == lit_rev(l) && Lib.length(l) == lit_length(l)
+                    && Lib.mem([3, "e2"])(l) == lit_mem([3, "e2"])(l)
+                    && Lib.mem([0, "e0"])(l) == lit_mem([0, "e0"])(l)
+         if ok | bad | bad + 1) ~is 0

@@ -66,3 +66,61 @@ check (try:
 // String.compare and integer compare.
 check [OCamlString.compare("a")("b"), OCamlString.compare("b")("b"), OCamlString.compare("c")("b")] ~is [-1, 0, 1]
 check [OCamlInt.compare(1)(2), OCamlInt.compare(2)(2), OCamlInt.compare(3)(2)] ~is [-1, 0, 1]
+
+// Polymorphic compare against its previous, literal implementation.
+import: "../fusion.rhm" as Kernel
+fun old_cmp_scalar(x,y): if x == y | 0 | (if x < y | -1 | 1)
+fun old_compare(x):
+  fun(y):
+    if x === y | 0 | old_compare_distinct(x,y)
+fun old_compare_lists(a,b):
+  if a == []
+  | 0
+  | let c = old_compare(a.first)(b.first)
+    if c != 0 | c | old_compare_lists(a.rest,b.rest)
+fun old_compare_distinct(x,y):
+  cond
+  | x is_a OcamlValue && y is_a OcamlValue:
+      let vx = x.ocaml_view()
+      let vy = y.ocaml_view()
+      if vx is_a List && vy is_a List | old_compare_lists(vx,vy) | old_compare(vx)(vy)
+  | x == y: 0
+  | x is_a Function || y is_a Function: throw InvalidArgument("compare: functional value")
+  | x is_a PairList && y is_a PairList && x != PairList [] && y != PairList []:
+      let c = old_compare(x.first)(y.first)
+      if c != 0 | c | old_compare(x.rest)(y.rest)
+  | x is_a List && y is_a List: old_compare_lists(x,y)
+  | x == PairList []: -1
+  | y == PairList []: 1
+  | ~else: old_cmp_scalar(x,y)
+
+def ty_a = Kernel.mk_vartype("A")
+def ty_b = Kernel.mk_vartype("B")
+def leaves:
+  [0, 1, -3, 7, "", "a", "b", "ab", PairList [], None(), Some(1), Some("a"),
+   ty_a, ty_b, Kernel.mk_fun_ty(ty_a)(ty_b), Kernel.bool_ty,
+   Kernel.mk_var(["x", ty_a]), Kernel.mk_var(["y", ty_a]), Kernel.mk_var(["x", ty_b]),
+   Kernel.mk_abs([Kernel.mk_var(["x", ty_a]), Kernel.mk_var(["x", ty_a])])]
+fun gen(seed, depth):
+  let k = seed mod 7
+  if depth == 0 || k < 3
+  | leaves[seed mod leaves.length()]
+  | match k
+    | 3: [gen(seed * 31 + 1, depth - 1), gen(seed * 17 + 2, depth - 1)]
+    | 4: [gen(seed * 13 + 3, depth - 1), gen(seed * 7 + 4, depth - 1), gen(seed * 5 + 5, depth - 1)]
+    | 5: PairList [gen(seed * 11 + 6, depth - 1), gen(seed * 3 + 7, depth - 1)]
+    | _: Some(gen(seed * 19 + 8, depth - 1))
+// Ill-typed pairs (a tuple against an option) cannot arise from OCaml; both
+// implementations must still agree on whether they fail.
+fun outcome(f):
+  try:
+    f()
+    ~catch
+    | InvalidArgument(_): "Invalid_argument"
+    | _: "error"
+def samples = for List (i in 0 .. 400): gen(i * 7919 + 13, 4)
+check (for values(bad = 0) (x in samples, i in 0 ..):
+         let y = samples[(i * 37 + 11) mod samples.length()]
+         if outcome(fun(): compare(x)(y)) == outcome(fun(): old_compare(x)(y)) | bad | bad + 1) ~is 0
+check (for values(bad = 0) (x in samples):
+         if compare(x)(x) == 0 | bad | bad + 1) ~is 0

@@ -6,12 +6,25 @@
 // translated (unused by the port): --, pow10, numerator, string_of_num_*,
 // report_timing, remark, increasing, decreasing, graph, ran, the fpf
 // printers, mem', insert', subtract' and the file utilities.
+// Library layer (AGENTS.md): map, rev, itlist, rev_itlist, forall, exists,
+// length and mem keep lib.ml's interface and the order in which they call
+// their function argument, over Racket's list functions (PairList is a Racket
+// list); tests/lib_native.rhm checks them against the literal translations.
 import:
   "private/ocaml.rhm" open
   lib("racket/base.rkt") as Rkt:
     only:
       denominator
       gcd
+      map
+      foldl
+      foldr
+      ormap
+      andmap
+      length
+      reverse
+      member
+      #{equal-always?}
 export:
   Unchanged
   fail
@@ -140,14 +153,8 @@ fun tl(l):
   match l
   | PairList [h, & t]: t
   | _: failwith("tl")
-fun map(f):
-  fun mapf(l):
-    match l
-    | PairList []: PairList []
-    | PairList [x, & t]:
-        let y = f(x)
-        PairList.cons(y, mapf(t))
-  mapf
+// Racket's map calls f from the first element to the last, as lib.ml's map.
+fun map(f): fun(l): Rkt.map(f, l)
 fun last(l):
   match l
   | PairList [x, & PairList []]: x
@@ -159,7 +166,7 @@ fun butlast(l):
   | PairList [h, & t]: PairList [h, & butlast(t)]
   | PairList []: failwith("butlast")
 fun el(n): fun(l): (if (n == 0) | hd(l) | el((n - 1))(tl(l)))
-fun rev(l): rev_itlist(fun(x): fun(a): PairList.cons(x,a))(l)(PairList [])
+fun rev(l): Rkt.reverse(l)
 fun map2(f):
   fun(l1):
     fun(l2):
@@ -194,20 +201,10 @@ fun repeat(f):
     try:
       repeat(f)(f(x))
       ~catch Failure(_): x
-fun itlist(f):
-  fun(l):
-    fun(b):
-      match l
-      | PairList []: b
-      | PairList [h, & t]:
-          let rest = itlist(f)(t)(b)
-          f(h)(rest)
-fun rev_itlist(f):
-  fun(l):
-    fun(b):
-      match l
-      | PairList []: b
-      | PairList [h, & t]: rev_itlist(f)(t)(f(h)(b))
+// foldr applies f from the last element to the first, as lib.ml's itlist
+// (OCaml evaluates the recursive call before applying `f h`).
+fun itlist(f): fun(l): fun(b): Rkt.foldr(fun(h, acc): f(h)(acc), b, l)
+fun rev_itlist(f): fun(l): fun(b): Rkt.foldl(fun(h, acc): f(h)(acc), b, l)
 fun end_itlist(f):
   fun(l):
     match l
@@ -271,11 +268,7 @@ fun range(m):
     if m>n | PairList [] | PairList.cons(m,range(m+1)(n))
 
 // Lists as predicates and searching.
-fun forall(p):
-  fun(l):
-    match l
-    | PairList []: #true
-    | PairList [h, & t]: p(h) && forall(p)(t)
+fun forall(p): fun(l): Rkt.andmap(p, l)
 fun forall2(p):
   fun forallp(l1):
     fun(l2):
@@ -284,15 +277,8 @@ fun forall2(p):
       | [PairList [h1,&t1], PairList [h2,&t2]]: p(h1)(h2) && forallp(t1)(t2)
       | _: failwith("forall2")
   forallp
-fun exists(p):
-  fun(l):
-    match l
-    | PairList []: #false
-    | PairList [h, & t]: p(h) || exists(p)(t)
-fun length(l):
-  fun len(k,l):
-    if l == PairList [] | k | len(k+1,tl(l))
-  len(0,l)
+fun exists(p): fun(l): Rkt.ormap(p, l)
+fun length(l): Rkt.length(l)
 fun filter(p):
   fun(l):
     match l
@@ -365,11 +351,8 @@ fun index(x):
 // Lists as sets.
 // On immutable HOL values structural == is equivalent to OCaml compare(...)=0.
 // This is deliberately NOT a general OCaml polymorphic compare implementation.
-fun mem(x):
-  fun(l):
-    match l
-    | PairList []: #false
-    | PairList [h, & t]: x == h || mem(x)(t)
+// `==` is equal-always?.
+fun mem(x): fun(l): Rkt.member(x, l, Rkt.#{equal-always?}) && #true
 fun insert(x): fun(l): if mem(x)(l) | l | PairList.cons(x,l)
 fun union(l1): fun(l2): itlist(insert)(l1)(l2)
 fun unions(l): itlist(union)(l)(PairList [])

@@ -84,7 +84,8 @@
                (define p (parse rel))
                (if (ok? p)
                    (let* ([items (flatten-includes (car p))]
-                          [names (append (defined-names items) (type-names items))])
+                          [names (append (defined-names items) (type-names items)
+                                         (if (includes-format? items) format-api '()))])
                      (list->set* (append names
                                          (for/list ([n names] #:when (hash-ref operator-aliases n #f))
                                            (hash-ref operator-aliases n)))))
@@ -105,6 +106,9 @@
        [(t:module _ n _ _) (list n)]
        [_ '()]))))
 
+(define (includes-format? items)
+  (for/or ([it items]) (match it [(t:include _ (m:path "Format")) #t] [_ #f])))
+
 (define (camel s)
   (string-append*
    (for/list ([w (string-split s "_")] #:unless (string=? w ""))
@@ -113,14 +117,8 @@
 (define (module-alias rel)
   (camel (path->string (path-replace-extension (file-name-from-path rel) #""))))
 
-;; where the port keeps a module that is not at the mirrored path
-(define port-layout
-  (hash "preterm.ml" "private/type_inference.rhm"
-        "printer.ml" "private/theory_support.rhm"))
-
 (define (rhm-of rel)
-  (hash-ref port-layout rel
-            (lambda () (path->string (path-replace-extension (string->path rel) #".rhm")))))
+  (path->string (path-replace-extension (string->path rel) #".rhm")))
 
 ;; import path of target (a rel .ml or a private file) from the module rel
 (define (import-path from target-rhm)
@@ -172,8 +170,10 @@
                        (for ([(k v) (ctor-arities (flatten-includes (car pm))
                                                   #:nested (equal? m rel))])
                          (hash-set! h k v))))
-                   h)))
+                   h)
+                 (box #f)))
   (define-values (lead body exports) (emit-module items comments e))
+  (define format-included? (unbox (env-included e)))
   (define text (string-join (append body) "\n"))
   (define quotes? (regexp-match? #rx"@hol[|][{]" text))
   (define decls? (regexp-match? #rx"(?m:^ *(variant|record) )" text))
@@ -203,6 +203,10 @@
          (list* (format "  ~s open:" (imp (string-append (private-prefix) "ocaml.rhm")))
                 "    only:"
                 (for/list ([n stdlib]) (string-append "      " (mangle-export n)))))
+     (if format-included?
+         (list (format "  ~s open" (imp (string-append (private-prefix) "format.rhm")))
+               "  .Format open")
+         '())
      (if quotes? (list (format "  ~s open" (imp (string-append (private-prefix) "hol_quote.rhm")))) '())
      (if decls? (list (format "  ~s open" (imp (string-append (private-prefix) "declarations.rhm")))) '())))
   (define lines
@@ -212,7 +216,11 @@
            "")
      (if (null? lead) '() (append lead (list "")))
      (if (null? imports) '() (append (list "import:") imports (list "")))
-     (if (null? exports) '() (append (list "export:") (for/list ([x exports]) (string-append "  " x)) (list "")))
+     (if (null? exports) '()
+         (append (list "export:")
+                 (if format-included? (list "  all_from(.Format)") '())
+                 (for/list ([x exports]) (string-append "  " x))
+                 (list "")))
      body
      (list "")))
   (define out (build-path (out-dir) (rhm-of rel)))

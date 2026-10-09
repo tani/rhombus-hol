@@ -1,6 +1,5 @@
 #lang rhombus
-// Direct translation of the pinned HOL Light tactics.ml. The goal printers
-// (print_goal, print_goalstack, PRINT_GOAL_TAC, ...) are not ported.
+// Direct translation of the pinned HOL Light tactics.ml.
 
 // =========================================================================
 // System of tactics (slightly different from any traditional LCF method).
@@ -28,10 +27,17 @@ import:
       many
       fix
       lex
-  "private/theory_support.rhm" as Host:
+  "printer.rhm" as Host:
     expose:
       isalnum
       string_of_type
+      pp_print_qterm
+      pp_print_colored_qterm
+      pp_open_hbox
+      pp_open_hvbox
+      pp_close_box
+      pp_get_max_boxes
+      pp_set_max_boxes
 
 export:
   null_inst
@@ -138,6 +144,15 @@ export:
   CHEAT_TAC
   RECALL_ACCEPT_TAC
   ANTS_TAC
+  print_goal_hyp_max_boxes
+  pp_print_goal
+  pp_print_colored_goal
+  pp_print_goalstack
+  pp_print_colored_goalstack
+  print_goal
+  print_goalstack
+  PRINT_GOAL_TAC
+  PRINT_COLORED_GOAL_TAC
   REMARK_TAC
   by
   rotate
@@ -469,11 +484,11 @@ def NAME_ASSUMS_TAC:
   fun([asl, g]):
     let mutable idx = 0
     let has = fun(name): exists(fun([name_prime, _]): name == name_prime)(asl)
-    fun next_hyp_name():
+    fun next_hyp_name(_):
       let n = "H" +& idx
       idx := idx + 1
-      if has(n) | next_hyp_name() | n
-    let asl = map(fun([name, a]): if name == "" | [next_hyp_name(), a] | [name, a])(asl)
+      if has(n) | next_hyp_name(#void) | n
+    let asl = map(fun([name, a]): if name == "" | [next_hyp_name(#void), a] | [name, a])(asl)
     ALL_TAC([asl, g])
 
 // -------------------------------------------------------------------------
@@ -609,10 +624,10 @@ fun SUBST_VAR_TAC(th):
     let [l, r] = dest_eq(eq)
     cond
     | aconv(l)(r): ALL_TAC
-    | !subset(frees(eq))(freesl(asm)): fail()
+    | !subset(frees(eq))(freesl(asm)): fail(#void)
     | (is_const(l) || is_var(l)) && !free_in(l)(r): SUBST_ALL_TAC(th)
     | (is_const(r) || is_var(r)) && !free_in(r)(l): SUBST_ALL_TAC(SYM(th))
-    | ~else: fail()
+    | ~else: fail(#void)
     ~catch Failure(_): failwith("SUBST_VAR_TAC")
 
 // -------------------------------------------------------------------------
@@ -947,7 +962,7 @@ fun X_META_EXISTS_TAC(t):
   fun([asl, w]):
     try:
       if !is_var(t)
-      | fail()
+      | fail(#void)
       | let [v, bod] = dest_exists(w)
         [[PairList [t], null_inst], PairList [[asl, vsubst(PairList [[t, v]])(bod)]],
          fun(i): fun(PairList [th]): EXISTS([instantiate(i)(w), instantiate(i)(t)])(th)]
@@ -990,8 +1005,105 @@ def ANTS_TAC:
   MATCH_MP_TAC(th) then_tac CONJ_TAC
 
 // -------------------------------------------------------------------------
-// The goal printers that follow here in the original are not ported.
+// Print a goal.
 // -------------------------------------------------------------------------
+
+def print_goal_hyp_max_boxes = Box(None())
+
+def [pp_print_goal, pp_print_colored_goal]:
+  let with_color:
+    fun(color_flag):
+      let string_of_int3:
+        fun(n):
+          if n < 10
+          | "  " +& string_of_int(n)
+          | if n < 100
+            | " " +& string_of_int(n)
+            | string_of_int(n)
+      let print_hyp:
+        fun(fmt):
+          fun(n):
+            fun([s, th]):
+              pp_open_hbox(fmt)(#void)
+              Format.pp_print_string(fmt)(string_of_int3(n))
+              Format.pp_print_string(fmt)(" [")
+              pp_open_hvbox(fmt)(0)
+              let old_max_boxes = pp_get_max_boxes(fmt)(#void)
+              match print_goal_hyp_max_boxes.value
+              | None(): #void
+              | Some(hb): pp_set_max_boxes(fmt)(hb)
+              (if color_flag | pp_print_colored_qterm | pp_print_qterm)(fmt)(concl(th))
+              pp_set_max_boxes(fmt)(old_max_boxes)
+              pp_close_box(fmt)(#void)
+              Format.pp_print_string(fmt)("]")
+              if !(s == "") | Format.pp_print_string(fmt)(" (" +& s +& ")") | #void
+              pp_close_box(fmt)(#void)
+              Format.pp_print_newline(fmt)(#void)
+      fun print_hyps(fmt):
+        fun(n):
+          fun(asl):
+            if asl == PairList []
+            | #void
+            | print_hyp(fmt)(n)(hd(asl))
+              print_hyps(fmt)(n + 1)(tl(asl))
+      fun(fmt):
+        fun([asl, w]):
+          Format.pp_print_newline(fmt)(#void)
+          if asl != PairList []
+          | print_hyps(fmt)(0)(rev(asl))
+            Format.pp_print_newline(fmt)(#void)
+          | #void
+          (if color_flag | pp_print_colored_qterm | pp_print_qterm)(fmt)(w)
+          Format.pp_print_newline(fmt)(#void)
+  [with_color(#false), with_color(#true)]
+
+def [pp_print_goalstack, pp_print_colored_goalstack]:
+  let print_goalstate:
+    fun(color_flag):
+      fun(fmt):
+        fun(k):
+          fun(gs):
+            let [_, gl, _] = gs
+            let n = length(gl)
+            let s:
+              if n == 0
+              | "No subgoals"
+              | string_of_int(k) +& \
+                " subgoal" +& (if k > 1 | "s" | "") +& " (" +& string_of_int(n) +& " total)"
+            Format.pp_print_string(fmt)(s)
+            Format.pp_print_newline(fmt)(#void)
+            if gl == PairList []
+            | #void
+            | do_list(o((if color_flag | pp_print_colored_goal | pp_print_goal)(fmt))(C(el)(gl)))(rev(range(0)(k - 1)))
+  let fn:
+    fun(color_flag):
+      fun(fmt):
+        fun(l):
+          if l == PairList []
+          | Format.pp_print_string(fmt)("Empty goalstack")
+          | if tl(l) == PairList []
+            | let [_, gl, _] as gs = hd(l)
+              print_goalstate(color_flag)(fmt)(1)(gs)
+            | let [_, gl, _] as gs = hd(l)
+              let [_, gl0, _] = hd(tl(l))
+              let p = length(gl) - length(gl0)
+              let p_prime = (if p < 1 | 1 | p + 1)
+              print_goalstate(color_flag)(fmt)(p_prime)(gs)
+  [fn(#false), fn(#true)]
+
+def print_goal = pp_print_goal(Format.std_formatter)
+
+def print_goalstack = pp_print_goalstack(Format.std_formatter)
+
+def PRINT_GOAL_TAC:
+  fun(gl):
+    print_goal(gl)
+    ALL_TAC(gl)
+
+def PRINT_COLORED_GOAL_TAC:
+  fun(gl):
+    pp_print_colored_goal(Format.std_formatter)(gl)
+    ALL_TAC(gl)
 
 fun REMARK_TAC(s):
   fun(gl):
@@ -1120,10 +1232,9 @@ fun er(tac):
   if n_subgoals_to_rotate == 0 || n_subgoals == 1
   | remark("(Rotating zero subgoal)\n\n")
     e_result
-  | // departure: the goalstack printer is not ported, so the
-    // `if !verbose then print_goalstack !current_goalstack` step is omitted.
-    remark("\n(Rotating " +& string_of_int(n_subgoals_to_rotate) +& " subgoal" \
-             +& (if n_subgoals_to_rotate == 1 | "" | "s") +& "...)\n\n")
+  | (if verbose.value | print_goalstack(current_goalstack.value) | #void)
+    remark(Printf.sprintf("\n(Rotating %d subgoal%s...)\n\n")(n_subgoals_to_rotate)(
+             if n_subgoals_to_rotate == 1 | "" | "s"))
     let new_g = r(n_subgoals_to_rotate)
     // pop the latest subgoal so that one b() can fully roll back the state
     let cur_gs = current_goalstack.value

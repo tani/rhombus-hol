@@ -8,6 +8,7 @@
          racket/match
          "ast.rkt")
 (provide emit-module
+         format-api
          ctor-arities
          flatten-includes
          mangle-id
@@ -149,7 +150,7 @@
 
 (define module-renames
   (hash "List" "OCamlList" "String" "OCamlString" "Char" "OCamlChar"
-        "Int" "OCamlInt" "Array" "OCamlArray" "Hashtbl" "Hashtbl"))
+        "Int" "OCamlInt" "Array" "OCamlArray" "Hashtbl" "Hashtbl" "Buffer" "OCamlBuffer"))
 
 (define (mangle-path s)
   (define parts (string-split s "."))
@@ -178,7 +179,12 @@
 ;;   use!      records a free name the module takes from elsewhere
 ;;   records   field name -> (cons RecordName (listof field))
 ;;   counts    name -> number of toplevel definitions of that name
-(struct env (modname resolve use! records counts line-of ctor-arity) #:transparent)
+(struct env (modname resolve use! records counts line-of ctor-arity included) #:transparent)
+
+;; The functions of OCaml's Format, as private/format.rhm provides them.
+;; printer.ml's `include Format` makes them part of the printer.
+(define format-api
+  '("formatter" "std_formatter" "err_formatter" "str_formatter" "flush_str_formatter" "formatter_of_buffer" "make_formatter" "pp_print_string" "pp_print_as" "pp_print_int" "pp_print_char" "pp_print_bool" "pp_print_float" "pp_print_break" "pp_print_custom_break" "pp_print_space" "pp_print_cut" "pp_force_newline" "pp_print_if_newline" "pp_print_newline" "pp_print_flush" "pp_open_box" "pp_open_hbox" "pp_open_vbox" "pp_open_hvbox" "pp_open_hovbox" "pp_close_box" "pp_open_tbox" "pp_close_tbox" "pp_print_tbreak" "pp_print_tab" "pp_set_tab" "pp_set_margin" "pp_get_margin" "pp_set_max_indent" "pp_get_max_indent" "pp_set_max_boxes" "pp_get_max_boxes" "pp_over_max_boxes" "pp_set_ellipsis_text" "pp_get_ellipsis_text" "print_string" "print_as" "print_int" "print_char" "print_break" "print_space" "print_cut" "print_newline" "print_flush" "force_newline" "open_box" "open_hbox" "open_vbox" "open_hvbox" "open_hovbox" "close_box" "set_margin" "get_margin" "set_max_indent" "get_max_indent" "set_max_boxes" "get_max_boxes" "printf" "fprintf" "asprintf"))
 
 ;; a constructor declared `C of (a * b)` has one field holding a tuple
 (define (tuple-field? n)
@@ -999,6 +1005,10 @@
      (when names
        (for ([n names]) (hash-set! (defined) n (string-append path "." (mangle-id n)))))
      (list (format "// open ~a" path))]
+    [(t:include _ (m:path "Format"))
+     (set-box! (env-included (current-env)) #t)
+     (for ([n format-api]) (hash-set! (defined) n n))
+     (list "// include Format: its functions are imported and exported above")]
     [(t:include _ m) (list "// include: not translated")]
     [(t:external _ name) (list (format "// external ~a: not translated" name))]
     [(t:directive _ name arg) (list (format "// #~a" name))]))
@@ -1161,8 +1171,11 @@
 ;; `module M = struct ... end` followed by `include M` in the same file (as
 ;; fusion.ml does with Hol) is emitted inline.
 (define (flatten-includes items)
+  (define local-modules
+    (for/list ([it items] #:when (t:module? it)) (t:module-name it)))
   (define included
-    (for/list ([it items] #:when (and (t:include? it) (m:path? (t:include-m it))))
+    (for/list ([it items] #:when (and (t:include? it) (m:path? (t:include-m it))
+                                      (member (m:path-name (t:include-m it)) local-modules)))
       (m:path-name (t:include-m it))))
   (append*
    (for/list ([it items])

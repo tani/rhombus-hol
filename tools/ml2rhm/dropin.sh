@@ -11,8 +11,6 @@ cp -r "$repo/rhombus" "$work/"
 status=0
 for m in "$@"; do
   target=rhombus/hol/$m.rhm
-  [ "$m" = preterm ] && target=rhombus/hol/private/type_inference.rhm
-  [ "$m" = printer ] && target=rhombus/hol/private/theory_support.rhm
   src=$gen/${target#rhombus/hol/}
   cp "$work/$target" "$work/orig.rhm"
   cp "$src" "$work/$target"

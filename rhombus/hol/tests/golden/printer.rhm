@@ -1,0 +1,125 @@
+#lang rhombus
+// The printer against pinned HOL Light: string_of_type of every constant,
+// string_of_thm of every axiom, definition and exported theorem, and the
+// goalstack after `g` and `e (REPEAT STRIP_TAC)` for the first theorems.
+// printed.tsv is produced by tools/hol_light_golden/printed.ml.
+import:
+  "data.rhm" open
+  "../../fusion.rhm" open
+  "../../printer.rhm" open:
+    only:
+      string_of_type
+      string_of_thm
+  "../../tactics.rhm" open:
+    only:
+      g
+      e
+      current_goalstack
+      pp_print_goalstack
+      STRIP_TAC
+  "../../tactics.rhm" as Tactics
+  "../../private/ocaml.rhm" open:
+    only:
+      Format
+  lib("racket/base.rkt") as R:
+    only:
+      #{eprintf}
+      #{string->immutable-string}
+      #{regexp-replace*}
+
+fun unescape(s :: String) :: String:
+  R.#{string->immutable-string}(
+    R.#{regexp-replace*}(#{#rx"\\\\(.)"}, s,
+                         fun(_, c):
+                           match R.#{string->immutable-string}(c)
+                           | "n": "\n"
+                           | "t": "\t"
+                           | c: c))
+
+// Names invented at run time (genvars _<n>, inferred type variables ?<n>,
+// set-notation variables GEN%PVAR%<n>) are numbered by first occurrence, as
+// in hol_light.rhm: HOL Light's counters advance over work the port does not
+// replay.
+fun invented_canonical(s :: String) :: String:
+  let mutable seen :: Map = {}
+  R.#{string->immutable-string}(
+    R.#{regexp-replace*}(#{#px"(?<![A-Za-z0-9_'])(_|\\?|GEN%PVAR%)[0-9]+"}, s,
+                         fun(m, kind):
+                           let key = R.#{string->immutable-string}(m)
+                           unless seen.has_key(key)
+                           | seen := seen ++ { key: seen.length() }
+                           kind +& "#" +& seen[key]))
+
+def golden = read_table("printed.tsv.gz")
+def theorems = exported_theorems()
+
+fun numbered(l):
+  for List (x in (l :: PairList).reverse(), i in 0..): [to_string(i), x]
+
+fun is_invented_name(name :: String):
+  name.length() > 1 && name[0] == #{#\_} && (for all (c in name.substring(1, name.length())): Char.is_numeric(c))
+def actual_consts = for Map ([_, [n, ty]] in numbered(constants(#void))): values(n, ty)
+// Constants named by genvar are matched by their order of definition.
+def actual_invented_consts:
+  for List ([_, [n, ty]] in numbered(constants(#void))):
+    skip_when !is_invented_name(n)
+    ty
+def mutable invented_index = 0
+def actual_axioms = for Map ([i, th] in numbered(axioms(#void))): values(i, th)
+def actual_defs = for Map ([i, th] in numbered(definitions(#void))): values(i, th)
+
+def mutable failures = []
+def mutable matched = 0
+def mutable renamed = 0
+
+fun compare_row(kind, name, expected, actual):
+  cond
+  | expected == actual: matched := matched + 1
+  | invented_canonical(expected) == invented_canonical(actual): renamed := renamed + 1
+  | ~else:
+      failures := failures.add(kind ++ "\t" ++ name ++ "\n  hol-light: " ++ expected
+                                 ++ "\n  rhombus:   " ++ actual)
+
+fun goalstack_text(th):
+  g(concl(th))
+  e(Tactics.REPEAT(STRIP_TAC))
+  Format.asprintf("%a")(pp_print_goalstack)(current_goalstack.value)
+
+fun theorem(name):
+  let rname = rhombus_name(name)
+  cond
+  | qualified_theorems.has_key(name): qualified_theorems[name]
+  | theorems.has_key(rname): theorems[rname][1]
+  | ~else: #false
+
+for (row in golden):
+  let [kind, name, text] = row
+  let expected = unescape(text)
+  fun missing(): failures := failures.add(kind ++ "\t" ++ name ++ "\tmissing in Rhombus/HOL")
+  match kind
+  | "const" when is_invented_name(name):
+      if invented_index < actual_invented_consts.length()
+      | compare_row(kind, name, expected, string_of_type(actual_invented_consts[invented_index]))
+      | missing()
+      invented_index := invented_index + 1
+  | "const":
+      if actual_consts.has_key(name)
+      | compare_row(kind, name, expected, string_of_type(actual_consts[name]))
+      | missing()
+  | "axiom":
+      if actual_axioms.has_key(name) | compare_row(kind, name, expected, string_of_thm(actual_axioms[name])) | missing()
+  | "definition":
+      if actual_defs.has_key(name) | compare_row(kind, name, expected, string_of_thm(actual_defs[name])) | missing()
+  | "thm":
+      let th = theorem(name)
+      if th | compare_row(kind, name, expected, string_of_thm(th)) | missing()
+  | "goal":
+      let th = theorem(name)
+      if th | compare_row(kind, name, expected, goalstack_text(th)) | missing()
+
+R.#{eprintf}("printer golden: ~a rows, ~a exact, ~a up to invented names, ~a failures\n",
+             golden.length(), matched, renamed, failures.length())
+for (f in failures.take(math.min(failures.length(), 40))):
+  R.#{eprintf}("~a\n", f)
+
+check failures ~is []

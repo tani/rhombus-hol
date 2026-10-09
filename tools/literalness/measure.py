@@ -31,11 +31,11 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 RH = os.path.normpath(os.path.join(HERE, '..', '..', 'rhombus', 'hol'))
 BASELINE = os.path.join(HERE, 'baseline.json')
-ORDER = ("lib fusion basics nets preterm parser equal bool drule tactics itab simp theorems "
+ORDER = ("lib fusion basics nets printer preterm parser equal bool drule tactics itab simp theorems "
          "ind_defs class trivia canon meson firstorder metis thecops quot impconv pair compute "
          "nums recursion arith wf calc_num normalizer grobner ind_types lists realax calc_int "
          "realarith real calc_rat int sets iterate cart define").split()
-RHFILE = {'preterm': 'private/type_inference.rhm'}
+RHFILE = {}
 LIBRARY_LAYER = {'lib'}
 TOLERANCE = 0.5   # percentage points a logic-layer score may drop
 

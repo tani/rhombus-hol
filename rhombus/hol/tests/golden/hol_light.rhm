@@ -3,6 +3,7 @@
 // hol_light.tsv is produced by tools/hol_light_golden/dump.ml after hol.ml;
 // it is only compared against, never imported as theorems.
 import: "serial.rhm" open
+import: "data.rhm" open
 import: "../../fusion.rhm" open
 import:
   "../../lib.rhm" open:
@@ -38,65 +39,6 @@ import:
   lib("file/gunzip.rkt") as Z:
     only:
       #{gunzip-through-ports}
-
-// Load order of hol_lib.ml from fusion.ml through define.ml.
-def modules = ["fusion", "basics", "nets", "equal", "bool", "drule",
-               "tactics", "itab", "simp", "theorems", "ind_defs", "class",
-               "trivia", "canon", "meson", "firstorder", "metis", "thecops",
-               "quot", "impconv", "pair", "compute", "nums", "recursion",
-               "arith", "wf", "calc_num", "normalizer", "grobner",
-               "ind_types", "lists", "realax", "calc_int", "realarith",
-               "real", "calc_rat", "int", "sets", "iterate", "cart",
-               "define"]
-
-fun data_file(name):
-  R.#{collection-file-path}(name, "rhombus/hol/tests/golden")
-
-fun read_lines(name :: String):
-  if name.length() > 3 && name.substring(name.length() - 3, name.length()) == ".gz"
-  | let in = R.#{open-input-file}(data_file(name))
-    let out = R.#{open-output-bytes}()
-    Z.#{gunzip-through-ports}(in, out)
-    R.#{close-input-port}(in)
-    P.#{port->lines}(R.#{open-input-bytes}(R.#{get-output-bytes}(out)))
-  | F.#{file->lines}(data_file(name))
-
-fun read_table(name):
-  for List (line in (read_lines(name) :: PairList)):
-    skip_when line == "" || line[0] == #{#\#}
-    for List (field in line.split("\t")): R.#{string->immutable-string}(field)
-
-fun is_thm(v):
-  try:
-    dest_thm(v)
-    #true
-    ~catch _: #false
-
-// Theorem-valued exports of every module, keyed by HOL Light name.
-fun exported_theorems():
-  let mutable found :: Map = {}
-  for (m in modules):
-    let path = PairList[#'lib, "rhombus/hol/" ++ m ++ ".rhm"]
-    R.#{dynamic-require}(path, #false)
-    let values(vars, _) = R.#{module->exports}(path)
-    for (phase_entry in (vars :: PairList)):
-      skip_when R.#{car}(phase_entry) != 0
-      for (e in (R.#{cdr}(phase_entry) :: PairList)):
-        let name = R.#{string->immutable-string}(R.#{symbol->string}(R.#{car}(e)))
-        let v = R.#{dynamic-require}(path, R.#{car}(e))
-        // Later modules shadow earlier bindings, as in the HOL Light toplevel.
-        when is_thm(v)
-        | found := found ++ { name: [m, v] }
-  found
-
-fun rhombus_name(name :: String): name.replace("'", "_prime", ~all: #true)
-
-// Theorems that database.ml names through an OCaml module path.
-def qualified_theorems :: Map:
-  {"Hashek.hashek_def": Thecops.Hashek.hashek_def,
-   "Hashek.hashek_eq": Thecops.Hashek.hashek_eq,
-   "Hashek.hashek_prop": Thecops.Hashek.hashek_prop,
-   "Hashek.hashek_thm": Thecops.Hashek.hashek_thm}
 
 // Names invented at run time: genvar variables and constants (_<n>), type
 // inference's invented type variables (?<n>) and the parser's set-notation
@@ -150,19 +92,19 @@ fun numbered(l):
   for List (x in plist_to_list(l).reverse(), i in 0..): [to_string(i), x]
 fun plist_to_list(l): for List (x in (l :: PairList)): x
 
-def actual_types = for Map ([_, a] in numbered(types())): values(a[0], to_string(a[1]))
+def actual_types = for Map ([_, a] in numbered(types(#void))): values(a[0], to_string(a[1]))
 fun is_invented_name(name :: String):
   name.length() > 1 && name[0] == #{#\_} && (for all (c in name.substring(1, name.length())): Char.is_numeric(c))
-def actual_consts = for Map ([_, a] in numbered(constants())):
+def actual_consts = for Map ([_, a] in numbered(constants(#void))):
   skip_when is_invented_name(a[0])
   values(a[0], serial_type(a[1]))
 // Constants named by genvar are matched by their order of definition.
 def actual_invented_consts:
-  for List ([_, a] in numbered(constants())):
+  for List ([_, a] in numbered(constants(#void))):
     skip_when !is_invented_name(a[0])
     a
-def actual_axioms = for Map ([i, th] in numbered(axioms())): values(i, serial_thm(th))
-def actual_defs = for Map ([i, th] in numbered(definitions())): values(i, serial_thm(th))
+def actual_axioms = for Map ([i, th] in numbered(axioms(#void))): values(i, serial_thm(th))
+def actual_defs = for Map ([i, th] in numbered(definitions(#void))): values(i, serial_thm(th))
 
 fun check_table(kind, actual :: Map, expected_name, expected):
   if actual.has_key(expected_name)

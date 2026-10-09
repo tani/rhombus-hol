@@ -1,0 +1,723 @@
+#lang rhombus
+// OCaml's Format: the pretty-printing engine HOL Light's printer runs on.
+// Translated from OCaml 4.14.1 stdlib/format.ml (Copyright 1996 INRIA;
+// Pierre Weis), with Queue, Stack and Buffer reduced to what it uses;
+// modified 2026-10-09: the engine and the functions HOL Light calls,
+// translated to Rhombus, curried with OCaml's argument order. Symbolic
+// output and semantic tags beyond OCaml's defaults are left out.
+// LGPL-2.1 with OCaml linking exception; see ../../../THIRD_PARTY_LICENSES/OCaml.txt.
+import: lib("racket/base.rkt") as Rkt
+
+export:
+  Format
+  OCamlBuffer
+
+// Buffer: an output string port.
+namespace OCamlBuffer:
+  export:
+    create
+    contents
+    reset
+    add_string
+    add_substring
+    length
+  class T(mutable port)
+  fun create(_): T(Rkt.#{open-output-string}())
+  fun contents(b :: T): Rkt.#{string->immutable-string}(Rkt.#{get-output-string}(b.port))
+  fun reset(b :: T): b.port := Rkt.#{open-output-string}()
+  fun add_string(b :: T): fun(s :: String): Rkt.#{write-string}(s, b.port)
+  fun add_substring(b :: T): fun(s :: String): fun(i): fun(n): Rkt.#{write-string}(s, b.port, i, i + n)
+  fun length(b :: T): contents(b).length()
+
+namespace Format:
+  export:
+    formatter
+    std_formatter
+    err_formatter
+    str_formatter
+    flush_str_formatter
+    formatter_of_buffer
+    make_formatter
+    pp_print_string
+    pp_print_as
+    pp_print_int
+    pp_print_char
+    pp_print_bool
+    pp_print_float
+    pp_print_break
+    pp_print_custom_break
+    pp_print_space
+    pp_print_cut
+    pp_force_newline
+    pp_print_if_newline
+    pp_print_newline
+    pp_print_flush
+    pp_open_box
+    pp_open_hbox
+    pp_open_vbox
+    pp_open_hvbox
+    pp_open_hovbox
+    pp_close_box
+    pp_open_tbox
+    pp_close_tbox
+    pp_print_tbreak
+    pp_print_tab
+    pp_set_tab
+    pp_set_margin
+    pp_get_margin
+    pp_set_max_indent
+    pp_get_max_indent
+    pp_set_max_boxes
+    pp_get_max_boxes
+    pp_over_max_boxes
+    pp_set_ellipsis_text
+    pp_get_ellipsis_text
+    print_string
+    print_as
+    print_int
+    print_char
+    print_break
+    print_space
+    print_cut
+    print_newline
+    print_flush
+    force_newline
+    open_box
+    open_hbox
+    open_vbox
+    open_hvbox
+    open_hovbox
+    close_box
+    set_margin
+    get_margin
+    set_max_indent
+    get_max_indent
+    set_max_boxes
+    get_max_boxes
+    printf
+    fprintf
+    asprintf
+
+  // The pretty-printing boxes: #'Pp_hbox, #'Pp_vbox, #'Pp_hvbox,
+  // #'Pp_hovbox, #'Pp_box and #'Pp_fits.
+
+  // The pretty-printing tokens.
+  class Pp_text(text)
+  class Pp_break(fits, breaks)          // each [before, width, after]
+  class Pp_tbreak(width, offset)
+  class Pp_stab()
+  class Pp_begin(indent, box_type)
+  class Pp_end()
+  class Pp_tbegin(tbox)
+  class Pp_tend()
+  class Pp_newline()
+  class Pp_if_newline()
+  class Pp_tbox(mutable tabs)
+
+  // Queue elements, scan stack elements and formatting stack elements.
+  class QueueElem(mutable size, token, length)
+  class ScanElem(left_total, queue_elem)
+  class FormatElem(box_type, width)
+
+  // Queue: a mutable FIFO, as Stdlib.Queue.
+  class Cell(value, mutable next)
+  class Queue(mutable first, mutable last)
+  fun queue_create(): Queue(#false, #false)
+  fun queue_add(q :: Queue, x):
+    let c = Cell(x, #false)
+    if q.last | (q.last :~ Cell).next := c | q.first := c
+    q.last := c
+  fun queue_peek_opt(q :: Queue): if q.first | (q.first :~ Cell).value | #false
+  fun queue_take_opt(q :: Queue):
+    if q.first
+    | let c :~ Cell = q.first
+      q.first := c.next
+      unless c.next | q.last := #false
+      c.value
+    | #false
+  fun queue_clear(q :: Queue):
+    q.first := #false
+    q.last := #false
+
+  // Stack: a mutable LIFO, as Stdlib.Stack.
+  class Stack(mutable items)
+  fun stack_create(): Stack(PairList [])
+  fun stack_push(x, s :: Stack): s.items := PairList.cons(x, s.items)
+  fun stack_top_opt(s :: Stack): if s.items == PairList [] | #false | s.items.first
+  fun stack_pop_opt(s :: Stack):
+    if s.items == PairList []
+    | #false
+    | let x = s.items.first
+      s.items := s.items.rest
+      x
+  fun stack_clear(s :: Stack): s.items := PairList []
+
+  // The formatter.
+  class formatter(pp_scan_stack :: Stack,
+                  pp_format_stack :: Stack,
+                  pp_tbox_stack :: Stack,
+                  mutable pp_margin,
+                  mutable pp_min_space_left,
+                  mutable pp_max_indent,
+                  mutable pp_space_left,
+                  mutable pp_current_indent,
+                  mutable pp_is_new_line,
+                  mutable pp_left_total,
+                  mutable pp_right_total,
+                  mutable pp_curr_depth,
+                  mutable pp_max_boxes,
+                  mutable pp_ellipsis,
+                  mutable pp_out_string,
+                  mutable pp_out_flush,
+                  mutable pp_out_newline,
+                  mutable pp_out_spaces,
+                  mutable pp_out_indent,
+                  pp_queue :: Queue)
+
+  def size_unknown = -1
+  fun size_is_known(n): n >= 0
+
+  // Enter a token in the pretty-printer queue.
+  fun pp_enqueue(state :: formatter, token :: QueueElem):
+    state.pp_right_total := state.pp_right_total + token.length
+    queue_add(state.pp_queue, token)
+
+  fun pp_clear_queue(state :: formatter):
+    state.pp_left_total := 1
+    state.pp_right_total := 1
+    queue_clear(state.pp_queue)
+
+  // Large value for default tokens size.
+  def pp_infinity = 1000000010
+
+  // Output functions for the formatter.
+  fun pp_output_string(state :: formatter, s :: String): state.pp_out_string(s, 0, s.length())
+  fun pp_output_newline(state :: formatter): state.pp_out_newline()
+  fun pp_output_spaces(state :: formatter, n): state.pp_out_spaces(n)
+  fun pp_output_indent(state :: formatter, n): state.pp_out_indent(n)
+
+  // Format a textual token.
+  fun format_pp_text(state :: formatter, size, text):
+    state.pp_space_left := state.pp_space_left - size
+    pp_output_string(state, text)
+    state.pp_is_new_line := #false
+
+  // Format a string by its length, if not empty.
+  fun format_string(state :: formatter, s :: String):
+    if s != "" | format_pp_text(state, s.length(), s) | #void
+
+  // To format a break, indenting a new line.
+  fun break_new_line(state :: formatter, [before, offset, after], width):
+    format_string(state, before)
+    pp_output_newline(state)
+    state.pp_is_new_line := #true
+    let indent = state.pp_margin - width + offset
+    // Don't indent more than pp_max_indent.
+    let real_indent = math.min(state.pp_max_indent, indent)
+    state.pp_current_indent := real_indent
+    state.pp_space_left := state.pp_margin - state.pp_current_indent
+    pp_output_indent(state, state.pp_current_indent)
+    format_string(state, after)
+
+  // To force a line break inside a box: no offset is added.
+  fun break_line(state, width): break_new_line(state, ["", 0, ""], width)
+
+  // To format a break that fits on the current line.
+  fun break_same_line(state :: formatter, [before, width, after]):
+    format_string(state, before)
+    state.pp_space_left := state.pp_space_left - width
+    pp_output_spaces(state, width)
+    format_string(state, after)
+
+  // To indent no more than pp_max_indent, if one tries to open a box
+  // beyond pp_max_indent, then the box is rejected on the left
+  // by simulating a break.
+  fun pp_force_break_line(state :: formatter):
+    match stack_top_opt(state.pp_format_stack)
+    | #false: pp_output_newline(state)
+    | FormatElem(box_type, width):
+        if width > state.pp_space_left
+        | match box_type
+          | #'Pp_fits || #'Pp_hbox: #void
+          | _: break_line(state, width)
+        | #void
+
+  // To skip a token, if the previous line has been broken.
+  fun pp_skip_token(state :: formatter):
+    match queue_take_opt(state.pp_queue)
+    | #false: #void
+    | QueueElem(size, _, length):
+        state.pp_left_total := state.pp_left_total - length
+        state.pp_space_left := state.pp_space_left + size
+
+  // Formatting a token with a given size.
+  fun format_pp_token(state :: formatter, size, token):
+    match token
+    | Pp_text(s): format_pp_text(state, size, s)
+    | Pp_begin(off, ty):
+        let insertion_point = state.pp_margin - state.pp_space_left
+        when insertion_point > state.pp_max_indent
+        | // can not open a box right there.
+          pp_force_break_line(state)
+        let width = state.pp_space_left - off
+        let box_type:
+          match ty
+          | #'Pp_vbox: #'Pp_vbox
+          | _: (if size > state.pp_space_left | ty | #'Pp_fits)
+        stack_push(FormatElem(box_type, width), state.pp_format_stack)
+    | Pp_end(): stack_pop_opt(state.pp_format_stack)
+    | Pp_tbegin(tbox): stack_push(tbox, state.pp_tbox_stack)
+    | Pp_tend(): stack_pop_opt(state.pp_tbox_stack)
+    | Pp_stab():
+        match stack_top_opt(state.pp_tbox_stack)
+        | #false: #void
+        | tbox :: Pp_tbox:
+            fun add_tab(n, ls):
+              match ls
+              | PairList []: PairList [n]
+              | PairList [x, & l]: (if n < x | PairList.cons(n, ls) | PairList.cons(x, add_tab(n, l)))
+            tbox.tabs := add_tab(state.pp_margin - state.pp_space_left, tbox.tabs)
+    | Pp_tbreak(n, off):
+        let insertion_point = state.pp_margin - state.pp_space_left
+        match stack_top_opt(state.pp_tbox_stack)
+        | #false: #void
+        | tbox :: Pp_tbox:
+            let tab:
+              match tbox.tabs
+              | PairList []: insertion_point
+              | PairList [first, & _]:
+                  fun find(l):
+                    match l
+                    | PairList [head, & tail]: (if head >= insertion_point | head | find(tail))
+                    | PairList []: first
+                  find(tbox.tabs)
+            let offset = tab - insertion_point
+            if offset >= 0
+            | break_same_line(state, ["", offset + n, ""])
+            | break_new_line(state, ["", tab + off, ""], state.pp_margin)
+    | Pp_newline():
+        match stack_top_opt(state.pp_format_stack)
+        | #false: pp_output_newline(state)
+        | FormatElem(_, width): break_line(state, width)
+    | Pp_if_newline():
+        if state.pp_current_indent != state.pp_margin - state.pp_space_left
+        | pp_skip_token(state)
+        | #void
+    | Pp_break(fits, breaks):
+        let [before, off, _] = breaks
+        match stack_top_opt(state.pp_format_stack)
+        | #false: #void
+        | FormatElem(box_type, width):
+            match box_type
+            | #'Pp_hovbox:
+                if size + before.length() > state.pp_space_left
+                | break_new_line(state, breaks, width)
+                | break_same_line(state, fits)
+            | #'Pp_box:
+                cond
+                | state.pp_is_new_line: break_same_line(state, fits)
+                | size + before.length() > state.pp_space_left: break_new_line(state, breaks, width)
+                | state.pp_current_indent > state.pp_margin - width + off:
+                    break_new_line(state, breaks, width)
+                | ~else: break_same_line(state, fits)
+            | #'Pp_hvbox: break_new_line(state, breaks, width)
+            | #'Pp_fits: break_same_line(state, fits)
+            | #'Pp_vbox: break_new_line(state, breaks, width)
+            | #'Pp_hbox: break_same_line(state, fits)
+
+  // Print if token size is known else printing is delayed.
+  // Printing is delayed when the text waiting in the queue requires
+  // more room to format than exists on the current line.
+  fun advance_left(state :: formatter):
+    match queue_peek_opt(state.pp_queue)
+    | #false: #void
+    | QueueElem(size, token, length):
+        let pending_count = state.pp_right_total - state.pp_left_total
+        when size_is_known(size) || pending_count >= state.pp_space_left
+        | queue_take_opt(state.pp_queue)
+          let size = (if size_is_known(size) | size | pp_infinity)
+          format_pp_token(state, size, token)
+          state.pp_left_total := length + state.pp_left_total
+          advance_left(state)
+
+  fun enqueue_advance(state, tok):
+    pp_enqueue(state, tok)
+    advance_left(state)
+
+  fun enqueue_string_as(state, size, s):
+    enqueue_advance(state, QueueElem(size, Pp_text(s), size))
+
+  fun enqueue_string(state, s :: String): enqueue_string_as(state, s.length(), s)
+
+  // Routines for scan stack: determine size of boxes.
+  fun initialize_scan_stack(stack :: Stack):
+    stack_clear(stack)
+    let queue_elem = QueueElem(size_unknown, Pp_text(""), 0)
+    stack_push(ScanElem(-1, queue_elem), stack)
+
+  // Setting the size of boxes on scan stack:
+  // if ty = true then size of break is set else size of box is set;
+  // in each case pp_scan_stack is popped.
+  fun set_size(state :: formatter, ty):
+    match stack_top_opt(state.pp_scan_stack)
+    | #false: #void
+    | ScanElem(left_total, queue_elem :: QueueElem):
+        let size = queue_elem.size
+        if left_total < state.pp_left_total
+        | initialize_scan_stack(state.pp_scan_stack)
+        | match queue_elem.token
+          | Pp_break(_, _) || Pp_tbreak(_, _):
+              when ty
+              | queue_elem.size := state.pp_right_total + size
+                stack_pop_opt(state.pp_scan_stack)
+          | Pp_begin(_, _):
+              unless ty
+              | queue_elem.size := state.pp_right_total + size
+                stack_pop_opt(state.pp_scan_stack)
+          | _: #void
+
+  // Push a token on pretty-printer scanning stack.
+  // If b is true set_size is called.
+  fun scan_push(state :: formatter, b, token):
+    pp_enqueue(state, token)
+    when b | set_size(state, #true)
+    let elem = ScanElem(state.pp_right_total, token)
+    stack_push(elem, state.pp_scan_stack)
+
+  // To open a new box: the user may set the depth bound pp_max_boxes;
+  // any text nested deeper is printed as the ellipsis string.
+  fun pp_open_box_gen(state :: formatter, indent, br_ty):
+    state.pp_curr_depth := state.pp_curr_depth + 1
+    cond
+    | state.pp_curr_depth < state.pp_max_boxes:
+        let size = - state.pp_right_total
+        let elem = QueueElem(size, Pp_begin(indent, br_ty), 0)
+        scan_push(state, #false, elem)
+    | state.pp_curr_depth == state.pp_max_boxes:
+        enqueue_string(state, state.pp_ellipsis)
+    | ~else: #void
+
+  // The box which is always open.
+  fun pp_open_sys_box(state): pp_open_box_gen(state, 0, #'Pp_hovbox)
+
+  // Close a box, setting sizes of its sub boxes.
+  fun pp_close_box(state :: formatter):
+    fun(_):
+      when state.pp_curr_depth > 1
+      | when state.pp_curr_depth < state.pp_max_boxes
+        | pp_enqueue(state, QueueElem(0, Pp_end(), 0))
+          set_size(state, #true)
+          set_size(state, #false)
+        state.pp_curr_depth := state.pp_curr_depth - 1
+
+  // Initialize pretty-printer.
+  fun pp_rinit(state :: formatter):
+    pp_clear_queue(state)
+    initialize_scan_stack(state.pp_scan_stack)
+    stack_clear(state.pp_format_stack)
+    stack_clear(state.pp_tbox_stack)
+    state.pp_current_indent := 0
+    state.pp_curr_depth := 0
+    state.pp_space_left := state.pp_margin
+    pp_open_sys_box(state)
+
+  // Flushing pretty-printer queue.
+  fun pp_flush_queue(state :: formatter, b):
+    while state.pp_curr_depth > 1:
+      pp_close_box(state)(#void)
+    state.pp_right_total := pp_infinity
+    advance_left(state)
+    when b | pp_output_newline(state)
+    pp_rinit(state)
+
+  // Procedures to format values and use boxes.
+  fun pp_print_as_size(state :: formatter, size, s):
+    when state.pp_curr_depth < state.pp_max_boxes
+    | enqueue_string_as(state, size, s)
+
+  fun pp_print_as(state): fun(isize): fun(s): pp_print_as_size(state, isize, s)
+  fun pp_print_string(state): fun(s :: String): pp_print_as(state)(s.length())(s)
+  fun pp_print_int(state): fun(i): pp_print_string(state)(to_string(i))
+  fun pp_print_float(state): fun(f): pp_print_string(state)(to_string(f))
+  fun pp_print_bool(state): fun(b): pp_print_string(state)(if b | "true" | "false")
+  fun pp_print_char(state): fun(c :: String): pp_print_as(state)(1)(c)
+
+  // Opening boxes.
+  fun pp_open_hbox(state): fun(_): pp_open_box_gen(state, 0, #'Pp_hbox)
+  fun pp_open_vbox(state): fun(indent): pp_open_box_gen(state, indent, #'Pp_vbox)
+  fun pp_open_hvbox(state): fun(indent): pp_open_box_gen(state, indent, #'Pp_hvbox)
+  fun pp_open_hovbox(state): fun(indent): pp_open_box_gen(state, indent, #'Pp_hovbox)
+  fun pp_open_box(state): fun(indent): pp_open_box_gen(state, indent, #'Pp_box)
+
+  // Printing queued text.
+  fun pp_print_newline(state :: formatter):
+    fun(_):
+      pp_flush_queue(state, #true)
+      state.pp_out_flush()
+  fun pp_print_flush(state :: formatter):
+    fun(_):
+      pp_flush_queue(state, #false)
+      state.pp_out_flush()
+
+  // To get a newline when one does not want to close the current box.
+  fun pp_force_newline(state :: formatter):
+    fun(_):
+      when state.pp_curr_depth < state.pp_max_boxes
+      | enqueue_advance(state, QueueElem(0, Pp_newline(), 0))
+
+  // To format something, only in case the line has just been broken.
+  fun pp_print_if_newline(state :: formatter):
+    fun(_):
+      when state.pp_curr_depth < state.pp_max_boxes
+      | enqueue_advance(state, QueueElem(0, Pp_if_newline(), 0))
+
+  // Generalized break hint that allows printing strings before/after
+  // same-line offset (width) or new-line offset.
+  fun pp_print_custom_break(state :: formatter, ~fits: fits, ~breaks: breaks):
+    let [before :: String, width, after :: String] = fits
+    when state.pp_curr_depth < state.pp_max_boxes
+    | let size = - state.pp_right_total
+      let token = Pp_break(fits, breaks)
+      let length = before.length() + width + after.length()
+      let elem = QueueElem(size, token, length)
+      scan_push(state, #true, elem)
+
+  // Printing break hints: if the line is broken then offset is added to the
+  // indentation of the current box, else width blanks are printed.
+  fun pp_print_break(state):
+    fun(width):
+      fun(offset):
+        pp_print_custom_break(state, ~fits: ["", width, ""], ~breaks: ["", offset, ""])
+
+  fun pp_print_space(state): fun(_): pp_print_break(state)(1)(0)
+  fun pp_print_cut(state): fun(_): pp_print_break(state)(0)(0)
+
+  // Tabulation boxes.
+  fun pp_open_tbox(state :: formatter):
+    fun(_):
+      state.pp_curr_depth := state.pp_curr_depth + 1
+      when state.pp_curr_depth < state.pp_max_boxes
+      | enqueue_advance(state, QueueElem(0, Pp_tbegin(Pp_tbox(PairList [])), 0))
+
+  fun pp_close_tbox(state :: formatter):
+    fun(_):
+      when state.pp_curr_depth > 1 && state.pp_curr_depth < state.pp_max_boxes
+      | enqueue_advance(state, QueueElem(0, Pp_tend(), 0))
+        state.pp_curr_depth := state.pp_curr_depth - 1
+
+  fun pp_print_tbreak(state :: formatter):
+    fun(width):
+      fun(offset):
+        when state.pp_curr_depth < state.pp_max_boxes
+        | let size = - state.pp_right_total
+          scan_push(state, #true, QueueElem(size, Pp_tbreak(width, offset), width))
+
+  fun pp_print_tab(state): fun(_): pp_print_tbreak(state)(0)(0)
+
+  fun pp_set_tab(state :: formatter):
+    fun(_):
+      when state.pp_curr_depth < state.pp_max_boxes
+      | enqueue_advance(state, QueueElem(0, Pp_stab(), 0))
+
+  // Procedures to control the pretty-printers.
+  fun pp_set_max_boxes(state :: formatter): fun(n): when n > 1 | state.pp_max_boxes := n
+  fun pp_get_max_boxes(state :: formatter): fun(_): state.pp_max_boxes
+  fun pp_over_max_boxes(state :: formatter): fun(_): state.pp_curr_depth == state.pp_max_boxes
+  fun pp_set_ellipsis_text(state :: formatter): fun(s): state.pp_ellipsis := s
+  fun pp_get_ellipsis_text(state :: formatter): fun(_): state.pp_ellipsis
+
+  // To set the margin of pretty-printer.
+  fun pp_limit(n): if n < pp_infinity | n | pp_infinity - 1
+
+  fun pp_set_min_space_left(state :: formatter, n):
+    when n >= 1
+    | let n = pp_limit(n)
+      state.pp_min_space_left := n
+      state.pp_max_indent := state.pp_margin - state.pp_min_space_left
+      pp_rinit(state)
+
+  // Initially, we have:
+  // pp_max_indent = pp_margin - pp_min_space_left, and
+  // pp_space_left = pp_margin.
+  fun pp_set_max_indent(state :: formatter):
+    fun(n):
+      when n > 1
+      | pp_set_min_space_left(state, state.pp_margin - n)
+
+  fun pp_get_max_indent(state :: formatter): fun(_): state.pp_max_indent
+
+  fun pp_set_margin(state :: formatter):
+    fun(n):
+      when n >= 1
+      | let n = pp_limit(n)
+        state.pp_margin := n
+        let new_max_indent:
+          if state.pp_max_indent <= state.pp_margin
+          | state.pp_max_indent
+          | // If possible maintain pp_min_space_left to its actual value,
+            // if this leads to a too small max_indent, take half of the
+            // new margin, if it is greater than 1.
+            math.max(math.max(state.pp_margin - state.pp_min_space_left,
+                              state.pp_margin div 2),
+                     1)
+        pp_set_max_indent(state)(new_max_indent)
+
+  fun pp_get_margin(state :: formatter): fun(_): state.pp_margin
+
+  // Defining specific formatters.
+  def blank_line = Rkt.#{string->immutable-string}(Rkt.#{make-string}(80, Rkt.#{string-ref}(" ", 0)))
+  fun display_blanks(state :: formatter, n):
+    when n > 0
+    | if n <= 80
+      | state.pp_out_string(blank_line, 0, n)
+      | state.pp_out_string(blank_line, 0, 80)
+        display_blanks(state, n - 80)
+
+  // Building a formatter given its basic output functions.
+  fun pp_make_formatter(f, g, h, i, j):
+    let pp_queue = queue_create()
+    let sys_tok = QueueElem(size_unknown, Pp_begin(0, #'Pp_hovbox), 0)
+    queue_add(pp_queue, sys_tok)
+    let scan_stack = stack_create()
+    initialize_scan_stack(scan_stack)
+    stack_push(ScanElem(1, sys_tok), scan_stack)
+    let pp_margin = 78
+    let pp_min_space_left = 10
+    formatter(scan_stack, stack_create(), stack_create(),
+              pp_margin, pp_min_space_left, pp_margin - pp_min_space_left,
+              pp_margin, 0, #true, 1, 1, 1, 1000000000000, ".",
+              f, g, h, i, j, pp_queue)
+
+  // Make a formatter with default functions to output spaces,
+  // indentation, and new lines.
+  fun make_formatter(output, flush):
+    let ppf :~ formatter = pp_make_formatter(output, flush, fun(): #void, fun(n): #void, fun(n): #void)
+    ppf.pp_out_newline := fun(): ppf.pp_out_string("\n", 0, 1)
+    ppf.pp_out_spaces := fun(n): display_blanks(ppf, n)
+    ppf.pp_out_indent := fun(n): display_blanks(ppf, n)
+    ppf
+
+  fun formatter_of_port(port):
+    make_formatter(fun(s, i, n): Rkt.#{write-string}(s, port(), i, i + n),
+                   fun(): Rkt.#{flush-output}(port()))
+
+  fun formatter_of_buffer(b):
+    make_formatter(fun(s, i, n): OCamlBuffer.add_substring(b)(s)(i)(n), fun(): #void)
+
+  // Predefined formatters: stdout, stderr and a string buffer.
+  def std_formatter = formatter_of_port(Rkt.#{current-output-port})
+  def err_formatter = formatter_of_port(Rkt.#{current-error-port})
+  def stdbuf = OCamlBuffer.create(#void)
+  def str_formatter = formatter_of_buffer(stdbuf)
+
+  fun flush_str_formatter(_):
+    pp_flush_queue(str_formatter, #false)
+    let s = OCamlBuffer.contents(stdbuf)
+    OCamlBuffer.reset(stdbuf)
+    s
+
+  // Basic functions on the standard formatter.
+  def print_string = pp_print_string(std_formatter)
+  def print_as = pp_print_as(std_formatter)
+  def print_int = pp_print_int(std_formatter)
+  def print_char = pp_print_char(std_formatter)
+  def print_break = pp_print_break(std_formatter)
+  def print_space = pp_print_space(std_formatter)
+  def print_cut = pp_print_cut(std_formatter)
+  def print_newline = pp_print_newline(std_formatter)
+  def print_flush = pp_print_flush(std_formatter)
+  def force_newline = pp_force_newline(std_formatter)
+  def open_box = pp_open_box(std_formatter)
+  def open_hbox = pp_open_hbox(std_formatter)
+  def open_vbox = pp_open_vbox(std_formatter)
+  def open_hvbox = pp_open_hvbox(std_formatter)
+  def open_hovbox = pp_open_hovbox(std_formatter)
+  def close_box = pp_close_box(std_formatter)
+  def set_margin = pp_set_margin(std_formatter)
+  def get_margin = pp_get_margin(std_formatter)
+  def set_max_indent = pp_set_max_indent(std_formatter)
+  def get_max_indent = pp_get_max_indent(std_formatter)
+  def set_max_boxes = pp_set_max_boxes(std_formatter)
+  def get_max_boxes = pp_get_max_boxes(std_formatter)
+
+  // fprintf and printf for the format strings HOL Light uses: text, %s,
+  // %d, %i, %c, %a (a printer and its argument), %% and the pretty-printing
+  // indications @[ @] @  @, @. @\n @@. Arguments are taken one at a time.
+  fun directive_count(fmt :: String):
+    fun loop(i, n):
+      cond
+      | i + 1 >= fmt.length(): n
+      | fmt.substring(i, i + 1) == "%":
+          let d = fmt.substring(i + 1, i + 2)
+          loop(i + 2, (if d == "%" | n | (if d == "a" | n + 2 | n + 1)))
+      | ~else: loop(i + 1, n)
+    loop(0, 0)
+
+  fun run_format(ppf :: formatter, fmt :: String, args :: List):
+    fun text(s): pp_print_string(ppf)(s)
+    fun loop(i, args :: List):
+      when i < fmt.length()
+      | let c = fmt.substring(i, i + 1)
+        let d = if i + 1 < fmt.length() | fmt.substring(i + 1, i + 2) | ""
+        cond
+        | c == "%" && d == "%":
+            text("%")
+            loop(i + 2, args)
+        | c == "%" && d == "a":
+            args[0](ppf)(args[1])
+            loop(i + 2, args.drop(2))
+        | c == "%":
+            let v = args[0]
+            text(if v is_a String | v | to_string(v))
+            loop(i + 2, args.drop(1))
+        | c == "@" && d == "[":
+            pp_open_box(ppf)(0)
+            loop(i + 2, args)
+        | c == "@" && d == "]":
+            pp_close_box(ppf)(#void)
+            loop(i + 2, args)
+        | c == "@" && d == " ":
+            pp_print_space(ppf)(#void)
+            loop(i + 2, args)
+        | c == "@" && d == ",":
+            pp_print_cut(ppf)(#void)
+            loop(i + 2, args)
+        | c == "@" && d == ".":
+            pp_print_newline(ppf)(#void)
+            loop(i + 2, args)
+        | c == "@" && d == "\n":
+            pp_force_newline(ppf)(#void)
+            loop(i + 2, args)
+        | c == "@" && d == "@":
+            text("@")
+            loop(i + 2, args)
+        | c == "\n":
+            pp_force_newline(ppf)(#void)
+            loop(i + 1, args)
+        | ~else:
+            text(c)
+            loop(i + 1, args)
+    loop(0, args)
+
+  fun fprintf(ppf):
+    fun(fmt :: String):
+      let n = directive_count(fmt)
+      fun collect(args :: List):
+        if args.length() == n
+        | run_format(ppf, fmt, args)
+        | fun(x): collect(args.add(x))
+      collect([])
+
+  fun printf(fmt): fprintf(std_formatter)(fmt)
+
+  fun asprintf(fmt :: String):
+    let b = OCamlBuffer.create(#void)
+    let ppf = formatter_of_buffer(b)
+    let n = directive_count(fmt)
+    fun collect(args :: List):
+      if args.length() == n
+      | run_format(ppf, fmt, args)
+        pp_flush_queue(ppf, #false)
+        OCamlBuffer.contents(b)
+      | fun(x): collect(args.add(x))
+    collect([])

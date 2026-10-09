@@ -44,9 +44,10 @@ these against the pinned HOL Light.
     enclosing block already binds.
 
 The output mirrors the checkout: `Library/card.ml` becomes
-`OUT/Library/card.rhm`. Where the port keeps a module elsewhere the output
-follows it (`preterm.ml` to `private/type_inference.rhm`, `printer.ml` to
-`private/theory_support.rhm`).
+`OUT/Library/card.rhm`, and `printer.ml` becomes `OUT/printer.rhm`, as in
+`rhombus/hol`. printer.ml's `include Format` imports and re-exports
+`private/format.rhm`'s `Format`, so later modules take `pp_print_string` and
+the rest from the printer, as in HOL Light.
 
 ## Translation
 
@@ -93,9 +94,6 @@ its own definition, the import is qualified (`IndTypes.list_INDUCT`).
 - Of 572 files, 569 parse. The three others are not HOL Light OCaml:
   `Mizarlight/pa_f.ml` is a camlp5 extension in revised syntax, and two
   `RichterHilbertAxiomGeometry` files are Mizar-style proof texts.
-- HOL Light's printer is not part of the port, so generated code that calls
-  printer functions (goal printing in `tactics.ml`, for example) names
-  functions the port does not define.
 - Constructor arities come from the declarations of the module and of the
   modules loaded before it; a module that redeclares a constructor name
   (compute.ml's `Const`) uses its own arity throughout.

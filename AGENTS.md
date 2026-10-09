@@ -13,10 +13,11 @@ separately; generated files alone do not establish a completed port.
 
 Theory quotations are HOL Light text written as `@hol|{...}|`. They are read
 by the direct translation of HOL Light's `parser.ml` (`rhombus/hol/parser.rhm`)
-and `preterm.ml` type inference (`private/type_inference.rhm`), at run time and
+and `preterm.ml` type inference (`rhombus/hol/preterm.rhm`), at run time and
 against the theory tables of that moment, exactly as HOL Light's quotation
 expander calls `parse_term` / `parse_type`. Copy quotation text from the pinned
-HOL Light sources unchanged. Do not port HOL Light's printer. Replay every
+HOL Light sources unchanged. The printer (`printer.ml`, the goal printers of
+`tactics.ml`) is ported too, on a translation of OCaml's `Format`. Replay every
 proof in the Rhombus kernel; never import recorded theorems as axioms.
 String patterns (`define_type`, `INTRO_TAC` and the like) go through the same
 `parser.rhm` lexer and combinators as upstream; keep no second parser.
@@ -27,7 +28,9 @@ The primary reference is upstream HOL Light. Preserve module order, logical
 boundaries, derived-rule structure, and operational behavior unless Rhombus
 requires a local mechanical adaptation.
 
-Keep the HOL Light-corresponding modules directly under `rhombus/hol/`.
+Keep the HOL Light-corresponding modules directly under `rhombus/hol/`, one
+file per HOL Light file with the same name and directory (`preterm.ml` is
+`rhombus/hol/preterm.rhm`), as `tools/ml2rhm` lays out its output.
 Mechanical OCaml-compatibility helpers belong under `rhombus/hol/private/`
 and must not become an alternative proof architecture.
 

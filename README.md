@@ -22,16 +22,17 @@ rhombus/hol/
   ind_defs.rhm
   class.rhm
   ... standard theories through define.rhm
+  printer.rhm             printer.ml (character classes, parse status
+                          tables, interface state, the printer)
+  preterm.rhm             preterm.ml (preterms, type inference)
   parser.rhm              parser.ml (lexer, type and term parsers)
   lib.rhm                 lib.ml (list utilities, finite partial functions)
   private/
     ocaml.rhm             OCaml runtime: exceptions, options, polymorphic
-                          compare, Hashtbl.hash, int_of_string, Random
-    theory_support.rhm    printer.ml pieces: character classes, reserved
-                          words, binder/prefix/infix tables, interface
-                          state, diagnostic printing
+                          compare, Hashtbl.hash, int_of_string, Random,
+                          Stdlib functions under their OCaml names
+    format.rhm            OCaml's Format (the pretty-printing engine)
     hol_quote.rhm         `@hol|{...}|` quotation macro
-    type_inference.rhm    preterm.ml (type inference)
     declarations.rhm      variant and record declarations
     proof_syntax.rhm      then_tac / then_list / or_tac / then_conv / or_conv
   tests/
@@ -39,7 +40,7 @@ rhombus/hol/
 ```
 
 The files directly under `rhombus/hol/` correspond to HOL Light modules:
-`lib.rhm` and the engine and theory modules. `private/` contains mechanical support needed to reproduce OCaml/HOL
+one file per HOL Light file, with the same name. `private/` contains mechanical support needed to reproduce OCaml/HOL
 Light behavior; it is not part of the intended public API.
 
 The source-to-source port includes the engine sequence:
@@ -69,7 +70,10 @@ when it is evaluated, by the direct translation of `parser.ml` and
 theories loaded at that moment; the result is built with the public kernel
 constructors and every proof is replayed. The raw `|{ }|` text keeps
 backslashes and braces literal, so quotations are copied from the HOL Light
-sources unchanged. HOL Light's printer is not ported.
+sources unchanged. Terms, types, theorems and goals print as in HOL Light:
+`printer.rhm` is a translation of `printer.ml` on a translation of OCaml's
+`Format`, checked against HOL Light's output for every theorem
+(`tests/golden/printer.rhm`).
 
 ### Checking quotations
 

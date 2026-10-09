@@ -1,15 +1,27 @@
 #lang rhombus
-// (c) University of Cambridge 1998; John Harrison 1998-2007.
-// Direct translation of HOL Light itab.ml.
+// Direct translation of the pinned HOL Light itab.ml.
+
+// =========================================================================
+// Intuitionistic theorem prover (complete for propositional fragment).
+//
+//       John Harrison, University of Cambridge Computer Laboratory
+//
+//            (c) Copyright, University of Cambridge 1998
+//              (c) Copyright, John Harrison 1998-2007
+// =========================================================================
+
 import:
   "lib.rhm" open
   "private/ocaml.rhm" open
-import: "fusion.rhm" open
-import: "basics.rhm" open
-import: "equal.rhm" open
-import: "bool.rhm" open
-import: "drule.rhm" open
-import: "tactics.rhm" open
+  "fusion.rhm" open
+  "basics.rhm" open
+  "equal.rhm" open
+  "bool.rhm" open
+  "drule.rhm" open
+  "tactics.rhm" open
+  "private/theory_support.rhm" open:
+    only:
+      string_of_term
 
 export:
   UNIFY_ACCEPT_TAC
@@ -17,94 +29,111 @@ export:
   ITAUT_TAC
   ITAUT
 
+// -------------------------------------------------------------------------
+// Accept a theorem modulo unification.
+// -------------------------------------------------------------------------
+
 fun UNIFY_ACCEPT_TAC(mvs):
   fun(th):
-    fun([_asl, w]):
+    fun([asl, w]):
       let insts = term_unify(mvs)(concl(th))(w)
-      let th1 = INSTANTIATE(insts)(th)
-      [[PairList [], insts],PairList [], fun(i): fun(PairList []): INSTANTIATE(i)(th1)]
+      [[PairList [], insts], PairList [],
+       block:
+         let th_prime = INSTANTIATE(insts)(th)
+         fun(i): fun(PairList []): INSTANTIATE(i)(th_prime)]
 
-fun UNIFY_REFL_TAC([asl, w] as g):
-  let [wl, wr] = dest_eq(w)
-  if is_var(wr)
-  | if vfree_in(wr)(wl)
-    | failwith("UNIFY_REFL_TAC: occurs check")
-    | UNIFY_ACCEPT_TAC(PairList [wr])(REFL(wl))(g)
-  | let [constr, rargs] = strip_comb(wr)
+// REFL version of UNIFY_ACCEPT_TAC.
+// The conclusion ust be `expr = x` where x is a meta variable.
+// It can be `expr = f x y z` where f is a meta variable as well.
+// (string_of_term is the port's diagnostic stub, not HOL Light's printer.)
+fun UNIFY_REFL_TAC([asl, w]):
+  let [w_lhs, w_rhs] = dest_eq(w)
+  if is_var(w_rhs)
+  | if vfree_in(w_rhs)(w_lhs)
+    | failwith("UNIFY_REFL_TAC: failed: `" +& string_of_term(w) +& "`")
+    | UNIFY_ACCEPT_TAC(PairList [w_rhs])(REFL(w_lhs))([asl, w])
+  | let [constr, rargs] = strip_comb(w_rhs)
     if !is_var(constr)
     | failwith("UNIFY_REFL_TAC: not variable")
-    | if vfree_in(constr)(wl)
-      | failwith("UNIFY_REFL_TAC: occurs check")
-      | let rargs_vars = map(fun(v): if is_var(v) | v | genvar(type_of(v)))(rargs)
-        let f = list_mk_abs([rargs_vars, wl])
-        let the_goal = mk_eq([wl, list_mk_comb([f, rargs])])
-        let th = prove([the_goal, THEN(CONV_TAC(RAND_CONV(DEPTH_CONV(BETA_CONV))))(REFL_TAC)])
-        UNIFY_ACCEPT_TAC(PairList [constr])(th)(g)
+    | if vfree_in(constr)(w_lhs)
+      | failwith("UNIFY_REFL_TAC: failed: `" +& string_of_term(w) +& "`")
+      | // replace non-variable arguments of the RHS function with temporary
+        // variables.
+        let rargs_vars:
+          map(fun(v):
+                if is_var(v)
+                | v
+                | print("UNIFY_REFL_TAC: warning: this isn't var: " +& string_of_term(v) +& "\n")
+                  genvar(type_of(v)))(rargs)
+        let f = list_mk_abs([rargs_vars, w_lhs])
+        let the_goal = mk_eq([w_lhs, list_mk_comb([f, rargs])])
+        let th:
+          prove([the_goal,
+                 CONV_TAC(RAND_CONV(DEPTH_CONV(BETA_CONV))) then_tac \
+                 REFL_TAC])
+        UNIFY_ACCEPT_TAC(PairList [constr])(th)([asl, w])
 
-fun CONJUNCTS_THEN_PRIME(ttac):
-  fun(cth): THEN(ttac(CONJUNCT1(cth)))(ttac(CONJUNCT2(cth)))
-fun IMPLICATE(t):
-  let th1 = AP_THM(NOT_DEF)(dest_neg(t))
-  CONV_RULE(RAND_CONV(BETA_CONV))(th1)
+// -------------------------------------------------------------------------
+// The actual prover, as a tactic.
+// -------------------------------------------------------------------------
 
-def RIGHT_REVERSIBLE_TAC = FIRST(PairList [CONJ_TAC,GEN_TAC,DISCH_TAC,EQ_TAC])
-
-fun LEFT_REVERSIBLE_TAC(th):
-  fun(gl):
-    tryfind(
-      fun(ttac): ttac(th)(gl)
-    )(PairList [
-      CONJUNCTS_THEN_PRIME(ASSUME_TAC),
-      DISJ_CASES_TAC,
-      CHOOSE_TAC,
-      fun(x): ASSUME_TAC(EQ_MP(IMPLICATE(concl(x)))(x)),
-      fun(x):
-        let [a, b] = EQ_IMP_RULE(x)
-        CONJUNCTS_THEN_PRIME(MP_TAC)(CONJ(a)(b))
-    ])
-
-fun ITAUT_CORE(mvs):
-  fun(n):
+def ITAUT_TAC:
+  let CONJUNCTS_THEN_prime:
+    fun(ttac):
+      fun(cth):
+        ttac(CONJUNCT1(cth)) then_tac ttac(CONJUNCT2(cth))
+  let IMPLICATE:
+    fun(t):
+      let th1 = AP_THM(NOT_DEF)(dest_neg(t))
+      CONV_RULE(RAND_CONV(BETA_CONV))(th1)
+  let RIGHT_REVERSIBLE_TAC:
+    FIRST(PairList [CONJ_TAC,           // and
+                    GEN_TAC,            // forall
+                    DISCH_TAC,          // implies; not
+                    EQ_TAC])            // iff
+  let LEFT_REVERSIBLE_TAC:
+    fun(th):
+      fun(gl):
+        tryfind(fun(ttac): ttac(th)(gl))(
+          PairList [CONJUNCTS_THEN_prime(ASSUME_TAC),                          // and
+                    DISJ_CASES_TAC,                                           // or
+                    CHOOSE_TAC,                                               // exists
+                    fun(th): ASSUME_TAC(EQ_MP(IMPLICATE(concl(th)))(th)),     // not
+                    o(o(CONJUNCTS_THEN_prime(MP_TAC))(uncurry(CONJ)))(EQ_IMP_RULE)]) // iff
+  fun ITAUT_TAC(mvs):
+    fun(n):
+      fun(gl):
+        if n <= 0
+        | failwith("ITAUT_TAC: Too deep")
+        | ((FIRST_ASSUM(UNIFY_ACCEPT_TAC(mvs))) or_tac \
+             (ACCEPT_TAC(TRUTH)) or_tac \
+             (FIRST_ASSUM(CONTR_TAC)) or_tac \
+             (RIGHT_REVERSIBLE_TAC then_tac TRY(ITAUT_TAC(mvs)(n))) or_tac \
+             (FIRST_X_ASSUM(LEFT_REVERSIBLE_TAC) then_tac TRY(ITAUT_TAC(mvs)(n))) or_tac \
+             (FIRST_X_ASSUM(fun(th):
+                              ASSUME_TAC(th) then_tac \
+                                (block:
+                                   let gv = genvar(type_of(fst(dest_forall(concl(th)))))
+                                   META_SPEC_TAC(gv)(th) then_tac \
+                                     ITAUT_TAC(PairList.cons(gv, mvs))(n - 2) then_tac NO_TAC))) or_tac \
+             (DISJ1_TAC then_tac ITAUT_TAC(mvs)(n) then_tac NO_TAC) or_tac \
+             (DISJ2_TAC then_tac ITAUT_TAC(mvs)(n) then_tac NO_TAC) or_tac \
+             (fun(gl):
+                let gv = genvar(type_of(fst(dest_exists(snd(gl)))))
+                (X_META_EXISTS_TAC(gv) then_tac \
+                   ITAUT_TAC(PairList.cons(gv, mvs))(n - 2) then_tac NO_TAC)(gl)) or_tac \
+             (FIRST_ASSUM(fun(th):
+                            SUBGOAL_THEN(fst(dest_imp(concl(th))))(
+                              fun(ath): ASSUME_TAC(MP(th)(ath))) then_tac \
+                              ITAUT_TAC(mvs)(n - 1) then_tac NO_TAC)))(gl)
+  fun ITAUT_ITERDEEP_TAC(n):
     fun(gl):
-      if n <= 0
-      | failwith("ITAUT_TAC: Too deep")
-      | ORELSE(
-          FIRST_ASSUM(UNIFY_ACCEPT_TAC(mvs)))(
-        ORELSE(
-          ACCEPT_TAC(TRUTH))(
-        ORELSE(
-          FIRST_ASSUM(CONTR_TAC))(
-        ORELSE(
-          THEN(RIGHT_REVERSIBLE_TAC)(TRY(ITAUT_CORE(mvs)(n))))(
-        ORELSE(
-          THEN(FIRST_X_ASSUM(LEFT_REVERSIBLE_TAC))(TRY(ITAUT_CORE(mvs)(n))))(
-        ORELSE(
-          FIRST_X_ASSUM(
-            fun(th):
-              THEN(ASSUME_TAC(th))(
-                fun(g):
-                  let gv = genvar(type_of(fst(dest_forall(concl(th)))))
-                  THEN(META_SPEC_TAC(gv)(th))(
-                    THEN(ITAUT_CORE(PairList.cons(gv,mvs))(n-2))(NO_TAC))(g))))(
-        ORELSE(
-          THEN(DISJ1_TAC)(THEN(ITAUT_CORE(mvs)(n))(NO_TAC)))(
-        ORELSE(
-          THEN(DISJ2_TAC)(THEN(ITAUT_CORE(mvs)(n))(NO_TAC)))(
-        ORELSE(
-          fun([_, w] as g):
-            let gv = genvar(type_of(fst(dest_exists(w))))
-            THEN(X_META_EXISTS_TAC(gv))(
-              THEN(ITAUT_CORE(PairList.cons(gv,mvs))(n-2))(NO_TAC))(g))(
-          FIRST_ASSUM(
-            fun(th):
-              let ant = fst(dest_imp(concl(th)))
-              THEN(SUBGOAL_THEN(ant)(fun(ath): ASSUME_TAC(MP(th)(ath))))(
-                THEN(ITAUT_CORE(mvs)(n-1))(NO_TAC))))))))))))(gl)
+      remark("Searching with limit " +& string_of_int(n))
+      ((ITAUT_TAC(PairList [])(n) then_tac NO_TAC) or_tac ITAUT_ITERDEEP_TAC(n + 1))(gl)
+  ITAUT_ITERDEEP_TAC(0)
 
-fun ITAUT_ITERDEEP_TAC(n):
-  fun(gl):
-    ORELSE(THEN(ITAUT_CORE(PairList [])(n))(NO_TAC))(
-      ITAUT_ITERDEEP_TAC(n+1))(gl)
+// -------------------------------------------------------------------------
+// Alternative interface.
+// -------------------------------------------------------------------------
 
-def ITAUT_TAC = ITAUT_ITERDEEP_TAC(0)
 fun ITAUT(tm): prove([tm, ITAUT_TAC])

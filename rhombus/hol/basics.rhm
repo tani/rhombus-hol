@@ -1,7 +1,7 @@
 #lang rhombus
 // (c) University of Cambridge 1998; John Harrison 1998-2007.
 // (c) Andrea Gabrielli, Marco Maggesi 2017-2018. See ../LICENSE.
-// Structural translation of pinned basics.ml; syntax remains runtime-based.
+// Direct translation of the pinned HOL Light basics.ml.
 import:
   "lib.rhm" open
   "private/ocaml.rhm" open
@@ -82,17 +82,32 @@ export:
   find_path
   follow_path
   atoms
-def mutable gcounter = 0
-fun genvar(ty):
-  let count = gcounter
-  gcounter := count+1
-  mk_var(["_" +& to_string(count), ty])
+
+// -------------------------------------------------------------------------
+// Create probably-fresh variable
+// -------------------------------------------------------------------------
+
+def genvar:
+  let gcounter = Box(0)
+  fun(ty):
+    let count = gcounter.value
+    gcounter.value := count + 1
+    mk_var(["_" +& string_of_int(count), ty])
+
+// -------------------------------------------------------------------------
+// Convenient functions for manipulating types.
+// -------------------------------------------------------------------------
+
 fun dest_fun_ty(ty):
   match ty
-  | Tyapp("fun",PairList [t1,t2]): [t1, t2]
+  | Tyapp("fun", PairList [ty1, ty2]): [ty1, ty2]
   | _: failwith("dest_fun_ty")
+
 fun occurs_in(ty):
-  fun(bigty): bigty == ty || (is_type(bigty) && exists(occurs_in(ty))(snd(dest_type(bigty))))
+  fun(bigty):
+    bigty == ty \
+      || is_type(bigty) && exists(occurs_in(ty))(snd(dest_type(bigty)))
+
 fun tysubst(alist):
   fun(ty):
     try:
@@ -100,98 +115,152 @@ fun tysubst(alist):
       ~catch Failure(_):
         if is_vartype(ty)
         | ty
-        | let [con, vars] = dest_type(ty)
-          mk_type([con, map(tysubst(alist))(vars)])
+        | let [tycon, tyvars] = dest_type(ty)
+          mk_type([tycon, map(tysubst(alist))(tyvars)])
+
+// -------------------------------------------------------------------------
+// A bit more syntax.
+// -------------------------------------------------------------------------
+
 fun bndvar(tm):
   try:
     fst(dest_abs(tm))
     ~catch Failure(_): failwith("bndvar: Not an abstraction")
+
 fun body(tm):
   try:
     snd(dest_abs(tm))
     ~catch Failure(_): failwith("body: Not an abstraction")
+
 fun list_mk_comb([h, t]): rev_itlist(C(curry(mk_comb)))(t)(h)
+
 fun list_mk_abs([vs, bod]): itlist(curry(mk_abs))(vs)(bod)
+
 def strip_comb = rev_splitlist(dest_comb)
+
 def strip_abs = splitlist(dest_abs)
+
+// -------------------------------------------------------------------------
+// Generic syntax to deal with some binary operators.
+//
+// Note that "mk_binary" only works for monomorphic functions.
+// -------------------------------------------------------------------------
+
 fun is_binary(s):
   fun(tm):
     match tm
-    | Comb(Comb(Const(s1,_),_),_): s1 == s
+    | Comb(Comb(Const(s_prime, _), _), _): s_prime == s
     | _: #false
+
 fun dest_binary(s):
   fun(tm):
     match tm
-    | Comb(Comb(Const(s1,_),l),r): (if s1 == s | [l, r] | failwith("dest_binary"))
+    | Comb(Comb(Const(s_prime, _), l), r) when s_prime == s: [l, r]
     | _: failwith("dest_binary")
+
 fun mk_binary(s):
   let c = mk_const([s, PairList []])
   fun([l, r]):
     try:
       mk_comb([mk_comb([c, l]), r])
       ~catch Failure(_): failwith("mk_binary")
+
+// -------------------------------------------------------------------------
+// Produces a sequence of variants, considering previous inventions.
+// -------------------------------------------------------------------------
+
 fun variants(av):
   fun(vs):
     if vs == PairList []
     | PairList []
     | let vh = variant(av)(hd(vs))
-      PairList.cons(vh,variants(PairList.cons(vh,av))(tl(vs)))
-fun variables(tm):
-  fun vars(acc,tm):
-    cond
-    | is_var(tm): insert(tm)(acc)
-    | is_const(tm): acc
-    | is_abs(tm):
-        let [v, bod] = dest_abs(tm)
-        vars(insert(v)(acc),bod)
-    | ~else:
-        let [l, r] = dest_comb(tm)
-        vars(vars(acc,l),r)
-  vars(PairList [],tm)
-fun subst(ilist):
-  fun ssubst(ilist,tm):
-    if ilist == PairList []
-    | tm
-    | try:
-        fst(find(o(aconv(tm))(snd))(ilist))
-        ~catch Failure(_):
-          match tm
-          | Comb(f,x):
-              let f1 = ssubst(ilist,f)
-              let x1 = ssubst(ilist,x)
-              if f1 === f && x1 === x | tm | mk_comb([f1, x1])
-          | Abs(v,bod):
-              let ilist1 = filter(fun(p): !vfree_in(v)(snd(p)))(ilist)
-              mk_abs([v, ssubst(ilist1,bod)])
-          | _: tm
-  let theta = filter(fun([s, t]): compare(s)(t) != 0)(ilist)
-  if theta == PairList []
-  | I
-  | let [ts, xs] = unzip(theta)
+      PairList.cons(vh, variants(PairList.cons(vh, av))(tl(vs)))
+
+// -------------------------------------------------------------------------
+// Gets all variables (free and/or bound) in a term.
+// -------------------------------------------------------------------------
+
+def variables:
+  fun vars([acc, tm]):
+    if is_var(tm)
+    | insert(tm)(acc)
+    | if is_const(tm)
+      | acc
+      | if is_abs(tm)
+        | let [v, bod] = dest_abs(tm)
+          vars([insert(v)(acc), bod])
+        | let [l, r] = dest_comb(tm)
+          vars([vars([acc, l]), r])
+  fun(tm): vars([PairList [], tm])
+
+// -------------------------------------------------------------------------
+// General substitution (for any free expression).
+// -------------------------------------------------------------------------
+
+def subst:
+  fun ssubst(ilist):
     fun(tm):
-      let gs = variants(variables(tm))(map(o(genvar)(type_of))(xs))
-      let tm1 = ssubst(zip(gs)(xs),tm)
-      if tm1 === tm | tm | vsubst(zip(ts)(gs))(tm1)
+      if ilist == PairList []
+      | tm
+      | try:
+          fst(find(o(aconv(tm))(snd))(ilist))
+          ~catch Failure(_):
+            match tm
+            | Comb(f, x):
+                let f_prime = ssubst(ilist)(f)
+                let x_prime = ssubst(ilist)(x)
+                if f_prime === f && x_prime === x | tm | mk_comb([f_prime, x_prime])
+            | Abs(v, bod):
+                let ilist_prime = filter(fun(p): !vfree_in(v)(snd(p)))(ilist)
+                mk_abs([v, ssubst(ilist_prime)(bod)])
+            | _: tm
+  fun(ilist):
+    let theta = filter(fun([s, t]): compare(s)(t) != 0)(ilist)
+    if theta == PairList []
+    | fun(tm): tm
+    | let [ts, xs] = unzip(theta)
+      fun(tm):
+        let gs = variants(variables(tm))(map(o(genvar)(type_of))(xs))
+        let tm_prime = ssubst(zip(gs)(xs))(tm)
+        if tm_prime === tm | tm | vsubst(zip(ts)(gs))(tm_prime)
+
+// -------------------------------------------------------------------------
+// Alpha conversion term operation.
+// -------------------------------------------------------------------------
+
 fun alpha(v):
   fun(tm):
     let [v0, bod]:
       try:
         dest_abs(tm)
         ~catch Failure(_): failwith("alpha: Not an abstraction")
-    cond
-    | v == v0: tm
-    | type_of(v) == type_of(v0) && !vfree_in(v)(bod): mk_abs([v, vsubst(PairList [[v, v0]])(bod)])
-    | ~else: failwith("alpha: Invalid new variable")
+    if v == v0
+    | tm
+    | if type_of(v) == type_of(v0) && !vfree_in(v)(bod)
+      | mk_abs([v, vsubst(PairList [[v, v0]])(bod)])
+      | failwith("alpha: Invalid new variable")
+
+// -------------------------------------------------------------------------
+// Type matching.
+// -------------------------------------------------------------------------
+
 fun type_match(vty):
   fun(cty):
     fun(sofar):
       if is_vartype(vty)
       | try:
           if rev_assoc(vty)(sofar) == cty | sofar | failwith("type_match")
-          ~catch Failure("find"): PairList.cons([cty, vty],sofar)
+          ~catch Failure("find"): PairList.cons([cty, vty], sofar)
       | let [vop, vargs] = dest_type(vty)
         let [cop, cargs] = dest_type(cty)
-        if vop == cop | itlist2(type_match)(vargs)(cargs)(sofar) | failwith("type_match")
+        if vop == cop
+        | itlist2(type_match)(vargs)(cargs)(sofar)
+        | failwith("type_match")
+
+// -------------------------------------------------------------------------
+// Conventional matching version of mk_const (but with a sanity test).
+// -------------------------------------------------------------------------
+
 fun mk_mconst([c, ty]):
   try:
     let uty = get_const_type(c)
@@ -199,102 +268,163 @@ fun mk_mconst([c, ty]):
     let con = mk_const([c, mat])
     if type_of(con) == ty | con | fail()
     ~catch Failure(_): failwith("mk_const: generic type cannot be instantiated")
-fun mk_icomb([t1, t2]):
-  let ["fun", PairList [ty,_]] = dest_type(type_of(t1))
-  let ti = type_match(ty)(type_of(t2))(PairList [])
-  mk_comb([inst(ti)(t1), t2])
+
+// -------------------------------------------------------------------------
+// Like mk_comb, but instantiates type variables in rator if necessary.
+// -------------------------------------------------------------------------
+
+fun mk_icomb([tm1, tm2]):
+  let ["fun", PairList [ty, _]] = dest_type(type_of(tm1))
+  let tyins = type_match(ty)(type_of(tm2))(PairList [])
+  mk_comb([inst(tyins)(tm1), tm2])
+
+// -------------------------------------------------------------------------
+// Instantiates types for constant c and iteratively makes combination.
+// -------------------------------------------------------------------------
+
 fun list_mk_icomb(cname):
   fun(args):
     let [atys, _] = nsplit(dest_fun_ty)(args)(get_const_type(cname))
-    let ti = itlist2(fun(g): fun(a): type_match(g)(type_of(a)))(atys)(args)(PairList [])
-    list_mk_comb([mk_const([cname, ti]), args])
+    let tyin = itlist2(fun(g): fun(a): type_match(g)(type_of(a)))(atys)(args)(PairList [])
+    list_mk_comb([mk_const([cname, tyin]), args])
+
+// -------------------------------------------------------------------------
+// Free variables in assumption list and conclusion of a theorem.
+// -------------------------------------------------------------------------
+
 fun thm_frees(th):
   let [asl, c] = dest_thm(th)
   itlist(o(union)(frees))(asl)(frees(c))
-fun free_in(t1):
-  fun(t2):
-    cond
-    | aconv(t1)(t2): #true
-    | is_comb(t2):
-        let [l, r] = dest_comb(t2)
-        free_in(t1)(l) || free_in(t1)(r)
-    | is_abs(t2):
-        let [v, bod] = dest_abs(t2)
-        !vfree_in(v)(t1) && free_in(t1)(bod)
-    | ~else: #false
+
+// -------------------------------------------------------------------------
+// Is one term free in another?
+// -------------------------------------------------------------------------
+
+fun free_in(tm1):
+  fun(tm2):
+    if aconv(tm1)(tm2)
+    | #true
+    | if is_comb(tm2)
+      | let [l, r] = dest_comb(tm2)
+        free_in(tm1)(l) || free_in(tm1)(r)
+      | if is_abs(tm2)
+        | let [bv, bod] = dest_abs(tm2)
+          !vfree_in(bv)(tm1) && free_in(tm1)(bod)
+        | #false
+
+// -------------------------------------------------------------------------
+// Searching for terms.
+// -------------------------------------------------------------------------
+
 fun find_term(p):
   fun(tm):
-    cond
-    | p(tm): tm
-    | is_abs(tm): find_term(p)(body(tm))
-    | is_comb(tm):
-        let [l, r] = dest_comb(tm)
-        try:
-          find_term(p)(l)
-          ~catch Failure(_): find_term(p)(r)
-    | ~else: failwith("find_term")
-fun find_terms(p):
-  fun accum(tl,p,tm):
-    let tl1 = if p(tm) | insert(tm)(tl) | tl
-    cond
-    | is_abs(tm): accum(tl1,p,body(tm))
-    | is_comb(tm): accum(accum(tl1,p,rator(tm)),p,rand(tm))
-    | ~else: tl1
-  fun(tm): accum(PairList [],p,tm)
+    if p(tm)
+    | tm
+    | if is_abs(tm)
+      | find_term(p)(body(tm))
+      | if is_comb(tm)
+        | let [l, r] = dest_comb(tm)
+          try:
+            find_term(p)(l)
+            ~catch Failure(_): find_term(p)(r)
+        | failwith("find_term")
+
+def find_terms:
+  fun accum(tl):
+    fun(p):
+      fun(tm):
+        let tl_prime = if p(tm) | insert(tm)(tl) | tl
+        if is_abs(tm)
+        | accum(tl_prime)(p)(body(tm))
+        | if is_comb(tm)
+          | accum(accum(tl_prime)(p)(rator(tm)))(p)(rand(tm))
+          | tl_prime
+  accum(PairList [])
+
+// -------------------------------------------------------------------------
+// General syntax for binders.
+//
+// NB! The "mk_binder" function expects polytype "A", which is the domain.
+// -------------------------------------------------------------------------
+
 fun is_binder(s):
   fun(tm):
     match tm
-    | Comb(Const(s1,_),Abs(_,_)): s1 == s
+    | Comb(Const(s_prime, _), Abs(_, _)): s_prime == s
     | _: #false
+
 fun dest_binder(s):
   fun(tm):
     match tm
-    | Comb(Const(s1,_),Abs(x,t)): (if s1 == s | [x, t] | failwith("dest_binder"))
+    | Comb(Const(s_prime, _), Abs(x, t)) when s_prime == s: [x, t]
     | _: failwith("dest_binder")
+
 fun mk_binder(op):
   let c = mk_const([op, PairList []])
   fun([v, tm]): mk_comb([inst(PairList [[type_of(v), aty]])(c), mk_abs([v, tm])])
+
+// -------------------------------------------------------------------------
+// Syntax for binary operators.
+// -------------------------------------------------------------------------
+
 fun is_binop(op):
   fun(tm):
     match tm
-    | Comb(Comb(op1,_),_): op1 == op
+    | Comb(Comb(op_prime, _), _): op_prime == op
     | _: #false
+
 fun dest_binop(op):
   fun(tm):
     match tm
-    | Comb(Comb(op1,l),r): (if op1 == op | [l, r] | failwith("dest_binop"))
+    | Comb(Comb(op_prime, l), r) when op_prime == op: [l, r]
     | _: failwith("dest_binop")
+
 fun mk_binop(op):
   fun(tm1):
     let f = mk_comb([op, tm1])
     fun(tm2): mk_comb([f, tm2])
+
 fun list_mk_binop(op): end_itlist(mk_binop(op))
+
 fun binops(op): striplist(dest_binop(op))
+
+// -------------------------------------------------------------------------
+// Some common special cases
+// -------------------------------------------------------------------------
+
 def is_conj = is_binary("/\\")
 def dest_conj = dest_binary("/\\")
 def conjuncts = striplist(dest_conj)
+
 def is_imp = is_binary("==>")
 def dest_imp = dest_binary("==>")
+
 def is_forall = is_binder("!")
 def dest_forall = dest_binder("!")
 def strip_forall = splitlist(dest_forall)
+
 def is_exists = is_binder("?")
 def dest_exists = dest_binder("?")
 def strip_exists = splitlist(dest_exists)
+
 def is_disj = is_binary("\\/")
 def dest_disj = dest_binary("\\/")
 def disjuncts = striplist(dest_disj)
+
 fun is_neg(tm):
   try:
     fst(dest_const(rator(tm))) == "~"
     ~catch Failure(_): #false
+
 fun dest_neg(tm):
   try:
     let [n, p] = dest_comb(tm)
     if fst(dest_const(n)) == "~" | p | fail()
     ~catch Failure(_): failwith("dest_neg")
+
 def is_uexists = is_binder("?!")
 def dest_uexists = dest_binder("?!")
+
 def dest_cons = dest_binary("CONS")
 def is_cons = is_binary("CONS")
 fun dest_list(tm):
@@ -303,53 +433,83 @@ fun dest_list(tm):
     if fst(dest_const(nil)) == "NIL" | tms | fail()
     ~catch Failure(_): failwith("dest_list")
 def is_list = can(dest_list)
-fun dest_numeral(tm):
+
+// -------------------------------------------------------------------------
+// Syntax for numerals.
+// -------------------------------------------------------------------------
+
+def dest_numeral:
   fun dest_num(tm):
-    let zero:
-      try:
-        fst(dest_const(tm)) == "_0"
-        ~catch Failure(_): #false
-    if zero
-    | 0
+    if (try:
+          fst(dest_const(tm)) == "_0"
+          ~catch Failure(_): #false)
+    | num_0
     | let [l, r] = dest_comb(tm)
-      let n = 2*dest_num(r)
+      let n = num_2 * dest_num(r)
       let cn = fst(dest_const(l))
-      cond
-      | cn == "BIT0": n
-      | cn == "BIT1": n+1
-      | ~else: fail()
-  try:
-    let [l, r] = dest_comb(tm)
-    if fst(dest_const(l)) == "NUMERAL" | dest_num(r) | fail()
-    ~catch Failure(_): failwith("dest_numeral")
-fun dest_gabs(tm):
+      if cn == "BIT0"
+      | n
+      | if cn == "BIT1"
+        | n + num_1
+        | fail()
+  fun(tm):
+    try:
+      let [l, r] = dest_comb(tm)
+      if fst(dest_const(l)) == "NUMERAL" | dest_num(r) | fail()
+      ~catch Failure(_): failwith("dest_numeral")
+
+// -------------------------------------------------------------------------
+// Syntax for generalized abstractions.
+//
+// These are here because they are used by the preterm->term translator;
+// preterms regard generalized abstractions as an atomic notion. This is
+// slightly unclean --- for example we need locally some operations on
+// universal quantifiers --- but probably simplest. It has to go somewhere!
+// -------------------------------------------------------------------------
+
+def dest_gabs:
   let dest_geq = dest_binary("GEQ")
-  try:
-    if is_abs(tm)
-    | dest_abs(tm)
-    | let [l, r] = dest_comb(tm)
-      if fst(dest_const(l)) != "GABS"
-      | fail()
-      | let [ltm, rtm] = dest_geq(snd(strip_forall(body(r))))
-        [rand(ltm), rtm]
-    ~catch Failure(_): failwith("dest_gabs: Not a generalized abstraction")
+  fun(tm):
+    try:
+      if is_abs(tm)
+      | dest_abs(tm)
+      | let [l, r] = dest_comb(tm)
+        if !(fst(dest_const(l)) == "GABS")
+        | fail()
+        | let [ltm, rtm] = dest_geq(snd(strip_forall(body(r))))
+          [rand(ltm), rtm]
+      ~catch Failure(_): failwith("dest_gabs: Not a generalized abstraction")
+
 def is_gabs = can(dest_gabs)
-fun mk_gabs([t1, t2]):
-  fun mk_forall([v, t]):
-    let c = mk_const(["!", PairList [[type_of(v), aty]]])
-    mk_comb([c, mk_abs([v, t])])
-  fun mk_geq([x, y]):
-    let p = mk_const(["GEQ", PairList [[type_of(x), aty]]])
-    mk_comb([mk_comb([p, x]), y])
-  if is_var(t1)
-  | mk_abs([t1, t2])
-  | let fvs = frees(t1)
-    let fty = mk_fun_ty(type_of(t1))(type_of(t2))
-    let f = variant(append(frees(t1))(frees(t2)))(mk_var(["f", fty]))
-    let bod = mk_abs([f, itlist(curry(mk_forall))(fvs)(mk_geq([mk_comb([f, t1]), t2]))])
-    mk_comb([mk_const(["GABS", PairList [[fty, aty]]]), bod])
+
+def mk_gabs:
+  let mk_forall:
+    fun([v, t]):
+      let cop = mk_const(["!", PairList [[type_of(v), aty]]])
+      mk_comb([cop, mk_abs([v, t])])
+  let list_mk_forall:
+    fun([vars, bod]): itlist(curry(mk_forall))(vars)(bod)
+  let mk_geq:
+    fun([t1, t2]):
+      let p = mk_const(["GEQ", PairList [[type_of(t1), aty]]])
+      mk_comb([mk_comb([p, t1]), t2])
+  fun([tm1, tm2]):
+    if is_var(tm1)
+    | mk_abs([tm1, tm2])
+    | let fvs = frees(tm1)
+      let fty = mk_fun_ty(type_of(tm1))(type_of(tm2))
+      let f = variant(append(frees(tm1))(frees(tm2)))(mk_var(["f", fty]))
+      let bod = mk_abs([f, list_mk_forall([fvs, mk_geq([mk_comb([f, tm1]), tm2])])])
+      mk_comb([mk_const(["GABS", PairList [[fty, aty]]]), bod])
+
 fun list_mk_gabs([vs, bod]): itlist(curry(mk_gabs))(vs)(bod)
+
 def strip_gabs = splitlist(dest_gabs)
+
+// -------------------------------------------------------------------------
+// Syntax for let terms.
+// -------------------------------------------------------------------------
+
 fun dest_let(tm):
   try:
     let [l, aargs] = strip_comb(tm)
@@ -360,64 +520,104 @@ fun dest_let(tm):
       let [le, bod] = dest_comb(lebod)
       if fst(dest_const(le)) == "LET_END" | [eqs, bod] | fail()
     ~catch Failure(_): failwith("dest_let: not a let-term")
+
 def is_let = can(dest_let)
+
 fun mk_let([assigs, bod]):
   let [lefts, rights] = unzip(assigs)
   let lend = mk_comb([mk_const(["LET_END", PairList [[type_of(bod), aty]]]), bod])
   let lbod = list_mk_gabs([lefts, lend])
-  let [t1, t2] = dest_fun_ty(type_of(lbod))
-  let ltm = mk_const(["LET", PairList [[t1, aty],[t2, bty]]])
-  list_mk_comb([ltm, PairList.cons(lbod,rights)])
-fun mk_finty(n):
+  let [ty1, ty2] = dest_fun_ty(type_of(lbod))
+  let ltm = mk_const(["LET", PairList [[ty1, aty], [ty2, bty]]])
+  list_mk_comb([ltm, PairList.cons(lbod, rights)])
+
+// -------------------------------------------------------------------------
+// Constructors and destructors for finite types.
+// -------------------------------------------------------------------------
+
+// departure: num is an exact Rhombus integer, so is_integer_num is Int.
+def mk_finty:
   fun finty(n):
-    if n == 1
+    if n == num_1
     | mk_type(["1", PairList []])
-    | mk_type([(if modulo(n,2) == 0 | "tybit0" | "tybit1"), PairList [finty(quotient(n,2))]])
-  if !(n is_a Int) || n < 1 | failwith("mk_finty") | finty(n)
+    | mk_type([(if mod_num(n)(num_2) == num_0 | "tybit0" | "tybit1"),
+               PairList [finty(quo_num(n)(num_2))]])
+  fun(n):
+    if !(n is_a Int) || n < num_1
+    | failwith("mk_finty")
+    | finty(n)
+
 fun dest_finty(ty):
   match ty
-  | Tyapp("1",_): 1
-  | Tyapp("tybit0",PairList [ty]): dest_finty(ty)*2
-  | Tyapp("tybit1",PairList [ty]): dest_finty(ty)*2+1
+  | Tyapp("1", _): num_1
+  | Tyapp("tybit0", PairList [ty]): dest_finty(ty) * num_2
+  | Tyapp("tybit1", PairList [ty]): dest_finty(ty) * num_2 + 1
   | _: failwith("dest_finty")
-fun make_args(s):
-  fun(avoid):
-    fun(tys):
-      fun margs(n,s,avoid,tys):
-        if tys == PairList []
-        | PairList []
-        | let v = variant(avoid)(mk_var([s +& to_string(n), hd(tys)]))
-          PairList.cons(v,margs(n+1,s,PairList.cons(v,avoid),tl(tys)))
-      if length(tys) == 1 | PairList [variant(avoid)(mk_var([s, hd(tys)]))] | margs(0,s,avoid,tys)
-fun find_path(p):
-  fun(tm):
-    fun fp(p,tm):
-      cond
-      | p(tm): PairList []
-      | is_abs(tm): PairList.cons("b",fp(p,body(tm)))
-      | ~else:
-          try:
-            PairList.cons("r",fp(p,rand(tm)))
-            ~catch Failure(_): PairList.cons("l",fp(p,rator(tm)))
-    implode(fp(p,tm))
-fun follow_path(s):
-  fun(tm):
-    fun fp(s,tm):
+
+// -------------------------------------------------------------------------
+// Useful function to create stylized arguments using numbers.
+// -------------------------------------------------------------------------
+
+def make_args:
+  fun margs(n):
+    fun(s):
+      fun(avoid):
+        fun(tys):
+          if tys == PairList []
+          | PairList []
+          | let v = variant(avoid)(mk_var([s +& string_of_int(n), hd(tys)]))
+            PairList.cons(v, margs(n + 1)(s)(PairList.cons(v, avoid))(tl(tys)))
+  fun(s):
+    fun(avoid):
+      fun(tys):
+        if length(tys) == 1
+        | PairList [variant(avoid)(mk_var([s, hd(tys)]))]
+        | margs(0)(s)(avoid)(tys)
+
+// -------------------------------------------------------------------------
+// Director strings down a term.
+// -------------------------------------------------------------------------
+
+def find_path:
+  fun find_path(p):
+    fun(tm):
+      if p(tm)
+      | PairList []
+      | if is_abs(tm)
+        | PairList.cons("b", find_path(p)(body(tm)))
+        | try:
+            PairList.cons("r", find_path(p)(rand(tm)))
+            ~catch Failure(_): PairList.cons("l", find_path(p)(rator(tm)))
+  fun(p): fun(tm): implode(find_path(p)(tm))
+
+def follow_path:
+  fun follow_path(s):
+    fun(tm):
       match s
       | PairList []: tm
-      | PairList ["l", & t]: fp(t,rator(tm))
-      | PairList ["r", & t]: fp(t,rand(tm))
-      | PairList [_, & t]: fp(t,body(tm))
-    fp(explode(s),tm)
-fun atoms(tm):
-  fun accum(acc,tm):
-    match tm
-    | Comb(Comb(Const("/\\",_),l),r): accum(accum(acc,l),r)
-    | Comb(Comb(Const("\\/",_),l),r): accum(accum(acc,l),r)
-    | Comb(Comb(Const("==>",_),l),r): accum(accum(acc,l),r)
-    | Comb(Comb(Const("=",Tyapp("fun",PairList [Tyapp("bool",PairList []),_])),l),r): accum(accum(acc,l),r)
-    | Comb(Const("~",_),l): accum(acc,l)
-    | _: fpf_define(tm)(#void)(acc)
-  if type_of(tm) != bool_ty
-  | failwith("atoms: not Boolean")
-  | foldl(fun(a): fun(x): fun(y): PairList.cons(x,a))(PairList [])(accum(undefined,tm))
+      | PairList ["l", & t]: follow_path(t)(rator(tm))
+      | PairList ["r", & t]: follow_path(t)(rand(tm))
+      | PairList [_, & t]: follow_path(t)(body(tm))
+  fun(s): fun(tm): follow_path(explode(s))(tm)
+
+// -------------------------------------------------------------------------
+// Considering a term as a propositional formula and returning atoms.
+// -------------------------------------------------------------------------
+
+def atoms:
+  fun atoms(acc):
+    fun(tm):
+      // departure: Rhombus or-patterns bind no variables, so the shared
+      // OCaml clause is written once per connective.
+      match tm
+      | Comb(Comb(Const("/\\", _), l), r): atoms(atoms(acc)(l))(r)
+      | Comb(Comb(Const("\\/", _), l), r): atoms(atoms(acc)(l))(r)
+      | Comb(Comb(Const("==>", _), l), r): atoms(atoms(acc)(l))(r)
+      | Comb(Comb(Const("=", Tyapp("fun", PairList [Tyapp("bool", PairList []), _])), l), r):
+          atoms(atoms(acc)(l))(r)
+      | Comb(Const("~", _), l): atoms(acc)(l)
+      | _: fpf_define(tm)(#void)(acc)
+  fun(tm):
+    if type_of(tm) != bool_ty
+    | failwith("atoms: not Boolean")
+    | foldl(fun(a): fun(x): fun(y): PairList.cons(x, a))(PairList [])(atoms(undefined)(tm))

@@ -1,0 +1,167 @@
+#lang rhombus
+// Evaluation of the Boyer-Moore waterfall (rhombus/hol/Boyer_Moore/) on the
+// conjectures of upstream's testset/, as Boyer_Moore/make.ml sets up the
+// prover (bm_reset), with a reason for every failure.
+//
+//   racket tools/boyer_moore_eval/eval.rhm LIMIT OUT.tsv [paper]
+//
+// With `paper`, the rewrite rules are those of the paper's Appendix A:
+// bm_reset's `~(SUC n = n)` and `a + SUC b = SUC (a + b)`, which make.ml
+// adds after the paper, are removed.
+//
+// LIMIT is a time limit in seconds per conjecture. Each conjecture is run by
+// the heuristics of main.ml's BOYER_MOORE_FINAL (BMF), called here without
+// BOYER_MOORE_FINAL's final `failwith "BOYER_MOORE"`, so that the failure the
+// waterfall raised is kept. Output columns:
+//
+//   set index result class time steps inds gens over message theorem
+//
+// class is proved, or for a failure:
+//   loop      the induction loop check ("Induction loop detected.")
+//   depth     max_var_depth exceeded ("Reached maximum depth!")
+//   refuted   "cannot prove" otherwise: a clause became F, or the
+//             irrelevance heuristic left no relevant literal
+//   error     any other Failure (a heuristic or proof reconstruction failed)
+//   exception a non-Failure exception
+//   timeout   LIMIT reached
+// steps/inds are bm_steps, gens the generalizations made (my_gen_terms) and
+// over the counterexamples found (overgeneralizations rejected).
+import:
+  "../../rhombus/hol/private/ocaml.rhm" open:
+    only:
+      Failure
+      fst
+      snd
+  "../../rhombus/hol/lib.rhm" open:
+    only:
+      length
+  "../../rhombus/hol/fusion.rhm" open:
+    only:
+      concl
+      hyp
+  "../../rhombus/hol/printer.rhm" open:
+    only:
+      string_of_term
+  "../../rhombus/hol/Boyer_Moore/make.rhm" open:
+    only:
+      BMF
+  "../../rhombus/hol/Boyer_Moore/testset/arith.rhm" open
+  "../../rhombus/hol/Boyer_Moore/testset/list.rhm" open
+  "../../rhombus/hol/Boyer_Moore/environment.rhm" open:
+    only:
+      my_gen_terms
+      bm_steps
+      system_rewrites
+  "../../rhombus/hol/private/hol_quote.rhm" open
+  "../../rhombus/hol/lib.rhm" open:
+    only:
+      filter
+      mem
+  "../../rhombus/hol/Boyer_Moore/counterexample.rhm" open:
+    only:
+      counterexamples
+  "../../rhombus/hol/Boyer_Moore/waterfall.rhm" open:
+    only:
+      proof_print_depth
+      FILTERED_WATERFALL
+      taut_heuristic
+      clausal_form_heuristic
+      setify_heuristic
+  "../../rhombus/hol/Boyer_Moore/terms_and_clauses.rhm" open:
+    only:
+      subst_heuristic
+      HL_simplify_heuristic
+  "../../rhombus/hol/Boyer_Moore/equalities.rhm" open:
+    only:
+      use_equality_heuristic
+  "../../rhombus/hol/Boyer_Moore/generalize.rhm" open:
+    only:
+      generalize_heuristic_ext
+  "../../rhombus/hol/Boyer_Moore/irrelevance.rhm" open:
+    only:
+      irrelevance_heuristic
+  "../../rhombus/hol/Boyer_Moore/induction.rhm" open:
+    only:
+      induction_heuristic
+  lib("racket/base.rkt") as Rkt
+
+def args = Rkt.#{current-command-line-arguments}()
+def limit = Rkt.#{string->number}(args[0])
+def out = Rkt.#{open-output-file}(args[1], ~exists: #'truncate)
+
+when args.length() > 2 && args[2] == "paper"
+| let later = PairList [@hol|{!n. ~(SUC n = n)}|, @hol|{!a b. a + SUC b = SUC (a + b)}|]
+  system_rewrites.value := filter(fun([th, _]): !mem(concl(th))(later))(system_rewrites.value)
+
+// BOYER_MOORE_FINAL(PairList []) of main.rhm, less its final failwith.
+fun bmf_raw(tm):
+  my_gen_terms.value := PairList []
+  counterexamples.value := 0
+  proof_print_depth.value := 0
+  bm_steps.value := [0, 0]
+  FILTERED_WATERFALL(
+    PairList [taut_heuristic,
+              clausal_form_heuristic,
+              setify_heuristic,
+              subst_heuristic,
+              HL_simplify_heuristic(PairList []),
+              use_equality_heuristic,
+              generalize_heuristic_ext,
+              irrelevance_heuristic])(
+    induction_heuristic)(PairList [])(
+    [tm, #false])
+
+fun classify(message, warnings):
+  cond
+  | message == "": "proved"
+  | Rkt.#{regexp-match?}("Induction loop detected", warnings): "loop"
+  | Rkt.#{regexp-match?}("Reached maximum depth", warnings): "depth"
+  | message == "cannot prove": "refuted"
+  | Rkt.#{regexp-match?}("^exception: ", message): "exception"
+  | ~else: "error"
+
+fun clean(s): Rkt.#{regexp-replace*}("[\t\n]+", s, " ")
+
+fun run(set, i, tm):
+  let ch = Rkt.#{make-channel}()
+  let t0 = Rkt.#{current-inexact-milliseconds}()
+  let worker:
+    Rkt.#{thread}(
+      fun ():
+        let warnings = Rkt.#{open-output-string}()
+        let message:
+          parameterize { Rkt.#{current-output-port}: warnings }:
+            try:
+              let th = bmf_raw(tm)
+              if concl(th) == tm && hyp(th) == PairList []
+              | ""
+              | "wrong theorem"
+              ~catch
+              | Failure(s): s
+              | e: "exception: " +& to_string(e)
+        Rkt.#{channel-put}(ch, [message, Rkt.#{get-output-string}(warnings)]))
+  let r = Rkt.#{sync/timeout}(limit, ch)
+  let dt = (Rkt.#{current-inexact-milliseconds}() - t0) / 1000.0
+  let [message, warnings] = r || ["", ""]
+  when !r
+  | Rkt.#{kill-thread}(worker)
+  let cls = if r | classify(message, warnings) | "timeout"
+  let result = if cls == "proved" | "true" | "false"
+  let fields:
+    [set, to_string(i + 1), result, cls, Rkt.#{real->decimal-string}(dt, 3),
+     to_string(fst(bm_steps.value)), to_string(snd(bm_steps.value)),
+     to_string(length(my_gen_terms.value)), to_string(counterexamples.value),
+     clean(message), clean(string_of_term(tm))]
+  let line:
+    for values(acc = "") (f in fields, k in 0..):
+      if k == 0 | f | acc +& "\t" +& f
+  Rkt.#{write-string}(line +& "\n", out)
+  Rkt.#{flush-output}(out)
+  println(line)
+
+Rkt.#{write-string}("set\tindex\tresult\tclass\ttime\tsteps\tinds\tgens\tover\tmessage\ttheorem\n", out)
+for (tm in mytheory.value, i in 0..):
+  run("arith", i, tm)
+for (tm in mytheory2.value, i in 0..):
+  run("list", i, tm)
+Rkt.#{close-output-port}(out)

@@ -1,0 +1,653 @@
+#lang rhombus
+// Extended Boyer-Moore prover: started from tools/ml2rhm's translation of
+// the pinned HOL Light Boyer_Moore/waterfall.ml (rhombus/hol/Boyer_Moore/ keeps the
+// literal translation). Edited freely for the frontend; not a literal port.
+
+// ****************************************************************************
+// FILE          : waterfall.ml
+// DESCRIPTION   : `Waterfall' of heuristics. Clauses pour over.
+// Some evaporate. Others collect in a pool to be cleaned up.
+// Heuristics that act on a clause send the new clauses to
+// the top of the waterfall.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 9th May 1991
+//
+// LAST MODIFIED : R.J.Boulton
+// DATE          : 12th August 1992
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : July 2009
+// ****************************************************************************
+
+// ============================================================================
+// Some auxiliary functions
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// proves : thm -> term -> bool
+//
+// Returns true if and only if the theorem proves the term without making any
+// assumptions.
+// ----------------------------------------------------------------------------
+
+import:
+  "../../hol/lib.rhm" open:
+    only:
+      subtract
+      itlist
+      implode
+      replicate
+      length
+      map
+      tl
+      hd
+      o
+      warn
+      assoc
+      flat
+      I
+      uncurry
+      forall
+      setify
+  "../../hol/fusion.rhm" open:
+    only:
+      dest_thm
+      INST_TYPE
+      REFL
+      is_var
+      is_const
+      rand
+      concl
+      EQ_MP
+  "../../hol/basics.rhm" open:
+    only:
+      is_neg
+      free_in
+      is_conj
+      is_disj
+  "../../hol/printer.rhm" open:
+    only:
+      print_string
+      print_term
+      print_newline
+      print_thm
+      print_bool
+      print_int
+  "../../hol/equal.rhm" open:
+    only:
+      lhs
+      rhs
+      SYM
+  "../../hol/bool.rhm" open:
+    only:
+      SPECL
+      GENL
+      EQT_ELIM
+      list_mk_disj
+      mk_imp
+      MP
+  "../../hol/drule.rhm" open:
+    only:
+      term_match
+  "../../hol/class.rhm" open:
+    only:
+      TAUT
+  "../../hol/meson.rhm" open:
+    only:
+      MESON
+  "support.rhm" open:
+    only:
+      hashI
+      is_F
+      lcombinep
+      sort_on_snd
+      number_list
+      hash
+      conj_list
+      disj_list
+      is_T
+  "environment.rhm" open:
+    only:
+      bm_steps
+      max_var_depth
+      LIST_CONJ
+      rewrite_rules
+  "clausal_form.rhm" open:
+    only:
+      has_boolean_args_and_result
+      CLAUSAL_FORM_CONV
+  "../../hol/private/ocaml.rhm" open:
+    only:
+      OCamlList
+      failwith
+      Failure
+      fst
+      string_of_int
+      append
+  "../../hol/private/hol_quote.rhm" open
+  "../../hol/private/declarations.rhm" open
+
+export:
+  proves
+  fproves
+  apply_proof
+  apply_fproof
+  proof_printing
+  proof_printer
+  proof_print_depth
+  inc_print_depth
+  dec_print_depth
+  proof_print_term
+  proof_print_thm
+  proof_print_tmi
+  proof_print_newline
+  proof_print_string
+  proof_print_string_l
+  proof_print_clausetree
+  nth_tail
+  waterfall
+  filtered_waterfall
+  fringe_of_clause_tree
+  prove_clause_tree
+  fprove_clause_tree
+  inst_of
+  insert_into_inst_tree
+  insert_into_inst_trees
+  mk_inst_trees
+  roots_of_inst_trees
+  prove_inst_tree
+  prove_inst_trees
+  prove_pool
+  WATERFALL
+  FILTERED_WATERFALL
+  conjuncts_heuristic
+  refl_heuristic
+  clausal_form_heuristic
+  meson_heuristic
+  taut_heuristic
+  setify_heuristic
+  Clause
+  Clause_proved
+  Clause_split
+  No_insts
+  Insts
+
+fun proves(th):
+  fun(tm):
+    let [hyp, concl] = dest_thm(th)
+    (hyp == PairList []) && (concl == tm)
+
+fun fproves(th):
+  fun(tm):
+    let [hyp, concl] = dest_thm(th)
+    (subtract(hyp)(PairList [@hol|{_FALSITY_}|]) == PairList []) && (concl == tm)
+
+fun apply_proof(f):
+  fun(tms):
+    fun(ths):
+      try:
+        if itlist(fun([tm, th]): fun(b): fproves(th)(tm) && b)(OCamlList.combine(tms)(ths))(#true)
+        | f(ths)
+        | failwith("")
+        ~catch Failure(_): failwith("apply_proof")
+
+fun apply_fproof(s):
+  fun(f):
+    fun(tms):
+      fun(ths):
+        try:
+          if itlist(fun([tm, th]): fun(b): fproves(th)(tm) && b)(OCamlList.combine(tms)(ths))(#true)
+          | f(ths)
+          | failwith("")
+          ~catch Failure(_): failwith("apply_fproof: " +& s)
+
+def proof_printing = Box(#false)
+
+fun proof_printer(state):
+  let old_state = proof_printing.value
+  proof_printing.value := state
+  old_state
+
+def proof_print_depth = Box(0)
+
+fun inc_print_depth(x):
+  proof_print_depth.value := proof_print_depth.value + 1
+  x
+
+fun dec_print_depth(x):
+  if proof_print_depth.value < 1
+  | proof_print_depth.value := 0
+    x
+  | proof_print_depth.value := proof_print_depth.value - 1
+    x
+
+fun proof_print_term(tm):
+  if proof_printing.value
+  | print_string(implode(replicate(" ")(proof_print_depth.value)))
+    print_term(tm)
+    print_newline(#void)
+    tm
+  | tm
+
+fun proof_print_thm(thm):
+  if proof_printing.value
+  | print_thm(thm)
+    print_newline(#void)
+    print_newline(#void)
+  | #void
+
+fun proof_print_tmi([tm, i]):
+  if proof_printing.value
+  | proof_print_term(tm)
+    print_string(" (")
+    print_bool(i)
+    print_string(")")
+    [tm, i]
+  | [tm, i]
+
+fun proof_print_newline(x):
+  if proof_printing.value
+  | print_newline(#void)
+    x
+  | x
+
+fun proof_print_string(s):
+  fun(x):
+    if proof_printing.value
+    | print_string(s)
+      x
+    | x
+
+fun proof_print_string_l(s):
+  fun(x):
+    if proof_printing.value
+    | print_string(s)
+      print_newline(#void)
+      x
+    | x
+
+variant clause_tree:
+  Clause(pair)
+  Clause_proved(thm)
+  Clause_split(list, f)
+
+fun proof_print_clausetree(cl):
+  if proof_printing.value
+  | proof_print_string_l("Clause tree:")(#void)
+    match cl
+    | Clause([tm, bool]):
+        print_term(tm)
+        print_newline(#void)
+    | Clause_proved(thm):
+        print_thm(thm)
+        print_newline(#void)
+    | Clause_split(tlist, proof):
+        print_string("Split -> ")
+        print_int(length(tlist))
+        print_newline(#void)
+        let void = map(proof_print_clausetree)(tlist)
+        #void
+  | #void
+
+fun nth_tail(n):
+  fun(l):
+    if n > length(l)
+    | PairList []
+    | fun repeattl(l): fun(i): (if i == 0 | l | tl(repeattl(l)(i - 1)))
+      repeattl(l)(n)
+
+fun waterfall(heuristics):
+  fun(tmi):
+    bm_steps.value := hashI((fun(x): fun(y): x + y)(1))(bm_steps.value)
+    fun flow_on_down(rest_of_heuristics):
+      fun(tmi):
+        if is_F(fst(tmi))
+        | failwith("cannot prove")
+        | if rest_of_heuristics == PairList []
+          | Clause(tmi)
+          | try:
+              let [tms, f] = hd(rest_of_heuristics)(tmi)
+              if tms == PairList []
+              | proof_print_string("Proven:")(#void)
+                proof_print_thm(f(PairList []))
+                Clause_proved(f(PairList []))
+              | if tl(tms) == PairList []
+                | Clause_split(PairList [waterfall(heuristics)(hd(tms))], f)
+                | Clause_split(o(o(dec_print_depth)(map(o(waterfall(heuristics))(proof_print_newline))))(inc_print_depth)(tms), f)
+              ~catch Failure(s):
+                  if s == "cannot prove" | failwith(s) | flow_on_down(tl(rest_of_heuristics))(tmi)
+    flow_on_down(heuristics)(proof_print_tmi(tmi))
+
+fun filtered_waterfall(heuristics):
+  fun(warehouse):
+    fun(tmi):
+      bm_steps.value := hashI((fun(x): fun(y): x + y)(1))(bm_steps.value)
+      if max_var_depth(fst(tmi)) > 12
+      | warn(#true)("Reached maximum depth!")
+        Clause(tmi)
+      | let heurn:
+          try:
+            assoc(fst(tmi))(warehouse)
+            ~catch Failure(_): 0
+        let warehouse:
+          if heurn > 0
+          | proof_print_string("Warehouse kicking in! Skipping " +& string_of_int(heurn) +& " heuristic(s)")(#void)
+            proof_print_newline(#void)
+            OCamlList.remove_assoc(fst(tmi))(warehouse)
+          | warehouse
+        fun flow_on_down(rest_of_heuristics):
+          fun(tmi):
+            fun(it):
+              if is_F(fst(tmi))
+              | failwith("cannot prove")
+              | let rest_of_heuristics = nth_tail(heurn)(rest_of_heuristics)
+                if rest_of_heuristics == PairList []
+                | Clause(tmi)
+                | try:
+                    let [tms, f] = hd(rest_of_heuristics)(tmi)
+                    if tms == PairList []
+                    | proof_print_string("Proven:")(#void)
+                      proof_print_thm(f(PairList []))
+                      Clause_proved(f(PairList []))
+                    | if tl(tms) == PairList []
+                      | Clause_split(PairList [filtered_waterfall(heuristics)(PairList.cons([fst(tmi), it], warehouse))(hd(tms))], f)
+                      | proof_print_string(string_of_int(length(tms)) +& " new clauses")(#void)
+                        proof_print_newline(#void)
+                        Clause_split(o(o(dec_print_depth)(map(o(filtered_waterfall(heuristics)(PairList.cons([fst(tmi), it], warehouse)))(proof_print_newline))))(inc_print_depth)(tms), f)
+                    ~catch Failure(s):
+                        if s == "cannot prove" | failwith(s) | flow_on_down(tl(rest_of_heuristics))(tmi)(it + 1)
+        flow_on_down(heuristics)(hashI(proof_print_term)(tmi))(1)
+
+fun fringe_of_clause_tree(tree):
+  match tree
+  | Clause(tmi): PairList [tmi]
+  | Clause_proved(_): PairList []
+  | Clause_split(trees, _): flat(map(fringe_of_clause_tree)(trees))
+
+fun prove_clause_tree(tree):
+  fun(ths):
+    try:
+      fun prove_clause_trees(trees):
+        fun(ths):
+          if trees == PairList []
+          | [PairList [], ths]
+          | let [th, ths_prime] = prove_clause_tree_prime(hd(trees))(ths)
+            let [thl, ths_prime_prime] = prove_clause_trees(tl(trees))(ths_prime)
+            [PairList.cons(th, thl), ths_prime_prime]
+      fun prove_clause_tree_prime(tree):
+        fun(ths):
+          match tree
+          | Clause([tm, _]):
+              let th = hd(ths)
+              if fproves(th)(tm) | [th, tl(ths)] | failwith("prove_clause_tree")
+          | Clause_proved(th): [th, ths]
+          | Clause_split(trees, f):
+              let [thl, ths_prime] = prove_clause_trees(trees)(ths)
+              [f(thl), ths_prime]
+      let [th, PairList []] = prove_clause_tree_prime(tree)(ths)
+      th
+      ~catch Failure(_): failwith("prove_clause_tree")
+
+fun fprove_clause_tree(tree):
+  fun(ths):
+    try:
+      fun prove_clause_trees(trees):
+        fun(ths):
+          if trees == PairList []
+          | [PairList [], ths]
+          | let [th, ths_prime] = prove_clause_tree_prime(hd(trees))(ths)
+            let [thl, ths_prime_prime] = prove_clause_trees(tl(trees))(ths_prime)
+            [PairList.cons(th, thl), ths_prime_prime]
+      fun prove_clause_tree_prime(tree):
+        fun(ths):
+          match tree
+          | Clause([tm, _]):
+              let th = hd(ths)
+              if fproves(th)(tm) | [th, tl(ths)] | failwith("fprove_clause_tree")
+          | Clause_proved(th): [th, ths]
+          | Clause_split(trees, f):
+              let [thl, ths_prime] = prove_clause_trees(trees)(ths)
+              [f(thl), ths_prime]
+      let [th, PairList []] = prove_clause_tree_prime(tree)(ths)
+      th
+      ~catch Failure(s): failwith("fprove_clause_tree: " +& s)
+
+fun inst_of(tm):
+  fun(patt):
+    try:
+      let [_, tm_bind, ty_bind] = term_match(PairList [])(patt)(tm)
+      let [insts, vars] = OCamlList.split(tm_bind)
+      let f = o(o(SPECL(insts))(GENL(vars)))(INST_TYPE(ty_bind))
+      fun(th): apply_fproof("inst_of")(o(f)(hd))(PairList [patt])(PairList [th])
+      ~catch Failure(_): failwith("inst_of")
+
+variant inst_tree:
+  No_insts(pair)
+  Insts(pair)
+
+fun insert_into_inst_tree([tm, n]):
+  fun(tree):
+    match tree
+    | No_insts([tm_prime, n_prime]):
+        try:
+          let f = inst_of(tm_prime)(tm)
+          Insts([tm, n, PairList [[No_insts([tm_prime, n_prime]), f]]])
+          ~catch Failure(_):
+              try:
+                let f = inst_of(tm)(tm_prime)
+                Insts([tm_prime, n_prime, PairList [[No_insts([tm, n]), f]]])
+                ~catch Failure(_): failwith("insert_into_inst_tree")
+    | Insts([tm_prime, n_prime, insts]):
+        try:
+          let f = inst_of(tm_prime)(tm)
+          Insts([tm, n, PairList [[Insts([tm_prime, n_prime, insts]), f]]])
+          ~catch Failure(_):
+              try:
+                let f = inst_of(tm)(tm_prime)
+                try:
+                  Insts([tm_prime, n_prime, insert_into_inst_trees([tm, n, f])(insts)])
+                  ~catch Failure(_): Insts([tm_prime, n_prime, PairList.cons([No_insts([tm, n]), f], insts)])
+                ~catch Failure(_): failwith("insert_into_inst_tree")
+
+fun insert_into_inst_trees([tm, n, f]):
+  fun(insts):
+    fun instances([tm, n]):
+      fun(insts):
+        if insts == PairList []
+        | [PairList [], PairList []]
+        | let [not_instl, instl] = instances([tm, n])(tl(insts))
+          let [h, f] = hd(insts)
+          let [tm_prime, n_prime]:
+            match h
+            | No_insts([tm_prime, n_prime]): [tm_prime, n_prime]
+            | Insts([tm_prime, n_prime, _]): [tm_prime, n_prime]
+          try:
+            let f_prime = inst_of(tm_prime)(tm)
+            [not_instl, PairList.cons([h, f_prime], instl)]
+            ~catch Failure(_): [PairList.cons([h, f], not_instl), instl]
+    fun insert_into_inst_trees_prime([tm, n]):
+      fun(trees):
+        if trees == PairList []
+        | failwith("insert_into_inst_trees'")
+        | try:
+            PairList.cons(insert_into_inst_tree([tm, n])(hd(trees)), tl(trees))
+            ~catch Failure(_):
+                PairList.cons(hd(trees), insert_into_inst_trees_prime([tm, n])(tl(trees)))
+    let [not_instl, instl] = instances([tm, n])(insts)
+    if instl == PairList []
+    | try:
+        o(lcombinep)(hashI(insert_into_inst_trees_prime([tm, n])))(OCamlList.split(insts))
+        ~catch Failure(_): PairList.cons([No_insts([tm, n]), f], insts)
+    | PairList.cons([Insts([tm, n, instl]), f], not_instl)
+
+fun mk_inst_trees(tmnl):
+  fun mk_inst_trees_prime(insts):
+    fun(tmnl):
+      if tmnl == PairList []
+      | insts
+      | let [tm, n] = hd(tmnl)
+        mk_inst_trees_prime(insert_into_inst_trees([tm, n, I])(insts))(tl(tmnl))
+  map(fst)(mk_inst_trees_prime(PairList [])(tmnl))
+
+fun roots_of_inst_trees(trees):
+  if trees == PairList []
+  | PairList []
+  | let tm:
+      match hd(trees)
+      | No_insts([tm, _]): tm
+      | Insts([tm, _, _]): tm
+    PairList.cons(tm, roots_of_inst_trees(tl(trees)))
+
+fun prove_inst_tree(tree):
+  fun(th):
+    match tree
+    | No_insts([tm, n]):
+        if fproves(th)(tm)
+        | PairList [[th, n]]
+        | failwith("prove_inst_tree")
+    | Insts([tm, n, insts]):
+        if fproves(th)(tm)
+        | PairList.cons([th, n], flat(map(fun([tr, f]): prove_inst_tree(tr)(f(th)))(insts)))
+        | failwith("prove_inst_tree")
+
+fun prove_inst_trees(trees):
+  fun(ths):
+    try:
+      map(fst)(sort_on_snd(flat(map(uncurry(prove_inst_tree))(lcombinep([trees, ths])))))
+      ~catch Failure(_): failwith("prove_inst_trees")
+
+fun prove_pool(conv):
+  fun(tml):
+    let tmnl = number_list(tml)
+    let trees = mk_inst_trees(tmnl)
+    let most_gen_terms = roots_of_inst_trees(trees)
+    let ths = map(conv)(most_gen_terms)
+    prove_inst_trees(trees)(ths)
+
+fun WATERFALL(heuristics):
+  fun(induction):
+    fun([tm, ind]):
+      let conv:
+        fun(tm):
+          proof_print_string("Doing induction on:")(#void)
+          bm_steps.value := hash((fun(x): fun(y): x + y)(1))((fun(x): fun(y): x + y)(1))(bm_steps.value)
+          let void:
+            proof_print_term(tm)
+            proof_print_newline(#void)
+          let [tmil, proof] = induction([tm, #false])
+          dec_print_depth(proof(map(WATERFALL(heuristics)(induction))(inc_print_depth(tmil))))
+      let void = proof_print_newline(#void)
+      let tree = waterfall(heuristics)([tm, ind])
+      let tmil = fringe_of_clause_tree(tree)
+      let thl = prove_pool(conv)(map(fst)(tmil))
+      prove_clause_tree(tree)(thl)
+
+fun FILTERED_WATERFALL(heuristics):
+  fun(induction):
+    fun(warehouse):
+      fun([tm, ind]):
+        let conv:
+          fun(tm):
+            let constr_check = max_var_depth(tm) > 12
+            if constr_check
+            | let void = warn(#true)("Reached maximum depth!")
+              failwith("cannot prove")
+            | let heurn:
+                try:
+                  assoc(tm)(warehouse)
+                  ~catch Failure(_): 0
+              let warehouse = (if heurn > 0 | OCamlList.remove_assoc(tm)(warehouse) | warehouse)
+              if heurn > length(heuristics)
+              | warn(#true)("Induction loop detected.")
+                failwith("cannot prove")
+              | proof_print_string("Doing induction on:")(#void)
+              bm_steps.value := hash((fun(x): fun(y): x + y)(1))((fun(x): fun(y): x + y)(1))(bm_steps.value)
+              let void:
+                proof_print_term(tm)
+                proof_print_newline(#void)
+              let [tmil, proof] = induction([tm, #false])
+              dec_print_depth(proof(map(FILTERED_WATERFALL(heuristics)(induction)(PairList.cons([tm, length(heuristics) + 1], warehouse)))(inc_print_depth(tmil))))
+        let void = proof_print_newline(#void)
+        let tree = filtered_waterfall(heuristics)(PairList [])([tm, ind])
+        let tmil = fringe_of_clause_tree(tree)
+        let thl = prove_pool(conv)(map(fst)(tmil))
+        prove_clause_tree(tree)(thl)
+
+fun conjuncts_heuristic([tm, i]):
+  let tms = conj_list(tm)
+  if length(tms) == 1
+  | failwith("conjuncts_heuristic")
+  | [map(fun(tm): [tm, i])(tms), apply_fproof("conjuncts_heuristic")(LIST_CONJ)(tms)]
+
+fun refl_heuristic([tm, i]):
+  try:
+    if lhs(tm) == rhs(tm)
+    | [PairList [], apply_fproof("refl_heuristic")(fun(ths): REFL(lhs(tm)))(PairList [])]
+    | failwith("")
+    ~catch Failure(_): failwith("refl_heuristic")
+
+fun clausal_form_heuristic([tm, i]):
+  try:
+    let is_atom = fun(tm): !has_boolean_args_and_result(tm) || is_var(tm) || is_const(tm)
+    let is_literal:
+      fun(tm):
+        is_atom(tm) || \
+        (is_neg(tm) && \
+         (try:
+            is_atom(rand(tm))
+            ~catch Failure(_): #false))
+    let is_clause = fun(tm): forall(is_literal)(disj_list(tm))
+    let result_string:
+      fun(tms):
+        let s = length(tms)
+        let plural = (if s == 1 | "" | "s")
+        "-> Clausal Form Heuristic (" +& string_of_int(s) +& " clause" +& plural +& ")"
+    if forall(is_clause)(conj_list(tm)) && !free_in(@hol|{T}|)(tm) && !free_in(@hol|{F}|)(tm)
+    | if is_conj(tm)
+      | let tms = conj_list(tm)
+        proof_print_string_l(result_string(tms))(#void)
+        [map(fun(tm): [tm, i])(tms), apply_fproof("clausal_form_heuristic")(LIST_CONJ)(tms)]
+      | failwith("")
+    | let th = CLAUSAL_FORM_CONV(tm)
+      let tm_prime = rhs(concl(th))
+      if is_T(tm_prime)
+      | proof_print_string_l("-> Clausal Form Heuristic")(#void)
+        [PairList [], apply_fproof("clausal_form_heuristic")(fun(_): EQT_ELIM(th))(PairList [])]
+      | let tms = conj_list(tm_prime)
+        proof_print_string_l(result_string(tms))(#void)
+        [map(fun(tm): [tm, i])(tms),
+         apply_fproof("clausal_form_heuristic")(o(EQ_MP(SYM(th)))(LIST_CONJ))(tms)]
+    ~catch Failure(_): failwith("clausal_form_heuristic")
+
+fun meson_heuristic(l):
+  fun([tm, i]):
+    try:
+      let meth = MESON(append(l)(rewrite_rules(#void)))(tm)
+      [PairList [], apply_fproof("meson_heuristic")(fun(ths): meth)(PairList [])]
+      ~catch Failure(_): failwith("meson_heuristic")
+
+fun taut_heuristic([tm, i]):
+  try:
+    let tautthm = TAUT(tm)
+    proof_print_string_l("-> Tautology Heuristic")(#void)
+    [PairList [], apply_fproof("taut_heuristic")(fun(ths): tautthm)(PairList [])]
+    ~catch Failure(_): failwith("taut_heuristic")
+
+fun setify_heuristic([tm, i]):
+  try:
+    if !is_disj(tm)
+    | failwith("")
+    | let tms = disj_list(tm)
+      let tms_prime = setify(tms)
+      let tm_prime = list_mk_disj(tms_prime)
+      if length(tms) == length(tms_prime)
+      | failwith("")
+      | let th = TAUT(mk_imp([tm_prime, tm]))
+        proof_print_string_l("-> Setify Heuristic")(#void)
+        [PairList [[tm_prime, i]],
+         apply_fproof("setify_heuristic")(o(MP(th))(hd))(PairList [tm_prime])]
+    ~catch Failure(_): failwith("setify_heuristic")

@@ -1,0 +1,250 @@
+#lang rhombus
+// Extended Boyer-Moore prover: started from tools/ml2rhm's translation of
+// the pinned HOL Light Boyer_Moore/equalities.ml (rhombus/hol/Boyer_Moore/ keeps the
+// literal translation). Edited freely for the frontend; not a literal port.
+
+// ****************************************************************************
+// FILE          : equalities.ml
+// DESCRIPTION   : Using equalities.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 19th June 1991
+//
+// LAST MODIFIED : R.J.Boulton
+// DATE          : 7th August 1992
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : 2008
+// ****************************************************************************
+
+// ----------------------------------------------------------------------------
+// is_explicit_value_template : term -> bool
+//
+// Function to compute whether a term is an explicit value template.
+// An explicit value template is a non-variable term composed entirely of
+// T or F or variables or applications of shell constructors.
+// A `bottom object' corresponds to an application to no arguments. I have
+// also made numeric constants valid components of explicit value templates,
+// since they are equivalent to some number of applications of SUC to 0.
+// ----------------------------------------------------------------------------
+
+import:
+  "../../hol/lib.rhm" open:
+    only:
+      mem
+      forall
+      exists
+      can
+      o
+      check
+      tl
+      hd
+      rev
+      map
+      itlist
+      end_itlist
+  "../../hol/fusion.rhm" open:
+    only:
+      is_const
+      type_of
+      is_var
+      dest_const
+      concl
+      is_eq
+      rand
+      dest_eq
+      mk_eq
+      EQ_MP
+      ASSUME
+      TRANS
+      REFL
+  "../../hol/basics.rhm" open:
+    only:
+      strip_comb
+      is_neg
+      dest_neg
+  "../../hol/equal.rhm" open:
+    only:
+      lhs
+      RAND_CONV
+      RATOR_CONV
+      rhs
+      ALL_CONV
+      SYM_CONV
+      SYM
+  "../../hol/bool.rhm" open:
+    only:
+      MP
+      SPECL
+      CONJ
+      mk_neg
+      ISPEC
+      ADD_ASSUM
+      DISJ2
+      DISJ1
+      list_mk_disj
+      SPEC
+      DISJ_CASES
+  "../../hol/tactics.rhm" open:
+    only:
+      prove
+      then_tac
+      REPEAT
+      STRIP_TAC
+  "../../hol/simp.rhm" open:
+    only:
+      ASM_REWRITE_TAC
+  "../../hol/class.rhm" open:
+    only:
+      EXCLUDED_MIDDLE
+  "../../hol/nums.rhm" open:
+    only:
+      is_numeral
+  "support.rhm" open:
+    only:
+      is_T
+      is_F
+      disj_list
+      hashI
+      NOT_EQ_SYM
+  "shells.rhm" open:
+    only:
+      all_constructors
+  "waterfall.rhm" open:
+    only:
+      proof_print_string_l
+      apply_fproof
+  "definitions.rhm" open:
+    only:
+      is_subterm
+      is_explicit_value
+  "terms_and_clauses.rhm" open:
+    only:
+      SUBST_CONV
+      NOT_EQ_F
+  "../../hol/private/ocaml.rhm" open:
+    only:
+      fst
+      Failure
+      failwith
+  "../../hol/private/hol_quote.rhm" open
+
+export:
+  is_explicit_value_template
+  subst_conv
+  use_equality_subst
+  EQ_EQ_IMP_DISJ_EQ
+  DISJ_EQ
+  use_equality_heuristic
+
+fun is_explicit_value_template(tm):
+  fun is_explicit_value_template_prime(constructors):
+    fun(tm):
+      is_T(tm) || \
+      is_F(tm) || \
+      (is_const(tm) && (type_of(tm) == @hol|{:num}|)) || \
+      is_var(tm) || \
+      is_numeral(tm) || \
+      (block:
+         let [f, args] = strip_comb(tm)
+         (try:
+            mem(fst(dest_const(f)))(constructors)
+            ~catch Failure(_): #false) && \
+         forall(is_explicit_value_template_prime(constructors))(args))
+  !is_var(tm) && is_explicit_value_template_prime(all_constructors(#void))(tm)
+
+fun subst_conv(th): fun(tm): SUBST_CONV(PairList [[th, lhs(concl(th))]])(tm)(tm)
+
+fun use_equality_subst(right):
+  fun(cross_fert):
+    fun(th):
+      fun(tm):
+        try:
+          if cross_fert
+          | if is_eq(tm)
+            | if right
+              | RAND_CONV(subst_conv(th))(tm)
+              | RATOR_CONV(RAND_CONV(subst_conv(th)))(tm)
+            | if (is_neg(tm) && \
+                  (try:
+                     is_eq(rand(tm))
+                     ~catch Failure(_): #false))
+              | subst_conv(th)(tm)
+              | subst_conv(th)(tm)
+          | subst_conv(th)(tm)
+          ~catch Failure(_): failwith("use_equality_subst")
+
+def EQ_EQ_IMP_DISJ_EQ:
+  prove([@hol|{!x x' y y'. (x = x') /\ (y = y') ==> ((x \/ y) = (x' \/ y'))}|,
+         REPEAT(STRIP_TAC) then_tac ASM_REWRITE_TAC(PairList [])])
+
+fun DISJ_EQ(th1):
+  fun(th2):
+    try:
+      let [x, x_prime] = dest_eq(concl(th1))
+      let [y, y_prime] = dest_eq(concl(th2))
+      MP(SPECL(PairList [x, x_prime, y, y_prime])(EQ_EQ_IMP_DISJ_EQ))(CONJ(th1)(th2))
+      ~catch Failure(_): failwith("DISJ_EQ")
+
+fun use_equality_heuristic([tm, ind]):
+  try:
+    let checkx:
+      fun([tml1, tml2]):
+        fun(t_prime):
+          !is_explicit_value_template(t_prime) && \
+          (exists(is_subterm(t_prime))(tml1) || exists(is_subterm(t_prime))(tml2))
+    fun split_disjuncts(side):
+      fun(prevl):
+        fun(tml):
+          if can(o(o(check(checkx([prevl, tl(tml)])))(side))(dest_neg))(hd(tml))
+          | [prevl, tml]
+          | split_disjuncts(side)(PairList.cons(hd(tml), prevl))(tl(tml))
+    let is_subterm_of_side:
+      fun(side):
+        fun(subterm):
+          fun(tm):
+            try:
+              is_subterm(subterm)(side(tm))
+              ~catch Failure(_): #false
+    let literals = disj_list(tm)
+    let [right, [overs, PairList [neq_prime, & unders]]]:
+      try:
+        [#true, hashI(rev)(split_disjuncts(rhs)(PairList [])(literals))]
+        ~catch Failure(_): [#false, hashI(rev)(split_disjuncts(lhs)(PairList [])(literals))]
+    let side = (if right | rhs | lhs)
+    let flipth = (if right | ALL_CONV(neq_prime) | RAND_CONV(SYM_CONV)(neq_prime))
+    let neq = rhs(concl(flipth))
+    let eq = dest_neg(neq)
+    let [s_prime, t_prime] = dest_eq(eq)
+    let delete = ind && !is_explicit_value(s_prime)
+    let cross_fert:
+      delete && \
+      (exists(is_subterm_of_side(side)(t_prime))(overs) || \
+       exists(is_subterm_of_side(side)(t_prime))(unders))
+    let sym_eq = mk_eq([t_prime, s_prime])
+    let sym_neq = mk_neg(sym_eq)
+    let ass1 = EQ_MP(SYM(flipth))(NOT_EQ_SYM(ASSUME(sym_neq)))
+    let ass2 = ASSUME(sym_eq)
+    let subsfun = use_equality_subst(right)(cross_fert)(ass2)
+    let overths = map(subsfun)(overs)
+    let neqth:
+      if delete
+      | TRANS(RAND_CONV(RAND_CONV(subst_conv(ass2)))(neq))(ISPEC(s_prime)(NOT_EQ_F))
+      | ADD_ASSUM(sym_eq)(REFL(neq))
+    let underths = map(subsfun)(unders)
+    let neqth_prime = TRANS(flipth)(neqth)
+    let th1 = itlist(DISJ2)(overs)(try:
+                                     DISJ1(ass1)(list_mk_disj(unders))
+                                     ~catch Failure(_): ass1)
+    let th2:
+      itlist(DISJ_EQ)(overths)(end_itlist(DISJ_EQ)(PairList.cons(neqth_prime, underths)))
+    let th3 = SPEC(sym_eq)(EXCLUDED_MIDDLE)
+    let tm_prime = rhs(concl(th2))
+    let proof = fun(th): DISJ_CASES(th3)(EQ_MP(SYM(th2))(th))(th1)
+    proof_print_string_l("-> Use Equality Heuristic")(#void)
+    [PairList [[tm_prime, ind]],
+     apply_fproof("use_equality_heuristic")(o(proof)(hd))(PairList [tm_prime])]
+    ~catch Failure(_): failwith("use_equality_heuristic`")

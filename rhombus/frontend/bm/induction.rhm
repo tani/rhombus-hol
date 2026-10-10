@@ -1,0 +1,194 @@
+#lang rhombus
+// Extended Boyer-Moore prover: started from tools/ml2rhm's translation of
+// the pinned HOL Light Boyer_Moore/induction.ml (rhombus/hol/Boyer_Moore/ keeps the
+// literal translation). Edited freely for the frontend; not a literal port.
+
+// ****************************************************************************
+// FILE          : induction.ml
+// DESCRIPTION   : Induction.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 26th June 1991
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : 2008
+// ****************************************************************************
+
+import:
+  "../../hol/lib.rhm" open:
+    only:
+      o
+      length
+      hd
+      map
+      setify
+      filter
+      flat
+      partition
+      mem
+      uncurry
+  "../../hol/fusion.rhm" open:
+    only:
+      frees
+      is_abs
+      is_comb
+      rand
+      rator
+      concl
+      TRANS
+      dest_const
+      is_var
+      dest_type
+      type_of
+      mk_abs
+      EQ_MP
+  "../../hol/basics.rhm" open:
+    only:
+      bndvar
+      strip_comb
+      is_forall
+      strip_forall
+      is_imp
+      is_neg
+  "../../hol/equal.rhm" open:
+    only:
+      ONCE_DEPTH_CONV
+      GEN_ALPHA_CONV
+      rhs
+      lhs
+      RAND_CONV
+      ABS_CONV
+      CONV_RULE
+      BETA_CONV
+      REPEATC
+      SYM
+  "../../hol/bool.rhm" open:
+    only:
+      ISPEC
+      GENL
+      SPEC
+      MP
+  "../../hol/simp.rhm" open:
+    only:
+      REWR_CONV
+  "../../hol/theorems.rhm" open:
+    only:
+      RIGHT_IMP_FORALL_THM
+  "support.rhm" open:
+    only:
+      find_bm_terms
+      remove_el
+      conj_list
+      lcombinep
+  "shells.rhm" open:
+    only:
+      sys_shell_info
+  "environment.rhm" open:
+    only:
+      get_def
+      LIST_CONJ
+  "waterfall.rhm" open:
+    only:
+      apply_fproof
+  "../../hol/private/ocaml.rhm" open:
+    only:
+      Failure
+      failwith
+      fst
+      snd
+      OCamlList
+
+export:
+  CONV_OF_RCONV
+  CONV_OF_THM
+  RIGHT_IMP_FORALL_CONV
+  is_rec_const_app
+  possible_inductions
+  DEPTH_FORALL_CONV
+  induction_heuristic
+  induction_on
+  induction_hint
+
+def CONV_OF_RCONV:
+  fun get_bv(tm):
+    if is_abs(tm)
+    | bndvar(tm)
+    | if is_comb(tm)
+      | try:
+          get_bv(rand(tm))
+          ~catch Failure(_): get_bv(rator(tm))
+      | failwith("")
+  fun(conv):
+    fun(tm):
+      let v = get_bv(tm)
+      let th1 = conv(tm)
+      let th2 = ONCE_DEPTH_CONV(GEN_ALPHA_CONV(v))(rhs(concl(th1)))
+      TRANS(th1)(th2)
+
+def CONV_OF_THM = o(CONV_OF_RCONV)(REWR_CONV)
+
+def RIGHT_IMP_FORALL_CONV = CONV_OF_THM(RIGHT_IMP_FORALL_THM)
+
+fun is_rec_const_app(tm):
+  try:
+    let [f, args] = strip_comb(tm)
+    let [n, defs] = o(o(get_def)(fst))(dest_const)(f)
+    (n > 0) && \
+    (o(o(o(o(o(o(length)(snd))(strip_comb))(lhs))(concl))(snd))(hd)(defs) == length(args))
+    ~catch Failure(_): #false
+
+fun possible_inductions(tm):
+  let apps = find_bm_terms(is_rec_const_app)(tm)
+  let [rec_args, other_args] = OCamlList.split(map(fun(app):
+                                                     let [f, args] = strip_comb(app)
+                                                     let name = fst(dest_const(f))
+                                                     let n = o(fst)(get_def)(name)
+                                                     remove_el(n)(args))(apps))
+  let vars = setify(filter(is_var)(rec_args))
+  let others = setify(flat(other_args))
+  partition(fun(v): !mem(v)(others))(vars)
+
+fun DEPTH_FORALL_CONV(conv):
+  fun(tm): if is_forall(tm) | RAND_CONV(ABS_CONV(DEPTH_FORALL_CONV(conv)))(tm) | conv(tm)
+
+// Extension: induction on a given variable (the `induct:` hint), and the
+// heuristic's choice of variable split from the induction it performs.
+fun induction_on(var):
+  fun([tm, ind]):
+    try:
+      let ty_name = fst(dest_type(type_of(var)))
+      let induct_thm = sys_shell_info(ty_name).induct
+      let P = mk_abs([var, tm])
+      let th1 = ISPEC(P)(induct_thm)
+      let th2:
+        CONV_RULE(ONCE_DEPTH_CONV(fun(tm): if rator(tm) == P | BETA_CONV(tm) | failwith("")))(th1)
+      let new_goals = conj_list(rand(rator(concl(th2))))
+      let ths = map(REPEATC(DEPTH_FORALL_CONV(RIGHT_IMP_FORALL_CONV)))(new_goals)
+      let [varsl, tml] = OCamlList.split(map(o(o(strip_forall)(rhs))(concl))(ths))
+      let proof:
+        fun(thl):
+          let thl_prime = map(uncurry(GENL))(lcombinep([varsl, thl]))
+          let thl_prime_prime = map(fun([eq, th]): EQ_MP(SYM(eq))(th))(lcombinep([ths, thl_prime]))
+          SPEC(var)(MP(th2)(LIST_CONJ(thl_prime_prime)))
+      [map(fun(tm): [tm, is_imp(tm) && !is_neg(tm)])(tml),
+       apply_fproof("induction_heuristic")(proof)(tml)]
+      ~catch Failure(_): failwith("induction_heuristic")
+
+// The variable a hint fixes for the next induction, if any (`induct:`).
+def induction_hint = Box(#false)
+
+fun induction_heuristic([tm, ind]):
+  try:
+    let hinted = induction_hint.value
+    let var:
+      if hinted && mem(hinted)(frees(tm))
+      | hinted
+      | let [unflawed, flawed] = possible_inductions(tm)
+        try:
+          hd(unflawed)
+          ~catch Failure(_): hd(flawed)
+    induction_on(var)([tm, ind])
+    ~catch Failure(_): failwith("induction_heuristic")

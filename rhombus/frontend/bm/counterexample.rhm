@@ -1,0 +1,245 @@
+#lang rhombus
+// Extended Boyer-Moore prover: started from tools/ml2rhm's translation of
+// the pinned HOL Light Boyer_Moore/counterexample.ml (rhombus/hol/Boyer_Moore/ keeps the
+// literal translation). Edited freely for the frontend; not a literal port.
+
+// ****************************************************************************
+// FILE          : counterexample.ml
+// DESCRIPTION   : Simple counterexample checker
+// Based on ideas and suggestions from S. Wilson
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : P. Papapanagiotou (University of Edinburgh)
+// DATE          : July 2009
+// ****************************************************************************
+
+// ----------------------------------------------------------------------------
+// Reference of how many examples will be tried on each check.
+// Set to 0 to turn off counterexample checker.
+// ----------------------------------------------------------------------------
+
+import:
+  "../../hol/lib.rhm" open:
+    only:
+      itlist
+      union
+      map
+      o
+      flat
+      subtract
+      zip
+      rev
+      num_of_string
+      partition
+      length
+      hd
+      warn
+  "../../hol/fusion.rhm" open:
+    only:
+      mk_var
+      inst
+      type_of
+      is_type
+      dest_type
+      frees
+      concl
+      mk_type
+      mk_comb
+  "../../hol/basics.rhm" open:
+    only:
+      type_match
+      mk_mconst
+  "../../hol/printer.rhm" open:
+    only:
+      string_of_type
+      string_of_term
+  "../../hol/equal.rhm" open:
+    only:
+      rhs
+  "../../hol/drule.rhm" open:
+    only:
+      term_match
+      instantiate
+  "../../hol/simp.rhm" open:
+    only:
+      REWRITE_CONV
+  "../../hol/nums.rhm" open:
+    only:
+      mk_numeral
+  "../../hol/arith.rhm" open:
+    only:
+      PRE
+      ADD
+      MULT
+      EXP
+      EVEN
+      ODD
+      LE
+      LT
+      GE
+      GT
+      SUB
+  "../../hol/calc_num.rhm" open:
+    only:
+      NUM_REDUCE_CONV
+      ARITH
+  "support.rhm" open:
+    only:
+      is_T
+  "shells.rhm" open:
+    only:
+      sys_shell_info
+      all_accessor_thms
+      shell_constructors
+      shell_arg_types
+  "environment.rhm" open:
+    only:
+      rewrite_rules
+      defs
+  "waterfall.rhm" open:
+    only:
+      proof_printing
+  "../../hol/private/ocaml.rhm" open:
+    only:
+      Failure
+      failwith
+      OCamlList
+      Random
+      fst
+  "../../hol/private/hol_quote.rhm" open
+
+export:
+  counter_check_num
+  counter_checks
+  counterexamples
+  inc_counterexamples
+  inst_type
+  shell_type_match
+  HL_rewrite_ground_term
+  HL_rewrite_ground_term_prime
+  random_example
+  random_grounding
+  counter_check_once
+  counter_check_n
+  counter_check
+
+def counter_check_num = Box(500)
+
+fun counter_checks(t): counter_check_num.value := t
+
+def counterexamples = Box(0)
+
+fun inc_counterexamples(_):
+  counterexamples.value := counterexamples.value + 1
+  #void
+
+def inst_type:
+  fun(ins):
+    fun(ty):
+      let tm = mk_var(["x", ty])
+      let itm = inst(ins)(tm)
+      type_of(itm)
+
+fun shell_type_match(ty):
+  if is_type(ty)
+  | let [tys, tyargs] = dest_type(ty)
+    let info:
+      try:
+        sys_shell_info(tys)
+        ~catch Failure(_): failwith("No shell defined for type '" +& string_of_type(ty) +& "'")
+    itlist(union)(map(shell_type_match)(tyargs))(PairList [])
+  | try:
+      type_match(ty)(@hol|{:num}|)(PairList [])
+      ~catch Failure(_):
+          failwith("Unknown type '" +& string_of_type(ty) +& "' that doesn't match 'num'!")
+
+fun HL_rewrite_ground_term(tm):
+  if frees(tm) == PairList []
+  | let numred:
+      try:
+        o(o(rhs)(concl))(NUM_REDUCE_CONV)(tm)
+        ~catch Failure(_): tm
+    if is_T(numred)
+    | numred
+    | let rew = REWRITE_CONV(union(rewrite_rules(#void))(all_accessor_thms(#void)))
+      o(o(rhs)(concl))(rew)(tm)
+  | failwith("rewrite_ground_term: free vars in term: " +& string_of_term(tm))
+
+fun HL_rewrite_ground_term_prime(tm):
+  if frees(tm) == PairList []
+  | let rules = union(o(flat)(defs)(#void))(all_accessor_thms(#void))
+    let arith_rules = PairList [PRE, ADD, MULT, EXP, EVEN, ODD, LE, LT, GE, GT, SUB]
+    let rew = REWRITE_CONV(PairList.cons(ARITH, subtract(rules)(arith_rules)))
+    o(o(rhs)(concl))(rew)(tm)
+  | failwith("rewrite_ground_term: free vars in term: " +& string_of_term(tm))
+
+def random_example:
+  fun random_example_prime(origdepth):
+    fun(maxdepth):
+      fun(ty):
+        let tyi = shell_type_match(ty)
+        let ty_prime = inst_type(tyi)(ty)
+        let [tystr, typarams] = dest_type(ty_prime)
+        let sinfo = sys_shell_info(tystr)
+        let ocons = shell_constructors(sinfo)
+        let sh_arg_types = shell_arg_types(sinfo)
+        let arg_type_pairs = zip(sh_arg_types)(typarams)
+        let arg_types_matches:
+          try:
+            itlist(fun([x, y]): fun(l): type_match(x)(y)(l))(arg_type_pairs)(tyi)
+            ~catch Failure(_): failwith("Shell argument types cannot be matched.")
+        let mk_cons_type:
+          fun(arglist):
+            OCamlList.fold_left(fun(ty): fun(i): mk_type(["fun", PairList [i, ty]]))(ty_prime)(rev(arglist))
+        let inst_cons = map(fun([x, y, _]): [x, map(inst_type(arg_types_matches))(y)])(ocons)
+        let mk_cons:
+          fun([x, y]):
+            try:
+              let n = num_of_string(x)
+              [mk_numeral(n), y]
+              ~catch Failure(_): [mk_mconst([x, mk_cons_type(y)]), y]
+        let cons = map(mk_cons)(inst_cons)
+        let terminal_filter = fun([_, l]): l == PairList []
+        let [tcons, ntcons] = partition(terminal_filter)(cons)
+        if maxdepth > 1
+        | let prob = 200 div ((maxdepth - 1) * 3)
+          let newdepth = maxdepth - 1
+          let selcons = (if Random.int(100) <= prob | tcons | ntcons)
+          let [cconstm, cconsargs] = OCamlList.nth(selcons)(Random.int(length(selcons)))
+          let args = map(random_example_prime(origdepth)(newdepth))(cconsargs)
+          OCamlList.fold_left(fun(x): fun(y): mk_comb([x, y]))(cconstm)(args)
+        | o(fst)(hd)(tcons)
+  fun(maxdepth): fun(ty): random_example_prime(maxdepth)(maxdepth)(ty)
+
+fun random_grounding(maxdepth):
+  fun(tm):
+    let vars = frees(tm)
+    let types = map(type_of)(vars)
+    let examples = map(random_example(maxdepth))(types)
+    let pairs = zip(vars)(examples)
+    let insts = map(fun([v, e]): term_match(PairList [])(v)(e))(pairs)
+    itlist(instantiate)(insts)(tm)
+
+fun counter_check_once(maxdepth):
+  fun(tm):
+    let tm_prime = random_grounding(maxdepth)(tm)
+    let tm_prime_prime = HL_rewrite_ground_term(tm_prime)
+    if is_T(tm_prime_prime)
+    | #true
+    | let junk:
+        warn(proof_printing.value)("Found counterexample for " +& string_of_term(tm) +& " : " +& string_of_term(tm_prime))
+      inc_counterexamples(#void)
+      #false
+
+fun counter_check_n(maxdepth):
+  fun(n):
+    fun(tm):
+      if n <= 0
+      | #true
+      | if counter_check_once(maxdepth)(tm)
+        | counter_check_n(maxdepth)(n - 1)(tm)
+        | #false
+
+fun counter_check(maxdepth): fun(tm): counter_check_n(maxdepth)(counter_check_num.value)(tm)

@@ -1,0 +1,617 @@
+#lang rhombus
+// Extended Boyer-Moore prover: started from tools/ml2rhm's translation of
+// the pinned HOL Light Boyer_Moore/terms_and_clauses.ml (rhombus/hol/Boyer_Moore/ keeps the
+// literal translation). Edited freely for the frontend; not a literal port.
+
+// ****************************************************************************
+// FILE          : terms_and_clauses.ml
+// DESCRIPTION   : Rewriting terms and simplifying clauses.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 7th June 1991
+//
+// MODIFIED      : R.J.Boulton
+// DATE          : 16th October 1992
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : July 2009
+// ****************************************************************************
+
+import:
+  "../../hol/lib.rhm" open:
+    only:
+      unzip
+      map
+      o
+      zip
+      check
+      hd
+      tl
+      F_F
+      I
+      fail
+      find
+      mem
+      itlist
+      el
+      assoc
+      can
+      funpow
+      chop_list
+      length
+      union
+      flat
+  "../../hol/fusion.rhm" open:
+    only:
+      type_of
+      mk_eq
+      REFL
+      dest_eq
+      ASSUME
+      hyp
+      concl
+      TRANS
+      rand
+      dest_type
+      dest_const
+      is_var
+      is_eq
+      is_comb
+      dest_comb
+      EQ_MP
+      frees
+  "../../hol/basics.rhm" open:
+    only:
+      genvar
+      subst
+      strip_comb
+      find_term
+      is_neg
+      is_disj
+      is_conj
+      dest_conj
+      dest_neg
+  "../../hol/equal.rhm" open:
+    only:
+      ALL_CONV
+      then_conv
+      TRY_CONV
+      RAND_CONV
+      RATOR_CONV
+      rhs
+      or_conv
+      AP_TERM
+      CONV_RULE
+      SYM
+      SUBS
+  "../../hol/bool.rhm" open:
+    only:
+      GEN
+      CONJUNCTS
+      SPEC
+      EQT_INTRO
+      EQT_ELIM
+      PROVE_HYP
+      SPEC_ALL
+      DISCH
+      MP
+      ISPECL
+      mk_neg
+      ISPEC
+      EQF_INTRO
+      CONJ
+      GEN_ALL
+      DISJ2
+      DISJ1
+      list_mk_disj
+      DISJ_CASES
+  "../../hol/tactics.rhm" open:
+    only:
+      prove
+      then_tac
+      REPEAT
+      GEN_TAC
+  "../../hol/simp.rhm" open:
+    only:
+      REWRITE_TAC
+      REWR_CONV
+      SIMP_CONV
+  "../../hol/theorems.rhm" open:
+    only:
+      EQ_CLAUSES
+      EQ_REFL
+      REFL_CLAUSE
+  "../../hol/class.rhm" open:
+    only:
+      COND_CLAUSES
+      BOOL_CASES_TAC
+      dest_cond
+      COND_ID
+      is_cond
+      COND_RATOR
+      COND_RAND
+      NOT_CLAUSES
+      COND_ELIM_CONV
+      EXCLUDED_MIDDLE
+  "../../hol/calc_num.rhm" open:
+    only:
+      num_CONV
+      NUM_EQ_CONV
+  "support.rhm" open:
+    only:
+      SUBST
+      is_T
+      is_F
+      disj_list
+  "shells.rhm" open:
+    only:
+      sys_shell_info
+      all_constructors
+      all_accessor_thms
+  "environment.rhm" open:
+    only:
+      get_def
+      rewrite_rules
+      defs
+  "clausal_form.rhm" open:
+    only:
+      NOT_NOT_NORM
+      COND_EXPAND
+      LEFT_OR_OVER_AND
+  "waterfall.rhm" open:
+    only:
+      apply_fproof
+      proof_print_string_l
+  "rewrite_rules.rhm" open:
+    only:
+      inst_frees_in_hyps
+      applicable_rewrites
+      ARGS_CONV
+      MULTI_DISJ_DISCH
+  "definitions.rhm" open:
+    only:
+      is_explicit_value
+      good_properties
+  "../../hol/private/ocaml.rhm" open:
+    only:
+      Failure
+      failwith
+      fst
+      snd
+      append
+  "../../hol/private/hol_quote.rhm" open
+
+export:
+  SUBST_CONV
+  bool_EQ_CONV
+  rewrite_with_lemmas
+  rewrite_explicit_value
+  COND_T
+  COND_F
+  COND_LEFT
+  COND_RIGHT
+  COND_RIGHT_F
+  COND_T_F
+  rewrite_conditional
+  EQ_T
+  EQ_EQ
+  EQ_F
+  prove_terms_not_eq
+  rewrite_equality
+  rewrite_application
+  rewrite_term
+  MOVE_COND_UP_CONV
+  COND_OR
+  MOVE_NOT_THRU_CONDS_CONV
+  EXPAND_ONE_COND_CONV
+  OR_OVER_ANDS_CONV
+  EXPAND_COND_CONV
+  SPLIT_CLAUSE_ON_COND_CONV
+  simplify_one_literal
+  simplify_clause
+  simplify_clauses
+  HL_simplify_clause
+  simplify_heuristic
+  HL_simplify_heuristic
+  NOT_EQ_F
+  subst_heuristic
+
+fun SUBST_CONV(thvars):
+  fun(template):
+    fun(tm):
+      let [thms, vars] = unzip(thvars)
+      let gvs = map(o(genvar)(type_of))(vars)
+      let gtemplate = subst(zip(gvs)(vars))(template)
+      SUBST(zip(thms)(gvs))(mk_eq([template, gtemplate]))(REFL(tm))
+
+def bool_EQ_CONV:
+  let check:
+    let boolty = @hol|{:bool}|
+    check(fun(tm): type_of(tm) == boolty)
+  let clist = map(GEN(@hol|{b:bool}|))(CONJUNCTS(SPEC(@hol|{b:bool}|)(EQ_CLAUSES)))
+  let tb = hd(clist)
+  let bt = hd(tl(clist))
+  let T = @hol|{T}|
+  let F = @hol|{F}|
+  fun(tm):
+    try:
+      let [l, r] = F_F(I)(check)(dest_eq(tm))
+      if l == r
+      | EQT_INTRO(REFL(l))
+      | if l == T
+        | SPEC(r)(tb)
+        | if r == T
+          | SPEC(l)(bt)
+          | fail(#void)
+      ~catch Failure(_): failwith("bool_EQ_CONV")
+
+fun rewrite_with_lemmas(rewrite):
+  fun(hyp_chain):
+    fun(assumps):
+      fun(tm):
+        let rewrite_hyp:
+          fun(h):
+            try:
+              EQT_INTRO(ASSUME(find(fun(tm): tm == h)(assumps)))
+              ~catch Failure(_):
+                  if mem(h)(hyp_chain) | ALL_CONV(h) | rewrite(PairList.cons(h, hyp_chain))(assumps)(h)
+        fun try_rewrites(assumps):
+          fun(ths):
+            if ths == PairList []
+            | failwith("try_rewrites")
+            | try:
+                let th = inst_frees_in_hyps(assumps)(hd(ths))
+                let hyp_ths = map(o(EQT_ELIM)(rewrite_hyp))(hyp(th))
+                itlist(PROVE_HYP)(hyp_ths)(th)
+                ~catch Failure(_): try_rewrites(assumps)(tl(ths))
+        try:
+          try_rewrites(assumps)(applicable_rewrites(tm))
+          ~catch Failure(_): ALL_CONV(tm)
+
+fun rewrite_explicit_value(tm):
+  fun conv(tm): (num_CONV then_conv TRY_CONV(RAND_CONV(conv)))(tm)
+  (TRY_CONV(conv) then_conv TRY_CONV(ARGS_CONV(rewrite_explicit_value)))(tm)
+
+def PairList [COND_T, COND_F] = CONJUNCTS(SPEC_ALL(COND_CLAUSES))
+
+def COND_LEFT:
+  prove([@hol|{!b x x' (y:'a). (b ==> (x = x')) ==> ((if b then x else y) = (if b then x' else y))}|,
+         REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(@hol|{b:bool}|) then_tac REWRITE_TAC(PairList [])])
+
+def COND_RIGHT:
+  prove([@hol|{!b y y' (x:'a). (~b ==> (y = y')) ==> ((if b then x else y) = (if b then x else y'))}|,
+         REPEAT(GEN_TAC) then_tac BOOL_CASES_TAC(@hol|{b:bool}|) then_tac REWRITE_TAC(PairList [])])
+
+def COND_RIGHT_F = prove([@hol|{(if b then b else F) = b}|,
+                          BOOL_CASES_TAC(@hol|{b:bool}|) then_tac REWRITE_TAC(PairList [])])
+
+def COND_T_F = prove([@hol|{(if b then  T else F) = b}|,
+                      BOOL_CASES_TAC(@hol|{b:bool}|) then_tac REWRITE_TAC(PairList [])])
+
+fun rewrite_conditional(rewrite):
+  fun(assumps):
+    fun(tm):
+      try:
+        let th1 = RATOR_CONV(RATOR_CONV(RAND_CONV(rewrite(assumps))))(tm)
+        let tm1 = rhs(concl(th1))
+        let [b_prime, [x, y]] = dest_cond(tm1)
+        if is_T(b_prime)
+        | TRANS(th1)((REWR_CONV(COND_T) then_conv rewrite(assumps))(tm1))
+        | if is_F(b_prime)
+          | TRANS(th1)((REWR_CONV(COND_F) then_conv rewrite(assumps))(tm1))
+          | let th2 = DISCH(b_prime)(rewrite(PairList.cons(b_prime, assumps))(x))
+            let x_prime = rand(rand(concl(th2)))
+            let th3 = MP(ISPECL(PairList [b_prime, x, x_prime, y])(COND_LEFT))(th2)
+            let tm3 = rhs(concl(th3))
+            let notb_prime = mk_neg(b_prime)
+            let th4 = DISCH(notb_prime)(rewrite(PairList.cons(notb_prime, assumps))(y))
+            let y_prime = rand(rand(concl(th4)))
+            let th5 = MP(ISPECL(PairList [b_prime, y, y_prime, x_prime])(COND_RIGHT))(th4)
+            let th6:
+              (REWR_CONV(COND_ID) or_conv REWR_CONV(COND_RIGHT_F) or_conv TRY_CONV(REWR_CONV(COND_T_F)))(rhs(concl(th5)))
+            TRANS(TRANS(TRANS(th1)(th3))(th5))(th6)
+        ~catch Failure(_): failwith("rewrite_conditional")
+
+def EQ_T:
+  prove([@hol|{(x = T) = x}|, BOOL_CASES_TAC(@hol|{x:bool}|) then_tac REWRITE_TAC(PairList [])])
+
+def EQ_EQ = prove([@hol|{(x = ((y:'a) = z)) = (if (y = z) then (x = T) else (x = F))}|,
+                   BOOL_CASES_TAC(@hol|{x:bool}|) then_tac \
+                   BOOL_CASES_TAC(@hol|{(y:'a) = z}|) then_tac \
+                   REWRITE_TAC(PairList [])])
+
+def EQ_F = prove([@hol|{(x = F) = (if x then F else T)}|,
+                  BOOL_CASES_TAC(@hol|{x:bool}|) then_tac REWRITE_TAC(PairList [])])
+
+fun prove_terms_not_eq(l):
+  fun(r):
+    fun STRUCT_CONV(tm):
+      (bool_EQ_CONV or_conv \
+       NUM_EQ_CONV or_conv \
+       (fun(tm):
+          let [l, r] = dest_eq(tm)
+          let ty_name = o(fst)(dest_type)(type_of(l))
+          let ty_info = sys_shell_info(ty_name)
+          let ty_conv = ty_info.struct_conv
+          ty_conv(STRUCT_CONV)(tm)) or_conv \
+       ALL_CONV)(tm)
+    try:
+      let th = STRUCT_CONV(mk_eq([l, r]))
+      if is_F(rhs(concl(th))) | th | failwith("")
+      ~catch Failure(_): failwith("prove_terms_not_eq")
+
+fun rewrite_equality(rewrite):
+  fun(hyp_chain):
+    fun(assumps):
+      fun(tm):
+        try:
+          let th1 = (RATOR_CONV(RAND_CONV(rewrite(hyp_chain)(assumps))) then_conv \
+                     RAND_CONV(rewrite(hyp_chain)(assumps)))(tm)
+          let tm1 = rhs(concl(th1))
+          let [l, r] = dest_eq(tm1)
+          if l == r
+          | TRANS(th1)(EQT_INTRO(ISPEC(l)(EQ_REFL)))
+          | try:
+              TRANS(th1)(prove_terms_not_eq(l)(r))
+              ~catch Failure(_):
+                  let th2 = (REWR_CONV(EQ_T) or_conv REWR_CONV(EQ_EQ) or_conv TRY_CONV(REWR_CONV(EQ_F)))(tm1)
+                  let th3 = rewrite_with_lemmas(rewrite)(hyp_chain)(assumps)(rhs(concl(th2)))
+                  TRANS(TRANS(th1)(th2))(th3)
+          ~catch Failure(_): failwith("rewrite_equality")
+
+fun rewrite_application(rewrite):
+  fun(lit):
+    fun(funcs):
+      fun(hyp_chain):
+        fun(assumps):
+          fun(tm):
+            try:
+              let th1 = ARGS_CONV(rewrite(lit)(funcs)(hyp_chain)(assumps))(tm)
+              let tm1 = rhs(concl(th1))
+              let [f, args] = strip_comb(tm1)
+              let name = fst(dest_const(f))
+              if mem(name)(all_constructors(#void))
+              | th1
+              | try:
+                  let [i, constructors] = get_def(name)
+                  if i == 0
+                  | let th2 = REWR_CONV(snd(hd(constructors)))(tm1)
+                    let th3 = rewrite(lit)(funcs)(hyp_chain)(assumps)(rhs(concl(th2)))
+                    TRANS(TRANS(th1)(th2))(th3)
+                  | if mem(name)(funcs)
+                    | th1
+                    | let th2 = rewrite_with_lemmas(rewrite(lit)(funcs))(hyp_chain)(assumps)(tm1)
+                      let tm2 = rhs(concl(th2))
+                      if tm2 == tm1
+                      | try:
+                          let argi = el(i - 1)(args)
+                          let hol_constructor:
+                            try:
+                              fst(dest_const(fst(strip_comb(argi))))
+                              ~catch Failure(_): ""
+                          let th = assoc(hol_constructor)(constructors)
+                          let th3 = REWR_CONV(th)(tm1)
+                          let tm3 = rhs(concl(th3))
+                          let funcs_prime = (if is_explicit_value(argi) | funcs | PairList.cons(name, funcs))
+                          let th4 = rewrite(lit)(funcs_prime)(hyp_chain)(assumps)(tm3)
+                          let tm4 = rhs(concl(th4))
+                          if good_properties(assumps)(tm1)(tm4)(lit) | TRANS(TRANS(th1)(th3))(th4) | th1
+                          ~catch Failure(_): th1
+                      | TRANS(th1)(th2)
+                  ~catch Failure("get_def"):
+                      TRANS(th1)(rewrite_with_lemmas(rewrite(lit)(funcs))(hyp_chain)(assumps)(tm1))
+              ~catch Failure(_): failwith("rewrite_application")
+
+fun rewrite_term(lit):
+  fun(funcs):
+    fun(hyp_chain):
+      fun(assumps):
+        fun(tm):
+          try:
+            EQT_INTRO(ASSUME(find(fun(t): t == tm)(assumps)))
+            ~catch Failure(_):
+                try:
+                  EQF_INTRO(ASSUME(find(fun(t): t == mk_neg(tm))(assumps)))
+                  ~catch Failure(_):
+                      try:
+                        let rewrite = rewrite_term(lit)(funcs)
+                        if is_var(tm)
+                        | ALL_CONV(tm)
+                        | if is_explicit_value(tm)
+                          | rewrite_explicit_value(tm)
+                          | if is_cond(tm)
+                            | rewrite_conditional(rewrite(hyp_chain))(assumps)(tm)
+                            | if is_eq(tm)
+                              | rewrite_equality(rewrite)(hyp_chain)(assumps)(tm)
+                              | rewrite_application(rewrite_term)(lit)(funcs)(hyp_chain)(assumps)(tm)
+                        ~catch Failure(_): failwith("rewrite_term")
+
+fun MOVE_COND_UP_CONV(tm):
+  try:
+    if !can(find_term(is_cond))(tm)
+    | ALL_CONV(tm)
+    | if is_cond(tm)
+      | (RATOR_CONV(RATOR_CONV(RAND_CONV(MOVE_COND_UP_CONV))) then_conv \
+         RATOR_CONV(RAND_CONV(MOVE_COND_UP_CONV)) then_conv \
+         RAND_CONV(MOVE_COND_UP_CONV))(tm)
+      | if is_comb(tm)
+        | let [op, arg] = dest_comb(tm)
+          if is_cond(op)
+          | (REWR_CONV(COND_RATOR) then_conv MOVE_COND_UP_CONV)(tm)
+          | if is_cond(arg)
+            | (REWR_CONV(COND_RAND) then_conv MOVE_COND_UP_CONV)(tm)
+            | let th = (RATOR_CONV(MOVE_COND_UP_CONV) then_conv RAND_CONV(MOVE_COND_UP_CONV))(tm)
+              let tm_prime = rhs(concl(th))
+              if tm_prime == tm | th | TRANS(th)(MOVE_COND_UP_CONV(tm_prime))
+        | ALL_CONV(tm)
+    ~catch Failure(_): failwith("MOVE_COND_UP_CONV")
+
+def COND_OR:
+  prove([@hol|{(if b then x else y) \/ z <=> ((~b \/ x \/ z) /\ (b \/ y \/ z))}|,
+         BOOL_CASES_TAC(@hol|{b:bool}|) then_tac REWRITE_TAC(PairList [])])
+
+fun MOVE_NOT_THRU_CONDS_CONV(tm):
+  try:
+    if is_neg(tm)
+    | if is_cond(rand(tm))
+      | (REWR_CONV(COND_RAND) then_conv \
+         RATOR_CONV(RAND_CONV(MOVE_NOT_THRU_CONDS_CONV)) then_conv \
+         RAND_CONV(MOVE_NOT_THRU_CONDS_CONV))(tm)
+      | TRY_CONV(REWR_CONV(NOT_NOT_NORM))(tm)
+    | ALL_CONV(tm)
+    ~catch Failure(_): failwith("MOVE_NOT_THRU_CONDS_CONV")
+
+fun EXPAND_ONE_COND_CONV(tm):
+  try:
+    ((REWR_CONV(COND_OR) or_conv REWR_CONV(COND_EXPAND)) then_conv \
+     RATOR_CONV(RAND_CONV(RATOR_CONV(RAND_CONV(MOVE_NOT_THRU_CONDS_CONV)))))(tm)
+    ~catch Failure(_): failwith("EXPAND_ONE_COND_CONV")
+
+fun OR_OVER_ANDS_CONV(conv):
+  fun(tm):
+    if is_disj(tm)
+    | if is_conj(rand(tm))
+      | (REWR_CONV(LEFT_OR_OVER_AND) then_conv \
+         RATOR_CONV(RAND_CONV(OR_OVER_ANDS_CONV(conv))) then_conv \
+         RAND_CONV(OR_OVER_ANDS_CONV(conv)))(tm)
+      | conv(tm)
+    | ALL_CONV(tm)
+
+fun EXPAND_COND_CONV(tm):
+  try:
+    (EXPAND_ONE_COND_CONV then_conv \
+     RATOR_CONV(RAND_CONV(RAND_CONV(EXPAND_COND_CONV) then_conv OR_OVER_ANDS_CONV(EXPAND_COND_CONV))) then_conv \
+     RAND_CONV(RAND_CONV(EXPAND_COND_CONV) then_conv OR_OVER_ANDS_CONV(EXPAND_COND_CONV)))(tm)
+    ~catch Failure(_): ALL_CONV(tm)
+
+fun SPLIT_CLAUSE_ON_COND_CONV(n):
+  fun(tm):
+    try:
+      funpow(n)(fun(conv): RAND_CONV(conv) then_conv OR_OVER_ANDS_CONV(ALL_CONV))(EXPAND_COND_CONV)(tm)
+      ~catch Failure(_): failwith("SPLIT_CLAUSE_ON_COND_CONV")
+
+fun simplify_one_literal(n):
+  fun(tm):
+    try:
+      let negate = (fun(tm): if is_neg(tm) | rand(tm) | mk_neg(tm))
+      let NEGATE:
+        fun(th):
+          let tm = rhs(concl(th))
+          let th_prime = AP_TERM(@hol|{(~)}|)(th)
+          if is_T(tm)
+          | TRANS(th_prime)(el(1)(CONJUNCTS(NOT_CLAUSES)))
+          | if is_F(tm)
+            | TRANS(th_prime)(el(2)(CONJUNCTS(NOT_CLAUSES)))
+            | th_prime
+      let [overs, y, unders]:
+        match chop_list(n)(disj_list(tm))
+        | [overs, PairList [y, & unders]]: [overs, y, unders]
+        | _: failwith("")
+      let overs_prime = map(negate)(overs)
+      let unders_prime = map(negate)(unders)
+      let th1:
+        if is_neg(y)
+        | NEGATE(rewrite_term(y)(PairList [])(PairList [])(append(overs_prime)(unders_prime))(rand(y)))
+        | rewrite_term(y)(PairList [])(PairList [])(append(overs_prime)(unders_prime))(y)
+      let tm1 = rhs(concl(th1))
+      if is_T(tm1) || is_F(tm1)
+      | [MULTI_DISJ_DISCH([overs_prime, unders_prime])(th1), if unders == PairList [] | 0 | -1]
+      | let th2 = TRANS(th1)(MOVE_COND_UP_CONV(tm1))
+        let tm2 = rhs(concl(th2))
+        let th3 = MULTI_DISJ_DISCH([overs_prime, unders_prime])(th2)
+        if is_cond(tm2) | [CONV_RULE(RAND_CONV(SPLIT_CLAUSE_ON_COND_CONV(n)))(th3), 1] | [th3, 0]
+      ~catch Failure(_): failwith("simplify_one_literal")
+
+fun simplify_clause(n):
+  fun(tm):
+    try:
+      let [th, change_flag] = simplify_one_literal(n)(tm)
+      let tm_prime = rhs(concl(th))
+      if is_T(tm_prime)
+      | [PairList [], apply_fproof("simplify_clause")(fun(ths): EQT_ELIM(th))(PairList [])]
+      | let [tms, proof]:
+          if change_flag < 0
+          | simplify_clause(n)(tm_prime)
+          | if change_flag == 0
+            | simplify_clause(n + 1)(tm_prime)
+            | simplify_clauses(n + 1)(tm_prime)
+        [tms, fun(ths): EQ_MP(SYM(th))(proof(ths))]
+      ~catch Failure(_): [PairList [tm], apply_fproof("simplify_clause")(hd)(PairList [tm])]
+
+fun simplify_clauses(n):
+  fun(tm):
+    try:
+      let [tm1, tm2] = dest_conj(tm)
+      let [tms1, proof1] = simplify_clauses(n + 1)(tm1)
+      let [tms2, proof2] = simplify_clauses(n + 1)(tm2)
+      [append(tms1)(tms2),
+       fun(ths):
+         let [ths1, ths2] = chop_list(length(tms1))(ths)
+         CONJ(proof1(ths1))(proof2(ths2))]
+      ~catch Failure(_): simplify_clause(n)(tm)
+
+fun HL_simplify_clause(l):
+  fun(tm):
+    try:
+      let rules:
+        itlist(union)(PairList [l, rewrite_rules(#void), flat(defs(#void)), all_accessor_thms(#void)])(PairList [])
+      let th = SIMP_CONV(rules)(tm)
+      let tm_prime = rhs(concl(th))
+      let tmc:
+        try:
+          o(o(rand)(concl))(COND_ELIM_CONV)(tm_prime)
+          ~catch Failure(_): tm_prime
+      if is_T(tm_prime)
+      | [PairList [], apply_fproof("HL_simplify_clause")(fun(ths): EQT_ELIM(th))(PairList [])]
+      | [PairList [tm_prime],
+         apply_fproof("HL_simplify_clause")(o(EQ_MP(SYM(th)))(hd))(PairList [tm_prime])]
+      ~catch Failure(_): [PairList [tm], apply_fproof("HL_simplify_clause")(hd)(PairList [tm])]
+
+fun simplify_heuristic([tm, ind]):
+  try:
+    let [tms, proof] = simplify_clause(0)(tm)
+    if tms == PairList [tm]
+    | failwith("")
+    | proof_print_string_l("-> Simplify Heuristic")(#void)
+      [map(fun(tm): [tm, ind])(tms), proof]
+    ~catch Failure(_): failwith("simplify_heuristic")
+
+fun HL_simplify_heuristic(l):
+  fun([tm, ind]):
+    try:
+      let [tms, proof] = HL_simplify_clause(l)(tm)
+      if tms == PairList [tm]
+      | failwith("")
+      | proof_print_string_l("-> HL Simplify Heuristic")(#void)
+        [map(fun(tm): [tm, ind])(tms), proof]
+      ~catch Failure(_): failwith("HL_simplify_heuristic")
+
+def NOT_EQ_F:
+  GEN_ALL(TRANS(AP_TERM(@hol|{(~)}|)(SPEC_ALL(REFL_CLAUSE)))(el(1)(CONJUNCTS(NOT_CLAUSES))))
+
+fun subst_heuristic([tm, ind]):
+  try:
+    let checkx = fun([v, t]): is_var(v) && !mem(v)(frees(t))
+    fun split_disjuncts(tml):
+      if can(check(o(o(checkx)(dest_eq))(dest_neg)))(hd(tml))
+      | [PairList [], tml]
+      | (fun([l1, l2]): [PairList.cons(hd(tml), l1), l2])(split_disjuncts(tl(tml)))
+    let [overs, PairList [neq, & unders]] = split_disjuncts(disj_list(tm))
+    let eq = dest_neg(neq)
+    let [v, t] = dest_eq(eq)
+    let ass = ASSUME(neq)
+    let th1 = itlist(DISJ2)(overs)(try:
+                                     DISJ1(ass)(list_mk_disj(unders))
+                                     ~catch Failure(_): ass)
+    let th2:
+      SUBS(PairList [ISPEC(t)(NOT_EQ_F)])(SUBST_CONV(PairList [[ASSUME(eq), v]])(tm)(tm))
+    let th3 = SPEC(eq)(EXCLUDED_MIDDLE)
+    let tm_prime = rhs(concl(th2))
+    let proof = fun(th): DISJ_CASES(th3)(EQ_MP(SYM(th2))(th))(th1)
+    proof_print_string_l("-> Subst Heuristic")(#void)
+    [PairList [[tm_prime, ind]],
+     apply_fproof("subst_heuristic")(o(proof)(hd))(PairList [tm_prime])]
+    ~catch Failure(_): failwith("subst_heuristic")

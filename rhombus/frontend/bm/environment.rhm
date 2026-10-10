@@ -1,0 +1,252 @@
+#lang rhombus
+// Extended Boyer-Moore prover: started from tools/ml2rhm's translation of
+// the pinned HOL Light Boyer_Moore/environment.ml (rhombus/hol/Boyer_Moore/ keeps the
+// literal translation). Edited freely for the frontend; not a literal port.
+
+// ****************************************************************************
+// FILE          : environment.ml
+// DESCRIPTION   : Environment of definitions and pre-proved theorems for use
+// in automation.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 8th May 1991
+//
+// LAST MODIFIED : R.J.Boulton
+// DATE          : 12th October 1992
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : July 2009
+// ****************************************************************************
+
+import:
+  "../../hol/lib.rhm" open:
+    only:
+      end_itlist
+      map
+      itlist
+      el
+      length
+      setify
+      hd
+      o
+      assoc
+      flat
+      mem
+  "../../hol/fusion.rhm" open:
+    only:
+      dest_thm
+      type_of
+      concl
+      is_eq
+      dest_const
+      is_var
+      hyp
+      is_const
+  "../../hol/basics.rhm" open:
+    only:
+      is_forall
+      genvar
+      dest_forall
+      is_neg
+      strip_comb
+      is_conj
+  "../../hol/equal.rhm" open:
+    only:
+      lhs
+      CONV_RULE
+  "../../hol/bool.rhm" open:
+    only:
+      SPEC
+      CONJ
+      CONJUNCT1
+      CONJUNCT2
+      EQF_INTRO
+      EQT_INTRO
+      SPEC_ALL
+      UNDISCH
+      CONJUNCTS
+      GEN_ALL
+  "../../hol/tactics.rhm" open:
+    only:
+      prove
+      then_tac
+  "../../hol/simp.rhm" open:
+    only:
+      REWRITE_TAC
+      REWR_CONV
+  "../../hol/class.rhm" open:
+    only:
+      BOOL_CASES_TAC
+  "../../hol/nums.rhm" open:
+    only:
+      is_numeral
+  "support.rhm" open:
+    only:
+      number_list
+      conj_list
+      hashI
+      is_T
+      is_F
+  "shells.rhm" open:
+    only:
+      all_constructors
+      all_accessors
+  "../../hol/private/ocaml.rhm" open:
+    only:
+      fst
+      Failure
+      failwith
+      OCamlList
+      snd
+      max
+  "../../hol/private/hol_quote.rhm" open
+
+export:
+  my_gen_terms
+  bm_steps
+  GSPEC
+  LIST_CONJ
+  CONJ_LIST
+  system_defs
+  new_def
+  defs
+  defs_names
+  get_def
+  system_rewrites
+  CONJ_IMP_IMP_IMP
+  CONJ_UNDISCH
+  new_rewrite_rule
+  rewrite_rules
+  system_gen_lemmas
+  new_gen_lemma
+  gen_lemmas
+  max_var_depth
+
+def my_gen_terms = Box(PairList [])
+
+def bm_steps = Box([0, 0])
+
+fun GSPEC(th):
+  let [wl, w] = dest_thm(th)
+  if is_forall(w) | GSPEC(SPEC(genvar(type_of(fst(dest_forall(w)))))(th)) | th
+
+def LIST_CONJ = end_itlist(CONJ)
+
+fun CONJ_LIST(n):
+  fun(th):
+    try:
+      if n == 1 | PairList [th] | PairList.cons(CONJUNCT1(th), CONJ_LIST(n - 1)(CONJUNCT2(th)))
+      ~catch Failure(_): failwith("CONJ_LIST")
+
+def system_defs = Box(PairList [])
+
+fun new_def(th):
+  try:
+    let make_into_eqn:
+      fun(th):
+        let tm = concl(th)
+        if is_eq(tm)
+        | th
+        | if is_neg(tm)
+          | EQF_INTRO(th)
+          | EQT_INTRO(th)
+    let get_constructor:
+      fun(th):
+        let tm = lhs(concl(th))
+        let [f, args] = strip_comb(tm)
+        let name = fst(dest_const(f))
+        let bools = number_list(map(is_var)(args))
+        let i = itlist(fun([b, i]):
+                         fun(n):
+                           if !b && (n == 0)
+                           | i
+                           | if b
+                             | n
+                             | failwith(""))(bools)(0)
+        if i == 0 | [[name, i], ""] | [[name, i], fst(dest_const(fst(strip_comb(el(i - 1)(args)))))]
+    let [PairList [], tm] = dest_thm(th)
+    let ths = CONJ_LIST(length(conj_list(tm)))(th)
+    let ths_prime = map(SPEC_ALL)(ths)
+    let eqs = map(make_into_eqn)(ths_prime)
+    let constructs = map(get_constructor)(eqs)
+    let [xl, yl] = hashI(setify)(OCamlList.split(constructs))
+    let [name, i] = (if length(xl) == 1 | hd(xl) | failwith(""))
+    system_defs.value := PairList.cons([name, [i, OCamlList.combine(yl)(eqs)]], system_defs.value)
+    ~catch Failure(_): failwith("new_def")
+
+fun defs(_): map(o(o(map(snd))(snd))(snd))(system_defs.value)
+
+fun defs_names(_): map(fst)(system_defs.value)
+
+fun get_def(name):
+  try:
+    assoc(name)(system_defs.value)
+    ~catch Failure(_): failwith("get_def")
+
+def system_rewrites = Box(PairList [])
+
+def CONJ_IMP_IMP_IMP = prove([@hol|{((x /\ y) ==> z) = (x ==> (y ==> z))}|,
+                              BOOL_CASES_TAC(@hol|{x:bool}|) then_tac \
+                              BOOL_CASES_TAC(@hol|{y:bool}|) then_tac \
+                              BOOL_CASES_TAC(@hol|{z:bool}|) then_tac \
+                              REWRITE_TAC(PairList [])])
+
+fun CONJ_UNDISCH(th):
+  try:
+    let th_prime = CONV_RULE(REWR_CONV(CONJ_IMP_IMP_IMP))(th)
+    let th_prime_prime = UNDISCH(th_prime)
+    CONJ_UNDISCH(th_prime_prime)
+    ~catch Failure(_):
+        try:
+          if !is_neg(concl(th)) | UNDISCH(th) | failwith("")
+          ~catch Failure(_): failwith("CONJ_UNDISCH")
+
+fun new_rewrite_rule(th):
+  try:
+    if is_conj(concl(th))
+    | map(new_rewrite_rule)(CONJUNCTS(th))
+      #void
+    | let [PairList [], tm] = dest_thm(th)
+      let th_prime = GSPEC(GEN_ALL(th))
+      let th_prime_prime:
+        try:
+          CONJ_UNDISCH(th_prime)
+          ~catch Failure(_): th_prime
+      let tm_prime_prime = concl(th_prime_prime)
+      let th_prime_prime_prime:
+        if is_eq(tm_prime_prime)
+        | th_prime_prime
+        | if is_neg(tm_prime_prime)
+          | EQF_INTRO(th_prime_prime)
+          | EQT_INTRO(th_prime_prime)
+      system_rewrites.value := PairList.cons([th, th_prime_prime_prime], system_rewrites.value)
+    ~catch Failure(_): failwith("new_rewrite_rule")
+
+fun rewrite_rules(_): map(fst)(system_rewrites.value)
+
+def system_gen_lemmas = Box(PairList [])
+
+fun new_gen_lemma(th):
+  if hyp(th) == PairList []
+  | system_gen_lemmas.value := PairList.cons(th, system_gen_lemmas.value)
+  | failwith("new_gen_lemma")
+
+fun gen_lemmas(_): system_gen_lemmas.value
+
+fun max_var_depth(tm):
+  if is_var(tm)
+  | 1
+  | if is_numeral(tm) || is_const(tm) || is_T(tm) || is_F(tm)
+    | 0
+    | try:
+        let [f, args] = strip_comb(tm)
+        let fn = o(fst)(dest_const)(f)
+        let l = flat(PairList [defs_names(#void), all_constructors(#void), all_accessors(#void)])
+        if mem(fn)(l)
+        | let x = itlist(max)(map(max_var_depth)(args))(0)
+          if x > 0 | x + 1 | 0
+        | itlist(max)(map(max_var_depth)(args))(0)
+        ~catch Failure(_): 0

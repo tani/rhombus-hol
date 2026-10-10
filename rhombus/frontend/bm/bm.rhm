@@ -1,0 +1,124 @@
+#lang rhombus
+// The extended Boyer-Moore prover as the frontend uses it.
+//
+// - define_shell: a type made by define_type becomes a Boyer-Moore shell
+//   (shells.ml's own define_shell is commented out upstream).
+// - register_definition / register_rewrite: definitions and proved theorems
+//   become available to later proofs, as make.ml's new_stuff does.
+// - prove: BOYER_MOORE_FINAL with the hints of a `proof:` block.
+import:
+  "../../hol/private/ocaml.rhm" open:
+    only:
+      Failure
+      fst
+      snd
+  "../../hol/lib.rhm" open:
+    only:
+      map
+      filter
+      mem
+      itlist
+  "../../hol/fusion.rhm" open:
+    only:
+      concl
+      dest_type
+      dest_const
+      type_of
+  "../../hol/basics.rhm" open:
+    only:
+      disjuncts
+      strip_exists
+      strip_comb
+      dest_forall
+  "../../hol/equal.rhm" open:
+    only:
+      rhs
+  "../../hol/bool.rhm" open:
+    only:
+      CONJUNCTS
+  "../../hol/ind_types.rhm" open:
+    only:
+      distinctness
+      injectivity
+  "shells.rhm" open:
+    only:
+      ShellInfo
+      Shell
+      system_shells
+      shells
+  "struct_equal.rhm" open:
+    only:
+      ONE_STEP_RECTY_EQ_CONV
+  "environment.rhm" open:
+    only:
+      new_def
+      new_rewrite_rule
+      system_rewrites
+  "induction.rhm" open:
+    only:
+      induction_hint
+  "main.rhm" open:
+    only:
+      BOYER_MOORE_FINAL
+
+export:
+  define_shell
+  register_definition
+  register_rewrite
+  Hints
+  no_hints
+  prove
+
+// The hints of a `proof:` block: theorems to use as rewrite rules for this
+// proof, theorems whose rules to leave out, and the variable to induct on.
+class Hints(use, disable, induct)
+def no_hints = Hints(PairList [], PairList [], #false)
+
+fun conjuncts_or_none(f):
+  try:
+    CONJUNCTS(f())
+    ~catch Failure(_): PairList []
+
+// The shell of the type `name`, from its induction and cases theorems as
+// define_type proves them: constructors in the order of the cases theorem,
+// without accessors.
+fun define_shell(name, induct, cases_thm):
+  if mem(name)(shells(#void))
+  | #void
+  | let [x, body] = dest_forall(concl(cases_thm))
+    let [_, ty_args] = dest_type(type_of(x))
+    let combs = map(fun(d): rhs(snd(strip_exists(d))))(disjuncts(body))
+    let constructors:
+      map(fun(c):
+            let [f, args] = strip_comb(c)
+            [fst(dest_const(f)), map(type_of)(args), PairList []])(combs)
+    let distinct = conjuncts_or_none(fun(): distinctness(name))
+    let one_one = conjuncts_or_none(fun(): injectivity(name))
+    let info:
+      ShellInfo(ty_args, constructors, induct, cases_thm, distinct, one_one,
+                ONE_STEP_RECTY_EQ_CONV([induct, distinct, one_one]))
+    system_shells.value := PairList.cons(Shell(name, info), system_shells.value)
+
+// A recursive or plain definition: a definition the prover may open up when
+// it has the form new_def accepts, and a rewrite rule in any case.
+fun register_definition(th):
+  try:
+    new_def(th)
+    ~catch Failure(_): #void
+  new_rewrite_rule(th)
+
+fun register_rewrite(th): new_rewrite_rule(th)
+
+// Proves tm (free variables read universally) or fails with
+// Failure("BOYER_MOORE"). The hints apply to this proof only.
+fun prove(tm, hints :: Hints):
+  let saved = system_rewrites.value
+  try:
+    itlist(fun(th): fun(_): new_rewrite_rule(th))(hints.use)(#void)
+    system_rewrites.value := filter(fun([th, _]): !mem(concl(th))(map(concl)(hints.disable)))(
+      system_rewrites.value)
+    induction_hint.value := hints.induct
+    BOYER_MOORE_FINAL(hints.use)(tm)
+    ~finally:
+      system_rewrites.value := saved
+      induction_hint.value := #false

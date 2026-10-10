@@ -1,0 +1,136 @@
+#lang rhombus
+// Extended Boyer-Moore prover: started from tools/ml2rhm's translation of
+// the pinned HOL Light Boyer_Moore/definitions.ml (rhombus/hol/Boyer_Moore/ keeps the
+// literal translation). Edited freely for the frontend; not a literal port.
+
+// ****************************************************************************
+// FILE          : definitions.ml
+// DESCRIPTION   : Using definitions.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 6th June 1991
+//
+// LAST MODIFIED : R.J.Boulton
+// DATE          : 3rd August 1992
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : 2008
+// ****************************************************************************
+
+// ----------------------------------------------------------------------------
+// recursive_calls : string -> term -> term list
+//
+// Function to compute the occurrences of applications of a constant in a
+// term. The first argument is the name of the constant. The second argument
+// is the term to be examined. If there are no occurrences, an empty list is
+// returned. The function assumes that the term does not contain
+// abstractions.
+// ----------------------------------------------------------------------------
+
+import:
+  "../../hol/lib.rhm" open:
+    only:
+      itlist
+      map
+      mem
+      forall
+      length
+      filter
+  "../../hol/fusion.rhm" open:
+    only:
+      dest_const
+      rator
+      rand
+      type_of
+      is_const
+  "../../hol/basics.rhm" open:
+    only:
+      strip_comb
+      genvar
+      subst
+  "support.rhm" open:
+    only:
+      is_T
+      is_F
+  "shells.rhm" open:
+    only:
+      all_constructors
+  "../../hol/private/ocaml.rhm" open:
+    only:
+      fst
+      Failure
+      OCamlList
+      snd
+      failwith
+  "../../hol/private/hol_quote.rhm" open
+
+export:
+  recursive_calls
+  is_subterm
+  no_new_terms
+  hide_fun_call
+  is_explicit_value
+  more_explicit_values
+  good_properties
+
+fun recursive_calls(name):
+  fun(tm):
+    try:
+      let [f, args] = strip_comb(tm)
+      if ((try:
+             fst(dest_const(f)) == name
+             ~catch Failure(_): #false))
+      | PairList [tm]
+      | itlist(OCamlList.append)(map(recursive_calls(name))(args))(PairList [])
+      ~catch Failure(_): PairList []
+
+fun is_subterm(subterm):
+  fun(tm):
+    try:
+      if tm == subterm
+      | #true
+      | is_subterm(subterm)(rator(tm)) || is_subterm(subterm)(rand(tm))
+      ~catch Failure(_): #false
+
+fun no_new_terms(app):
+  fun(tm):
+    try:
+      let args = snd(strip_comb(app))
+      itlist(fun(x): fun(y): x && y)(map(fun(arg): is_subterm(arg)(tm))(args))(#true)
+      ~catch Failure(_): failwith("no_new_terms")
+
+fun hide_fun_call(app):
+  fun(tm):
+    let var = genvar(type_of(app))
+    subst(PairList [[var, app]])(tm)
+
+fun is_explicit_value(tm):
+  fun is_explicit_value_prime(constructors):
+    fun(tm):
+      is_T(tm) || \
+      is_F(tm) || \
+      (is_const(tm) && (type_of(tm) == @hol|{:num}|)) || \
+      (block:
+         let [f, args] = strip_comb(tm)
+         (try:
+            mem(fst(dest_const(f)))(constructors)
+            ~catch Failure(_): #false) && \
+         forall(is_explicit_value_prime(constructors))(args))
+  is_explicit_value_prime(all_constructors(#void))(tm)
+
+fun more_explicit_values(old_call):
+  fun(new_call):
+    try:
+      let [f1, args1] = strip_comb(old_call)
+      let [f2, args2] = strip_comb(new_call)
+      if f1 == f2
+      | let n1 = length(filter(is_explicit_value)(args1))
+        let n2 = length(filter(is_explicit_value)(args2))
+        n2 > n1
+      | failwith("")
+      ~catch Failure(_): failwith("more_explicit_values")
+
+fun good_properties(assumps): fun(call): fun(body_of_call): fun(tm): #true

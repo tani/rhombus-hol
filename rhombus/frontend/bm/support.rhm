@@ -1,0 +1,256 @@
+#lang rhombus
+// Extended Boyer-Moore prover: started from tools/ml2rhm's translation of
+// the pinned HOL Light Boyer_Moore/support.ml (rhombus/hol/Boyer_Moore/ keeps the
+// literal translation). Edited freely for the frontend; not a literal port.
+
+// ****************************************************************************
+// FILE          : support.ml
+// DESCRIPTION   : Miscellaneous supporting definitions for Boyer-Moore
+// style prover in HOL.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 6th June 1991
+//
+// LAST MODIFIED : R.J.Boulton
+// DATE          : 21st June 1991
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : 2008
+// ****************************************************************************
+
+import:
+  "../../hol/lib.rhm" open:
+    only:
+      unzip
+      map
+      o
+      zip
+      itlist
+      rev_itlist
+      C
+      I
+      length
+      filter
+      mem
+      hd
+      tl
+  "../../hol/fusion.rhm" open:
+    only:
+      type_of
+      dest_eq
+      concl
+      ASSUME
+      mk_eq
+      INST
+      REFL
+      INST_TYPE
+  "../../hol/basics.rhm" open:
+    only:
+      genvar
+      subst
+      dest_imp
+      dest_neg
+      dest_conj
+      dest_disj
+      strip_comb
+  "../../hol/equal.rhm" open:
+    only:
+      SUBS
+      SYM
+  "../../hol/bool.rhm" open:
+    only:
+      DISCH
+      MP
+      GENL
+      DISCH_ALL
+      SPECL
+      mk_imp
+  "../../hol/tactics.rhm" open:
+    only:
+      then_list
+      then_tac
+      MATCH_MP_TAC
+      CONJ_TAC
+      ALL_TAC
+      GEN_TAC
+      DISCH_TAC
+  "../../hol/itab.rhm" open:
+    only:
+      ITAUT
+  "../../hol/private/ocaml.rhm" open:
+    only:
+      Failure
+      failwith
+      OCamlList
+      snd
+  "../../hol/private/hol_quote.rhm" open
+
+export:
+  SUBST
+  SUBST_CONV
+  CONTRAPOS
+  NOT_EQ_SYM
+  hash
+  hashI
+  fst3
+  snd3
+  thd3
+  lcombinep
+  lcount
+  list_mk_imp
+  INDUCT_TAC_
+  distinct
+  is_T
+  is_F
+  conj_list
+  disj_list
+  number_list
+  insert_on_snd
+  sort_on_snd
+  find_bm_terms
+  remove_el
+
+fun SUBST(thl):
+  fun(pat):
+    fun(th):
+      let [eqs, vs] = unzip(thl)
+      let gvs = map(o(genvar)(type_of))(vs)
+      let gpat = subst(zip(gvs)(vs))(pat)
+      let [ls, rs] = unzip(map(o(dest_eq)(concl))(eqs))
+      let ths = map(o(ASSUME)(mk_eq))(zip(gvs)(rs))
+      let th1 = ASSUME(gpat)
+      let th2 = SUBS(ths)(th1)
+      let th3 = itlist(DISCH)(map(concl)(ths))(DISCH(gpat)(th2))
+      let th4 = INST(zip(ls)(gvs))(th3)
+      MP(rev_itlist(C(MP))(eqs)(th4))(th)
+
+fun SUBST_CONV(thvars):
+  fun(template):
+    fun(tm):
+      let [thms, vars] = unzip(thvars)
+      let gvs = map(o(genvar)(type_of))(vars)
+      let gtemplate = subst(zip(gvs)(vars))(template)
+      SUBST(zip(thms)(gvs))(mk_eq([template, gtemplate]))(REFL(tm))
+
+def CONTRAPOS:
+  let a = @hol|{a:bool}|
+  let b = @hol|{b:bool}|
+  let pth = ITAUT(@hol|{(a ==> b) ==> (~b ==> ~a)}|)
+  fun(th):
+    try:
+      let [P, Q] = dest_imp(concl(th))
+      MP(INST(PairList [[P, a], [Q, b]])(pth))(th)
+      ~catch Failure(_): failwith("CONTRAPOS")
+
+def NOT_EQ_SYM:
+  let pth:
+    GENL(PairList [@hol|{a:A}|, @hol|{b:A}|])(CONTRAPOS(DISCH_ALL(SYM(ASSUME(@hol|{a:A = b}|)))))
+  let aty = @hol|{:A}|
+  fun(th):
+    try:
+      let [l, r] = dest_eq(dest_neg(concl(th)))
+      MP(SPECL(PairList [r, l])(INST_TYPE(PairList [[type_of(l), aty]])(pth)))(th)
+      ~catch Failure(_): failwith("NOT_EQ_SYM")
+
+fun hash(f): fun(g): fun([x, y]): [f(x), g(y)]
+
+fun hashI(f): fun([x, y]): hash(f)(I)([x, y])
+
+fun fst3([x, _, _]): x
+
+fun snd3([_, x, _]): x
+
+fun thd3([_, _, x]): x
+
+fun lcombinep([x, y]): OCamlList.combine(x)(y)
+
+fun lcount(x): fun(l): length(filter((fun(x): fun(y): x == y)(x))(l))
+
+fun list_mk_imp([tms, tm]):
+  if tms == PairList []
+  | tm
+  | try:
+      itlist(fun(p): fun(q): mk_imp([p, q]))(tms)(tm)
+      ~catch Failure(_): failwith("list_mk_imp")
+
+fun INDUCT_TAC_(thm):
+  MATCH_MP_TAC(thm) then_tac CONJ_TAC then_list \
+  PairList [ALL_TAC, GEN_TAC then_tac GEN_TAC then_tac DISCH_TAC]
+
+fun distinct(x): if x == PairList [] | #true | !mem(hd(x))(tl(x)) && distinct(tl(x))
+
+def is_T:
+  let T = @hol|{T}|
+  fun(tm): tm == T
+
+def is_F:
+  let F = @hol|{F}|
+  fun(tm): tm == F
+
+fun support_conj_list_v1(tm):
+  try:
+    let [tm1, tm2] = dest_conj(tm)
+    PairList.cons(tm1, support_conj_list_v1(tm2))
+    ~catch Failure(_): PairList [tm]
+
+fun support_disj_list_v1(tm):
+  try:
+    let [tm1, tm2] = dest_disj(tm)
+    PairList.cons(tm1, support_disj_list_v1(tm2))
+    ~catch Failure(_): PairList [tm]
+
+fun number_list(l):
+  fun number_list_prime(n):
+    fun(l):
+      if l == PairList []
+      | PairList []
+      | PairList.cons([hd(l), n], number_list_prime(n + 1)(tl(l)))
+  number_list_prime(1)(l)
+
+fun insert_on_snd([x, n]):
+  fun(l):
+    if l == PairList []
+    | PairList [[x, n]]
+    | let h = hd(l)
+      if n < snd(h) | PairList.cons([x, n], l) | PairList.cons(h, insert_on_snd([x, n])(tl(l)))
+
+fun sort_on_snd(l):
+  if l == PairList [] | PairList [] | insert_on_snd(hd(l))(sort_on_snd(tl(l)))
+
+fun conj_list(tm):
+  try:
+    let [tm1, tm2] = dest_conj(tm)
+    PairList.cons(tm1, conj_list(tm2))
+    ~catch Failure(_): PairList [tm]
+
+fun disj_list(tm):
+  try:
+    let [tm1, tm2] = dest_disj(tm)
+    PairList.cons(tm1, disj_list(tm2))
+    ~catch Failure(_): PairList [tm]
+
+fun find_bm_terms(p):
+  fun(tm):
+    try:
+      fun accum(tml):
+        fun(p):
+          fun(tm):
+            let tml_prime = (if p(tm) | PairList.cons(tm, tml) | tml)
+            let args = snd(strip_comb(tm))
+            try:
+              rev_itlist(fun(tm): fun(tml): accum(tml)(p)(tm))(args)(tml_prime)
+              ~catch Failure(_): tml_prime
+      accum(PairList [])(p)(tm)
+      ~catch Failure(_): failwith("find_bm_terms")
+
+fun remove_el(n):
+  fun(l):
+    if (l == PairList []) || (n < 1)
+    | failwith("remove_el")
+    | if n == 1
+      | [hd(l), tl(l)]
+      | let [x, l_prime] = remove_el(n - 1)(tl(l))
+        [x, PairList.cons(hd(l), l_prime)]

@@ -1,0 +1,393 @@
+#lang rhombus
+// Extended Boyer-Moore prover: started from tools/ml2rhm's translation of
+// the pinned HOL Light Boyer_Moore/struct_equal.ml (rhombus/hol/Boyer_Moore/ keeps the
+// literal translation). Edited freely for the frontend; not a literal port.
+
+// ****************************************************************************
+// FILE          : struct_equal.ml
+// DESCRIPTION   : Proof procedure for simplifying an equation between two
+// data-structures of the same type.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton & T.F.Melham
+// DATE          : 4th June 1992
+//
+// LAST MODIFIED : R.J.Boulton
+// DATE          : 14th October 1992
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : 2008
+// ****************************************************************************
+
+import:
+  "../../hol/lib.rhm" open:
+    only:
+      partition
+      map
+      unzip
+      filter
+      C
+      hd
+      zip
+      o
+      tl
+      rev
+      check
+      can
+      assoc
+      flat
+      length
+      el
+      I
+      splitlist
+      end_itlist
+      curry
+  "../../hol/fusion.rhm" open:
+    only:
+      aconv
+      is_comb
+      dest_comb
+      mk_comb
+      is_abs
+      dest_abs
+      type_of
+      vsubst
+      mk_abs
+      concl
+      dest_const
+      is_var
+      dest_eq
+      dest_type
+      rand
+      mk_eq
+      ASSUME
+      EQ_MP
+      INST
+      REFL
+      TRANS
+      MK_COMB
+  "../../hol/basics.rhm" open:
+    only:
+      genvar
+      alpha
+      subst
+      strip_comb
+      list_mk_comb
+      dest_neg
+      strip_forall
+      conjuncts
+      dest_imp
+      dest_forall
+      dest_conj
+  "../../hol/equal.rhm" open:
+    only:
+      lhs
+      CONV_RULE
+      ALPHA
+      ONCE_DEPTH_CONV
+      AP_TERM
+      or_conv
+      then_conv
+      ALL_CONV
+  "../../hol/bool.rhm" open:
+    only:
+      GEN_ALL
+      SPEC_ALL
+      mk_neg
+      mk_forall
+      list_mk_conj
+      list_mk_forall
+      CONJUNCTS
+      SPEC
+      SPECL
+      EQT_INTRO
+      mk_conj
+      DISCH
+      CONJUNCT1
+      CONTR
+      IMP_ANTISYM_RULE
+      MP
+      EQF_INTRO
+      EQT_ELIM
+  "../../hol/tactics.rhm" open:
+    only:
+      prove
+      then_tac
+  "../../hol/simp.rhm" open:
+    only:
+      ASM_REWRITE_TAC
+      REWR_CONV
+      ONCE_REWRITE_RULE
+      GEN_REWRITE_CONV
+  "../../hol/theorems.rhm" open:
+    only:
+      CONJ_SYM
+  "support.rhm" open:
+    only:
+      SUBST
+      hash
+      NOT_EQ_SYM
+      INDUCT_TAC_
+  "../../hol/private/ocaml.rhm" open:
+    only:
+      fst
+      append
+      OCamlList
+      Failure
+      failwith
+      snd
+  "../../hol/private/hol_quote.rhm" open
+
+export:
+  subst_occs
+  GSUBS
+  SUBS_OCCS
+  VAR_NOT_EQ_STRUCT_OF_VAR_CONV
+  CONJS_CONV
+  ONE_STEP_RECTY_EQ_CONV
+  RECTY_EQ_CONV
+
+def subst_occs:
+  fun subst_occs(slist):
+    fun(tm):
+      let [applic, noway] = partition(fun([i, [t, x]]): aconv(tm)(x))(slist)
+      let sposs = map(fun([l, z]):
+                        let [l1, l2] = partition((fun(x): fun(y): x == y)(1))(l)
+                        [[l1, z], [l2, z]])(applic)
+      let [racts, rrest] = unzip(sposs)
+      let acts = filter(fun(t): !(fst(t) == PairList []))(racts)
+      let trest = map(fun([n, t]): [map(C(fun(x): fun(y): x - y)(1))(n), t])(rrest)
+      let urest = filter(fun(t): !(fst(t) == PairList []))(trest)
+      let tlist = append(urest)(noway)
+      if acts == PairList []
+      | if is_comb(tm)
+        | let [l, r] = dest_comb(tm)
+          let [l_prime, s_prime] = subst_occs(tlist)(l)
+          let [r_prime, s_prime_prime] = subst_occs(s_prime)(r)
+          [mk_comb([l_prime, r_prime]), s_prime_prime]
+        | if is_abs(tm)
+          | let [bv, bod] = dest_abs(tm)
+            let gv = genvar(type_of(bv))
+            let nbod = vsubst(PairList [[gv, bv]])(bod)
+            let [tm_prime, s_prime] = subst_occs(tlist)(nbod)
+            [alpha(bv)(mk_abs([gv, tm_prime])), s_prime]
+          | [tm, tlist]
+      | let tm_prime = (fun([n, [t, x]]): subst(PairList [[t, x]])(tm))(hd(acts))
+        [tm_prime, tlist]
+  fun(ilist): fun(slist): fun(tm): fst(subst_occs(zip(ilist)(slist))(tm))
+
+fun GSUBS(substfn):
+  fun(ths):
+    fun(th):
+      let ls = map(o(lhs)(concl))(ths)
+      let vars = map(o(genvar)(type_of))(ls)
+      let w = substfn(OCamlList.combine(ls)(vars))(concl(th))
+      SUBST(OCamlList.combine(ths)(vars))(w)(th)
+
+fun SUBS_OCCS(nlths):
+  fun(th):
+    try:
+      let [nll, ths] = unzip(nlths)
+      GSUBS(subst_occs(nll))(ths)(th)
+      ~catch Failure(_): failwith("SUBS_OCCS")
+
+def VAR_NOT_EQ_STRUCT_OF_VAR_CONV:
+  try:
+    let number_list:
+      fun(l):
+        fun number_list_prime(n):
+          fun(l):
+            if l == PairList []
+            | PairList []
+            | PairList.cons([hd(l), n], number_list_prime(n + 1)(tl(l)))
+        number_list_prime(1)(l)
+    let name = o(fst)(dest_const)
+    let occurrences:
+      fun(constrs):
+        fun(v):
+          fun(st):
+            fun occurrences_prime(v):
+              fun(st):
+                fun(path):
+                  if !(type_of(st) == type_of(v))
+                  | PairList []
+                  | if st == v
+                    | PairList [rev(path)]
+                    | if is_var(st)
+                      | PairList []
+                      | let [f, args] = check(o(o(can(C(assoc)(constrs)))(name))(fst))(strip_comb(st))
+                        flat(map(fun([arg, n]): occurrences_prime(v)(arg)(PairList.cons(n, path)))(number_list(args)))
+            occurrences_prime(v)(st)(PairList [])
+    let min_length:
+      fun(l):
+        fun min_length_prime([x, n]):
+          fun(l):
+            if l == PairList []
+            | x
+            | if length(hd(l)) < n
+              | min_length_prime([hd(l), length(hd(l))])(tl(l))
+              | min_length_prime([x, n])(tl(l))
+        if l == PairList []
+        | failwith("min_length")
+        | min_length_prime([hd(l), length(hd(l))])(tl(l))
+    fun generalise([st, occ]):
+      fun replace_side_structs([n, argn_prime, binding]):
+        fun(m):
+          fun(args):
+            if args == PairList []
+            | [PairList [], PairList []]
+            | let m_prime = m + 1
+              let arg = hd(args)
+              let [rest, bind] = replace_side_structs([n, argn_prime, binding])(m_prime)(tl(args))
+              if m_prime == n
+              | [PairList.cons(argn_prime, rest), append(binding)(bind)]
+              | if is_var(arg)
+                | [PairList.cons(arg, rest), PairList.cons([arg, arg], bind)]
+                | let var = genvar(type_of(arg))
+                  [PairList.cons(var, rest), PairList.cons([var, arg], bind)]
+      if occ == PairList []
+      | [st, PairList []]
+      | let [f, args] = strip_comb(st)
+        let PairList [n, & occ_prime] = occ
+        let [argn_prime, binding] = generalise([el(n - 1)(args), occ_prime])
+        let [args_prime, bind] = replace_side_structs([n, argn_prime, binding])(0)(args)
+        [list_mk_comb([f, args_prime]), bind]
+    fun constr_apps(v):
+      fun([st, occ]):
+        fun replace_argn([n, argn_prime]):
+          fun(m):
+            fun(args):
+              if args == PairList []
+              | PairList []
+              | let m_prime = m + 1
+                if m_prime == n
+                | PairList.cons(argn_prime, tl(args))
+                | PairList.cons(hd(args), replace_argn([n, argn_prime])(m_prime)(tl(args)))
+        if occ == PairList []
+        | PairList []
+        | let [f, args] = strip_comb(st)
+          let PairList [n, & occ_prime] = occ
+          let args_prime = replace_argn([n, v])(0)(args)
+          PairList.cons(list_mk_comb([f, args_prime]), constr_apps(v)([el(n - 1)(args), occ_prime]))
+    let rotations:
+      fun(l):
+        fun rotations_prime(l):
+          fun(n):
+            if n < 1
+            | PairList []
+            | PairList.cons(l, rotations_prime(append(tl(l))(PairList [hd(l)]))(n - 1))
+        rotations_prime(l)(length(l))
+    let two_constrs:
+      o(o(o(o(o(hash(o(fst)(strip_comb))(o(fst)(strip_comb)))(dest_eq))(dest_neg))(snd))(strip_forall))(concl)
+    let flip = fun([x, y]): [y, x]
+    let DEPTH_SYM = o(o(GEN_ALL)(NOT_EQ_SYM))(SPEC_ALL)
+    fun arg_types(ty):
+      try:
+        match dest_type(ty)
+        | ["fun", PairList [argty, rest]]: PairList.cons(argty, arg_types(rest))
+        | _: PairList []
+        ~catch Failure(_): PairList []
+    let name_and_args = o(hash(I)(arg_types))(dest_const)
+    fun([induction, distincts, oneOnes]):
+      let half_distincts = map(fun(th): [hash(name)(name)(two_constrs(th)), th])(distincts)
+      let distincts = append(half_distincts)(map(hash(flip)(DEPTH_SYM))(half_distincts))
+      let ind_goals = o(o(o(o(o(conjuncts)(fst))(dest_imp))(snd))(dest_forall))(concl)(induction)
+      let constrs:
+        map(o(o(o(o(o(o(o(o(o(name_and_args)(fst))(strip_comb))(rand))(snd))(strip_forall))(snd))(splitlist(dest_imp)))(snd))(strip_forall))(ind_goals)
+      fun(tm):
+        let [l, r] = dest_eq(dest_neg(tm))
+        let [flipped, v, st]:
+          if is_var(l)
+          | if is_var(r)
+            | failwith("")
+            | [#false, l, r]
+          | if is_var(r)
+            | [#true, r, l]
+            | failwith("")
+        let occ = min_length(occurrences(constrs)(v)(st))
+        let [st_prime, bind] = generalise([st, occ])
+        let [vars, subterms] = OCamlList.split(bind)
+        let apps = constr_apps(v)([st_prime, occ])
+        let rotats:
+          map(end_itlist(fun(t1): fun(t2): subst(PairList [[t2, v]])(t1)))(rotations(apps))
+        let uneqs = map(o(mk_neg)(curry(mk_eq)(v)))(rotats)
+        let conj = mk_forall([v, list_mk_conj(map(curry(list_mk_forall)(vars))(uneqs))])
+        let th1 = prove([conj,
+                         INDUCT_TAC_(induction) then_tac ASM_REWRITE_TAC(append(oneOnes)(map(snd)(distincts)))])
+        let th2 = o(o(hd)(CONJUNCTS))(SPEC(v))(th1)
+        let th3 = SPECL(subterms)(th2)
+        let th4 = (if flipped | NOT_EQ_SYM(th3) | th3)
+        EQT_INTRO(CONV_RULE(C(ALPHA)(tm))(th4))
+    ~catch Failure(_): failwith("VAR_NOT_EQ_STRUCT_OF_VAR_CONV")
+
+def CONJS_CONV:
+  try:
+    let is:
+      fun(st):
+        fun(th):
+          try:
+            fst(dest_const(rand(concl(th)))) == st
+            ~catch Failure(_): #false
+    let v1 = genvar(@hol|{:bool}|)
+    let v2 = genvar(@hol|{:bool}|)
+    let fthm1:
+      let th1 = ASSUME(mk_eq([v1, @hol|{F}|]))
+      let cnj = mk_conj([v1, v2])
+      let th1 = DISCH(cnj)(EQ_MP(th1)(CONJUNCT1(ASSUME(cnj))))
+      let th2 = DISCH(@hol|{F}|)(CONTR(cnj)(ASSUME(@hol|{F}|)))
+      DISCH(mk_eq([v1, @hol|{F}|]))(IMP_ANTISYM_RULE(th1)(th2))
+    let fthm2 = CONV_RULE(ONCE_DEPTH_CONV(REWR_CONV(CONJ_SYM)))(fthm1)
+    let fandr = fun(th): fun(tm): MP(INST(PairList [[lhs(concl(th)), v1], [tm, v2]])(fthm1))(th)
+    let fandl = fun(th): fun(tm): MP(INST(PairList [[lhs(concl(th)), v1], [tm, v2]])(fthm2))(th)
+    let tthm1:
+      let th1 = ASSUME(mk_eq([v1, @hol|{T}|]))
+      let th2 = SUBS_OCCS(PairList [[PairList [2], th1]])(REFL(mk_conj([v1, v2])))
+      DISCH(mk_eq([v1, @hol|{T}|]))(ONCE_REWRITE_RULE(PairList [])(th2))
+    let tthm2 = CONV_RULE(ONCE_DEPTH_CONV(REWR_CONV(CONJ_SYM)))(tthm1)
+    let tandr = fun(th): fun(tm): MP(INST(PairList [[lhs(concl(th)), v1], [tm, v2]])(tthm1))(th)
+    let tandl = fun(th): fun(tm): MP(INST(PairList [[lhs(concl(th)), v1], [tm, v2]])(tthm2))(th)
+    fun cconv(conv):
+      fun(tm):
+        let [c, cs] = dest_conj(tm)
+        let cth = conv(c)
+        if is("F")(cth)
+        | fandr(cth)(cs)
+        | let csth = cconv(conv)(cs)
+          if is("F")(csth)
+          | fandl(csth)(c)
+          | if is("T")(cth)
+            | TRANS(tandr(cth)(cs))(csth)
+            | if is("T")(csth)
+              | TRANS(tandl(csth)(c))(cth)
+              | try:
+                  MK_COMB([AP_TERM(@hol|{(/\)}|)(cth), csth])
+                  ~catch Failure(_): conv(tm)
+    fun(conv): fun(tm): cconv(conv)(tm)
+    ~catch Failure(_): failwith("CONJS_CONV")
+
+fun ONE_STEP_RECTY_EQ_CONV([induction, distincts, oneOnes]):
+  let NOT_EQ_CONV:
+    o(o(o(EQF_INTRO)(EQT_ELIM))(VAR_NOT_EQ_STRUCT_OF_VAR_CONV([induction, distincts, oneOnes])))(mk_neg)
+  let INJ_REW = GEN_REWRITE_CONV(I)(oneOnes)
+  let ths1 = map(SPEC_ALL)(distincts)
+  let ths2 = map(o(o(GEN_ALL)(EQF_INTRO))(NOT_EQ_SYM))(ths1)
+  let dths = append(ths2)(map(o(GEN_ALL)(EQF_INTRO))(ths1))
+  let DIST_REW = GEN_REWRITE_CONV(I)(dths)
+  fun(conv):
+    NOT_EQ_CONV or_conv \
+    DIST_REW or_conv \
+    (INJ_REW then_conv CONJS_CONV(conv)) or_conv \
+    (fun(tm): failwith("ONE_STEP_RECTY_EQ_CONV"))
+
+fun RECTY_EQ_CONV([induction, distincts, oneOnes]):
+  try:
+    let one_step_conv = ONE_STEP_RECTY_EQ_CONV([induction, distincts, oneOnes])
+    let REFL_CONV:
+      fun(tm):
+        let [l, r] = dest_eq(tm)
+        if l == r | EQT_INTRO(REFL(l)) | failwith("REFL_CONV")
+    fun conv(tm): (one_step_conv(conv) or_conv REFL_CONV or_conv ALL_CONV)(tm)
+    fun(tm): conv(tm)
+    ~catch Failure(_): failwith("RECTY_EQ_CONV")

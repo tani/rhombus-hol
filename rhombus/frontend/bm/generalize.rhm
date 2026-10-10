@@ -1,0 +1,783 @@
+#lang rhombus
+// Extended Boyer-Moore prover: started from tools/ml2rhm's translation of
+// the pinned HOL Light Boyer_Moore/generalize.ml (rhombus/hol/Boyer_Moore/ keeps the
+// literal translation). Edited freely for the frontend; not a literal port.
+
+// ****************************************************************************
+// FILE          : generalize.ml
+// DESCRIPTION   : Generalization.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 21st June 1991
+//
+// LAST MODIFIED : R.J.Boulton
+// DATE          : 12th October 1992
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : July 2009
+// ****************************************************************************
+
+// ----------------------------------------------------------------------------
+// is_generalizable : string list -> term -> bool
+//
+// Function to determine whether or not a term has the correct properties to
+// be generalizable. It takes a list of accessor function names as its first
+// argument. This is for efficiency. It could compute them itself, but if an
+// external function is going to call is_generalizable many times it is
+// better for the external function to compute the list of accessors.
+// ----------------------------------------------------------------------------
+
+import:
+  "../../hol/lib.rhm" open:
+    only:
+      mem
+      o
+      setify
+      filter
+      exists
+      hd
+      explode
+      tl
+      can
+      subtract
+      rev
+      tryfind
+      flat
+      map
+      mapfilter
+      check
+      itlist
+      curry
+      warn
+      rev_itlist
+      assoc
+      el
+      forall
+      length
+      find
+  "../../hol/fusion.rhm" open:
+    only:
+      is_var
+      is_eq
+      dest_const
+      dest_eq
+      dest_type
+      variant
+      mk_var
+      INST_TYPE
+      type_of
+      concl
+      dest_thm
+      frees
+      EQ_MP
+      is_const
+      is_abs
+      dest_abs
+      dest_comb
+      is_comb
+  "../../hol/basics.rhm" open:
+    only:
+      strip_comb
+      dest_neg
+      subst
+      genvar
+      find_terms
+      is_neg
+      dest_disj
+      list_mk_icomb
+      list_mk_comb
+  "../../hol/printer.rhm" open:
+    only:
+      print_term
+      print_string
+      print_newline
+  "../../hol/equal.rhm" open:
+    only:
+      CONV_RULE
+      SYM
+      RAND_CONV
+      AP_THM
+      AP_TERM
+      lhs
+  "../../hol/bool.rhm" open:
+    only:
+      SPECL
+      GENL
+      EQF_INTRO
+      SPEC_ALL
+      CONJUNCTS
+      mk_disj
+  "../../hol/drule.rhm" open:
+    only:
+      term_match
+  "../../hol/simp.rhm" open:
+    only:
+      REWR_CONV
+      REWRITE_CONV
+  "../../hol/class.rhm" open:
+    only:
+      NOT_CLAUSES
+  "../../hol/nums.rhm" open:
+    only:
+      is_numeral
+  "support.rhm" open:
+    only:
+      find_bm_terms
+      disj_list
+      lcombinep
+      fst3
+      conj_list
+      lcount
+      sort_on_snd
+      number_list
+      remove_el
+  "shells.rhm" open:
+    only:
+      all_accessors
+      shell_constructors
+      sys_shell_info
+      shell_constructor_arg_types
+      shell_constructor_accessors
+      shells
+      all_constructors
+  "environment.rhm" open:
+    only:
+      gen_lemmas
+      my_gen_terms
+      get_def
+      defs_names
+  "waterfall.rhm" open:
+    only:
+      proof_print_string_l
+      apply_fproof
+  "rewrite_rules.rhm" open:
+    only:
+      F_OR
+  "definitions.rhm" open:
+    only:
+      is_subterm
+  "equalities.rhm" open:
+    only:
+      is_explicit_value_template
+  "induction.rhm" open:
+    only:
+      possible_inductions
+  "counterexample.rhm" open:
+    only:
+      counter_check
+  "../../hol/private/ocaml.rhm" open:
+    only:
+      fst
+      Failure
+      failwith
+      append
+      OCamlList
+      snd
+      not
+  "../../hol/private/hol_quote.rhm" open
+
+export:
+  is_generalizable
+  generalizable_subterms
+  minimal_common_subterms
+  to_be_generalized
+  terms_to_be_generalized
+  distinct_var
+  distinct_vars
+  apply_gen_lemma
+  applicable_gen_lemmas
+  generalize_heuristic
+  is_constructor_eq
+  is_constructor_neq
+  infer_constructor
+  get_rec_pos_of_fun
+  is_in_rec_pos
+  is_var_in_rec_pos
+  eliminateSelectors
+  all_variables
+  all_equations
+  contains_any
+  is_rec_type
+  is_generalizable_subterm
+  is_suitable_proposal
+  checksuitableeq
+  newisgen
+  is_eq_suitable
+  generateProposals
+  proposal_induction_test
+  get_proposal_term_occs
+  organizeProposals
+  generalizeCommonSubterms
+  separate
+  generalized_apart_successfully
+  useful_apart_generalization
+  generalize_apart
+  checkgen
+  generalize_heuristic_aderhold
+  generalize_heuristic_ext
+
+fun is_generalizable(accessors):
+  fun(tm):
+    !(is_var(tm) || \
+      is_explicit_value_template(tm) || \
+      is_eq(tm) || \
+      (try:
+         mem(o(o(o(fst)(dest_const))(fst))(strip_comb)(tm))(accessors)
+         ~catch Failure(_): #false))
+
+fun generalizable_subterms(accessors):
+  fun(tm):
+    try:
+      setify(find_bm_terms(is_generalizable(accessors))(tm))
+      ~catch Failure(_): failwith("generalizable_subterms")
+
+fun minimal_common_subterms(tml):
+  let tml_prime = setify(tml)
+  filter(fun(tm): !exists(fun(tm_prime): is_subterm(tm_prime)(tm) && !(tm_prime == tm))(tml_prime))(tml_prime)
+
+fun to_be_generalized(tm):
+  fun(tml):
+    fun(gen):
+      try:
+        let [l, r] = dest_eq(dest_neg(tm))
+        if is_subterm(gen)(l) && is_subterm(gen)(r) | #true | failwith("")
+        ~catch Failure(_):
+            try:
+              let [l, r] = dest_eq(tm)
+              if is_subterm(gen)(l) && is_subterm(gen)(r) | #true | failwith("")
+              ~catch Failure(_): exists(is_subterm(gen))(tml)
+
+fun terms_to_be_generalized(tm):
+  let accessors = all_accessors(#void)
+  fun terms_to_be_generalized_prime(tml):
+    if tml == PairList []
+    | PairList []
+    | let PairList [h, & t] = tml
+      let gens = generalizable_subterms(accessors)(h)
+      let gens_prime = filter(to_be_generalized(h)(t))(gens)
+      append(gens_prime)(terms_to_be_generalized_prime(t))
+  minimal_common_subterms(terms_to_be_generalized_prime(disj_list(tm)))
+
+fun distinct_var(vars):
+  fun(ty):
+    let letter:
+      try:
+        o(o(o(hd)(explode))(fst))(dest_type)(ty)
+        ~catch Failure(_): "x"
+    variant(vars)(mk_var([letter, ty]))
+
+fun distinct_vars(vars):
+  fun(tyl):
+    if tyl == PairList []
+    | PairList []
+    | let var = distinct_var(vars)(hd(tyl))
+      PairList.cons(var, distinct_vars(PairList.cons(var, vars))(tl(tyl)))
+
+fun apply_gen_lemma(tm):
+  fun(th):
+    try:
+      let apply_gen_lemma_prime:
+        fun(subtm):
+          let [_, tm_bind, ty_bind] = term_match(PairList [])(subtm)(tm)
+          let [insts, vars] = OCamlList.split(tm_bind)
+          let th_prime = o(o(SPECL(insts))(GENL(vars)))(INST_TYPE(ty_bind))(th)
+          let gen_conc = subst(PairList [[genvar(type_of(tm)), tm]])(concl(th_prime))
+          let f = fst(strip_comb(tm))
+          if is_subterm(f)(gen_conc) | failwith("") | th_prime
+      let [PairList [], conc] = dest_thm(th)
+      let conc_vars = frees(conc)
+      let good_subterm:
+        fun(subtm):
+          can(term_match(PairList [])(subtm))(tm) && \
+          (subtract(conc_vars)(frees(subtm)) == PairList [])
+      let subtms = rev(find_terms(good_subterm)(conc))
+      tryfind(apply_gen_lemma_prime)(subtms)
+      ~catch Failure(_): failwith("apply_gen_lemma")
+
+fun applicable_gen_lemmas(tml):
+  flat(map(fun(tm): mapfilter(apply_gen_lemma(tm))(gen_lemmas(#void)))(tml))
+
+fun generalize_heuristic([tm, ind]):
+  try:
+    let NEGATE:
+      fun(th):
+        let [PairList [], tm] = dest_thm(th)
+        if is_neg(tm)
+        | EQF_INTRO(th)
+        | EQF_INTRO(CONV_RULE(REWR_CONV(SYM(SPEC_ALL(hd(CONJUNCTS(NOT_CLAUSES))))))(th))
+    let ELIM_LEMMA:
+      fun(lemma):
+        fun(th):
+          let rest = snd(dest_disj(concl(th)))
+          EQ_MP(CONV_RULE(RAND_CONV(REWR_CONV(F_OR)))(AP_THM(AP_TERM(@hol|{(\/)}|)(lemma))(rest)))(th)
+    let gen_terms = check(fun(l): !(l == PairList []))(terms_to_be_generalized(tm))
+    let lemmas = map(NEGATE)(applicable_gen_lemmas(gen_terms))
+    let tm_prime = itlist(curry(mk_disj))(map(o(lhs)(concl))(lemmas))(tm)
+    let new_vars = distinct_vars(frees(tm_prime))(map(type_of)(gen_terms))
+    let tm_prime_prime = subst(lcombinep([new_vars, gen_terms]))(tm_prime)
+    let countercheck:
+      try:
+        counter_check(5)(tm_prime_prime)
+        ~catch Failure(_):
+            warn(#true)("Could not generate counter example!")
+            #true
+    if countercheck == #true
+    | let proof:
+        fun(th_prime_prime):
+          let th_prime = SPECL(gen_terms)(GENL(new_vars)(th_prime_prime))
+          rev_itlist(ELIM_LEMMA)(lemmas)(th_prime)
+      proof_print_string_l("-> Generalize Heuristic")(#void)
+      my_gen_terms.value := PairList.cons(tm_prime_prime, my_gen_terms.value)
+      [PairList [[tm_prime_prime, ind]],
+       apply_fproof("generalize_heuristic")(o(proof)(hd))(PairList [tm_prime_prime])]
+    | failwith("Counter example failure!")
+    ~catch Failure(_): failwith("generalize_heuristic")
+
+fun is_constructor_eq(hol_constructor):
+  fun(v):
+    fun(tm):
+      try:
+        let [a, b] = dest_eq(tm)
+        let cand_c:
+          if v == a
+          | b
+          | if v == b
+            | a
+            | failwith("")
+        let cand_name = o(o(o(fst)(dest_const))(fst))(strip_comb)(cand_c)
+        hol_constructor == cand_name
+        ~catch Failure(_): #false
+
+fun is_constructor_neq(hol_constructor):
+  fun(v):
+    fun(tm):
+      try:
+        let tm_prime = dest_neg(tm)
+        let [a, b] = dest_eq(tm_prime)
+        let cand_c:
+          if v == a
+          | b
+          | if v == b
+            | a
+            | failwith("")
+        let cand_name = o(o(o(fst)(dest_const))(fst))(strip_comb)(cand_c)
+        hol_constructor == cand_name
+        ~catch Failure(_): #false
+
+fun infer_constructor(v):
+  fun(tm):
+    try:
+      print_term(v)
+      print_string(" XXX ")
+      print_term(tm)
+      print_newline(#void)
+      let v_ty = o(fst)(dest_type)(type_of(v))
+      let clist = map(fst3)(o(shell_constructors)(sys_shell_info)(v_ty))
+      let conjs = conj_list(tm)
+      let check_constructor_eq:
+        fun(c):
+          fun(v):
+            fun(tms):
+              let res = map(is_constructor_eq(c)(v))(tms)
+              if mem(#true)(res) | #true | #false
+      let check_constructor_neq:
+        fun(c):
+          fun(v):
+            fun(tms):
+              let res = map(is_constructor_neq(c)(v))(tms)
+              if mem(#true)(res) | #true | #false
+      let check_constructor:
+        fun(c):
+          fun(all_constr):
+            fun(v):
+              fun(tms):
+                if check_constructor_eq(c)(v)(tms)
+                | #true
+                | let constrs = subtract(all_constr)(PairList [c])
+                  let res = map(fun(c): check_constructor_neq(c)(v)(tms))(constrs)
+                  if mem(#false)(res) | #false | #true
+      let res = map(fun(c): check_constructor(c)(clist)(v)(conjs))(clist)
+      let reslist = OCamlList.combine(res)(clist)
+      assoc(#true)(reslist)
+      ~catch Failure(_): failwith("infer_constructor")
+
+fun get_rec_pos_of_fun(f):
+  try:
+    o(o(o(fst)(get_def))(fst))(dest_const)(f)
+    ~catch Failure(_): 0
+
+fun is_in_rec_pos(subtm):
+  fun(tm):
+    let [op, args] = strip_comb(tm)
+    try:
+      let rec_argn = get_rec_pos_of_fun(op)
+      if el(rec_argn - 1)(args) == subtm | #true | failwith("")
+      ~catch Failure(_): mem(#true)(map(is_in_rec_pos(subtm))(args))
+
+fun is_var_in_rec_pos(v):
+  fun(tm):
+    try:
+      if !is_var(v)
+      | #false
+      | if !mem(v)(frees(tm))
+        | #false
+        | is_in_rec_pos(v)(tm)
+      ~catch Failure(_): #false
+
+fun eliminateSelectors(tm):
+  try:
+    let vars = frees(tm)
+    let vars_prime = filter(o(not)(fun(v): is_var_in_rec_pos(v)(tm)))(vars)
+    if vars_prime == PairList []
+    | tm
+    | fun find_candidate(vars):
+        fun(tm):
+          if vars == PairList []
+          | failwith("find_candidate")
+          | let var = hd(vars)
+            try:
+              [var, infer_constructor(var)(tm)]
+              ~catch Failure(_): find_candidate(tl(vars))(tm)
+      let [var, constr] = find_candidate(vars_prime)(tm)
+      let v_ty = o(fst)(dest_type)(type_of(var))
+      let s_info = sys_shell_info(v_ty)
+      let new_vars = distinct_vars(vars)(shell_constructor_arg_types(constr)(s_info))
+      let new_subtm = list_mk_icomb(constr)(new_vars)
+      let new_tm = subst(PairList [[new_subtm, var]])(tm)
+      o(o(snd)(dest_eq))(concl)(REWRITE_CONV(map(snd)(shell_constructor_accessors(constr)(s_info)))(new_tm))
+    ~catch Failure(_): failwith("eliminateSelectors")
+
+def all_variables:
+  fun vars([acc, tm]):
+    if is_var(tm)
+    | PairList.cons(tm, acc)
+    | if is_const(tm)
+      | acc
+      | if is_abs(tm)
+        | let [v, bod] = dest_abs(tm)
+          vars([PairList.cons(v, acc), bod])
+        | let [l, r] = dest_comb(tm)
+          vars([vars([acc, r]), l])
+  fun(tm): vars([PairList [], tm])
+
+def all_equations:
+  fun eqs([acc, tm]):
+    if is_eq(tm)
+    | PairList.cons(tm, acc)
+    | if is_var(tm)
+      | acc
+      | if is_const(tm)
+        | acc
+        | if is_abs(tm)
+          | let [v, bod] = dest_abs(tm)
+            eqs([acc, bod])
+          | let [l, r] = dest_comb(tm)
+            eqs([eqs([acc, r]), l])
+  fun(tm): eqs([PairList [], tm])
+
+fun contains_any(tm):
+  fun(args):
+    if is_var(tm)
+    | #false
+    | if is_numeral(tm)
+      | #false
+      | if is_const(tm)
+        | mem(o(fst)(dest_const)(tm))(args)
+        | if is_abs(tm)
+          | let [v, bod] = dest_abs(tm)
+            contains_any(v)(args)
+          | let [l, r] = dest_comb(tm)
+            contains_any(l)(args) || contains_any(r)(args)
+
+fun is_rec_type(tm):
+  try:
+    mem(o(o(fst)(dest_type))(type_of)(tm))(shells(#void))
+    ~catch Failure(_): #false
+
+fun is_generalizable_subterm(bad):
+  fun(tm):
+    is_rec_type(tm) && !(is_var(tm) || is_const(tm) || is_numeral(tm) || contains_any(tm)(bad))
+
+fun is_suitable_proposal(s):
+  fun(phi):
+    fun(gens): forall(fun(tm): mem(tm)(gens))(s) && exists(fun(tm): lcount(tm)(gens) > 1)(s)
+
+def checksuitableeq = Box(#false)
+
+def newisgen = Box(#true)
+
+fun is_eq_suitable(t):
+  fun(eq):
+    if !checksuitableeq.value
+    | #true
+    | if !is_eq(eq)
+      | #false
+      | let [l, r] = dest_eq(eq)
+        if is_subterm(t)(r) && is_subterm(t)(l)
+        | #true
+        | length(find_bm_terms((fun(x): fun(y): x == y)(t))(eq)) > 1
+
+fun generateProposals(tm):
+  fun(phi):
+    fun generateProposals_prime(bad):
+      fun(tm):
+        fun(phi):
+          fun(gens):
+            let p = PairList []
+            if is_eq(tm)
+            | let [t1, t2] = dest_eq(tm)
+              let p1 = generateProposals_prime(bad)(t1)(phi)(gens)
+              let p1_prime:
+                if is_suitable_proposal(PairList [t1])(phi)(gens)
+                | append(p1)(PairList [PairList [t1]])
+                | p1
+              let p = append(p)(filter(exists(fun(t): is_eq_suitable(t)(tm)))(p1_prime))
+              let p2 = generateProposals_prime(bad)(t2)(phi)(gens)
+              let p2_prime:
+                if is_suitable_proposal(PairList [t2])(phi)(gens)
+                | append(p2)(PairList [PairList [t2]])
+                | p2
+              append(p)(filter(exists(fun(t): is_eq_suitable(t)(tm)))(p2_prime))
+            | if is_comb(tm)
+              | let [op, args] = strip_comb(tm)
+                let recpos = get_rec_pos_of_fun(op)
+                let s = (if recpos > 0 | PairList [el(recpos - 1)(args)] | PairList [])
+                let p = (if is_suitable_proposal(s)(phi)(gens) | append(p)(PairList [s]) | p)
+                append(p)(flat(map(fun(tm): generateProposals_prime(bad)(tm)(phi)(gens))(args)))
+              | p
+    let bad = append(all_accessors(#void))(all_constructors(#void))
+    let gens:
+      if newisgen.value
+      | find_bm_terms(is_generalizable_subterm(bad))(phi)
+      | find_bm_terms(is_generalizable(bad))(phi)
+    generateProposals_prime(bad)(tm)(phi)(gens)
+
+fun proposal_induction_test(s):
+  fun(phi):
+    let newvars = distinct_vars(frees(phi))(map(type_of)(s))
+    let subs = OCamlList.combine(newvars)(s)
+    let newterm = subst(subs)(phi)
+    let [unfl, fl] = possible_inductions(newterm)
+    if exists(fun(v): mem(v)(append(unfl)(fl)))(newvars) | #true | #false
+
+fun get_proposal_term_occs(s):
+  fun(phi):
+    let gens = find_bm_terms(fun(tm): #true)(phi)
+    let scount = map(fun(tm): lcount(tm)(gens))(s)
+    itlist(fun(x): fun(y): x + y)(scount)(0)
+
+fun organizeProposals(s):
+  fun(phi):
+    let stest = map(fun(prop): [prop, proposal_induction_test(prop)(phi)])(s)
+    let indok = filter(o((fun(x): fun(y): x == y)(#true))(snd))(stest)
+    let s_prime:
+      if indok == PairList []
+      | proof_print_string_l("Weak Generalization")(map(fst)(stest))
+      | map(fst)(indok)
+    if length(s_prime) == 1
+    | hd(s_prime)
+    | let scounted = o(rev)(sort_on_snd)(map(fun(prop): [prop, lcount(prop)(s_prime)])(s_prime))
+      let smax = o(snd)(hd)(scounted)
+      let s_prime_prime = map(fst)(filter(o((fun(x): fun(y): x == y)(smax))(snd))(scounted))
+      if length(s_prime_prime) == 1
+      | hd(s_prime_prime)
+      | let soccscounted:
+          o(rev)(sort_on_snd)(map(fun(prop): [prop, get_proposal_term_occs(prop)(phi)])(s_prime_prime))
+        o(fst)(hd)(soccscounted)
+
+fun generalizeCommonSubterms(tm):
+  let props = generateProposals(tm)(tm)
+  if props == PairList []
+  | failwith("")
+  | let s = organizeProposals(props)(tm)
+    let newvars = distinct_vars(frees(tm))(map(type_of)(s))
+    let varcomb = OCamlList.combine(newvars)(s)
+    [subst(varcomb)(tm), varcomb]
+
+fun separate(f):
+  fun(v):
+    fun(v_prime):
+      fun(allrpos):
+        fun(tm):
+          let replace:
+            fun(tm):
+              fun(v):
+                fun(v_prime):
+                  fun(rpos):
+                    if !rpos
+                    | tm
+                    | if tm == v
+                      | v_prime
+                      | separate(f)(v)(v_prime)(allrpos)(tm)
+          if is_comb(tm)
+          | let [op, args] = strip_comb(tm)
+            let recpos = get_rec_pos_of_fun(op)
+            if allrpos && !(op == @hol|{(=)}|)
+            | list_mk_comb([op,
+                            map(fun([t, i]): replace(t)(v)(v_prime)((i == recpos) || (recpos == 0)))(number_list(args))])
+            | if op == @hol|{(=)}|
+              | list_mk_comb([op,
+                              PairList [replace(hd(args))(v)(v_prime)(#true), replace(o(hd)(tl)(args))(v)(v_prime)(#true)]])
+              | if op == f
+                | list_mk_comb([op, map(fun([t, i]): replace(t)(v)(v_prime)(i == recpos))(number_list(args))])
+                | list_mk_comb([op, map(separate(f)(v)(v_prime)(allrpos))(args)])
+          | tm
+
+fun generalized_apart_successfully(v):
+  fun(v_prime):
+    fun(tm):
+      fun(tm_prime):
+        if tm_prime == v_prime
+        | #true
+        | if is_eq(tm)
+          | let [tm1, tm2] = dest_eq(tm)
+            let [tm1_prime, tm2_prime] = dest_eq(tm_prime)
+            generalized_apart_successfully(v)(v_prime)(tm1)(tm1_prime) && \
+            generalized_apart_successfully(v)(v_prime)(tm2)(tm2_prime)
+          | let av = all_variables(tm)
+            let av_prime = all_variables(tm_prime)
+            let varsub = OCamlList.combine(av)(av_prime)
+            mem([v, v_prime])(varsub) && mem(v)(av_prime)
+
+fun useful_apart_generalization(v):
+  fun(v_prime):
+    fun(tm):
+      fun(gen):
+        let eqssub = OCamlList.combine(all_equations(tm))(all_equations(gen))
+        let eqsok:
+          forall(fun([x, y]): (x == y) || generalized_apart_successfully(v)(v_prime)(x)(y))(eqssub)
+        let countercheck:
+          try:
+            counter_check(5)(gen)
+            ~catch Failure(s):
+                warn(#true)("Could not generate counter example: " +& s)
+                #true
+        eqsok && generalized_apart_successfully(v)(v_prime)(tm)(gen) && countercheck
+
+fun generalize_apart(tm):
+  let is_fun:
+    fun(tm):
+      try:
+        mem(o(o(o(fst)(dest_const))(fst))(strip_comb)(tm))(defs_names(#void))
+        ~catch Failure(_): #false
+  let fs = find_bm_terms(is_fun)(tm)
+  let dfs = map(strip_comb)(fs)
+  let find_f:
+    fun([op, args]):
+      fun(dfs):
+        let r = get_rec_pos_of_fun(op)
+        let arg_filter:
+          fun(args):
+            fun(args_prime):
+              let v = el(r - 1)(args)
+              is_var(v) && mem(v)(snd(remove_el(r)(args_prime)))
+        let match_filter:
+          fun([op_prime, args_prime]): (op_prime == op) && arg_filter(args)(args_prime)
+        can(find(match_filter))(dfs)
+  let [f, args]:
+    try:
+      find(fun([op, args]): find_f([op, args])(dfs))(dfs)
+      ~catch Failure(_): failwith("")
+  let v = el(get_rec_pos_of_fun(f) - 1)(args)
+  let v_prime = distinct_var(frees(tm))(type_of(v))
+  let gen = separate(f)(v)(v_prime)(#false)(tm)
+  if useful_apart_generalization(v)(v_prime)(tm)(gen)
+  | [gen, PairList [[v_prime, v]]]
+  | let pcs = map(fst)(dfs)
+    let restpcs = subtract(pcs)(PairList [f])
+    let recposs = map(get_rec_pos_of_fun)(restpcs)
+    let recpos:
+      try:
+        find((fun(x): fun(y): x < y)(0))(recposs)
+        ~catch Failure(_): 0
+    let gen:
+      if forall(fun(x): (x == 0) || (x == recpos))(recposs)
+      | separate(f)(v)(v_prime)(#true)(tm)
+      | failwith("not same recpos for all functions")
+    if useful_apart_generalization(v)(v_prime)(tm)(gen)
+    | [gen, PairList [[v_prime, v]]]
+    | failwith("failed")
+
+def checkgen = Box(#true)
+
+fun generalize_heuristic_aderhold([tm, ind]):
+  if mem(tm)(my_gen_terms.value) && checkgen.value
+  | failwith("")
+  | try:
+      let ELIM_LEMMA:
+        fun(lemma):
+          fun(th):
+            let rest = snd(dest_disj(concl(th)))
+            EQ_MP(CONV_RULE(RAND_CONV(REWR_CONV(F_OR)))(AP_THM(AP_TERM(@hol|{(\/)}|)(lemma))(rest)))(th)
+      let [tm_prime, subs]:
+        try:
+          generalize_apart(tm)
+          ~catch Failure(_): [tm, PairList []]
+      let [new_ap_vars, gen_ap_terms] = OCamlList.split(subs)
+      let [tm_prime_prime, subs]:
+        try:
+          generalizeCommonSubterms(tm_prime)
+          ~catch Failure(_): [tm_prime, PairList []]
+      if tm == tm_prime_prime
+      | failwith("")
+      | let [new_vars, gen_terms] = OCamlList.split(subs)
+        let lemmas = PairList []
+        let countercheck:
+          try:
+            counter_check(5)(tm_prime_prime)
+            ~catch Failure(s):
+                warn(#true)("Could not generate counter example: " +& s)
+                #true
+        if countercheck == #true
+        | let proof:
+            fun(th_prime_prime):
+              let th_prime:
+                o(o(o(SPECL(gen_ap_terms))(GENL(new_ap_vars)))(SPECL(gen_terms)))(GENL(new_vars))(th_prime_prime)
+              rev_itlist(ELIM_LEMMA)(lemmas)(th_prime)
+          proof_print_string_l("-> Generalize Heuristic")(#void)
+          my_gen_terms.value := PairList.cons(tm_prime_prime, my_gen_terms.value)
+          [PairList [[tm_prime_prime, ind]],
+           apply_fproof("generalize_heuristic_aderhold")(o(proof)(hd))(PairList [tm_prime_prime])]
+        | failwith("Counter example failure!")
+      ~catch Failure(_): failwith("generalize_heuristic")
+
+fun generalize_heuristic_ext([tm, ind]):
+  if mem(tm)(my_gen_terms.value) && checkgen.value
+  | failwith("")
+  | try:
+      let ELIM_LEMMA:
+        fun(lemma):
+          fun(th):
+            let rest = snd(dest_disj(concl(th)))
+            EQ_MP(CONV_RULE(RAND_CONV(REWR_CONV(F_OR)))(AP_THM(AP_TERM(@hol|{(\/)}|)(lemma))(rest)))(th)
+      let lemmas = PairList []
+      let [tm_prime, subs]:
+        try:
+          generalize_apart(tm)
+          ~catch Failure(_): [tm, PairList []]
+      let [new_ap_vars, gen_ap_terms] = OCamlList.split(subs)
+      let gen_terms = terms_to_be_generalized(tm_prime)
+      let _ = check(fun(l): !(l == PairList []))(append(gen_ap_terms)(gen_terms))
+      let new_vars = distinct_vars(frees(tm_prime))(map(type_of)(gen_terms))
+      let tm_prime_prime = subst(lcombinep([new_vars, gen_terms]))(tm_prime)
+      let countercheck:
+        try:
+          counter_check(5)(tm_prime_prime)
+          ~catch Failure(_):
+              warn(#true)("Could not generate counter example!")
+              #true
+      if countercheck == #true
+      | let proof:
+          fun(th_prime_prime):
+            let th_prime:
+              o(o(o(SPECL(gen_ap_terms))(GENL(new_ap_vars)))(SPECL(gen_terms)))(GENL(new_vars))(th_prime_prime)
+            rev_itlist(ELIM_LEMMA)(lemmas)(th_prime)
+        proof_print_string_l("-> Generalize Heuristic")(#void)
+        my_gen_terms.value := PairList.cons(tm_prime_prime, my_gen_terms.value)
+        [PairList [[tm_prime_prime, ind]],
+         apply_fproof("generalize_heuristic_ext")(o(proof)(hd))(PairList [tm_prime_prime])]
+      | failwith("Counter example failure!")
+      ~catch Failure(_): failwith("generalize_heuristic")

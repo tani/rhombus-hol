@@ -130,7 +130,8 @@ raco test -j 4 rhombus/hol/tests/golden/hol_light.rhm rhombus/hol/tests/upstream
   definition and toplevel theorem with the logical state of the pinned HOL
   Light after `define.ml`, recorded in `tests/golden/hol_light.tsv.gz`.
 - `tests/upstream/` ports HOL Light's `UnitTests/basic_tests.ml` and
-  `Examples/{dickson,lagrange_lemma}.ml`.
+  `Examples/{dickson,lagrange_lemma}.ml`; its `boyer_moore.rhm` runs in the
+  CI `waterfall` job (see below).
 
 The data comes from `tools/hol_light_golden/` and is only compared against.
 
@@ -179,7 +180,11 @@ The entry points are those of `main.ml`: `BOYER_MOORE`, `BOYER_MOORE_EXT`,
 `BM_SIMPLIFY_TAC`, `BM_INDUCT_TAC`. `make.rhm` translates upstream's
 evaluation script (`bm_reset`, `bm_test`, the `BM`/`BME`/`BMF` shortcuts)
 and `testset/` its 119 arithmetic and 48 list conjectures;
-`tests/upstream/boyer_moore.rhm` (CI `theories` job) runs it.
+`tests/upstream/boyer_moore.rhm` runs it in the CI `waterfall` job:
+
+```sh
+raco test rhombus/hol/tests/upstream/boyer_moore.rhm
+```
 
 ## Generated source style
 

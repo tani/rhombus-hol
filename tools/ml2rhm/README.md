@@ -23,6 +23,7 @@ racket tools/ml2rhm/main.rkt --out OUT HOL-LIGHT-DIR itab.ml    # some files
 racket tools/ml2rhm/coverage.rkt HOL-LIGHT-DIR                  # parse report
 python3 tools/ml2rhm/compare.py HOL-LIGHT-DIR OUT                # vs rhombus/hol
 tools/ml2rhm/dropin.sh OUT bool drule ...                        # compile in place
+tools/ml2rhm/dropin_waterfall.sh OUT                             # Boyer_Moore/ in place, tested
 ```
 
 `dropin.sh` compiles each generated module in place of the hand-maintained
@@ -37,11 +38,11 @@ these against the pinned HOL Light.
   token-similar to the hand-maintained modules.
 - All 45 compile in place of the hand-maintained module (`dropin.sh`, run by
   the CI job `ml2rhm`).
-- The 17 files of `Boyer_Moore/` compile together in place of the
-  hand-written translation, and pass `tests/upstream/boyer_moore.rhm`, with
-  that test importing the generated `environment` and `main` and the
-  hand-written `testset/` directly (the generated `boyer-moore.rhm` loads,
-  it does not re-export). This was checked by hand; CI does not run it.
+- The 19 files of `Boyer_Moore/` (with `testset/`) replace the hand-written
+  translation together and pass `tests/upstream/boyer_moore.rhm`
+  (`dropin_waterfall.sh`, run by the CI job `ml2rhm`). The test imports the
+  modules it uses by name: the generated `boyer-moore.rhm` loads the others,
+  it does not re-export them.
 
 The output mirrors the checkout: `Library/card.ml` becomes
 `OUT/Library/card.rhm`, and `printer.ml` becomes `OUT/printer.rhm`, as in

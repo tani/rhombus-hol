@@ -54,10 +54,51 @@
   (if (ok? p)
       (for*/list ([it (car p)]
                   #:when (t:expr? it)
-                  [s (in-value (needs-string (t:expr-e it)))]
-                  #:when s)
+                  [s (let ([n (needs-string (t:expr-e it))])
+                       (if n (list n) (path-loads rel (t:expr-e it))))])
         s)
       '()))
+
+;; the directory of rel, as a prefix: "" or "Boyer_Moore/"
+(define (dir-prefix rel)
+  (define-values (d n _) (split-path (string->path rel)))
+  (if (path? d) (path->string (path->directory-path d)) ""))
+
+;; files an expression loads with load_on_path over a literal list of names,
+;; as Boyer_Moore/boyer-moore.ml does: a name is looked up beside the loader,
+;; then from the checkout's root
+(define (path-loads rel e)
+  (define (walk x f)
+    (cond [(pair? x) (walk (car x) f) (walk (cdr x) f)]
+          [(prefab-struct-key x) (f x) (for ([y (cdr (vector->list (struct->vector x)))]) (walk y f))]
+          [else (void)]))
+  (define loads? #f)
+  (walk e (lambda (x) (when (equal? x (e:var "load_on_path")) (set! loads? #t))))
+  (define names '())
+  (when loads?
+    (walk e (lambda (x)
+              (match x
+                [(e:list items)
+                 (for ([i items])
+                   (match i
+                     [(e:const 'string (? (lambda (v) (regexp-match? #rx"[.]ml$" v)) s))
+                      (set! names (cons s names))]
+                     [_ (void)]))]
+                [_ (void)]))))
+  (for/list ([s (reverse names)])
+    (define beside (string-append (dir-prefix rel) s))
+    (if (file-exists? (rel->path beside)) beside s)))
+
+;; a file of rel's directory that loads rel, if any
+(define (loader-of rel)
+  (define dir (if (string=? (dir-prefix rel) "") hol (rel->path (dir-prefix rel))))
+  (for/first ([f (sort (for/list ([f (directory-list dir)]
+                                  #:when (regexp-match? #rx"[.]ml$" (path->string f)))
+                         (string-append (dir-prefix rel) (path->string f)))
+                       string<?)]
+              #:unless (equal? f rel)
+              #:when (member rel (needs-of f)))
+    f))
 (define (needs-string e)
   (match e
     [(e:app (e:var (or "needs" "loads" "loadt")) (list (e:const 'string s))) s]
@@ -70,11 +111,20 @@
     [else
      (define seen (make-hash))
      (define order '())
-     (let visit ([m rel])
-       (unless (or (hash-ref seen m #f) (member m core))
+     (define (visit m)
+       (unless (or (hash-ref seen m #f) (member m core) (equal? m rel))
          (hash-set! seen m #t)
          (for ([n (needs-of m)]) (when (file-exists? (rel->path n)) (visit n)))
-         (unless (equal? m rel) (set! order (cons m order)))))
+         (set! order (cons m order))))
+     ;; a file its loader loads from a list comes after the ones listed before
+     ;; it, and after what the loader's own loader loaded first
+     (let context ([m rel] [inside '()])
+       (define l (loader-of m))
+       (when (and l (not (member l inside)))
+         (context l (cons m inside))
+         (for ([s (takef (needs-of l) (lambda (x) (not (equal? x m))))])
+           (when (file-exists? (rel->path s)) (visit s)))))
+     (for ([n (needs-of rel)]) (when (file-exists? (rel->path n)) (visit n)))
      (append core (reverse order))]))
 
 ;; names a module defines: values, constructors, exceptions, records, modules

@@ -200,7 +200,7 @@
 ;; The functions of OCaml's Format, as private/format.rhm provides them.
 ;; printer.ml's `include Format` makes them part of the printer.
 (define format-api
-  '("formatter" "std_formatter" "err_formatter" "str_formatter" "flush_str_formatter" "formatter_of_buffer" "make_formatter" "pp_print_string" "pp_print_as" "pp_print_int" "pp_print_char" "pp_print_bool" "pp_print_float" "pp_print_break" "pp_print_custom_break" "pp_print_space" "pp_print_cut" "pp_force_newline" "pp_print_if_newline" "pp_print_newline" "pp_print_flush" "pp_open_box" "pp_open_hbox" "pp_open_vbox" "pp_open_hvbox" "pp_open_hovbox" "pp_close_box" "pp_open_tbox" "pp_close_tbox" "pp_print_tbreak" "pp_print_tab" "pp_set_tab" "pp_set_margin" "pp_get_margin" "pp_set_max_indent" "pp_get_max_indent" "pp_set_max_boxes" "pp_get_max_boxes" "pp_over_max_boxes" "pp_set_ellipsis_text" "pp_get_ellipsis_text" "print_string" "print_as" "print_int" "print_char" "print_break" "print_space" "print_cut" "print_newline" "print_flush" "force_newline" "open_box" "open_hbox" "open_vbox" "open_hvbox" "open_hovbox" "close_box" "set_margin" "get_margin" "set_max_indent" "get_max_indent" "set_max_boxes" "get_max_boxes" "printf" "fprintf" "asprintf"))
+  '("formatter" "std_formatter" "err_formatter" "str_formatter" "flush_str_formatter" "formatter_of_buffer" "make_formatter" "pp_print_string" "pp_print_as" "pp_print_int" "pp_print_char" "pp_print_bool" "pp_print_float" "pp_print_break" "pp_print_custom_break" "pp_print_space" "pp_print_cut" "pp_force_newline" "pp_print_if_newline" "pp_print_newline" "pp_print_flush" "pp_open_box" "pp_open_hbox" "pp_open_vbox" "pp_open_hvbox" "pp_open_hovbox" "pp_close_box" "pp_open_tbox" "pp_close_tbox" "pp_print_tbreak" "pp_print_tab" "pp_set_tab" "pp_set_margin" "pp_get_margin" "pp_set_max_indent" "pp_get_max_indent" "pp_set_max_boxes" "pp_get_max_boxes" "pp_over_max_boxes" "pp_set_ellipsis_text" "pp_get_ellipsis_text" "print_string" "print_as" "print_int" "print_bool" "print_char" "print_break" "print_space" "print_cut" "print_newline" "print_flush" "force_newline" "open_box" "open_hbox" "open_vbox" "open_hvbox" "open_hovbox" "close_box" "set_margin" "get_margin" "set_max_indent" "get_max_indent" "set_max_boxes" "get_max_boxes" "printf" "fprintf" "asprintf"))
 
 ;; constructors with an inline record argument -> their labels, in order
 (define inline-records (make-parameter (make-hash)))
@@ -596,7 +596,8 @@
                (list (for/list ([l (hash-ref (inline-records) n)])
                        (define hit (assoc l by-name))
                        (if hit (ex (cdr hit)) (atom "#void")))))]
-    [(e:constr n (e:tuple items))
+    ;; `C (a, b)` applies C to its arguments: the parentheses are syntax
+    [(e:constr n (app unparen (e:tuple items)))
      (if (tuple-field? n)
          (call-doc (constr-name n) (list (list (bracket "[" "]" (map ex items)))))
          (call-doc (constr-name n) (list (map ex items))))]
@@ -700,11 +701,16 @@
     [((e:var "ref") (list a)) (call-doc "Box" (list (list (ex a))))]
     [((e:var "raise") (list a)) (open* (r-lines (atom* (wrap "throw " (r-lines (ex a)) ""))))]
     [((e:var "!=") (list a b)) (unary "!" (paren (binop "===" (ex a) (ex b))))]
+    ;; `(+) a b` is `a + b`
+    [((app unparen (e:opname op)) (list a b)) (infix op a b)]
     [(_ _)
      (define head (ex h))
      (define head-line
        (if (and (single? head) (eq? (r-kind head) 'atom)) (line1 head)
            (let ([p (paren head)]) (if (single? p) (line1 p) #f))))
+     ;; an operator section such as `(+) 1` is a `fun` value: call it parenthesised
+     (when (and head-line (regexp-match? #rx"^fun[(]" head-line))
+       (set! head-line (string-append "(" head-line ")")))
      (if head-line
          (call-doc head-line (for/list ([a args]) (list (ex a))))
          ;; multi-line head: parenthesise and call
@@ -770,6 +776,20 @@
 ;; positions where their `|` would be read as the enclosing alternatives
 (define multi-line-form (make-hash))   ; one-line text -> lines
 
+(define (paren-trailing-if line)
+  (or (for/or ([m (regexp-match-positions* #rx": " line)])
+        (define tail (substring line (cdr m)))
+        (and (hash-ref multi-line-form tail #f)
+             (string-append (substring line 0 (cdr m)) "(" tail ")")))
+      line))
+
+(define (mentions-var? x name)
+  (let walk ([x x])
+    (cond [(e:var? x) (equal? (e:var-name x) name)]
+          [(pair? x) (or (walk (car x)) (walk (cdr x)))]
+          [(prefab-struct-key x) (walk (cdr (vector->list (struct->vector x))))]
+          [else #f])))
+
 (define (alternatives head alts)
   ;; alts: list of (cons label-string body-lines) where label ends with ":"
   ;; or is "" for if-branches
@@ -780,10 +800,17 @@
              (define body0 (cdr a))
              ;; a one-line if/match opening the branch would lend its `|`
              ;; to these alternatives: use its multi-line form there
-             (define body
+             (define body1
                (if (and (pair? body0) (hash-ref multi-line-form (car body0) #f))
                    (append (hash-ref multi-line-form (car body0)) (cdr body0))
                    body0))
+             ;; a line that ends in a one-line if after a `:`, such as
+             ;; `fun f(x): if c | a | b`, leaves its alternatives open for the
+             ;; next line of the branch: parenthesise the if there
+             (define body
+               (if (and (pair? body1) (pair? (cdr body1)))
+                   (append (map paren-trailing-if (drop-right body1 1)) (list (last body1)))
+                   body1))
              (define first (if (string=? label "") "| " (string-append "| " label " ")))
              (define one (and (= (length body) 1) (string-append first (car body))))
              (cond
@@ -1077,6 +1104,9 @@
          (operator-alias-lines op)))
      (append defs (append* (for/list ([o ops]) (cons "" o))))]
     [(t:expr _ (e:app (e:var (or "needs" "loads" "loadt")) _)) '()]
+    ;; files loaded with load_on_path (Boyer_Moore/boyer-moore.ml): the
+    ;; importing modules name them directly, as for `loads`
+    [(t:expr _ e) #:when (mentions-var? e "load_on_path") '()]
     [(t:expr _ e) (stmts e)]
     [(t:type _ decls)
      (for* ([d decls])
@@ -1107,7 +1137,9 @@
      (define names
        (or (hash-ref (namespaces) path #f)
            (let ([ext ((env-module-members (current-env)) path)])
-             (and ext (begin ((env-use! (current-env)) path) ext)))))
+             (and ext (begin ((env-use! (current-env)) path) ext)))
+           (let ([std (hash-ref stdlib-open-members path #f)])
+             (and std (begin ((env-use! (current-env)) path) std)))))
      (when names
        (for ([n names]) (hash-set! (defined) n (string-append path "." (mangle-id n)))))
      (list (format "// open ~a" path))]
@@ -1118,6 +1150,13 @@
     [(t:include _ m) (list "// include: not translated")]
     [(t:external _ name) (list (format "// external ~a: not translated" name))]
     [(t:directive _ name arg) (list (format "// #~a" name))]))
+
+;; Stdlib modules that private/ocaml.rhm provides as namespaces, with the
+;; members an `open` of them makes visible (Boyer_Moore/make.ml opens Printf
+;; and Unix after printer.ml's `include Format`)
+(define stdlib-open-members
+  (hash "Printf" '("printf" "sprintf" "eprintf")
+        "Unix" '("times")))
 
 (define (module-lines m)
   (item-lines m))

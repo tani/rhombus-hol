@@ -37,6 +37,11 @@ these against the pinned HOL Light.
   token-similar to the hand-maintained modules.
 - All 45 compile in place of the hand-maintained module (`dropin.sh`, run by
   the CI job `ml2rhm`).
+- The 17 files of `Boyer_Moore/` compile together in place of the
+  hand-written translation, and pass `tests/upstream/boyer_moore.rhm`, with
+  that test importing the generated `environment` and `main` and the
+  hand-written `testset/` directly (the generated `boyer-moore.rhm` loads,
+  it does not re-export). This was checked by hand; CI does not run it.
 
 The output mirrors the checkout: `Library/card.ml` becomes
 `OUT/Library/card.rhm`, and `printer.ml` becomes `OUT/printer.rhm`, as in
@@ -62,7 +67,10 @@ The output follows the conventions of the hand-maintained modules:
 | `a = b`, `a <> b`, `a == b`, `s ^ t` | `a == b`, `a != b`, `a === b`, `s +& t` |
 | `match e with p -> a \| q when g -> b` | `match e` / `\| p: a` / `\| q when g: b` |
 | `try e with Failure _ -> h` | `try:` / `e` / `~catch Failure(_): h` |
-| `if c then a else b` | `if c \| a \| b` |
+| `if c then a else b` | `if c \| a \| b`, or `(if c \| a \| b)` at the end of a line that other lines of a branch follow |
+| `C (a, b)` for `C of t * u`, `C (a, b)` for `C of (t * u)` | `C(a, b)`, `C([a, b])` |
+| `(+) a b`, `(+) 1` | `a + b`, `(fun(x): fun(y): x + y)(1)` |
+| `open Printf` (a Stdlib module of `private/ocaml.rhm`) | its names as `Printf.printf` |
 | `type t = A \| B of u` | `variant t:` / `A()` / `B(u)` |
 | `type r = {f: u}` | `record R(f)` |
 | `exception E of string` | `class E(message)` |
@@ -77,7 +85,12 @@ patterns bind variables becomes one case per alternative, since Rhombus
 or-patterns bind none.
 
 Imports are computed. A file sees the modules HOL Light loads before it: the
-sequence of `hol_lib.ml`, then its `needs` closure. Each free name is
+sequence of `hol_lib.ml`, then its `needs` closure. A file that a loader of
+its directory loads from a list, with `needs`/`loads`/`loadt` or with
+`load_on_path` over a literal list of names (`Boyer_Moore/boyer-moore.ml`,
+`IsabelleLight/isalight.ml`), also sees the files listed before it, and what
+the loader's own loader loaded first; the loading statement itself becomes no
+code, as `loads` does. Each free name is
 imported, as an `only:` list, from the latest earlier module that defines it.
 OCaml Stdlib names come from `private/ocaml.rhm`, which provides them under
 their OCaml names (`not`, `max`, `Printf.sprintf`, `OCamlString.sub`,

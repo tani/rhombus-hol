@@ -1,0 +1,190 @@
+#lang rhombus
+// Parsing the bodies of `datatype`, `function` and `theorem` forms into IR
+// (ir.rhm). Imported for expansion time by main.rhm. Errors are syntax
+// errors at the offending term.
+import:
+  "ir.rhm" open
+  lib("racket/base.rkt") as Rkt
+
+export:
+  parse_type
+  parse_params
+  parse_expr
+  parse_block
+  parse_pattern
+  parse_hints
+  parse_ctor
+  ident_name
+
+fun ident_name(id): to_string(id.unwrap())
+
+fun fail(msg, stx): Rkt.#{raise-syntax-error}(#false, msg, stx)
+
+// ------------------------------------------------------------------ types
+
+// Nat, Bool, ?a, Name, Name(type, ...)
+fun parse_type(g):
+  match g
+  | 'Nat': TNat()
+  | 'Bool': TBool()
+  | '? $(v :: Identifier)': TVar("?" +& ident_name(v))
+  | '$(n :: Identifier)($(a :: Group), ...)': TCon(ident_name(n), [parse_type(a), ...])
+  | '$(n :: Identifier)': TCon(ident_name(n), [])
+  | _: fail("expected a type: Nat, Bool, ?a, or a datatype", g)
+
+// (x :: type, ...)
+fun parse_params(parens):
+  match parens
+  | '($(p :: Group), ...)': [parse_param(p), ...]
+  | _: fail("expected parameters", parens)
+
+fun parse_param(p):
+  match p
+  | '$(x :: Identifier) :: $(ty :: Group)': Param(ident_name(x), parse_type(ty))
+  | '$(x :: Identifier)': Param(ident_name(x), #false)
+  | _: fail("expected `name :: type`", p)
+
+// A constructor of a datatype: Name, or Name(field :: type, ...)
+fun parse_ctor(g):
+  match g
+  | '$(n :: Identifier)($(f :: Group), ...)': Ctor(ident_name(n), [parse_field(f), ...])
+  | '$(n :: Identifier)': Ctor(ident_name(n), [])
+  | _: fail("expected a constructor", g)
+
+fun parse_field(f):
+  match f
+  | '$(x :: Identifier) :: $(ty :: Group)': Field(ident_name(x), parse_type(ty))
+  | '$(ty :: Group)': Field(#false, parse_type(ty))
+
+// ------------------------------------------------------------ expressions
+
+// Binary operators: precedence and associativity.
+def binops:
+  {"==>": [1, #'right],
+   "||": [2, #'left],
+   "&&": [3, #'left],
+   "==": [4, #'none], "!=": [4, #'none], "<": [4, #'none], "<=": [4, #'none],
+   ">": [4, #'none], ">=": [4, #'none],
+   "+": [5, #'left], "-": [5, #'left],
+   "*": [6, #'left], "div": [6, #'left], "mod": [6, #'left]}
+
+// The operator a term stands for, if any: operators, and the names div, mod.
+fun term_op(t):
+  match t
+  | '$(o :: Operator)': to_string(o.unwrap_op())
+  | '$(i :: Identifier)':
+      let s = ident_name(i)
+      if s == "div" || s == "mod" | s | #false
+  | _: #false
+
+// A block: `let x = e` lines, then an expression.
+fun parse_block(b):
+  match b
+  | ': $(g :: Group); ...': parse_groups([g, ...], b)
+  | _: fail("expected a block", b)
+
+fun parse_groups(gs :: List, ctx):
+  match gs
+  | []: fail("empty block", ctx)
+  | [g]:
+      match g
+      | 'let $_ ...': fail("a block cannot end with `let`", g)
+      | _: parse_expr(g)
+  | [g, & rest]:
+      match g
+      | 'let $(x :: Identifier) = $(rhs :: Group)':
+          ELet(ident_name(x), parse_expr(rhs), parse_groups(rest, ctx))
+      | _: fail("only `let` may come before the last line of a block", g)
+
+// One group as an expression.
+fun parse_expr(g):
+  match g
+  | 'match $scrut ...
+     | $pat ...: $(body :: Block)
+     | ...':
+      EMatch(parse_expr('$scrut ...'),
+             [Case(parse_pattern('$pat ...'), parse_block(body)), ...])
+  | 'if $test ... | $(thn :: Block) | $(els :: Block)':
+      EIf(parse_expr('$test ...'), parse_block(thn), parse_block(els))
+  | 'if $test ...
+     | $thn ...
+     | $els ...':
+      EIf(parse_expr('$test ...'), parse_expr('$thn ...'), parse_expr('$els ...'))
+  | '$t ...':
+      let [e, rest] = parse_terms([t, ...], 0, g)
+      if rest == [] | e | fail("unexpected term", rest[0])
+
+// Precedence climbing over a group's terms: returns the expression and the
+// terms left over.
+fun parse_terms(ts :: List, min_prec, ctx):
+  let [lhs0, rest0] = parse_unary(ts, ctx)
+  fun loop(lhs, rest :: List):
+    if rest == []
+    | [lhs, rest]
+    | let op = term_op(rest[0])
+      let info = op && binops.get(op, #false)
+      if !info || info[0] < min_prec
+      | [lhs, rest]
+      | let [prec, assoc] = info
+        let next_min = if assoc == #'right | prec | prec + 1
+        let [rhs, rest2] = parse_terms(rest.drop(1), next_min, rest[0])
+        let e = EOp(op, [lhs, rhs])
+        if assoc == #'none && rest2 != [] && (block:
+                                               let op2 = term_op(rest2[0])
+                                               op2 && binops.get(op2, [0])[0] == prec)
+        | fail("comparisons do not chain: add parentheses", rest2[0])
+        | loop(e, rest2)
+  loop(lhs0, rest0)
+
+fun parse_unary(ts :: List, ctx):
+  if ts == []
+  | fail("expected an expression", ctx)
+  | match ts[0]
+    | '!': let [e, rest] = parse_unary(ts.drop(1), ts[0])
+           [EOp("!", [e]), rest]
+    | _: parse_primary(ts, ctx)
+
+fun parse_primary(ts :: List, ctx):
+  let t = ts[0]
+  let rest = ts.drop(1)
+  match t
+  | '$(n :: Int)':
+      let v = n.unwrap()
+      if v >= 0 | [ENat(v), rest] | fail("Nat literals are not negative", t)
+  | '#true': [EBool(#true), rest]
+  | '#false': [EBool(#false), rest]
+  | '$(f :: Identifier)':
+      let name = ident_name(f)
+      if rest != [] && (rest[0] matches '($(_ :: Group), ...)')
+      | match rest[0]
+        | '($(a :: Group), ...)': [ECall(name, [parse_expr(a), ...]), rest.drop(1)]
+      | [EVar(name), rest]
+  | '($(e :: Group))': [parse_expr(e), rest]
+  | _: fail("unexpected term in an expression", t)
+
+// ---------------------------------------------------------------- patterns
+
+fun parse_pattern(g):
+  match g
+  | '_': PWild()
+  | '$(n :: Int)': PNat(n.unwrap())
+  | '$(p :: Group) + 1': PSucc(parse_pattern(p))
+  | '$(c :: Identifier)($(a :: Group), ...)': PCon(ident_name(c), [parse_pattern(a), ...])
+  | '$(x :: Identifier)':
+      // A capitalized name is a nullary constructor, as in a datatype.
+      let s = ident_name(x)
+      if Char.is_uppercase(s[0]) | PCon(s, []) | PVar(s)
+  | '($(p :: Group))': parse_pattern(p)
+  | _: fail("expected a pattern", g)
+
+// ------------------------------------------------------------------- hints
+
+// The groups of a `proof:` block: `use: name ...`, `disable: name ...`,
+// `induct: x` (names are separated by spaces: a block holds no commas).
+fun parse_hints(gs :: List):
+  for values(h = Hints([], [], #false)) (g in gs):
+    match g
+    | 'use: $(n :: Identifier) ...': Hints(h.use ++ [ident_name(n), ...], h.disable, h.induct)
+    | 'disable: $(n :: Identifier) ...': Hints(h.use, h.disable ++ [ident_name(n), ...], h.induct)
+    | 'induct: $(x :: Identifier)': Hints(h.use, h.disable, ident_name(x))
+    | _: fail("unknown hint: expected use:, disable: or induct:", g)

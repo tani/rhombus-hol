@@ -1,0 +1,213 @@
+#lang rhombus/and_meta
+// The Rhombus/HOL frontend: `datatype`, `function` and `theorem`.
+//
+// Each form is parsed into IR (ir.rhm, parse.rhm) when it expands, and
+// expands to
+//   - executable code generated from the IR (classes for a datatype, a `fun`
+//     for a function; a theorem has none), and
+//   - a run-time registration of the IR (runtime.rhm's `declare`), which the
+//     checker (check.rhm) turns into HOL definitions and Boyer-Moore proofs.
+// Running a module runs only the executable code: the HOL theories are
+// loaded by the checker alone.
+//
+//   datatype Tree(?a)
+//   | Leaf
+//   | Node(left :: Tree(?a), value :: ?a, right :: Tree(?a))
+//
+//   function mirror(t :: Tree(?a)) :: Tree(?a):
+//     match t
+//     | Leaf: Leaf
+//     | Node(l, x, r): Node(mirror(r), x, mirror(l))
+//
+//   theorem mirror_mirror(t :: Tree(?a)):
+//     mirror(mirror(t)) == t
+//   proof:
+//     induct: t
+import:
+  meta:
+    "parse.rhm" open
+    "ir.rhm" open
+  "ir.rhm" as IR
+  "runtime.rhm" as rt
+
+export:
+  datatype
+  function
+  theorem
+  rename rt.declarations as declarations
+
+meta:
+  fun name_id(s, ctx): Syntax.make(Symbol.from_string(s), ctx)
+
+  // ---------------------------------------------- IR as run-time syntax
+  fun lit(v): Syntax.make(v, 'here')
+
+  fun ir_syn(v):
+    match v
+    | s :: String: lit(s)
+    | n :: Int: lit(n)
+    | b :: Boolean: lit(b)
+    | xs :: List:
+        let [s, ...] = xs.map(ir_syn)
+        '[$s, ...]'
+    | TNat(): 'IR.TNat()'
+    | TBool(): 'IR.TBool()'
+    | TVar(n): 'IR.TVar($(lit(n)))'
+    | TCon(n, args): 'IR.TCon($(lit(n)), $(ir_syn(args)))'
+    | EVar(n): 'IR.EVar($(lit(n)))'
+    | ENat(n): 'IR.ENat($(lit(n)))'
+    | EBool(b): 'IR.EBool($(lit(b)))'
+    | ECall(n, args): 'IR.ECall($(lit(n)), $(ir_syn(args)))'
+    | EOp(op, args): 'IR.EOp($(lit(op)), $(ir_syn(args)))'
+    | EIf(c, t, e): 'IR.EIf($(ir_syn(c)), $(ir_syn(t)), $(ir_syn(e)))'
+    | EMatch(s, cs): 'IR.EMatch($(ir_syn(s)), $(ir_syn(cs)))'
+    | Case(p, b): 'IR.Case($(ir_syn(p)), $(ir_syn(b)))'
+    | ELet(x, r, b): 'IR.ELet($(lit(x)), $(ir_syn(r)), $(ir_syn(b)))'
+    | PVar(n): 'IR.PVar($(lit(n)))'
+    | PWild(): 'IR.PWild()'
+    | PCon(n, ps): 'IR.PCon($(lit(n)), $(ir_syn(ps)))'
+    | PNat(n): 'IR.PNat($(lit(n)))'
+    | PSucc(p): 'IR.PSucc($(ir_syn(p)))'
+    | Field(n, ty): 'IR.Field($(ir_syn(n)), $(ir_syn(ty)))'
+    | Ctor(n, fs): 'IR.Ctor($(lit(n)), $(ir_syn(fs)))'
+    | TypeDef(n, ps, cs): 'IR.TypeDef($(lit(n)), $(ir_syn(ps)), $(ir_syn(cs)))'
+    | Datatype(ts): 'IR.Datatype($(ir_syn(ts)))'
+    | Param(n, ty): 'IR.Param($(lit(n)), $(ir_syn(ty)))'
+    | Function(n, ps, r, b): 'IR.Function($(lit(n)), $(ir_syn(ps)), $(ir_syn(r)), $(ir_syn(b)))'
+    | Hints(u, d, i): 'IR.Hints($(ir_syn(u)), $(ir_syn(d)), $(ir_syn(i)))'
+    | Theorem(n, ps, s, h): 'IR.Theorem($(lit(n)), $(ir_syn(ps)), $(ir_syn(s)), $(ir_syn(h)))'
+
+  // ------------------------------------------------- executable code
+  fun ex(e, ctx):
+    match e
+    | EVar(n): name_id(n, ctx)
+    | ENat(n): lit(n)
+    | EBool(b): lit(b)
+    | ECall(n, args):
+        let [a, ...] = args.map(fun(a): ex(a, ctx))
+        '$(name_id(n, ctx))($a, ...)'
+    | EOp("!", [a]): '(!$(ex(a, ctx)))'
+    | EOp(op, [a0, b0]):
+        let a = ex(a0, ctx)
+        let b = ex(b0, ctx)
+        match op
+        | "+": '($a + $b)'
+        | "-": 'rt.monus($a, $b)'
+        | "*": '($a * $b)'
+        | "div": 'rt.nat_div($a, $b)'
+        | "mod": 'rt.nat_mod($a, $b)'
+        | "==": '($a == $b)'
+        | "!=": '($a != $b)'
+        | "<": '($a < $b)'
+        | "<=": '($a <= $b)'
+        | ">": '($a > $b)'
+        | ">=": '($a >= $b)'
+        | "&&": '($a && $b)'
+        | "||": '($a || $b)'
+        | "==>": 'rt.implies($a, $b)'
+    | EIf(c, t, f): '(if $(ex(c, ctx)) | $(ex(t, ctx)) | $(ex(f, ctx)))'
+    | ELet(x, r, b): '(block: let $(name_id(x, ctx)) = $(ex(r, ctx)); $(ex(b, ctx)))'
+    | EMatch(s, cases):
+        let chain:
+          for values(acc = 'rt.no_match("match")') (c in cases.reverse()):
+            let [tests, binds] = pat_code(c.pat, 'scrutinee', ctx)
+            let test = for values(t = '#true') (x in tests.reverse()):
+                         if t == '#true' | x | '($x && $t)'
+            let body = ex(c.body, ctx)
+            let rhs = for values(b = body) (bd in binds.reverse()):
+                        '(block: let $(bd[0]) = $(bd[1]); $b)'
+            '(if $test | $rhs | $acc)'
+        '(block: let scrutinee = $(ex(s, ctx)); $chain)'
+
+  // The tests a value at `path` must pass to match p, and the variables p
+  // binds with their paths.
+  fun pat_code(p, path, ctx):
+    match p
+    | PVar(x): [[], [[name_id(x, ctx), path]]]
+    | PWild(): [[], []]
+    | PNat(n): [['($path == $(lit(n)))'], []]
+    | PSucc(q):
+        let [ts, bs] = pat_code(q, 'rt.monus($path, 1)', ctx)
+        [['($path > 0)'] ++ ts, bs]
+    | PCon(c, qs):
+        let values(ts, bs):
+          for values(ts = ['(rt.ctor_of($path) == $(lit(c)))'], bs = []) (q in qs, i in 0..):
+            let [ts2, bs2] = pat_code(q, 'rt.field($path, $(lit(i)))', ctx)
+            values(ts ++ ts2, bs ++ bs2)
+        [ts, bs]
+
+  fun datatype_code(dt, ctx):
+    let [d, ...]:
+      for List:
+        each td in dt.types
+        each c in td.ctors
+        let cls = name_id(c.name +& "_value", ctx)
+        let [f, ...] = for List (f in c.fields, i in 0..): name_id(f.name || ("f" +& i), ctx)
+        let made:
+          if c.fields == []
+          | '$cls()'
+          | cls
+        'class $cls($f, ...):
+           implements rt.DataValue
+           override ctor_name(): $(lit(c.name))
+           override fields(): [$f, ...]
+         def $(name_id(c.name, ctx)) = $made'
+    '$d
+     ...'
+
+  // A following `proof:` block: its groups, and the remaining groups.
+  fun split_proof(tail):
+    match tail
+    | 'proof: «$(h :: Group); ...»; $rest; ...': values([h, ...], '$rest; ...')
+    | _: values(#false, tail)
+
+  fun typedef(name, params, alts):
+    TypeDef(ident_name(name),
+            for List (p in params):
+              match parse_type(p)
+              | TVar(v) && tv: tv
+              | _: syntax_meta.error("a datatype's parameters are type variables ?a", p),
+            alts.map(parse_ctor))
+
+defn.sequence_macro 'datatype $(name :: Identifier) $ps ...
+                     | $(alt :: Group)
+                     | ...
+                     $tail
+                     ...':
+  let params:
+    match '$ps ...'
+    | '': []
+    | '($(p :: Group), ...)': [p, ...]
+    | other: syntax_meta.error("expected type parameters (?a, ...)", other)
+  let dt = Datatype([typedef(name, params, [alt, ...])])
+  values('$(datatype_code(dt, name))
+          rt.declare($(ir_syn(dt)))',
+         '$tail; ...')
+
+defn.sequence_macro 'function $(name :: Identifier) $(ps :: Term) $rt_g ...: $(body :: Block)
+                     $tail
+                     ...':
+  let values(hints, rest) = split_proof('$tail; ...')
+  let result:
+    match '$rt_g ...'
+    | ':: $(ty :: Group)': parse_type(ty)
+    | '': #false
+    | other: syntax_meta.error("expected `:: type` before the body", other)
+  let params = parse_params(ps)
+  let f = Function(ident_name(name), params, result, parse_block(body))
+  let [x, ...] = params.map(fun(p): name_id(p.name, name))
+  values('fun $name($x, ...): $(ex(f.body, name))
+          rt.declare($(ir_syn(f)))',
+         rest)
+
+defn.sequence_macro 'theorem $(name :: Identifier) $(ps :: Term) ...: $(stmt :: Block)
+                     $tail
+                     ...':
+  let values(hint_groups, rest) = split_proof('$tail; ...')
+  let params:
+    match '$ps ...'
+    | '': []
+    | '$(pp :: Term)': parse_params(pp)
+  let hints = if hint_groups | parse_hints(hint_groups) | Hints([], [], #false)
+  let th = Theorem(ident_name(name), params, parse_block(stmt), hints)
+  values('rt.declare($(ir_syn(th)))', rest)

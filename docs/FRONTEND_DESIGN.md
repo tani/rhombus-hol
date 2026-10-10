@@ -300,7 +300,7 @@ frontend, so that sentence needs to change to something like:
 Also check that `tools/literalness/measure.py` ignores `lang/` and `waterfall/`, so the
 logic-layer score is unaffected.
 
-## 10. Validation
+## 11. Validation
 
 Tracked separately from implementation, per AGENTS.md.
 
@@ -316,7 +316,7 @@ Tracked separately from implementation, per AGENTS.md.
   `aconv`-equal terms.
 - Phase 4: generated functions agree with kernel evaluation of the equations.
 
-## 11. Milestones
+## 12. Milestones
 
 Waterfall first (W), then frontend (M).
 
@@ -335,7 +335,7 @@ Waterfall first (W), then frontend (M).
 - **M4.** Code extraction.
 - **M5.** Scribble manual and examples.
 
-## 12. Open decisions
+## 13. Open decisions
 
 0. **Waterfall scope.** Is the default closing stage allowed to call
    `ARITH_RULE`/ITAUT (complete but not "simple rewriting"), and is MESON

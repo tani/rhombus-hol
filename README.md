@@ -120,8 +120,14 @@ The slower suites replay the whole standard theory sequence (several minutes
 each) and run in the CI `theories` job:
 
 ```sh
-raco test -j 4 rhombus/hol/tests/golden/hol_light.rhm rhombus/hol/tests/upstream/*.rhm
+raco test -j 2 rhombus/hol/tests/slow/theories.rhm rhombus/hol/tests/upstream/lagrange_lemma.rhm
 ```
+
+`tests/slow/theories.rhm` runs `golden/hol_light.rhm`, `golden/printer.rhm`,
+`upstream/basic_tests.rhm` and `upstream/dickson.rhm` in one process, so the
+theories are replayed once instead of four times. Each of them also runs on
+its own. `lagrange_lemma.rhm` reads its quotations against the theories up to
+`real.ml` and needs a process of its own.
 
 - `tests/golden/hol_light.rhm` compares every type, constant, axiom,
   definition and toplevel theorem with the logical state of the pinned HOL

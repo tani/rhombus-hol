@@ -26,8 +26,9 @@ tools/ml2rhm/dropin.sh OUT bool drule ...                        # compile in pl
 ```
 
 `dropin.sh` compiles each generated module in place of the hand-maintained
-one, in a scratch copy of the repository. The CI job `ml2rhm` runs all of
-these against the pinned HOL Light.
+one, in a scratch copy of the repository per module, `DROPIN_JOBS` (default:
+all cores) at a time; compile the repository's modules first. The CI job
+`ml2rhm` runs all of these against the pinned HOL Light.
 
 ## Results
 

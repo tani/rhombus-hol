@@ -26,12 +26,14 @@ import:
       concl
       frees
       dest_var
+      get_const_type
       type_of
       dest_type
       dest_vartype
   "../hol/basics.rhm" open:
     only:
-      dest_forall
+      is_forall
+      dest_fun_ty
   "../hol/bool.rhm" open:
     only:
       GENL
@@ -45,6 +47,9 @@ import:
   "../hol/calc_num.rhm" open:
     only:
       num_CONV
+  "../hol/recursion.rhm" open:
+    only:
+      new_recursive_definition
   "../hol/define.rhm" open:
     only:
       define
@@ -86,7 +91,8 @@ class Checker(types :: MutableMap, thms :: MutableMap, mutable fresh :: Int,
   method run(d) :: List:
     match d
     | Datatype(tds): datatype(tds)
-    | _ :: Function: function(d)
+    | _ :: Function: function([d])
+    | Mutual(fs): function(fs)
     | _ :: Theorem: theorem(d)
 
   // ------------------------------------------------------------ types
@@ -126,42 +132,61 @@ class Checker(types :: MutableMap, thms :: MutableMap, mutable fresh :: Int,
     try:
       trace(spec)
       let [induct, recursion] = define_type(spec)
-      for (td in tds):
-        let cases_thm = cases(td.name)
-        let [x, _] = dest_forall(concl(cases_thm))
-        let [_, args] = dest_type(type_of(x))
-        let hol_params = for List (a in args): "?" ++ dest_vartype(a)
-        types[td.name] := TypeInfoHol(td.params.map(fun(p): p.name), td.ctors, hol_params)
-        if tds.length() == 1
-        | BM.define_shell(td.name, induct, cases_thm)
-        | #void
-      [Outcome("datatype", String.join(names, " "), "ok", string_of_thm(induct))]
+      let notes:
+        for List (td in tds):
+          // The type's variables in HOL's order, from its first constructor.
+          let [_, args] = dest_type(result_type(get_const_type(td.ctors[0].name)))
+          let hol_params = for List (a in args): "?" ++ dest_vartype(a)
+          types[td.name] := TypeInfoHol(td.params.map(fun(p): p.name), td.ctors, hol_params, recursion)
+          // A Boyer-Moore shell needs a type's own induction theorem: the
+          // prover has no mutual or nested induction yet.
+          let cases_thm = cases(td.name)
+          if tds.length() == 1 && is_forall(concl(cases_thm))
+          | BM.define_shell(td.name, induct, cases_thm)
+            #false
+          | td.name ++ ": no Boyer-Moore shell (mutual or nested type)"
+      [Outcome("datatype", String.join(names, " "), "ok",
+               String.join([string_of_thm(induct)] ++ notes.filter(~keep: fun(n): n), "\n  "))]
       ~catch exn:
         [Outcome("datatype", String.join(names, " "), "failed", describe(exn))]
 
   // -------------------------------------------------------- functions
-  method function(f :: Function) :: List:
+  method function(fs :: List) :: List:
+    let names = String.join(fs.map(fun(f): f.name), " ")
     try:
-      let fn_ty:
-        for values(t = ty_text(f.result || fail("give " +& f.name +& " a result type"), [])) (p in f.params.reverse()):
-          ty_text(p.ty || fail("give parameter " +& p.name +& " a type"), []) ++ "->" ++ t
-      let head = "(" ++ f.name ++ ":" ++ fn_ty ++ ")"
-      let env0 = for Map (p in f.params): values(p.name, typed_var(p))
-      need_numerals(f.body)
-      let clauses = split(f.params, env0, f.body)
-      let text:
-        String.join(
-          for List ([env, body] in clauses):
-            "(" ++ String.join([head] ++ (for List (p in f.params): env[p.name]), " ")
-              ++ " = " ++ expr(body, env) ++ ")",
-          " /\\ ")
+      let text = String.join(fs.map(fun(f): equations(f)), " /\\ ")
       trace(text)
-      let th = define(Parser.parse_term(text))
+      let tm = Parser.parse_term(text)
+      // Mutually recursive functions are primitive recursive on a mutual or
+      // nested type, through its recursion theorem; `define` takes one
+      // function at a time.
+      let th:
+        if fs.length() == 1
+        | define(tm)
+        | match fs[0].params
+          | [Param(_, TCon(n, _)), & _] when types.has_key(n):
+              new_recursive_definition(types[n].recursion)(tm)
+          | _: fail("mutually recursive functions recurse on their first parameter's datatype")
       BM.register_definition(th)
-      thms[f.name] := th
-      [Outcome("function", f.name, "ok", string_of_thm(th))]
+      for (f in fs): thms[f.name] := th
+      [Outcome("function", names, "ok", string_of_thm(th))]
       ~catch exn:
-        [Outcome("function", f.name, "failed", describe(exn))]
+        [Outcome("function", names, "failed", describe(exn))]
+
+  // The equations defining f, as text.
+  method equations(f :: Function) :: String:
+    let fn_ty:
+      for values(t = ty_text(f.result || fail("give " +& f.name +& " a result type"), [])) (p in f.params.reverse()):
+        ty_text(p.ty || fail("give parameter " +& p.name +& " a type"), []) ++ "->" ++ t
+    let head = "(" ++ f.name ++ ":" ++ fn_ty ++ ")"
+    let env0 = for Map (p in f.params): values(p.name, typed_var(p))
+    need_numerals(f.body)
+    let clauses = split(f.params, env0, f.body)
+    String.join(
+      for List ([env, body] in clauses):
+        "(" ++ String.join([head] ++ (for List (p in f.params): env[p.name]), " ")
+          ++ " = " ++ expr(body, env) ++ ")",
+      " /\\ ")
 
   method typed_var(p) :: String:
     "(" ++ p.name ++ ":" ++ ty_text(p.ty || fail("give " +& p.name +& " a type"), []) ++ ")"
@@ -294,8 +319,13 @@ fun describe(exn):
   | e :: Exn: e.message
   | _: to_string(exn)
 
+fun result_type(ty):
+  try:
+    result_type(dest_fun_ty(ty)[1])
+    ~catch _ :: Failure: ty
+
 fun paren(s :: String): if s.contains(" ") || s.contains("->") | "(" ++ s ++ ")" | s
 
 class Shape(ctor, vars)
 
-class TypeInfoHol(params, ctors, hol_params)
+class TypeInfoHol(params, ctors, hol_params, recursion)

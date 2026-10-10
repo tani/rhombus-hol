@@ -74,6 +74,7 @@ meta:
     | Datatype(ts): 'IR.Datatype($(ir_syn(ts)))'
     | Param(n, ty): 'IR.Param($(lit(n)), $(ir_syn(ty)))'
     | Function(n, ps, r, b): 'IR.Function($(lit(n)), $(ir_syn(ps)), $(ir_syn(r)), $(ir_syn(b)))'
+    | Mutual(fs): 'IR.Mutual($(ir_syn(fs)))'
     | Hints(u, d, i): 'IR.Hints($(ir_syn(u)), $(ir_syn(d)), $(ir_syn(i)))'
     | Theorem(n, ps, s, h): 'IR.Theorem($(lit(n)), $(ir_syn(ps)), $(ir_syn(s)), $(ir_syn(h)))'
 
@@ -161,43 +162,70 @@ meta:
     | 'proof: «$(h :: Group); ...»; $rest; ...': values([h, ...], '$rest; ...')
     | _: values(#false, tail)
 
-  fun typedef(name, params, alts):
-    TypeDef(ident_name(name),
-            for List (p in params):
-              match parse_type(p)
-              | TVar(v) && tv: tv
-              | _: syntax_meta.error("a datatype's parameters are type variables ?a", p),
-            alts.map(parse_ctor))
+  // Groups after the first that start with `and`, and the groups after
+  // them.
+  fun take_ands(tail):
+    match tail
+    | 'and $g ...; $rest; ...':
+        let values(more, r) = take_ands('$rest; ...')
+        values(['$g ...'] ++ more, r)
+    | _: values([], tail)
 
-defn.sequence_macro 'datatype $(name :: Identifier) $ps ...
-                     | $(alt :: Group)
-                     | ...
+  // `Name(?a, ...) | Ctor(...) | ...`
+  fun typedef(g):
+    match g
+    | '$(name :: Identifier) $ps ...
+       | $(alt :: Group)
+       | ...':
+        let params:
+          match '$ps ...'
+          | '': []
+          | '($(p :: Group), ...)': [p, ...]
+          | other: syntax_meta.error("expected type parameters (?a, ...)", other)
+        TypeDef(ident_name(name),
+                for List (p in params):
+                  match parse_type(p)
+                  | TVar(v) && tv: tv
+                  | _: syntax_meta.error("a datatype's parameters are type variables ?a", p),
+                [alt, ...].map(parse_ctor))
+    | _: syntax_meta.error("expected `Name(?a, ...)` and `| Constructor(field :: type, ...)` lines", g)
+
+  // `name(x :: type, ...) :: type: body`
+  fun function_head(g):
+    match g
+    | '$(name :: Identifier) $(ps :: Term) $rt_g ...: $(body :: Block)':
+        let result:
+          match '$rt_g ...'
+          | ':: $(ty :: Group)': parse_type(ty)
+          | '': #false
+          | other: syntax_meta.error("expected `:: type` before the body", other)
+        Function(ident_name(name), parse_params(ps), result, parse_block(body))
+    | _: syntax_meta.error("expected `name(x :: type, ...) :: type: body`", g)
+
+defn.sequence_macro 'datatype $g ...
                      $tail
                      ...':
-  let params:
-    match '$ps ...'
-    | '': []
-    | '($(p :: Group), ...)': [p, ...]
-    | other: syntax_meta.error("expected type parameters (?a, ...)", other)
-  let dt = Datatype([typedef(name, params, [alt, ...])])
-  values('$(datatype_code(dt, name))
+  let values(more, rest) = take_ands('$tail; ...')
+  let dt = Datatype(['$g ...', & more].map(typedef))
+  values('$(datatype_code(dt, [g, ...][0]))
           rt.declare($(ir_syn(dt)))',
-         '$tail; ...')
+         rest)
 
-defn.sequence_macro 'function $(name :: Identifier) $(ps :: Term) $rt_g ...: $(body :: Block)
+defn.sequence_macro 'function $g ...
                      $tail
                      ...':
-  let values(hints, rest) = split_proof('$tail; ...')
-  let result:
-    match '$rt_g ...'
-    | ':: $(ty :: Group)': parse_type(ty)
-    | '': #false
-    | other: syntax_meta.error("expected `:: type` before the body", other)
-  let params = parse_params(ps)
-  let f = Function(ident_name(name), params, result, parse_block(body))
-  let [x, ...] = params.map(fun(p): name_id(p.name, name))
-  values('fun $name($x, ...): $(ex(f.body, name))
-          rt.declare($(ir_syn(f)))',
+  let values(more, tail2) = take_ands('$tail; ...')
+  let values(hints, rest) = split_proof(tail2)
+  let fs = ['$g ...', & more].map(function_head)
+  let decl = if fs.length() == 1 | fs[0] | Mutual(fs)
+  let [code, ...]:
+    for List (f in fs):
+      let ctx = [g, ...][0]
+      let [x, ...] = f.params.map(fun(p): name_id(p.name, ctx))
+      'fun $(name_id(f.name, ctx))($x, ...): $(ex(f.body, ctx))'
+  values('$code
+          ...
+          rt.declare($(ir_syn(decl)))',
          rest)
 
 defn.sequence_macro 'theorem $(name :: Identifier) $(ps :: Term) ...: $(stmt :: Block)

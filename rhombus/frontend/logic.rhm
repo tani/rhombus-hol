@@ -1,0 +1,301 @@
+#lang rhombus
+// The checker's logic: the IR of each declaration (ir.rhm) becomes HOL Light
+// text, read by the port's own parser (../hol/parser.rhm) against the
+// theories loaded at that moment, as a quotation would be.
+//
+//   - A datatype becomes define_type's specification and, when it is not
+//     mutually recursive, a Boyer-Moore shell.
+//   - A function becomes the equations of a `define`: a `match` on a
+//     parameter splits the equation into one per constructor (Nat: 0 and
+//     SUC n), as a pattern-matching definition in HOL Light; `let` is
+//     inlined. The definition is given to the prover.
+//   - A theorem is proved by the extended Boyer-Moore prover (bm/bm.rhm)
+//     with the hints of its `proof:` block, and is then a rewrite rule for
+//     later theorems.
+//
+// Names are kept: `?a` is the type variable `a`, Nat is num, Bool is bool.
+import:
+  "ir.rhm" open
+  "../hol/parser.rhm" as Parser
+  "../hol/private/ocaml.rhm" open:
+    only:
+      Failure
+      fst
+  "../hol/fusion.rhm" open:
+    only:
+      concl
+      frees
+      dest_var
+      type_of
+      dest_type
+      dest_vartype
+  "../hol/basics.rhm" open:
+    only:
+      dest_forall
+  "../hol/bool.rhm" open:
+    only:
+      GENL
+  "../hol/ind_types.rhm" open:
+    only:
+      define_type
+      cases
+  "../hol/nums.rhm" open:
+    only:
+      mk_small_numeral
+  "../hol/calc_num.rhm" open:
+    only:
+      num_CONV
+  "../hol/define.rhm" open:
+    only:
+      define
+  "../hol/printer.rhm" open:
+    only:
+      string_of_thm
+  "bm/bm.rhm" as BM
+  lib("racket/base.rkt") as Rkt
+
+export:
+  Checker
+  Outcome
+
+// What became of one declaration: "ok" with the theorem(s) as text, or
+// "failed" with the reason.
+class Outcome(kind, name, status, detail)
+
+class Checker(types :: MutableMap, thms :: MutableMap, mutable fresh :: Int,
+              mutable numerals :: Int):
+  constructor():
+    BM.reset()
+    super({}.copy(), {}.copy(), 0, 1)
+
+  // The prover knows 1 = SUC 0; a literal n > 1 needs n = SUC (n - 1) down
+  // to 2 (num_CONV).
+  method need_numerals(e):
+    match e
+    | ENat(n) when n > numerals:
+        for (k in numerals + 1 ..= n):
+          BM.register_rewrite(num_CONV(mk_small_numeral(k)))
+        numerals := n
+    | ECall(_, args): for (a in args): need_numerals(a)
+    | EOp(_, args): for (a in args): need_numerals(a)
+    | EIf(c, t, f): need_numerals(c); need_numerals(t); need_numerals(f)
+    | EMatch(x, cs): need_numerals(x); for (c in cs): need_numerals(c.body)
+    | ELet(_, r, b): need_numerals(r); need_numerals(b)
+    | _: #void
+
+  method run(d) :: List:
+    match d
+    | Datatype(tds): datatype(tds)
+    | _ :: Function: function(d)
+    | _ :: Theorem: theorem(d)
+
+  // ------------------------------------------------------------ types
+  method tyvar(n :: String): n.substring(1, n.length())
+
+  method ty_text(ty, group :: List) :: String:
+    match ty
+    | TNat(): "num"
+    | TBool(): "bool"
+    | TVar(n): tyvar(n)
+    | TCon(n, args):
+        cond
+        | group.contains(n): n
+        | !types.has_key(n): fail("unknown type " +& n)
+        | args == []: n
+        | ~else:
+            // The arguments in the order HOL gave the type's variables.
+            let info = types[n]
+            let by_name = for Map (p in info.params, a in args): values(p, a)
+            let hol_order = info.hol_params
+            "(" ++ String.join(for List (p in hol_order): ty_text(by_name[p], group), ",") ++ ")" ++ n
+
+  method fail(msg): throw Failure(msg)
+
+  // -------------------------------------------------------- datatypes
+  method datatype(tds :: List) :: List:
+    let names = for List (td in tds): td.name
+    let spec:
+      String.join(
+        for List (td in tds):
+          td.name ++ " = "
+            ++ String.join(
+                 for List (c in td.ctors):
+                   String.join([c.name] ++ (for List (f in c.fields): paren(ty_text(f.ty, names))), " "),
+                 " | "),
+        "; ")
+    try:
+      trace(spec)
+      let [induct, recursion] = define_type(spec)
+      for (td in tds):
+        let cases_thm = cases(td.name)
+        let [x, _] = dest_forall(concl(cases_thm))
+        let [_, args] = dest_type(type_of(x))
+        let hol_params = for List (a in args): "?" ++ dest_vartype(a)
+        types[td.name] := TypeInfoHol(td.params.map(fun(p): p.name), td.ctors, hol_params)
+        if tds.length() == 1
+        | BM.define_shell(td.name, induct, cases_thm)
+        | #void
+      [Outcome("datatype", String.join(names, " "), "ok", string_of_thm(induct))]
+      ~catch exn:
+        [Outcome("datatype", String.join(names, " "), "failed", describe(exn))]
+
+  // -------------------------------------------------------- functions
+  method function(f :: Function) :: List:
+    try:
+      let fn_ty:
+        for values(t = ty_text(f.result || fail("give " +& f.name +& " a result type"), [])) (p in f.params.reverse()):
+          ty_text(p.ty || fail("give parameter " +& p.name +& " a type"), []) ++ "->" ++ t
+      let head = "(" ++ f.name ++ ":" ++ fn_ty ++ ")"
+      let env0 = for Map (p in f.params): values(p.name, typed_var(p))
+      need_numerals(f.body)
+      let clauses = split(f.params, env0, f.body)
+      let text:
+        String.join(
+          for List ([env, body] in clauses):
+            "(" ++ String.join([head] ++ (for List (p in f.params): env[p.name]), " ")
+              ++ " = " ++ expr(body, env) ++ ")",
+          " /\\ ")
+      trace(text)
+      let th = define(Parser.parse_term(text))
+      BM.register_definition(th)
+      thms[f.name] := th
+      [Outcome("function", f.name, "ok", string_of_thm(th))]
+      ~catch exn:
+        [Outcome("function", f.name, "failed", describe(exn))]
+
+  method typed_var(p) :: String:
+    "(" ++ p.name ++ ":" ++ ty_text(p.ty || fail("give " +& p.name +& " a type"), []) ++ ")"
+
+  // The equations of a body: [env, body] for each, env giving each
+  // parameter's pattern on the left-hand side. A match on a parameter that
+  // still stands for itself splits it.
+  method split(params :: List, env :: Map, body) :: List:
+    match body
+    | EMatch(EVar(x), cs) when (for any (p in params): p.name == x && env[x] == typed_var(p)):
+        let ty = (for List (p in params): keep_when p.name == x; p.ty)[0]
+        let shapes = shapes_of(ty)
+        let values(out, left):
+          for values(out = [], left = shapes) (c in cs):
+            let taken = take_pattern(c.pat, left, params)
+            let out2:
+              for values(out = out) ([sh, binds] in taken):
+                out ++ split(params, env ++ binds ++ {x: sh_text(sh)}, c.body)
+            values(out2, left.filter(~keep: fun(sh): !(for any ([t, _] in taken): t.ctor == sh.ctor)))
+        if left == []
+        | out
+        | fail("the match on " +& x +& " misses " +& String.join(left.map(fun(sh): sh.ctor), ", "))
+    | _: [[env, body]]
+
+  // The constructors of a type, with fresh variables for their fields.
+  method shapes_of(ty) :: List:
+    match ty
+    | TNat(): [Shape("0", []), Shape("SUC", [fresh_var()])]
+    | TCon(n, _) when types.has_key(n):
+        for List (c in types[n].ctors):
+          Shape(c.name, for List (_ in c.fields): fresh_var())
+    | _: fail("match on a value that is not of a datatype or Nat")
+
+  method fresh_var():
+    fresh := fresh + 1
+    "v" +& fresh +& "'"
+
+  // The shapes among `left` a pattern covers, each with the variables the
+  // pattern binds: a constructor pattern names the fields by its own
+  // variables (fresh ones for `_`).
+  method take_pattern(pat, left :: List, params :: List) :: List:
+    fun of(ctor, qs :: List):
+      for List (sh in left):
+        keep_when sh.ctor == ctor
+        let vars:
+          for List (q in qs, v in sh.vars):
+            match q
+            | PVar(y) when (for any (p in params): p.name == y):
+                fail("the pattern variable " +& y +& " hides a parameter")
+            | PVar(y): y
+            | PWild(): v
+            | _: fail("nested patterns are not supported by the checker yet")
+        [Shape(ctor, vars), {}]
+    match pat
+    | PWild(): for List (sh in left): [sh, {}]
+    | PVar(y): for List (sh in left): [sh, {y: sh_text(sh)}]
+    | PNat(0): of("0", [])
+    | PSucc(q): of("SUC", [q])
+    | PCon(c, qs): of(c, qs)
+    | _: fail("this pattern is not supported by the checker yet")
+
+  method sh_text(sh) :: String:
+    if sh.vars == []
+    | sh.ctor
+    | "(" ++ String.join([sh.ctor] ++ sh.vars, " ") ++ ")"
+
+  // -------------------------------------------------------- expressions
+  method expr(e, env :: Map) :: String:
+    match e
+    | EVar(n): env.get(n, n)
+    | ENat(n): to_string(n)
+    | EBool(b): (if b | "T" | "F")
+    | ECall(n, args): "(" ++ String.join([n] ++ args.map(fun(a): expr(a, env)), " ") ++ ")"
+    | EOp("!", [a]): "(~" ++ expr(a, env) ++ ")"
+    | EOp("!=", [a, b]): "(~(" ++ expr(a, env) ++ " = " ++ expr(b, env) ++ "))"
+    | EOp(op, [a, b]):
+        let hol_op:
+          match op
+          | "div": "DIV"
+          | "mod": "MOD"
+          | "==": "="
+          | "&&": "/\\"
+          | "||": "\\/"
+          | _: op
+        "(" ++ expr(a, env) ++ " " ++ hol_op ++ " " ++ expr(b, env) ++ ")"
+    | EIf(c, t, f): "(if " ++ expr(c, env) ++ " then " ++ expr(t, env) ++ " else " ++ expr(f, env) ++ ")"
+    | ELet(x, r, b): expr(b, env ++ {x: "(" ++ expr(r, env) ++ ")"})
+    | _ :: EMatch: fail("the checker supports `match` only on a function's parameter")
+
+  // --------------------------------------------------------- theorems
+  method theorem(t :: Theorem) :: List:
+    try:
+      let env:
+        for Map (p in t.params):
+          values(p.name, typed_var(p))
+      let text = expr(t.stmt, env)
+      trace(text)
+      let tm = Parser.parse_term(text)
+      let named = fun(n): thms.get(n, #false) || fail("no theorem or function named " +& n)
+      let hints = BM.Hints(PairList[& t.hints.use.map(named)],
+                           PairList[& t.hints.disable.map(named)],
+                           t.hints.induct)
+      need_numerals(t.stmt)
+      let th0 = BM.prove(tm, hints)
+      // Quantified in the order of the parameters.
+      let fvs = frees(concl(th0))
+      let vars:
+        for List (p in t.params):
+          each v in fvs
+          keep_when fst(dest_var(v)) == p.name
+          v
+      let th = GENL(PairList[& vars])(th0)
+      BM.register_rewrite(th)
+      thms[t.name] := th
+      [Outcome("theorem", t.name, "ok", string_of_thm(th))]
+      ~catch exn:
+        [Outcome("theorem", t.name, "failed", describe(exn))]
+
+// FRONTEND_TRACE=1 prints the HOL Light text of each declaration;
+// FRONTEND_TRACE=raise also lets the first error escape, with its context.
+def trace_mode:
+  let m = Rkt.getenv("FRONTEND_TRACE")
+  m && Rkt.#{string->immutable-string}(m)
+fun trace(text): if trace_mode | println("HOL: " ++ text) | #void
+
+fun describe(exn):
+  if trace_mode == "raise" | throw exn | #void
+  match exn
+  | f :: Failure: "Failure " +& f.message
+  | e :: Exn: e.message
+  | _: to_string(exn)
+
+fun paren(s :: String): if s.contains(" ") || s.contains("->") | "(" ++ s ++ ")" | s
+
+class Shape(ctor, vars)
+
+class TypeInfoHol(params, ctors, hol_params)

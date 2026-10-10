@@ -1,0 +1,71 @@
+#lang rhombus
+// HOL Light's Boyer_Moore/ waterfall prover (Papapanagiotou and Fleuriot,
+// arXiv:1808.03810), run through the translation of its evaluation script
+// Boyer_Moore/make.ml: importing make.rhm performs bm_reset and upstream's
+// `bm_test BME` example. Each theorem below is proved by the waterfall in the
+// Rhombus kernel and must have exactly the conjecture as its conclusion and
+// no hypotheses. The conjectures are entries of upstream's testset/arith.ml
+// and testset/list.ml, by their position there.
+import:
+  "../../private/hol_quote.rhm" open
+  "../../private/proof_syntax.rhm" open
+  "../../lib.rhm" open:
+    only:
+      el
+      length
+      can
+  "../../private/ocaml.rhm" open:
+    only:
+      Failure
+      fst
+      snd
+  "../../fusion.rhm" open:
+    only:
+      concl
+      hyp
+  "../../tactics.rhm" open:
+    only:
+      prove
+      GEN_TAC
+      REPEAT
+      STRIP_TAC
+  "../../Boyer_Moore/make.rhm" open
+  "../../Boyer_Moore/boyer-moore.rhm" open
+
+fun proves_exactly(th, tm):
+  concl(th) == tm && hyp(th) == PairList []
+
+// Upstream's example: bm_test BME `m + n:num = n + m` returned no
+// generalizations; the waterfall did two inductions.
+check bm_steps.value ~is [13, 2]
+check my_gen_terms.value ~is PairList []
+
+// BOYER_MOORE_FINAL (BMF), the paper's final configuration, on arithmetic.
+for (i in [0, 1, 2, 3, 4, 5, 6, 8, 10, 11]):
+  let tm = el(i)(mytheory.value)
+  check proves_exactly(BMF(tm), tm) ~is #true
+
+// Boulton's original waterfall (BM) and its extension (BME).
+check proves_exactly(BM(@hol|{m + 0 = m}|), @hol|{m + 0 = m}|) ~is #true
+check proves_exactly(BME(@hol|{(m + n) + p = m + (n + p)}|), @hol|{(m + n) + p = m + (n + p)}|) ~is #true
+
+// Lists.
+for (i in [0, 1, 2]):
+  let tm = el(i)(mytheory2.value)
+  check proves_exactly(BMF(tm), tm) ~is #true
+
+// The waterfall as a tactic, with the goal's universal variables
+// stripped first; BMF_TAC proved upstream's rewrite rule in bm_reset.
+def ADD_SUC_tm = @hol|{!a b. a + SUC b = SUC (a + b)}|
+check proves_exactly(prove([ADD_SUC_tm, REPEAT(GEN_TAC) then_tac BMF_TAC(PairList [])]), ADD_SUC_tm) ~is #true
+
+// Assumptions of the goal become antecedents of the clause.
+def assumed = @hol|{!m n. m = n ==> n + 0 = m}|
+check proves_exactly(prove([assumed, REPEAT(STRIP_TAC) then_tac BMF_TAC(PairList [])]), assumed) ~is #true
+
+// BM_INDUCT_TAC does one induction and returns its cases as subgoals.
+def [_, cases, _] = BM_INDUCT_TAC([PairList [], @hol|{m + n = n + m}|])
+check length(cases) ~is 2
+
+// A false conjecture is refuted, not proved.
+check can(BMF)(@hol|{m + n = m}|) ~is #false

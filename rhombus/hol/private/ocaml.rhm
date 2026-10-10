@@ -104,6 +104,7 @@ export:
   output_string
   close_out
   Sys
+  Unix
   Format
   OCamlBuffer
   ocaml_random_bits
@@ -532,13 +533,14 @@ namespace OCamlArray:
   fun make_matrix(n): fun(m): fun(x): Array(& (for List (i in 0 .. n): Array.make(m, x)))
 
 // Printf and the parts of Format that HOL Light uses outside its printer:
-// %d %i %s %c %f %b and %%, with the arguments taken one at a time.
+// %d %i %s %c %f (six decimals) %b (true/false), %% and %!, with the
+// arguments taken one at a time.
 fun format_directives(fmt :: String):
   fun loop(i, n):
     cond
     | i + 1 >= fmt.length(): n
     | fmt.substring(i, i + 1) != "%": loop(i + 1, n)
-    | fmt.substring(i + 1, i + 2) == "%": loop(i + 2, n)
+    | fmt.substring(i + 1, i + 2) == "%" || fmt.substring(i + 1, i + 2) == "!": loop(i + 2, n)
     | ~else: loop(i + 2, n + 1)
   loop(0, 0)
 fun format_apply(fmt :: String, args :: List):
@@ -548,12 +550,22 @@ fun format_apply(fmt :: String, args :: List):
     | let c = fmt.substring(i, i + 1)
       if c == "%" && i + 1 < fmt.length()
       | let d = fmt.substring(i + 1, i + 2)
-        if d == "%"
-        | Rkt.#{write-string}("%", out)
-          loop(i + 2, args)
-        | let v = args[0]
-          Rkt.#{write-string}(if v is_a String | v | to_string(v), out)
-          loop(i + 2, args.drop(1))
+        cond
+        | d == "%":
+            Rkt.#{write-string}("%", out)
+            loop(i + 2, args)
+        | d == "!":
+            loop(i + 2, args)
+        | ~else:
+            let v = args[0]
+            let s:
+              cond
+              | d == "b": (if v | "true" | "false")
+              | d == "f": Rkt.#{real->decimal-string}(v, 6)
+              | v is_a String: v
+              | ~else: to_string(v)
+            Rkt.#{write-string}(s, out)
+            loop(i + 2, args.drop(1))
       | Rkt.#{write-string}(c, out)
         loop(i + 1, args)
   loop(0, args)
@@ -600,6 +612,15 @@ namespace Printexc:
 namespace Sys:
   export: time
   fun time(_): Rkt.#{current-process-milliseconds}() / 1000.0
+
+// Unix.times as Boyer_Moore/make.ml reads it. Racket reports the process's
+// CPU time without the user/system split: tms_utime holds all of it.
+namespace Unix:
+  export:
+    times
+  class process_times(tms_utime, tms_stime, tms_cutime, tms_cstime)
+  fun times(_):
+    process_times(Rkt.#{current-process-milliseconds}() / 1000.0, 0.0, 0.0, 0.0)
 
 namespace Printf:
   export:
@@ -718,6 +739,9 @@ namespace OCamlList:
     assoc
     concat_map
     filter_map
+    combine
+    split
+    remove_assoc
   fun map(f):
     fun(l):
       match l
@@ -789,6 +813,24 @@ namespace OCamlList:
       | PairList []: #false
       | PairList [h,&t]: x == h || mem(x)(t)
   fun mem_assoc(x): fun(l): exists(fun([y, _]): x==y)(l)
+  fun combine(l1):
+    fun(l2):
+      match [l1, l2]
+      | [PairList [], PairList []]: PairList []
+      | [PairList [a,&l1], PairList [b,&l2]]: PairList.cons([a, b], combine(l1)(l2))
+      | _: invalid_arg("List.combine")
+  fun split(l):
+    match l
+    | PairList []: [PairList [], PairList []]
+    | PairList [[x, y],&t]:
+        let [rx, ry] = split(t)
+        [PairList.cons(x, rx), PairList.cons(y, ry)]
+  fun remove_assoc(x):
+    fun(l):
+      match l
+      | PairList []: PairList []
+      | PairList [[a, _] as pair,&t]:
+          if compare(a)(x) == 0 | t | PairList.cons(pair, remove_assoc(x)(t))
   // List.nth as translated: the failures are those of hd and tl.
   fun nth(l): fun(n): if n == 0 | hd(l) | nth(tl(l))(n-1)
   fun partition(p):

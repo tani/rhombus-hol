@@ -1,0 +1,332 @@
+#lang rhombus
+// Direct translation of the pinned HOL Light Boyer_Moore/counterexample.ml.
+
+// ****************************************************************************
+// FILE          : counterexample.ml
+// DESCRIPTION   : Simple counterexample checker
+//                 Based on ideas and suggestions from S. Wilson
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : P. Papapanagiotou (University of Edinburgh)
+// DATE          : July 2009
+// ****************************************************************************
+
+import:
+  "../private/hol_quote.rhm" open
+  "../private/ocaml.rhm" open:
+    only:
+      Failure
+      failwith
+      OCamlList
+      Random
+      fst
+  "../lib.rhm" open:
+    only:
+      itlist
+      union
+      map
+      o
+      flat
+      subtract
+      zip
+      rev
+      num_of_string
+      partition
+      length
+      hd
+      warn
+  "../fusion.rhm" open:
+    only:
+      mk_var
+      inst
+      type_of
+      is_type
+      dest_type
+      frees
+      concl
+      mk_type
+      mk_comb
+  "../basics.rhm" open:
+    only:
+      type_match
+      mk_mconst
+  "../printer.rhm" open:
+    only:
+      string_of_type
+      string_of_term
+  "../equal.rhm" open:
+    only:
+      rhs
+  "../drule.rhm" open:
+    only:
+      term_match
+      instantiate
+  "../simp.rhm" open:
+    only:
+      REWRITE_CONV
+  "../nums.rhm" open:
+    only:
+      mk_numeral
+  "../arith.rhm" open:
+    only:
+      PRE
+      ADD
+      MULT
+      EXP
+      EVEN
+      ODD
+      LE
+      LT
+      GE
+      GT
+      SUB
+  "../calc_num.rhm" open:
+    only:
+      NUM_REDUCE_CONV
+      ARITH
+  "support.rhm" open:
+    only:
+      is_T
+  "shells.rhm" open:
+    only:
+      sys_shell_info
+      all_accessor_thms
+      shell_constructors
+      shell_arg_types
+  "environment.rhm" open:
+    only:
+      rewrite_rules
+      defs
+  "waterfall.rhm" open:
+    only:
+      proof_printing
+
+export:
+  counter_check_num
+  counter_checks
+  counterexamples
+  inc_counterexamples
+  inst_type
+  shell_type_match
+  HL_rewrite_ground_term
+  HL_rewrite_ground_term_prime
+  random_example
+  random_grounding
+  counter_check_once
+  counter_check_n
+  counter_check
+
+// ----------------------------------------------------------------------------
+// Reference of how many examples will be tried on each check.
+// Set to 0 to turn off counterexample checker.
+// ----------------------------------------------------------------------------
+
+def counter_check_num = Box(500)
+
+fun counter_checks(t):
+  counter_check_num.value := t
+
+
+// ----------------------------------------------------------------------------
+// Reference to count how many counterexamples were found during a proof.
+// ----------------------------------------------------------------------------
+
+def counterexamples = Box(0)
+
+fun inc_counterexamples(_):
+  counterexamples.value := counterexamples.value + 1
+  #void
+
+
+// ----------------------------------------------------------------------------
+// inst_type
+// ----------------------------------------------------------------------------
+// Hacky function to instantiate types.
+// I'm surprised there is no such function in HOL Light (or perhaps I just
+// haven't found it yet?).
+// ----------------------------------------------------------------------------
+// Creates a variable of the given type. Instantiates the term using "inst"
+// then returns the type of the resulting term.
+// ----------------------------------------------------------------------------
+
+fun inst_type(ins):
+  fun(ty):
+    let tm = mk_var(["x", ty])
+    let itm = inst(ins)(tm)
+    type_of(itm)
+
+
+// ----------------------------------------------------------------------------
+// shell_type_match
+// ----------------------------------------------------------------------------
+// Does a deep search to check if a type can be properly grounded to a
+// combination of types defined in the shell.
+// Returns the type instantiation pairs to make it happen.
+// Variable types are instantiated by `:num`.
+// ----------------------------------------------------------------------------
+// If the type is an instance of a type constructor (is_type) then it is
+// split. The name of the constructor is looked up in the system shells list.
+// The arguments are checked recursively.
+// If it's not an instance of a  type constructor, we try to replace it by
+// `:num`.
+// ----------------------------------------------------------------------------
+
+fun shell_type_match(ty):
+  if is_type(ty)
+  | let [tys, tyargs] = dest_type(ty)
+    let info:
+      try:
+        sys_shell_info(tys)
+        ~catch Failure(_):
+          failwith("No shell defined for type '" +& string_of_type(ty) +& "'")
+    itlist(union)(map(shell_type_match)(tyargs))(PairList [])
+  | try:
+      type_match(ty)(@hol|{:num}|)(PairList [])
+      ~catch Failure(_):
+        failwith("Unknown type '" +& string_of_type(ty) +& "' that doesn't match 'num'!")
+
+
+// ----------------------------------------------------------------------------
+// HL_rewrite_ground_term : term -> term
+//
+// Uses HOL Light's REWRITE_CONV to rewrite a ground term.
+// The function and accessor definitions are used as rewrite rules.
+// This reduces valid expressions to `T`.
+// ----------------------------------------------------------------------------
+
+fun HL_rewrite_ground_term(tm):
+  // ((proof_print_newline) o (proof_print_term) o (proof_print_string "Checking:")) tm ;
+  if frees(tm) == PairList []
+  | // let rules = (union ((flat o defs) ()) (all_accessor_thms ()))
+    // let rules = (union (rewrite_rules ()) (all_accessor_thms ()))
+    let numred:
+      try:
+        o(o(rhs)(concl))(NUM_REDUCE_CONV)(tm)
+        ~catch Failure(_): tm
+    if is_T(numred)
+    | numred
+    | let rew = REWRITE_CONV(union(rewrite_rules(#void))(all_accessor_thms(#void)))
+      o(o(rhs)(concl))(rew)(tm)
+  | failwith("rewrite_ground_term: free vars in term: " +& string_of_term(tm))
+
+
+
+fun HL_rewrite_ground_term_prime(tm):
+  if frees(tm) == PairList []
+  | // let rules = (union ((flat o defs) ()) (all_accessor_thms ()))
+    let rules = union(o(flat)(defs)(#void))(all_accessor_thms(#void))
+    let arith_rules = PairList [PRE, ADD, MULT, EXP, EVEN, ODD, LE, LT, GE, GT, SUB]
+    // Need to apply preprocessing similar to add_def in environment.ml
+    let rew = REWRITE_CONV(PairList.cons(ARITH, subtract(rules)(arith_rules)))
+    o(o(rhs)(concl))(rew)(tm)
+  | failwith("rewrite_ground_term: free vars in term: " +& string_of_term(tm))
+
+// ----------------------------------------------------------------------------
+// random_example : int -> hol_type -> term
+// ----------------------------------------------------------------------------
+// Creates a random example of a given type.
+// The first argument is a maximum depth so as to control the size of the
+// example.
+// ----------------------------------------------------------------------------
+// Uses "shell_type_match" in order to ground the type to a combination of
+// types defined as shells. Therefore, all variable types are instantiated to
+// `:num`.
+// Instantiates the arg_types of the shell for each constructor, then uses
+// mk_cons_type to create proper types for the constructors. Having those and
+// by using mk_mconst creates the constructors as terms.
+// random_example is called recursively for every constructor argument, while
+// decreasing the maxdepth to ensure termination.
+// If maxdepth is reached, we just pick randomly one of the base
+// constructors.
+// ----------------------------------------------------------------------------
+// NOTE: The current version can still afford  a few optimisations.
+// eg. The preprocessing so as to ground the given type should only happen
+// once.
+// NOTE: We could optimise this function further by accommodating the
+// constructors as terms (rather than or in addition to strings) within the
+// shell.
+// ----------------------------------------------------------------------------
+
+def random_example:
+  fun random_example_prime(origdepth):
+    fun(maxdepth):
+      fun(ty):
+        let tyi = shell_type_match(ty)
+        let ty_prime = inst_type(tyi)(ty)
+        let [tystr, typarams] = dest_type(ty_prime)
+        let sinfo = sys_shell_info(tystr)
+        let ocons = shell_constructors(sinfo)
+        let sh_arg_types = shell_arg_types(sinfo)
+
+        let arg_type_pairs = zip(sh_arg_types)(typarams)
+        let arg_types_matches:
+          try:
+            itlist(fun([x, y]): fun(l): type_match(x)(y)(l))(arg_type_pairs)(tyi)
+            ~catch Failure(_): failwith("Shell argument types cannot be matched.")
+
+        let mk_cons_type:
+          fun(arglist):
+            OCamlList.fold_left(fun(ty): fun(i): mk_type(["fun", PairList [i, ty]]))(ty_prime)(rev(arglist))
+        let inst_cons = map(fun([x, y, _]): [x, map(inst_type(arg_types_matches))(y)])(ocons)
+        let mk_cons:
+          fun([x, y]):
+            try:
+              let n = num_of_string(x)
+              [mk_numeral(n), y]
+              ~catch Failure(_): [mk_mconst([x, mk_cons_type(y)]), y]
+        let cons = map(mk_cons)(inst_cons)
+
+        let terminal_filter = fun([_, l]): l == PairList []
+        let [tcons, ntcons] = partition(terminal_filter)(cons)
+
+        if maxdepth > 1
+        | let prob = 200 div ((maxdepth - 1) * 3)
+          // let newdepth = origdepth / (length cons) in
+          let newdepth = maxdepth - 1
+          let selcons = if Random.int(100) <= prob | tcons | ntcons
+          let [cconstm, cconsargs] = OCamlList.nth(selcons)(Random.int(length(selcons)))
+          let args = map(random_example_prime(origdepth)(newdepth))(cconsargs)
+          OCamlList.fold_left(fun(x): fun(y): mk_comb([x, y]))(cconstm)(args)
+        | o(fst)(hd)(tcons)
+  fun(maxdepth): fun(ty): random_example_prime(maxdepth)(maxdepth)(ty)
+
+// print_string "*" ; print_term cconstm ; print_string "*" ; print_type (type_of cconstm); print_newline ();
+// map (fun x -> print_term x ; print_string ":" ; print_type (type_of x); print_newline()) args ;
+// print_newline ();
+
+
+fun random_grounding(maxdepth):
+  fun(tm):
+    let vars = frees(tm)
+    let types = map(type_of)(vars)
+    let examples = map(random_example(maxdepth))(types)
+    let pairs = zip(vars)(examples)
+    let insts = map(fun([v, e]): term_match(PairList [])(v)(e))(pairs)
+    itlist(instantiate)(insts)(tm)
+
+
+fun counter_check_once(maxdepth):
+  fun(tm):
+    let tm_prime = random_grounding(maxdepth)(tm)
+    let tm_prime_prime = HL_rewrite_ground_term(tm_prime)
+    if is_T(tm_prime_prime)
+    | #true
+    | let junk:
+        warn(proof_printing.value)("Found counterexample for " +& string_of_term(tm) +& " : " +& string_of_term(tm_prime))
+      inc_counterexamples(#void)
+      #false
+
+fun counter_check_n(maxdepth):
+  fun(n):
+    fun(tm):
+      if n <= 0
+      | #true
+      | if counter_check_once(maxdepth)(tm)
+        | counter_check_n(maxdepth)(n - 1)(tm)
+        | #false
+
+fun counter_check(maxdepth):
+  fun(tm):
+    counter_check_n(maxdepth)(counter_check_num.value)(tm)

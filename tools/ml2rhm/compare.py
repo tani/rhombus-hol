@@ -46,7 +46,7 @@ def main(argv):
         for s, size, n in sorted(rows):
             print(f'{s:6.1f}% {size:5} tokens  {n}')
         return 0
-    print(f"{'module':12} {'similarity':>10} {'generated':>10} {'port':>6}")
+    print(f"{'module':32} {'similarity':>10} {'generated':>10} {'port':>6}")
     tot = [0, 0, 0, 0, 0, 0]
     for mod in M.ORDER:
         ml = os.path.join(hol, mod + '.ml')
@@ -56,15 +56,15 @@ def main(argv):
             continue
         a = M.toks_ml(M.strip_ml_comments(open(ml).read()))
         names = set(a)
-        g = body_tokens(gn, mod, names)
-        p = body_tokens(rh, mod, names)
+        g = body_tokens(gn, os.path.basename(mod), names)
+        p = body_tokens(rh, os.path.basename(mod), names)
         common = M.lcs(g, p)
         lit_g = M.lcs(a, g); lit_p = M.lcs(a, p)
-        print(f'{mod:12} {200.0 * common / max(len(g) + len(p), 1):9.1f}% '
+        print(f'{mod:32} {200.0 * common / max(len(g) + len(p), 1):9.1f}% '
               f'{100.0 * lit_g / max(len(a), 1):9.1f}% {100.0 * lit_p / max(len(a), 1):5.1f}%')
         for i, v in enumerate((common, len(g), len(p), lit_g, lit_p, len(a))):
             tot[i] += v
-    print(f"{'TOTAL':12} {200.0 * tot[0] / max(tot[1] + tot[2], 1):9.1f}% "
+    print(f"{'TOTAL':32} {200.0 * tot[0] / max(tot[1] + tot[2], 1):9.1f}% "
           f'{100.0 * tot[3] / max(tot[5], 1):9.1f}% {100.0 * tot[4] / max(tot[5], 1):5.1f}%')
     return 0
 

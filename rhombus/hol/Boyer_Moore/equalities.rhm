@@ -1,0 +1,319 @@
+#lang rhombus
+// Direct translation of the pinned HOL Light Boyer_Moore/equalities.ml.
+
+// ****************************************************************************
+// FILE          : equalities.ml
+// DESCRIPTION   : Using equalities.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 19th June 1991
+//
+// LAST MODIFIED : R.J.Boulton
+// DATE          : 7th August 1992
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : 2008
+// ****************************************************************************
+
+import:
+  "../private/hol_quote.rhm" open
+  "../private/proof_syntax.rhm" open
+  "../private/ocaml.rhm" open:
+    only:
+      fst
+      Failure
+      failwith
+  "../lib.rhm" open:
+    only:
+      mem
+      forall
+      exists
+      can
+      o
+      check
+      tl
+      hd
+      rev
+      map
+      itlist
+      end_itlist
+  "../fusion.rhm" open:
+    only:
+      is_const
+      type_of
+      is_var
+      dest_const
+      concl
+      is_eq
+      rand
+      dest_eq
+      mk_eq
+      EQ_MP
+      ASSUME
+      TRANS
+      REFL
+  "../basics.rhm" open:
+    only:
+      strip_comb
+      is_neg
+      dest_neg
+  "../equal.rhm" open:
+    only:
+      lhs
+      RAND_CONV
+      RATOR_CONV
+      ALL_CONV
+      rhs
+      SYM_CONV
+      SYM
+  "../bool.rhm" open:
+    only:
+      MP
+      SPECL
+      CONJ
+      mk_neg
+      ISPEC
+      ADD_ASSUM
+      DISJ2
+      DISJ1
+      list_mk_disj
+      SPEC
+      DISJ_CASES
+  "../tactics.rhm" open:
+    only:
+      prove
+      REPEAT
+      STRIP_TAC
+  "../simp.rhm" open:
+    only:
+      ASM_REWRITE_TAC
+  "../class.rhm" open:
+    only:
+      EXCLUDED_MIDDLE
+  "../nums.rhm" open:
+    only:
+      is_numeral
+  "support.rhm" open:
+    only:
+      is_T
+      is_F
+      disj_list
+      hashI
+      NOT_EQ_SYM
+  "shells.rhm" open:
+    only:
+      all_constructors
+  "waterfall.rhm" open:
+    only:
+      proof_print_string_l
+      apply_fproof
+  "definitions.rhm" open:
+    only:
+      is_subterm
+      is_explicit_value
+  "terms_and_clauses.rhm" open:
+    only:
+      SUBST_CONV
+      NOT_EQ_F
+
+export:
+  is_explicit_value_template
+  subst_conv
+  use_equality_subst
+  EQ_EQ_IMP_DISJ_EQ
+  DISJ_EQ
+  use_equality_heuristic
+
+// ----------------------------------------------------------------------------
+// is_explicit_value_template : term -> bool
+//
+// Function to compute whether a term is an explicit value template.
+// An explicit value template is a non-variable term composed entirely of
+// T or F or variables or applications of shell constructors.
+// A `bottom object' corresponds to an application to no arguments. I have
+// also made numeric constants valid components of explicit value templates,
+// since they are equivalent to some number of applications of SUC to 0.
+// ----------------------------------------------------------------------------
+
+fun is_explicit_value_template(tm):
+  fun is_explicit_value_template_prime(constructors):
+    fun(tm):
+      is_T(tm) || is_F(tm) || (is_const(tm) && (type_of(tm) == @hol|{:num}|)) || \
+        is_var(tm) || is_numeral(tm) || \
+        (block:
+           let [f, args] = strip_comb(tm)
+           (try:
+              mem(fst(dest_const(f)))(constructors)
+              ~catch Failure(_): #false) && \
+             forall(is_explicit_value_template_prime(constructors))(args))
+  (!is_var(tm)) && \
+    is_explicit_value_template_prime(all_constructors(#void))(tm)
+
+// ----------------------------------------------------------------------------
+// subst_conv : thm -> conv
+//
+// Substitution conversion. Given a theorem |- l = r, it replaces all
+// occurrences of l in the term with r.
+// ----------------------------------------------------------------------------
+
+fun subst_conv(th): fun(tm): SUBST_CONV(PairList [[th, lhs(concl(th))]])(tm)(tm)
+
+// ----------------------------------------------------------------------------
+// use_equality_subst : bool -> bool -> thm -> conv
+//
+// Function to perform substitution when using equalities. The first argument
+// is a Boolean that controls which side of an equation substitution is to
+// take place on. The second argument is also a Boolean, indicating whether
+// or not we have decided to cross-fertilize. The third argument is a
+// substitution theorem of the form:
+//
+//    t' = s' |- t' = s'
+//
+// If we are not cross-fertilizing, s' is substituted for t' throughout the
+// term. If we are cross-fertilizing, the behaviour depends on the structure
+// of the term, tm:
+//
+//    (a) if tm is "l = r", substitute s' for t' in either r or l.
+//    (b) if tm is "~(l = r)", substitute s' for t' throughout tm.
+//    (c) otherwise, do not substitute.
+// ----------------------------------------------------------------------------
+
+// The heuristic above is modified so that in case (c) a substitution does
+// take place. This reduces the chances of an invalid subgoal (clause) being
+// generated, and has been shown to be a better option for certain examples.
+
+fun use_equality_subst(right):
+  fun(cross_fert):
+    fun(th):
+      fun(tm):
+        try:
+          if cross_fert
+          | if is_eq(tm)
+            | if right
+              | RAND_CONV(subst_conv(th))(tm)
+              | RATOR_CONV(RAND_CONV(subst_conv(th)))(tm)
+            | if is_neg(tm) && (try:
+                                  is_eq(rand(tm))
+                                  ~catch Failure(_): #false)
+              | subst_conv(th)(tm)
+              | /* ALL_CONV tm */ subst_conv(th)(tm)
+          | subst_conv(th)(tm)
+          ~catch Failure(_): failwith("use_equality_subst")
+
+// ----------------------------------------------------------------------------
+// EQ_EQ_IMP_DISJ_EQ =
+// |- !x x' y y'. (x = x') /\ (y = y') ==> (x \/ y = x' \/ y')
+// ----------------------------------------------------------------------------
+
+def EQ_EQ_IMP_DISJ_EQ:
+  prove([@hol|{!x x' y y'. (x = x') /\ (y = y') ==> ((x \/ y) = (x' \/ y'))}|,
+         REPEAT(STRIP_TAC) then_tac \
+           ASM_REWRITE_TAC(PairList [])])
+
+// ----------------------------------------------------------------------------
+// DISJ_EQ : thm -> thm -> thm
+//
+//     |- x = x'    |- y = y'
+//    ------------------------
+//    |- (x \/ y) = (x' \/ y')
+// ----------------------------------------------------------------------------
+
+fun DISJ_EQ(th1):
+  fun(th2):
+    try:
+      let [x, x_prime] = dest_eq(concl(th1))
+      let [y, y_prime] = dest_eq(concl(th2))
+      MP(SPECL(PairList [x, x_prime, y, y_prime])(EQ_EQ_IMP_DISJ_EQ))(CONJ(th1)(th2))
+      ~catch Failure(_): failwith("DISJ_EQ")
+
+// ----------------------------------------------------------------------------
+// use_equality_heuristic : (term # bool) -> ((term # bool) list # proof)
+//
+// Heuristic for using equalities, and in particular for cross-fertilizing.
+// Given a clause, the function looks for a literal of the form ~(s' = t')
+// where t' occurs in another literal and is not an explicit value template.
+// If no such literal is present, the function looks for a literal of the
+// form ~(t' = s') where t' occurs in another literal and is not an explicit
+// value template. If a substitution literal of one of these two forms is
+// found, substitution takes place as follows.
+//
+// If the clause is an induction step, and there is an equality literal
+// mentioning t' on the RHS (or LHS if the substitution literal was
+// ~(t' = s')), and s' is not an explicit value, the function performs a
+// cross-fertilization. The substitution function is called for each literal
+// other than the substitution literal. Each call results in a theorem of the
+// form:
+//
+//    t' = s' |- old_lit = new_lit
+//
+// If the clause is an induction step and s' is not an explicit value, the
+// substitution literal is rewritten to F, and so will subsequently be
+// eliminated. Otherwise this literal is unchanged. The theorems for each
+// literal are recombined using the DISJ_EQ rule, and the new clause is
+// returned. See the comments for the substitution heuristic for a
+// description of how the original clause is proved from the new clause.
+// ----------------------------------------------------------------------------
+
+fun use_equality_heuristic([tm, ind]):
+  try:
+    let checkx:
+      fun([tml1, tml2]):
+        fun(t_prime):
+          (!is_explicit_value_template(t_prime)) && \
+            (exists(is_subterm(t_prime))(tml1) || exists(is_subterm(t_prime))(tml2))
+    fun split_disjuncts(side):
+      fun(prevl):
+        fun(tml):
+          if can(o(o(check(checkx([prevl, tl(tml)])))(side))(dest_neg))(hd(tml))
+          | [prevl, tml]
+          | split_disjuncts(side)(PairList.cons(hd(tml), prevl))(tl(tml))
+    let is_subterm_of_side:
+      fun(side):
+        fun(subterm):
+          fun(tm):
+            try:
+              is_subterm(subterm)(side(tm))
+              ~catch Failure(_): #false
+    let literals = disj_list(tm)
+    let [right, [overs, PairList [neq_prime, & unders]]]:
+      try:
+        [#true, hashI(rev)(split_disjuncts(rhs)(PairList [])(literals))]
+        ~catch Failure(_):
+          [#false, hashI(rev)(split_disjuncts(lhs)(PairList [])(literals))]
+    let side = if right | rhs | lhs
+    let flipth = if right | ALL_CONV(neq_prime) | RAND_CONV(SYM_CONV)(neq_prime)
+    let neq = rhs(concl(flipth))
+    let eq = dest_neg(neq)
+    let [s_prime, t_prime] = dest_eq(eq)
+    let delete = ind && !is_explicit_value(s_prime)
+    let cross_fert:
+      delete && \
+        (exists(is_subterm_of_side(side)(t_prime))(overs) || \
+           exists(is_subterm_of_side(side)(t_prime))(unders))
+    let sym_eq = mk_eq([t_prime, s_prime])
+    let sym_neq = mk_neg(sym_eq)
+    let ass1 = EQ_MP(SYM(flipth))(NOT_EQ_SYM(ASSUME(sym_neq)))
+    let ass2 = ASSUME(sym_eq)
+    let subsfun = use_equality_subst(right)(cross_fert)(ass2)
+    let overths = map(subsfun)(overs)
+    let neqth:
+      if delete
+      | TRANS(RAND_CONV(RAND_CONV(subst_conv(ass2)))(neq))(
+          ISPEC(s_prime)(NOT_EQ_F))
+      | ADD_ASSUM(sym_eq)(REFL(neq))
+    let underths = map(subsfun)(unders)
+    let neqth_prime = TRANS(flipth)(neqth)
+    let th1:
+      itlist(DISJ2)(overs)(try:
+                             DISJ1(ass1)(list_mk_disj(unders))
+                             ~catch Failure(_): ass1)
+    let th2 = itlist(DISJ_EQ)(overths)(end_itlist(DISJ_EQ)(PairList.cons(neqth_prime, underths)))
+    let th3 = SPEC(sym_eq)(EXCLUDED_MIDDLE)
+    let tm_prime = rhs(concl(th2))
+    let proof = fun(th): DISJ_CASES(th3)(EQ_MP(SYM(th2))(th))(th1)
+    proof_print_string_l("-> Use Equality Heuristic")(#void)
+    [PairList [[tm_prime, ind]], apply_fproof("use_equality_heuristic")(o(proof)(hd))(PairList [tm_prime])]
+    ~catch Failure(_): failwith("use_equality_heuristic`")

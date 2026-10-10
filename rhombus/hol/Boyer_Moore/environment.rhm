@@ -1,0 +1,392 @@
+#lang rhombus
+// Direct translation of the pinned HOL Light Boyer_Moore/environment.ml.
+
+// ****************************************************************************
+// FILE          : environment.ml
+// DESCRIPTION   : Environment of definitions and pre-proved theorems for use
+//                 in automation.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 8th May 1991
+//
+// LAST MODIFIED : R.J.Boulton
+// DATE          : 12th October 1992
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : July 2009
+// ****************************************************************************
+
+import:
+  "../private/hol_quote.rhm" open
+  "../private/proof_syntax.rhm" open
+  "../private/ocaml.rhm" open:
+    only:
+      fst
+      Failure
+      failwith
+      OCamlList
+      snd
+      max
+  "../lib.rhm" open:
+    only:
+      end_itlist
+      map
+      itlist
+      el
+      length
+      setify
+      hd
+      o
+      assoc
+      flat
+      mem
+  "../fusion.rhm" open:
+    only:
+      dest_thm
+      type_of
+      concl
+      is_eq
+      dest_const
+      is_var
+      hyp
+      is_const
+  "../basics.rhm" open:
+    only:
+      is_forall
+      genvar
+      dest_forall
+      is_neg
+      strip_comb
+      is_conj
+  "../equal.rhm" open:
+    only:
+      lhs
+      CONV_RULE
+  "../bool.rhm" open:
+    only:
+      SPEC
+      CONJ
+      CONJUNCT1
+      CONJUNCT2
+      EQF_INTRO
+      EQT_INTRO
+      SPEC_ALL
+      UNDISCH
+      CONJUNCTS
+      GEN_ALL
+  "../tactics.rhm" open:
+    only:
+      prove
+  "../simp.rhm" open:
+    only:
+      REWRITE_TAC
+      REWR_CONV
+  "../class.rhm" open:
+    only:
+      BOOL_CASES_TAC
+  "../nums.rhm" open:
+    only:
+      is_numeral
+  "support.rhm" open:
+    only:
+      number_list
+      conj_list
+      hashI
+      is_T
+      is_F
+  "shells.rhm" open:
+    only:
+      all_constructors
+      all_accessors
+
+export:
+  my_gen_terms
+  bm_steps
+  GSPEC
+  LIST_CONJ
+  CONJ_LIST
+  system_defs
+  new_def
+  defs
+  defs_names
+  get_def
+  system_rewrites
+  CONJ_IMP_IMP_IMP
+  CONJ_UNDISCH
+  new_rewrite_rule
+  rewrite_rules
+  system_gen_lemmas
+  new_gen_lemma
+  gen_lemmas
+  max_var_depth
+
+def my_gen_terms = Box(PairList [])
+def bm_steps = Box([0, 0])
+
+
+fun GSPEC(th):
+  let [wl, w] = dest_thm(th)
+  if is_forall(w)
+  | GSPEC(SPEC(genvar(type_of(fst(dest_forall(w)))))(th))
+  | th
+
+def LIST_CONJ = end_itlist(CONJ)
+
+fun CONJ_LIST(n):
+  fun(th):
+    try:
+      if n == 1
+      | PairList [th]
+      | PairList.cons(CONJUNCT1(th), CONJ_LIST(n - 1)(CONJUNCT2(th)))
+      ~catch Failure(_): failwith("CONJ_LIST")
+
+// ----------------------------------------------------------------------------
+// Reference variable to hold the defining theorems for operators currently
+// defined within the system. Each definition is stored as a triple. The
+// first component is the name of the operator. The second is the number of
+// the recursive argument. If the operator is not defined recursively, this
+// number is zero. The third component is a list of pairs of type constructor
+// names and the theorems that define the behaviour of the operator for each
+// constructor. If the operator is not recursive, the constructor names are
+// empty (null) strings.
+// ----------------------------------------------------------------------------
+
+def system_defs = Box(PairList [])
+
+// ----------------------------------------------------------------------------
+// new_def : thm -> void
+//
+// Make a new definition available. Checks that theorem has no hypotheses,
+// then splits it into conjuncts. The variables for each conjunct are
+// specialised and then the conjuncts are made into equations.
+//
+// For each equation, a triple is obtained, consisting of the name of the
+// function on the LHS, the number of the recursive argument, and the name of
+// the constructor used in that argument. This process fails if the LHS is
+// not an application of a constant (possibly to zero arguments), or if more
+// than one of the arguments is anything other than a variable. The argument
+// that is not a variable must be an application of a constructor. If the
+// function is not recursive, the argument number returned is zero.
+//
+// Having obtained a triple for each equation, a check is made that the first
+// two components are the same for each equation. Then, the equations are
+// saved together with constructor names for each, and the name of the
+// operator being defined, and the number of the recursive argument.
+// ----------------------------------------------------------------------------
+
+fun new_def(th):
+  try:
+    let make_into_eqn:
+      fun(th):
+        let tm = concl(th)
+        if is_eq(tm)
+        | th
+        | if is_neg(tm)
+          | EQF_INTRO(th)
+          | EQT_INTRO(th)
+    let get_constructor:
+      fun(th):
+        let tm = lhs(concl(th))
+        let [f, args] = strip_comb(tm)
+        let name = fst(dest_const(f))
+        let bools = number_list(map(is_var)(args))
+        let i:
+          itlist(fun([b, i]):
+                   fun(n):
+                     if (!b) && (n == 0)
+                     | i
+                     | if b
+                       | n
+                       | failwith(""))(bools)(0)
+        if i == 0
+        | [[name, i], ""]
+        | [[name, i], fst(dest_const(fst(strip_comb(el(i - 1)(args)))))]
+    let [PairList [], tm] = dest_thm(th)
+    let ths = CONJ_LIST(length(conj_list(tm)))(th)
+    let ths_prime = map(SPEC_ALL)(ths)
+    let eqs = map(make_into_eqn)(ths_prime)
+    let constructs = map(get_constructor)(eqs)
+    let [xl, yl] = hashI(setify)(OCamlList.split(constructs))
+    let [name, i] = if length(xl) == 1 | hd(xl) | failwith("")
+    system_defs.value := PairList.cons([name, [i, OCamlList.combine(yl)(eqs)]], system_defs.value)
+    ~catch Failure(_): failwith("new_def")
+
+// ----------------------------------------------------------------------------
+// defs : void -> thm list list
+//
+// Returns a list of lists of theorems currently being used as definitions.
+// Each list in the list is for one operator.
+// ----------------------------------------------------------------------------
+
+fun defs(_): map(o(o(map(snd))(snd))(snd))(system_defs.value)
+fun defs_names(_): map(fst)(system_defs.value)
+
+// ----------------------------------------------------------------------------
+// get_def : string -> (string # int # (string # thm) list)
+//
+// Function to obtain the definition information of a named operator.
+// ----------------------------------------------------------------------------
+
+fun get_def(name):
+  try:
+    assoc(name)(system_defs.value)
+    ~catch Failure(_): failwith("get_def")
+
+// ----------------------------------------------------------------------------
+// Reference variable for a list of theorems currently proved in the system.
+// These theorems are available to the automatic proof procedures for use as
+// rewrite rules. The elements of the list are actually pairs of theorems.
+// The first theorem is that specified by the user. The second is an
+// equivalent theorem in a standard form.
+// ----------------------------------------------------------------------------
+
+def system_rewrites = Box(PairList [])
+
+// ----------------------------------------------------------------------------
+// CONJ_IMP_IMP_IMP = |- x /\ y ==> z = x ==> y ==> z
+// ----------------------------------------------------------------------------
+
+def CONJ_IMP_IMP_IMP:
+  prove([@hol|{((x /\ y) ==> z) = (x ==> (y ==> z))}|,
+         BOOL_CASES_TAC(@hol|{x:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{y:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{z:bool}|) then_tac \
+           REWRITE_TAC(PairList [])])
+
+// ----------------------------------------------------------------------------
+// CONJ_UNDISCH : thm -> thm
+//
+// Undischarges the conjuncts of the antecedant of an implication.
+// e.g. |- x /\ (y /\ z) /\ w ==> x  --->  x, y /\ z, w |- x
+//
+// Has to check for negations, because UNDISCH processes them when we don't
+// want it to.
+// ----------------------------------------------------------------------------
+
+fun CONJ_UNDISCH(th):
+  try:
+    let th_prime = CONV_RULE(REWR_CONV(CONJ_IMP_IMP_IMP))(th)
+    let th_prime_prime = UNDISCH(th_prime)
+    CONJ_UNDISCH(th_prime_prime)
+    ~catch Failure(_):
+      try:
+        if !is_neg(concl(th)) | UNDISCH(th) | failwith("")
+        ~catch Failure(_): failwith("CONJ_UNDISCH")
+
+// ----------------------------------------------------------------------------
+// new_rewrite_rule : thm -> void
+//
+// Make a new rewrite rule available. Checks that theorem has no hypotheses.
+// The theorem is saved together with an equivalent theorem in a standard
+// form. Theorems are fully generalized, then specialized with unique
+// variable names (genvars), and then standardized as follows:
+//
+//    |- (h1 /\ ... /\ hn) ==> (l = r)  --->  h1, ..., hn |- l = r
+//    |- (h1 /\ ... /\ hn) ==> ~b       --->  h1, ..., hn |- b = F
+//    |- (h1 /\ ... /\ hn) ==> b        --->  h1, ..., hn |- b = T
+//    |- l = r                          --->  |- l = r
+//    |- ~b                             --->  |- b = F
+//    |- b                              --->  |- b = T
+//
+// A conjunction of rules may be given. The function will treat each conjunct
+// in the theorem as a separate rule.
+// ----------------------------------------------------------------------------
+
+fun new_rewrite_rule(th):
+  try:
+    if is_conj(concl(th))
+    | map(new_rewrite_rule)(CONJUNCTS(th))
+      #void
+    | let [PairList [], tm] = dest_thm(th)
+      let th_prime = GSPEC(GEN_ALL(th))
+      let th_prime_prime:
+        try:
+          CONJ_UNDISCH(th_prime)
+          ~catch Failure(_): th_prime
+      let tm_prime_prime = concl(th_prime_prime)
+      let th_prime_prime_prime:
+        if is_eq(tm_prime_prime)
+        | th_prime_prime
+        | if is_neg(tm_prime_prime)
+          | EQF_INTRO(th_prime_prime)
+          | EQT_INTRO(th_prime_prime)
+      system_rewrites.value := PairList.cons([th, th_prime_prime_prime], system_rewrites.value)
+    ~catch Failure(_): failwith("new_rewrite_rule")
+
+// ----------------------------------------------------------------------------
+// rewrite_rules : void -> thm list
+//
+// Returns the list of theorems currently being used as rewrites, in the form
+// they were originally given by the user.
+// ----------------------------------------------------------------------------
+
+fun rewrite_rules(_): map(fst)(system_rewrites.value)
+
+// ----------------------------------------------------------------------------
+// Reference variable to hold the generalisation lemmas currently known to
+// the system.
+// ----------------------------------------------------------------------------
+
+def system_gen_lemmas = Box(PairList [])
+
+// ----------------------------------------------------------------------------
+// new_gen_lemma : thm -> void
+//
+// Make a new generalisation lemma available.
+// Checks that the theorem has no hypotheses.
+// ----------------------------------------------------------------------------
+
+fun new_gen_lemma(th):
+  if hyp(th) == PairList []
+  | system_gen_lemmas.value := PairList.cons(th, system_gen_lemmas.value)
+  | failwith("new_gen_lemma")
+
+// ----------------------------------------------------------------------------
+// gen_lemmas : void -> thm list
+//
+// Returns the list of theorems currently being used as
+// generalisation lemmas.
+// ----------------------------------------------------------------------------
+
+fun gen_lemmas(_): system_gen_lemmas.value
+
+
+
+// ----------------------------------------------------------------------------
+// max_var_depth : term -> int
+//
+// Returns the maximum depth of any variable in a term.
+// eg. max_var_depth  `PRE (a + SUC c)` = 4
+//     max_var_depth  `a` = 1
+//     max_var_depth  `PRE (5 + SUC 2)` = 0
+//     max_var_depth  `PRE (a + SUC 2)` = 3
+// ----------------------------------------------------------------------------
+// This is primarily used to limit non-termination. If max_var_depth exceeds
+// a limit the system will fail.
+// The algorithm is simple:
+// if constant,numeral,etc then 0
+// else if variable then 1
+// else if definition,constructor,accessor then
+//         if (max_var_depth of arguments) > 0 then result + 1
+//         else 0
+// else if any other combination then max_var_depth of arguments
+// ----------------------------------------------------------------------------
+
+
+fun max_var_depth(tm):
+  if is_var(tm)
+  | 1
+  | if is_numeral(tm) || is_const(tm) || is_T(tm) || is_F(tm)
+    | 0
+    | try:
+        let [f, args] = strip_comb(tm)
+        let fn = o(fst)(dest_const)(f)
+        let l = flat(PairList [defs_names(#void), all_constructors(#void), all_accessors(#void)])
+        if mem(fn)(l)
+        | let x = itlist(max)(map(max_var_depth)(args))(0)
+          if x > 0 | x + 1 | 0
+        | itlist(max)(map(max_var_depth)(args))(0)
+        ~catch Failure(_): 0

@@ -1,0 +1,330 @@
+#lang rhombus
+// Direct translation of the pinned HOL Light Boyer_Moore/make.ml.
+
+// =========================================================================
+// Load in Petros Papapanagiotou's Boyer-Moore code and try examples.
+// =========================================================================
+
+import:
+  "../private/hol_quote.rhm" open
+  "../private/proof_syntax.rhm" open
+  "../private/ocaml.rhm" open:
+    only:
+      Failure
+      failwith
+      fst
+      snd
+      Unix
+      Printf
+  .Printf open
+  "../lib.rhm" open:
+    only:
+      o
+      can
+      length
+      hd
+      tl
+  "../fusion.rhm" open:
+    only:
+      dest_thm
+  "../printer.rhm" open:
+    only:
+      print_term
+      print_newline
+  "../tactics.rhm" open:
+    only:
+      prove
+      REPEAT
+      GEN_TAC
+  "../simp.rhm" open:
+    only:
+      ASM_REWRITE_TAC
+  "../nums.rhm" open:
+    only:
+      NOT_SUC
+      SUC_INJ
+      INDUCT_TAC
+  "../arith.rhm" open:
+    only:
+      ADD
+      MULT
+      SUB
+      LE
+      LT
+      GE
+      GT
+      EXP
+      FACT
+      ODD
+      EVEN
+      PRE
+  "../lists.rhm" open:
+    only:
+      HD
+      TL
+      APPEND
+      REVERSE
+      LENGTH
+      MAP
+      LAST
+      REPLICATE
+      NULL
+      ALL
+      EX
+      ITLIST
+      MEM
+      ALL2_DEF
+      ALL2
+      MAP2_DEF
+      MAP2
+      EL
+      FILTER
+      ASSOC
+      ITLIST2_DEF
+      ITLIST2
+      ZIP_DEF
+      ZIP
+      NOT_CONS_NIL
+      CONS_11
+  "../int.rhm" open:
+    only:
+      ARITH_RULE
+  "boyer-moore.rhm" open
+  "testset/arith.rhm" open
+  "testset/list.rhm" open
+
+export:
+  BM
+  BME
+  BMR
+  BMG
+  BMF
+  RBM
+  RBME
+  RBMG
+  new_stuff
+  bm_reset
+  remaining_theory
+  currenttm
+  bm_time
+  bm_test
+  bm_test2
+  nexttm
+  sametm
+  mytheory
+  mytheory2
+
+// loads "Boyer_Moore/boyer-moore.ml";;
+
+// ------------------------------------------------------------------------
+// Slight variant of Petros's eval.ml file.
+// ------------------------------------------------------------------------
+
+// =========================================================================
+
+// ------------------------------------------------------------------------
+// Shortcuts for the various evaluation versions:
+// ------------------------------------------------------------------------
+
+def BM = BOYER_MOORE  // Pure re-implementation of R.Boulton's work.
+def BME = BOYER_MOORE_EXT  // Extended with early termination heuristics and HOL Light features.
+def BMR = BOYER_MOORE_RE(PairList [])
+def BMG = BOYER_MOORE_GEN(PairList [])  // Further extended with M.Aderhold's generalization techniques.
+def BMF = BOYER_MOORE_FINAL(PairList [])
+
+def RBM = o(new_rewrite_rule)(BOYER_MOORE)
+def RBME = o(new_rewrite_rule)(BOYER_MOORE_EXT)
+def RBMG = o(new_rewrite_rule)(BOYER_MOORE_GEN(PairList []))
+
+// ------------------------------------------------------------------------
+// Add a theorem as a new function definition and rewrite rule.
+// Adding it as a rewrite rule should no longer be necessary after the
+// latest (July 2009) bugfixes but it doesn't do any harm either.
+// ------------------------------------------------------------------------
+
+fun new_stuff(x):
+  new_def(x)
+  new_rewrite_rule(x)
+
+// ------------------------------------------------------------------------
+// Test sets extracted from the proven theorems in HOL Light's arith.ml and
+// list.ml.
+// ------------------------------------------------------------------------
+
+// loads "Boyer_Moore/testset/arith.ml";; (* Arithmetic test set *)
+// loads "Boyer_Moore/testset/list.ml";; (* List test set *)
+
+// ------------------------------------------------------------------------
+// Reloads all the necessary definitions and rules for the evaluation of the
+// test sets above.
+// ------------------------------------------------------------------------
+
+fun bm_reset(_):
+  system_defs.value := PairList []
+  system_rewrites.value := PairList []
+
+  new_stuff(ADD)
+  new_stuff(MULT)
+  new_stuff(SUB)
+  new_stuff(LE)
+  new_stuff(LT)
+  new_stuff(GE)
+  new_stuff(GT)
+  new_rewrite_rule(ARITH_RULE(@hol|{1=SUC(0)}|))
+  new_stuff(EXP)
+  new_stuff(FACT)
+  new_stuff(ODD)
+  new_stuff(EVEN)
+
+  new_rewrite_rule(NOT_SUC)
+  new_rewrite_rule(SUC_INJ)
+  new_rewrite_rule(PRE)
+  new_rewrite_rule(prove([@hol|{!n. ~(SUC n = n)}|, INDUCT_TAC then_tac ASM_REWRITE_TAC(PairList [SUC_INJ, NOT_SUC])]))
+  new_rewrite_rule(prove([@hol|{!a b. a + SUC b = SUC (a + b)}|, REPEAT(GEN_TAC) then_tac BMF_TAC(PairList [])]))
+
+  new_stuff(HD)
+  new_stuff(TL)
+  new_stuff(APPEND)
+  new_stuff(REVERSE)
+  new_stuff(LENGTH)
+  new_stuff(MAP)
+  new_stuff(LAST)
+  new_stuff(REPLICATE)
+  new_stuff(NULL)
+  new_stuff(ALL)
+  new_stuff(EX)
+  new_stuff(ITLIST)
+  new_stuff(MEM)
+  new_stuff(ALL2_DEF)
+  new_rewrite_rule(ALL2)
+  new_stuff(MAP2_DEF)
+  new_rewrite_rule(MAP2)
+  new_stuff(EL)
+  new_stuff(FILTER)
+  new_stuff(ASSOC)
+  new_stuff(ITLIST2_DEF)
+  new_rewrite_rule(ITLIST2)
+  new_stuff(ZIP_DEF)
+  new_rewrite_rule(ZIP)
+
+  new_rewrite_rule(NOT_CONS_NIL)
+  new_rewrite_rule(CONS_11)
+
+bm_reset(#void)
+
+// ------------------------------------------------------------------------
+// Test functions. They use the Unix library to measure time.
+// Unfortunately this means that they do not load properly in Cygwin.
+// ------------------------------------------------------------------------
+
+// #load "unix.cma";;
+// open Unix;;
+// open Printf;;
+
+
+// ------------------------------------------------------------------------
+// Reference of the remaining theory to be proven. Load a list of theorems
+// that you want the evaluation to run through.
+// eg. remaining_theory := !mytheory;;
+// Then use nexttm (see below) to evaluate one of the BOYER_MOORE_*
+// procedures over the list.
+// ------------------------------------------------------------------------
+
+def remaining_theory = Box(PairList [])
+
+def currenttm = Box(@hol|{p}|)
+
+// ------------------------------------------------------------------------
+// Tries a theorem-proving procedure f on arg.
+// Returns a truth value of whether the procedure succeeded in finding a
+// proof and a pair of timestamps taken from the start and the end of the
+// procedure.
+// ------------------------------------------------------------------------
+
+fun bm_time(f):
+  fun(arg):
+    let t1 = Unix.times(#void)
+    let resu:
+      try:
+        if can(dest_thm)(f(arg)) | #true | #false
+        ~catch Failure(_): #false
+    let t2 = Unix.times(#void)
+    [resu, [t1, t2]]
+// printf "User time: %f - system time: %f\n%!" (t2.tms_utime -. t1.tms_utime) (t2.tms_stime -. t1.tms_stime);;
+
+
+// ------------------------------------------------------------------------
+// Uses bm_time to try a Boyer-Moore theorem-proving procedure f on tm.
+// Prints out all the evaluation information that is collected and returns
+// the list of generalizations made during the proof.
+// ------------------------------------------------------------------------
+
+fun bm_test(f):
+  fun(tm):
+    let pfpt:
+      print_term(tm)
+      print_newline(#void)
+      proof_printer(#false)
+    let [resu, [t1, t2]] = bm_time(f)(tm)
+    let pfpt = proof_printer(pfpt)
+    printf("Proven: %b - Time: %f - Steps: %d - Inductions: %d - Gen terms: %d - Over gens: %d \\\\\n")(resu)(
+      t2.tms_utime - t1.tms_utime)(fst(bm_steps.value))(snd(bm_steps.value))(length(my_gen_terms.value))(
+      counterexamples.value)
+    my_gen_terms.value
+
+// ------------------------------------------------------------------------
+// Another version of bm_test but with a more compact printout.
+// Returns unit ().
+// ------------------------------------------------------------------------
+
+fun bm_test2(f):
+  fun(tm):
+    let pfpt:
+      print_term(tm)
+      print_newline(#void)
+      proof_printer(#false)
+    let [resu, [t1, t2]] = bm_time(f)(tm)
+    let pfpt = proof_printer(pfpt)
+    printf("& %b & %f & %d & %d & %d & %d \\\\\n")(resu)(t2.tms_utime - t1.tms_utime)(
+      fst(bm_steps.value))(snd(bm_steps.value))(length(my_gen_terms.value))(counterexamples.value)
+    #void
+
+// ------------------------------------------------------------------------
+// Convenient function for evaluation.
+// Uses f to try and prove the next term in !remaining_theory by bm_test2
+// ------------------------------------------------------------------------
+
+fun nexttm(f):
+  if remaining_theory.value == PairList []
+  | failwith("No more")
+  | currenttm.value := hd(remaining_theory.value)
+  remaining_theory.value := tl(remaining_theory.value)
+  bm_test2(f)(currenttm.value)
+
+// ------------------------------------------------------------------------
+// Reruns evaluation on the same term that was last loaded with nexttm.
+// ------------------------------------------------------------------------
+
+fun sametm(f): bm_test2(f)(currenttm.value)
+
+
+// =========================================================================
+
+
+// ------------------------------------------------------------------------
+// Just one example.
+// ------------------------------------------------------------------------
+
+bm_test(BME)(@hol|{m + n:num = n + m}|)
+
+// ------------------------------------------------------------------------
+// Note that these don't all terminate, so need more delicacy really.
+// Should carefully reconstruct the cases in Petros's thesis, also maybe
+// using a timeout.
+// ------------------------------------------------------------------------
+
+// ***
+// do_list (bm_test BME) (!mytheory);;
+//
+// do_list (bm_test BME) (!mytheory2);;
+//  ***

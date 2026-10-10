@@ -1,0 +1,260 @@
+#lang rhombus
+// Direct translation of the pinned HOL Light Boyer_Moore/induction.ml.
+
+// ****************************************************************************
+// FILE          : induction.ml
+// DESCRIPTION   : Induction.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 26th June 1991
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : 2008
+// ****************************************************************************
+
+import:
+  "../private/hol_quote.rhm" open
+  "../private/ocaml.rhm" open:
+    only:
+      Failure
+      failwith
+      fst
+      snd
+      OCamlList
+  "../lib.rhm" open:
+    only:
+      o
+      length
+      hd
+      map
+      setify
+      filter
+      flat
+      partition
+      mem
+      uncurry
+  "../fusion.rhm" open:
+    only:
+      is_abs
+      is_comb
+      rand
+      rator
+      concl
+      TRANS
+      dest_const
+      is_var
+      dest_type
+      type_of
+      mk_abs
+      EQ_MP
+  "../basics.rhm" open:
+    only:
+      bndvar
+      strip_comb
+      is_forall
+      strip_forall
+      is_imp
+      is_neg
+  "../equal.rhm" open:
+    only:
+      ONCE_DEPTH_CONV
+      GEN_ALPHA_CONV
+      rhs
+      lhs
+      RAND_CONV
+      ABS_CONV
+      CONV_RULE
+      BETA_CONV
+      REPEATC
+      SYM
+  "../bool.rhm" open:
+    only:
+      ISPEC
+      GENL
+      SPEC
+      MP
+  "../simp.rhm" open:
+    only:
+      REWR_CONV
+  "../theorems.rhm" open:
+    only:
+      RIGHT_IMP_FORALL_THM
+  "support.rhm" open:
+    only:
+      find_bm_terms
+      remove_el
+      conj_list
+      lcombinep
+  "shells.rhm" open:
+    only:
+      sys_shell_info
+  "environment.rhm" open:
+    only:
+      get_def
+      LIST_CONJ
+  "waterfall.rhm" open:
+    only:
+      apply_fproof
+
+export:
+  CONV_OF_RCONV
+  CONV_OF_THM
+  RIGHT_IMP_FORALL_CONV
+  is_rec_const_app
+  possible_inductions
+  DEPTH_FORALL_CONV
+  induction_heuristic
+
+def CONV_OF_RCONV:
+  fun get_bv(tm):
+    if is_abs(tm)
+    | bndvar(tm)
+    | if is_comb(tm)
+      | try:
+          get_bv(rand(tm))
+          ~catch Failure(_): get_bv(rator(tm))
+      | failwith("")
+  fun(conv):
+    fun(tm):
+      let v = get_bv(tm)
+      let th1 = conv(tm)
+      let th2 = ONCE_DEPTH_CONV(GEN_ALPHA_CONV(v))(rhs(concl(th1)))
+      TRANS(th1)(th2)
+
+def CONV_OF_THM = o(CONV_OF_RCONV)(REWR_CONV)
+
+def RIGHT_IMP_FORALL_CONV = CONV_OF_THM(RIGHT_IMP_FORALL_THM)
+// Does this work??
+
+// ----------------------------------------------------------------------------
+// is_rec_const_app : term -> bool
+//
+// This function returns true if the term it is given is an application of a
+// currently known recursive function constant.
+// ----------------------------------------------------------------------------
+
+fun is_rec_const_app(tm):
+  try:
+    let [f, args] = strip_comb(tm)
+    let [n, defs] = o(o(get_def)(fst))(dest_const)(f)
+    (n > 0) && \
+      (o(o(o(o(o(o(length)(snd))(strip_comb))(lhs))(concl))(snd))(hd)(defs) == length(args))
+    ~catch Failure(_): #false
+
+
+// ----------------------------------------------------------------------------
+// possible_inductions : term -> (term list # term list)
+//
+// Function to compute two lists of variables on which induction could be
+// performed. The first list of variables for which the induction is unflawed
+// and the second is of variables for which the induction is flawed.
+//
+// From a list of applications of recursive functions, the arguments are
+// split into those that are in a recursive argument position and those that
+// are not. Possible inductions are on the variables in the recursive
+// argument positions, but if the variable also appears in a non-recursive
+// argument position then the induction is flawed.
+// ----------------------------------------------------------------------------
+
+fun possible_inductions(tm):
+  let apps = find_bm_terms(is_rec_const_app)(tm)
+  let [rec_args, other_args]:
+    OCamlList.split(map(fun(app):
+                          let [f, args] = strip_comb(app)
+                          let name = fst(dest_const(f))
+                          let n = o(fst)(get_def)(name)
+                          remove_el(n)(args))(apps))
+  let vars = setify(filter(is_var)(rec_args))
+  let others = setify(flat(other_args))
+  partition(fun(v): !mem(v)(others))(vars)
+
+// ----------------------------------------------------------------------------
+// DEPTH_FORALL_CONV : conv -> conv
+//
+// Given a term of the form "!x1 ... xn. t", this function applies the
+// argument conversion to "t".
+// ----------------------------------------------------------------------------
+
+fun DEPTH_FORALL_CONV(conv):
+  fun(tm):
+    if is_forall(tm)
+    | RAND_CONV(ABS_CONV(DEPTH_FORALL_CONV(conv)))(tm)
+    | conv(tm)
+
+// ----------------------------------------------------------------------------
+// induction_heuristic : (term # bool) -> ((term # bool) list # proof)
+//
+// Heuristic for induction. It performs one of the possible unflawed
+// inductions on a clause, or failing that, one of the flawed inductions.
+// The heuristic fails if no inductions are possible.
+//
+// Having obtained a variable on which to perform induction, the function
+// computes the name of the top-level type constructor in the type of the
+// variable. The appropriate induction theorem is then obtained from the
+// shell environment. The theorem is specialised for the argument clause and
+// beta-reduction is performed at the appropriate places.
+//
+// The resulting theorem will be of the form:
+//
+//    |- (case1 /\ ... /\ casen) ==> (!x. f[x])                         ( * )
+//
+// So, if we can establish casei for each i, we shall have |- !x. f[x]. When
+// specialised with the induction variable, this theorem has the original
+// clause as its conclusion. Each casei is of one of these forms:
+//
+//    !x1 ... xn. s ==> (!y1 ... ym. t)
+//    !x1 ... xn. t
+//
+// where the yi's do not appear in s. We simplify the casei's that have the
+// first form by proving theorems like:
+//
+//    |- (!x1 ... xn. s ==> (!y1 ... ym. t)) =
+//       (!x1 ... xn y1 ... ym. s ==> t)
+//
+// For consistency, theorems of the form |- (!x1 ... xn. t) = (!x1 ... xn. t)
+// are proved for the casei's that have the second form. The bodies of the
+// right-hand sides of these equations are returned as the new goal clauses.
+// A body that is an implication is taken to be an inductive step and so is
+// returned paired with true. Bodies that are not implications are paired
+// with false.
+//
+// The proof of the original clause from these new clauses proceeds as
+// follows. The universal quantifications that were stripped from the
+// right-hand sides are restored by generalizing the theorems. From the
+// equations we can then obtain theorems for the left-hand sides. These are
+// conjoined and used to satisfy the antecedant of the theorem ( * ). As
+// described above, specialising the resulting theorem gives a theorem for
+// the original clause.
+// ----------------------------------------------------------------------------
+
+fun induction_heuristic([tm, ind]):
+  try:
+    let [unflawed, flawed] = possible_inductions(tm)
+    let var:
+      try:
+        hd(unflawed)
+        ~catch Failure(_): hd(flawed)
+    let ty_name = fst(dest_type(type_of(var)))
+    let induct_thm = sys_shell_info(ty_name).induct
+    let P = mk_abs([var, tm])
+    let th1 = ISPEC(P)(induct_thm)
+    let th2:
+      CONV_RULE(
+        ONCE_DEPTH_CONV(
+          fun(tm): if rator(tm) == P | BETA_CONV(tm) | failwith("")))(th1)
+    let new_goals = conj_list(rand(rator(concl(th2))))
+    let ths:
+      map(REPEATC(DEPTH_FORALL_CONV(RIGHT_IMP_FORALL_CONV)))(new_goals)
+    let [varsl, tml] = OCamlList.split(map(o(o(strip_forall)(rhs))(concl))(ths))
+    let proof:
+      fun(thl):
+        let thl_prime = map(uncurry(GENL))(lcombinep([varsl, thl]))
+        let thl_prime_prime:
+          map(fun([eq, th]): EQ_MP(SYM(eq))(th))(lcombinep([ths, thl_prime]))
+        SPEC(var)(MP(th2)(LIST_CONJ(thl_prime_prime)))
+    [map(fun(tm): [tm, is_imp(tm) && !is_neg(tm)])(tml),
+     apply_fproof("induction_heuristic")(proof)(tml)]
+    ~catch Failure(_): failwith("induction_heuristic")

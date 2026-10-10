@@ -35,6 +35,12 @@ ORDER = ("lib fusion basics nets printer preterm parser equal bool drule tactics
          "ind_defs class trivia canon meson firstorder metis thecops quot impconv pair compute "
          "nums recursion arith wf calc_num normalizer grobner ind_types lists realax calc_int "
          "realarith real calc_rat int sets iterate cart define").split()
+# HOL Light's Boyer_Moore/ library (the waterfall prover), in boyer-moore.ml's
+# load order, followed by its evaluation script.
+ORDER += ['Boyer_Moore/' + m for m in (
+    "support struct_equal shells environment clausal_form waterfall rewrite_rules "
+    "definitions terms_and_clauses equalities induction counterexample generalize "
+    "irrelevance main make").split()]
 RHFILE = {}
 LIBRARY_LAYER = {'lib'}
 TOLERANCE = 0.5   # percentage points a logic-layer score may drop
@@ -216,9 +222,10 @@ def measure(hol):
         body = '\n'.join(l for l in rh_src.split('\n') if not l.lstrip().startswith('//'))
         if '\nexport:' in body:
             body = body[body.index('\nexport:'):]
-        c = toks_rh(body, mod, set(a))
+        short = os.path.basename(mod)
+        c = toks_rh(body, short, set(a))
         md = [n for n, _ in ml_defs(ml_src)]
-        rd = [n for n, _ in rh_defs(rh_src, mod)]
+        rd = [n for n, _ in rh_defs(rh_src, short)]
         qa = [t for t in a if t.startswith('Q:')]
         qc = [t for t in c if t.startswith('Q:')]
         rows[mod] = {
@@ -238,7 +245,7 @@ def report(rows):
     for mod, r in rows.items():
         for k in ('tokens', 'common', 'defs', 'defs_found', 'defs_in_order', 'quotes', 'quotes_same'):
             tot[k] += r[k]
-        print(f"{mod:12} {r['layer']:8} {r['score']:5.1f}% "
+        print(f"{mod:32} {r['layer']:8} {r['score']:5.1f}% "
               f"{r['defs_found']:6}/{r['defs_in_order']:5}/{r['defs']:<6}  "
               f"{r['quotes_same']:6}/{r['quotes']:<6}")
     print(f"{'TOTAL':12} {'':8} {100 * tot['common'] / tot['tokens']:5.1f}% "
@@ -252,13 +259,14 @@ def defs_report(hol, mod, threshold=100.0):
     rh_src = open(os.path.join(RH, RHFILE.get(mod, mod + '.rhm'))).read()
     names = set(toks_ml(strip_ml_comments(ml_src)))
     rmap = collections.defaultdict(list)
-    for n, b in rh_defs(rh_src, mod):
+    short = os.path.basename(mod)
+    for n, b in rh_defs(rh_src, short):
         rmap[n].append(b)
     used = collections.Counter(); rows = []; missing = []
     for n, b in ml_defs(ml_src):
         if used[n] >= len(rmap[n]):
             missing.append(n); continue
-        a = toks_ml(strip_ml_comments(b)); c = toks_rh(rmap[n][used[n]], mod, names)
+        a = toks_ml(strip_ml_comments(b)); c = toks_rh(rmap[n][used[n]], short, names)
         used[n] += 1
         rows.append((round(100 * lcs(a, c) / max(len(a), 1), 1), len(a), n))
     print('not found in the port:', ' '.join(missing) or '-')

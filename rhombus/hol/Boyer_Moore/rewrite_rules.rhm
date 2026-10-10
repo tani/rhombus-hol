@@ -1,0 +1,476 @@
+#lang rhombus
+// Direct translation of the pinned HOL Light Boyer_Moore/rewrite_rules.ml.
+
+// ****************************************************************************
+// FILE          : rewrite_rules.ml
+// DESCRIPTION   : Using axioms and lemmas as rewrite rules.
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 14th May 1991
+//
+// LAST MODIFIED : R.J.Boulton
+// DATE          : 15th October 1992
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : 2008
+// ****************************************************************************
+
+import:
+  "../private/hol_quote.rhm" open
+  "../private/proof_syntax.rhm" open
+  "../private/ocaml.rhm" open:
+    only:
+      Failure
+      polymorphic_lt
+      failwith
+      OCamlList
+      snd
+      fst
+  "../lib.rhm" open:
+    only:
+      o
+      mapfilter
+      hd
+      set_eq
+      map
+      tl
+      setify
+      flat
+      subtract
+      itlist
+      I
+  "../fusion.rhm" open:
+    only:
+      dest_eq
+      is_const
+      dest_const
+      is_var
+      dest_var
+      is_comb
+      dest_comb
+      INST_TYPE
+      concl
+      hyp
+      frees
+  "../basics.rhm" open:
+    only:
+      is_disj
+      is_neg
+      dest_disj
+  "../equal.rhm" open:
+    only:
+      lhs
+      RATOR_CONV
+      RAND_CONV
+      ALL_CONV
+      CONV_RULE
+      rhs
+  "../bool.rhm" open:
+    only:
+      UNDISCH_ALL
+      SPECL
+      GENL
+      DISCH_ALL
+      CONJUNCTS
+      SPEC_ALL
+      DISCH
+  "../drule.rhm" open:
+    only:
+      term_match
+  "../tactics.rhm" open:
+    only:
+      prove
+  "../simp.rhm" open:
+    only:
+      REWRITE_TAC
+      REWR_CONV
+  "../theorems.rhm" open:
+    only:
+      OR_CLAUSES
+  "../class.rhm" open:
+    only:
+      BOOL_CASES_TAC
+  "support.rhm" open:
+    only:
+      is_T
+      is_F
+  "environment.rhm" open:
+    only:
+      system_rewrites
+
+export:
+  is_permutative
+  lex_smaller_term
+  inst_eq_thm
+  applicable_rewrites
+  ARGS_CONV
+  assump_inst_hyps
+  assumps_inst_hyps
+  inst_frees_in_hyps
+  NOT_IMP_EQ_EQ_EQ_OR
+  IMP_EQ_EQ_EQ_OR_NOT
+  NOT_IMP_EQ_OR_EQ_EQ_OR_OR
+  IMP_EQ_OR_EQ_EQ_OR_NOT_OR
+  IMP_EQ_EQ_EQ_NOT_OR
+  IMP_NOT_EQ_EQ_EQ_OR
+  T_OR
+  OR_T
+  F_OR
+  OR_F
+  UNDER_DISJ_DISCH
+  OVER_DISJ_DISCH
+  MULTI_DISJ_DISCH
+
+// ----------------------------------------------------------------------------
+// is_permutative : term -> bool
+//
+// Determines whether or not an equation is permutative (the left-hand and
+// right-hand sides are instances of one another). A permutative equation may
+// cause looping when it is used for rewriting.
+// ----------------------------------------------------------------------------
+
+fun is_permutative(tm):
+  try:
+    let [l, r] = dest_eq(tm)
+    let bind1 = term_match(PairList [])(l)(r)
+    let bind2 = term_match(PairList [])(r)(l)
+    #true
+    ~catch Failure(_): #false
+
+
+// ----------------------------------------------------------------------------
+// lex_smaller_term : term -> term -> bool
+//
+// Computes whether the first term is `alphabetically' smaller than the
+// second term. Used to avoid looping when rewriting with permutative rules.
+//
+// A constant is considered to be smaller than a variable which in turn is
+// considered to be smaller than an application. Two variables or two
+// constants are compared alphabetically by name. An application (f1 x1) is
+// considered to be smaller than another application (f2 x2) if either f1 is
+// smaller than f2, or f1 equals f2 and x1 is smaller than x2.
+// ----------------------------------------------------------------------------
+
+fun lex_smaller_term(tm1):
+  fun(tm2):
+    try:
+      if is_const(tm1)
+      | if is_const(tm2)
+        | let [name1, type1] = dest_const(tm1)
+          let [name2, type2] = dest_const(tm2)
+          if type1 == type2
+          | polymorphic_lt(name1)(name2)
+          | failwith("")
+        | #true
+      | if is_var(tm1)
+        | if is_const(tm2)
+          | #false
+          | if is_var(tm2)
+            | let [name1, type1] = dest_var(tm1)
+              let [name2, type2] = dest_var(tm2)
+              if type1 == type2
+              | polymorphic_lt(name1)(name2)
+              | failwith("")
+            | #true
+        | if is_comb(tm1)
+          | if is_comb(tm2)
+            | let [rator1, rand1] = dest_comb(tm1)
+              let [rator2, rand2] = dest_comb(tm2)
+              lex_smaller_term(rator1)(rator2) || \
+                ((rator1 == rator2) && lex_smaller_term(rand1)(rand2))
+            | #false
+          | failwith("")
+      ~catch Failure(_): failwith("lex_smaller_term")
+
+// ----------------------------------------------------------------------------
+// inst_eq_thm : ((term # term) list # (type # type) list) -> thm -> thm
+//
+// Instantiates a theorem (possibly having hypotheses) with a binding.
+// Assumes the conclusion is an equality, so that discharging then undisching
+// cannot cause parts of the conclusion to be moved into the hypotheses.
+// ----------------------------------------------------------------------------
+
+fun inst_eq_thm([tm_bind, ty_bind]):
+  fun(th):
+    let [insts, vars] = OCamlList.split(tm_bind)
+    o(o(o(o(UNDISCH_ALL)(SPECL(insts)))(GENL(vars)))(INST_TYPE(ty_bind)))(DISCH_ALL)(th)
+
+// ----------------------------------------------------------------------------
+// applicable_rewrites : term -> thm list
+//
+// Returns the results of rewriting the term with those rewrite rules that
+// are applicable to it. A rewrite rule is not applicable if it's permutative
+// and the rewriting does not produce an alphabetically smaller term.
+// ----------------------------------------------------------------------------
+
+fun applicable_rewrites(tm):
+  let applicable_rewrite:
+    fun(tm):
+      fun(th):
+        let conc = concl(th)
+        let [_, tm_bind, ty_bind] = term_match(PairList [])(lhs(conc))(tm)
+        let instth = inst_eq_thm([tm_bind, ty_bind])(th)
+        if is_permutative(conc)
+        | let [l, r] = dest_eq(concl(instth))
+          if lex_smaller_term(r)(l)
+          | instth
+          | failwith("")
+        | instth
+  mapfilter(o(applicable_rewrite(tm))(snd))(system_rewrites.value)
+
+// ----------------------------------------------------------------------------
+// ARGS_CONV : conv -> conv
+//
+// Applies a conversion to every argument of an application of the form
+// "f x1 ... xn".
+// ----------------------------------------------------------------------------
+
+fun ARGS_CONV(conv):
+  fun(tm):
+    try:
+      ((RATOR_CONV(ARGS_CONV(conv))) then_conv (RAND_CONV(conv)))(tm)
+      ~catch Failure(_): ALL_CONV(tm)
+
+// ----------------------------------------------------------------------------
+// assump_inst_hyps : term list ->
+//                    term ->
+//                    term list ->
+//                    ((term # term) list # (type # type) list)
+//
+// Searches a list of hypotheses for one that matches the specified
+// assumption such that the variables instantiated are precisely those in the
+// list of variables given. If such a hypothesis is found, the binding
+// produced by the match is returned.
+// ----------------------------------------------------------------------------
+
+fun assump_inst_hyps(vars):
+  fun(assump):
+    fun(hyps):
+      try:
+        let [_, tm_bind, ty_bind] = term_match(PairList [])(hd(hyps))(assump)
+        let bind = [tm_bind, ty_bind]
+        if set_eq(vars)(map(snd)(fst(bind)))
+        | bind
+        | failwith("")
+        ~catch Failure(_):
+          try:
+            assump_inst_hyps(vars)(assump)(tl(hyps))
+            ~catch Failure(_): failwith("assump_inst_hyps")
+
+// ----------------------------------------------------------------------------
+// assumps_inst_hyps : term list ->
+//                     term list ->
+//                     term list ->
+//                     ((term # term) list # (type # type) list)
+//
+// Searches a list of hypotheses and a list of assumptions for a pairing that
+// match (the assumption is an instance of the hypothesis) such that the
+// variables instantiated are precisely those in the list of variables given.
+// If such a pair is found, the binding produced by the match is returned.
+// ----------------------------------------------------------------------------
+
+fun assumps_inst_hyps(vars):
+  fun(assumps):
+    fun(hyps):
+      try:
+        assump_inst_hyps(vars)(hd(assumps))(hyps)
+        ~catch Failure(_):
+          try:
+            assumps_inst_hyps(vars)(tl(assumps))(hyps)
+            ~catch Failure(_): failwith("assumps_inst_hyps")
+
+// ----------------------------------------------------------------------------
+// inst_frees_in_hyps : term list -> thm -> thm
+//
+// Takes a theorem (possibly with hypotheses) and computes a list of
+// variables that are free in the hypotheses but not in the conclusion.
+// If this list of variables is empty the original theorem is returned.
+// The function also takes a list of assumptions as another argument. Once it
+// has the list of variables it searches for an assumption and a hypothesis
+// such that the hypothesis matches the assumption binding precisely those
+// variables in the list. If this is successful the original theorem is
+// returned having had the variables in the list instantiated.
+// ----------------------------------------------------------------------------
+
+fun inst_frees_in_hyps(assumps):
+  fun(th):
+    try:
+      let hyps = hyp(th)
+      let hyp_frees = setify(flat(map(frees)(hyps)))
+      let vars = subtract(hyp_frees)(frees(concl(th)))
+      if vars == PairList []
+      | th
+      | let bind = assumps_inst_hyps(vars)(assumps)(hyps)
+        inst_eq_thm(bind)(th)
+      ~catch Failure(_): failwith("inst_frees_in_hyps")
+
+// ----------------------------------------------------------------------------
+// NOT_IMP_EQ_EQ_EQ_OR = |- (~x ==> (y = y')) = ((y \/ x) = (y' \/ x))
+// ----------------------------------------------------------------------------
+
+def NOT_IMP_EQ_EQ_EQ_OR:
+  prove([@hol|{(~x ==> (y = y')) = ((y \/ x) = (y' \/ x))}|,
+         BOOL_CASES_TAC(@hol|{x:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{y:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{y':bool}|) then_tac \
+           REWRITE_TAC(PairList [])])
+
+// ----------------------------------------------------------------------------
+// IMP_EQ_EQ_EQ_OR_NOT = |- (x ==> (y = y')) = ((y \/ ~x) = (y' \/ ~x))
+// ----------------------------------------------------------------------------
+
+def IMP_EQ_EQ_EQ_OR_NOT:
+  prove([@hol|{(x ==> (y = y')) = ((y \/ ~x) = (y' \/ ~x))}|,
+         BOOL_CASES_TAC(@hol|{x:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{y:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{y':bool}|) then_tac \
+           REWRITE_TAC(PairList [])])
+
+// ----------------------------------------------------------------------------
+// NOT_IMP_EQ_OR_EQ_EQ_OR_OR =
+// |- (~x ==> ((y \/ t) = (y' \/ t))) = ((y \/ (x \/ t)) = (y' \/ (x \/ t)))
+// ----------------------------------------------------------------------------
+
+def NOT_IMP_EQ_OR_EQ_EQ_OR_OR:
+  prove([@hol|{(~x ==> ((y \/ t) = (y' \/ t))) = ((y \/ (x \/ t)) = (y' \/ (x \/ t)))}|,
+         BOOL_CASES_TAC(@hol|{x:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{y:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{y':bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{t:bool}|) then_tac \
+           REWRITE_TAC(PairList [])])
+
+// ----------------------------------------------------------------------------
+// IMP_EQ_OR_EQ_EQ_OR_NOT_OR =
+// |- (x ==> ((y \/ t) = (y' \/ t))) = ((y \/ (~x \/ t)) = (y' \/ (~x \/ t)))
+// ----------------------------------------------------------------------------
+
+def IMP_EQ_OR_EQ_EQ_OR_NOT_OR:
+  prove([@hol|{(x ==> ((y \/ t) = (y' \/ t))) = ((y \/ (~x \/ t)) = (y' \/ (~x \/ t)))}|,
+         BOOL_CASES_TAC(@hol|{x:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{y:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{y':bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{t:bool}|) then_tac \
+           REWRITE_TAC(PairList [])])
+
+// ----------------------------------------------------------------------------
+// IMP_EQ_EQ_EQ_NOT_OR = |- (x ==> (t = t')) = ((~x \/ t) = (~x \/ t'))
+// ----------------------------------------------------------------------------
+
+def IMP_EQ_EQ_EQ_NOT_OR:
+  prove([@hol|{(x ==> (t = t')) = ((~x \/ t) = (~x \/ t'))}|,
+         BOOL_CASES_TAC(@hol|{x:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{t:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{t':bool}|) then_tac \
+           REWRITE_TAC(PairList [])])
+
+// ----------------------------------------------------------------------------
+// IMP_NOT_EQ_EQ_EQ_OR = |- (~x ==> (t = t')) = ((x \/ t) = (x \/ t'))
+// ----------------------------------------------------------------------------
+
+def IMP_NOT_EQ_EQ_EQ_OR:
+  prove([@hol|{(~x ==> (t = t')) = ((x \/ t) = (x \/ t'))}|,
+         BOOL_CASES_TAC(@hol|{x:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{t:bool}|) then_tac \
+           BOOL_CASES_TAC(@hol|{t':bool}|) then_tac \
+           REWRITE_TAC(PairList [])])
+
+// ----------------------------------------------------------------------------
+// T_OR = |- T \/ t = T
+// OR_T = |- t \/ T = T
+// F_OR = |- F \/ t = t
+// OR_F = |- t \/ F = t
+// ----------------------------------------------------------------------------
+
+def PairList [T_OR, OR_T, F_OR, OR_F, _] = CONJUNCTS(SPEC_ALL(OR_CLAUSES))
+
+// ----------------------------------------------------------------------------
+// UNDER_DISJ_DISCH : term -> thm -> thm
+//
+//    A, ~x |- y \/ t = y' \/ t          A, x |- y \/ t = y' \/ t
+//    -------------------------------    ---------------------------------
+//    A |- y \/ x \/ t = y' \/ x \/ t    A |- y \/ ~x \/ t = y' \/ ~x \/ t
+//
+//    A, ~x |- y = y'                    A, x |- y = y'
+//    ---------------------              -----------------------
+//    A |- y \/ x = y' \/ x              A |- y \/ ~x = y' \/ ~x
+//
+// The function assumes that y is a literal, so it is valid to test the LHS
+// of the theorem to see if it is a disjunction in order to determine which
+// rule to use.
+// ----------------------------------------------------------------------------
+
+fun UNDER_DISJ_DISCH(tm):
+  fun(th):
+    try:
+      let rewrite:
+        if is_disj(lhs(concl(th)))
+        | if is_neg(tm)
+          | NOT_IMP_EQ_OR_EQ_EQ_OR_OR
+          | IMP_EQ_OR_EQ_EQ_OR_NOT_OR
+        | if is_neg(tm)
+          | NOT_IMP_EQ_EQ_EQ_OR
+          | IMP_EQ_EQ_EQ_OR_NOT
+      CONV_RULE(REWR_CONV(rewrite))(DISCH(tm)(th))
+      ~catch Failure(_): failwith("UNDER_DISJ_DISCH")
+
+// ----------------------------------------------------------------------------
+// OVER_DISJ_DISCH : term -> thm -> thm
+//
+//    A, ~x |- t = t'                    A, x |- t = t'
+//    ---------------------              -----------------------
+//    A |- x \/ t = x \/ t'              A |- ~x \/ t = ~x \/ t'
+// ----------------------------------------------------------------------------
+
+fun OVER_DISJ_DISCH(tm):
+  fun(th):
+    try:
+      let rewrite:
+        if is_neg(tm)
+        | IMP_NOT_EQ_EQ_EQ_OR
+        | IMP_EQ_EQ_EQ_NOT_OR
+      CONV_RULE(REWR_CONV(rewrite))(DISCH(tm)(th))
+      ~catch Failure(_): failwith("OVER_DISJ_DISCH")
+
+// ----------------------------------------------------------------------------
+// MULTI_DISJ_DISCH : (term list # term list) -> thm -> thm
+//
+// Examples:
+//
+//    MULTI_DISJ_DISCH (["x1"; "x2"],["~x3"; "x4"]) x1, ~x3, x4, x2 |- y = y'
+//    --->
+//    |- ~x1 \/ ~x2 \/ y \/ x3 \/ ~x4 = ~x1 \/ ~x2 \/ y' \/ x3 \/ ~x4
+//
+//
+//    MULTI_DISJ_DISCH (["x1"; "x2"],["~x3"; "x4"]) x1, ~x3, x4, x2 |- y = F
+//    --->
+//    |- ~x1 \/ ~x2 \/ y \/ x3 \/ ~x4 = ~x1 \/ ~x2 \/ x3 \/ ~x4
+//
+//
+//    MULTI_DISJ_DISCH (["x1"; "x2"],["~x3"; "x4"]) x1, ~x3, x4, x2 |- y = T
+//    --->
+//    |- ~x1 \/ ~x2 \/ y \/ x3 \/ ~x4 = T
+// ----------------------------------------------------------------------------
+
+fun MULTI_DISJ_DISCH([overs, unders]):
+  fun(th):
+    try:
+      let th1 = itlist(UNDER_DISJ_DISCH)(unders)(th)
+      let tm1 = rhs(concl(th1))
+      let th2:
+        if (try:
+              is_T(fst(dest_disj(tm1)))
+              ~catch Failure(_): #false)
+        | CONV_RULE(RAND_CONV(REWR_CONV(T_OR)))(th1)
+        | if (try:
+                is_F(fst(dest_disj(tm1)))
+                ~catch Failure(_): #false)
+          | CONV_RULE(RAND_CONV(REWR_CONV(F_OR)))(th1)
+          | th1
+      let tm2 = rhs(concl(th2))
+      let rule:
+        if is_T(tm2) | CONV_RULE(RAND_CONV(REWR_CONV(OR_T))) | I
+      itlist(fun(tm): fun(th): rule(OVER_DISJ_DISCH(tm)(th)))(overs)(th2)
+      ~catch Failure(_): failwith("MULTI_DISJ_DISCH")

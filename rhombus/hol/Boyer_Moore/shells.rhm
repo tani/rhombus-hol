@@ -1,0 +1,265 @@
+#lang rhombus
+// Direct translation of the pinned HOL Light Boyer_Moore/shells.ml.
+
+// ****************************************************************************
+// FILE          : shells.ml
+// DESCRIPTION   : Vague approximation in ML to Boyer-Moore "shell" principle
+//
+// READS FILES   : <none>
+// WRITES FILES  : <none>
+//
+// AUTHOR        : R.J.Boulton
+// DATE          : 8th May 1991
+//
+// LAST MODIFIED : R.J.Boulton
+// DATE          : 12th October 1992
+//
+// LAST MODIFIED : P. Papapanagiotou (University of Edinburgh)
+// DATE          : July 2009
+// ****************************************************************************
+
+import:
+  "../private/hol_quote.rhm" open
+  "../private/declarations.rhm" open
+  "../private/ocaml.rhm" open:
+    only:
+      failwith
+      snd
+      fst
+  "../lib.rhm" open:
+    only:
+      hd
+      tl
+      o
+      map
+      flat
+  "../bool.rhm" open:
+    only:
+      CONJUNCT2
+  "../nums.rhm" open:
+    only:
+      num_INDUCTION
+      num_CASES
+      NOT_SUC
+      SUC_INJ
+  "../arith.rhm" open:
+    only:
+      PRE
+  "../ind_types.rhm" open:
+    only:
+      list_INDUCT
+  "../lists.rhm" open:
+    only:
+      list_CASES
+      NOT_CONS_NIL
+      CONS_11
+      HD
+      TL
+  "support.rhm" open:
+    only:
+      thd3
+      fst3
+  "struct_equal.rhm" open:
+    only:
+      ONE_STEP_RECTY_EQ_CONV
+
+export:
+  ShellInfo
+  Shell
+  system_shells
+  shell_info
+  sys_shell_info
+  shell_constructors
+  shell_accessor_thms
+  shell_arg_types
+  shell_constructor
+  shell_constructor_arg_types
+  shell_constructor_accessors
+  shells
+  all_constructors
+  all_accessors
+  all_accessor_thms
+  num_shell
+  list_shell
+
+// ----------------------------------------------------------------------------
+// ML datatype for holding information about a recursive logical type.
+// ----------------------------------------------------------------------------
+
+// type constructor_info =
+//    string *               (* Constructor name   *)
+//    hol_type list *        (* Argument types     *)
+//    (string * thm) list;;   (* Accessor functions *)
+
+// departure: the record type shell_info is the class ShellInfo, since a
+// Rhombus class name and the function shell_info share one namespace.
+record ShellInfo(arg_types,       // Argument types for type constructor
+                 constructors,    // Constructors for the type
+                 // axiom : thm;  (* Type axiom *)
+                 induct,          // Induction theorem
+                 cases,           // Cases theorem
+                 distinct,        // Constructors distinct
+                 one_one,         // Constructors one-one
+                 struct_conv)
+
+variant shell:
+  Shell(name, info)
+
+// ----------------------------------------------------------------------------
+// Reference variable holding the currently defined system shells.
+// ----------------------------------------------------------------------------
+
+def system_shells = Box(PairList [])
+
+// ----------------------------------------------------------------------------
+// Function to find the details of a named shell from a list of shells.
+// ----------------------------------------------------------------------------
+
+fun shell_info(shl):
+  fun(name):
+    if shl == PairList []
+    | failwith("shell_info")
+    | match hd(shl)
+      | Shell(sh_name, info):
+          if sh_name == name
+          | info
+          | shell_info(tl(shl))(name)
+
+// ----------------------------------------------------------------------------
+// Function to find the details of a named shell from the shells currently
+// defined in the system.
+// ----------------------------------------------------------------------------
+
+fun sys_shell_info(name): shell_info(system_shells.value)(name)
+
+// ----------------------------------------------------------------------------
+// Functions to extract the components of shell information.
+// ----------------------------------------------------------------------------
+fun shell_constructors(info): info.constructors
+fun shell_accessor_thms(info):
+  o(o(o(map(snd))(flat))(map(thd3)))(shell_constructors)(info)
+fun shell_arg_types(info): info.arg_types
+
+// let shell_arg_types info = fst info
+// and shell_constructors info = (fst o snd) info
+// and shell_axiom info = (fst o snd o snd) info
+// and shell_induct info = (fst o snd o snd o snd) info
+// and shell_cases info = (fst o snd o snd o snd o snd) info
+// and shell_distinct info = (fst o snd o snd o snd o snd o snd) info
+// and shell_one_one info = (fst o snd o snd o snd o snd o snd o snd) info
+// and shell_struct_conv info = (snd o snd o snd o snd o snd o snd o snd) info;;
+
+// ----------------------------------------------------------------------------
+// Function to extract details of a named constructor from shell information.
+// ----------------------------------------------------------------------------
+
+fun shell_constructor(name):
+  fun(info :: ShellInfo):
+    fun shell_constructor_prime(name):
+      fun(triples):
+        if triples == PairList []
+        | failwith("shell_constructor")
+        | let [con_name, arg_types, accessors] = hd(triples)
+          if con_name == name
+          | [arg_types, accessors]
+          | shell_constructor_prime(name)(tl(triples))
+    shell_constructor_prime(name)(info.constructors)
+
+// ----------------------------------------------------------------------------
+// Functions to extract the argument types and the accessor functions for a
+// particular constructor. The source is a set of shell information.
+// ----------------------------------------------------------------------------
+
+fun shell_constructor_arg_types(name):
+  fun(info): fst(shell_constructor(name)(info))
+fun shell_constructor_accessors(name):
+  fun(info): snd(shell_constructor(name)(info))
+
+// ----------------------------------------------------------------------------
+// shells : void -> string list
+//
+// Function to compute the names of the currently defined system shells.
+// ----------------------------------------------------------------------------
+
+fun shells(_):
+  fun shells_prime(shl):
+    if shl == PairList []
+    | PairList []
+    | match hd(shl)
+      | Shell(name, _): PairList.cons(name, shells_prime(tl(shl)))
+  shells_prime(system_shells.value)
+
+// ----------------------------------------------------------------------------
+// all_constructors : void -> string list
+//
+// Returns a list of all the shell constructors (and bottom values) available
+// in the system.
+// ----------------------------------------------------------------------------
+
+fun all_constructors(_):
+  flat(map(o(o(map(fst3))(shell_constructors))(sys_shell_info))(shells(#void)))
+
+// ----------------------------------------------------------------------------
+// all_accessors : void -> string list
+//
+// Returns a list of all the shell accessors available in the system.
+// ----------------------------------------------------------------------------
+
+fun all_accessors(_):
+  flat(map(o(o(o(flat)(map(o(map(fst))(thd3))))(shell_constructors))(
+             sys_shell_info))(shells(#void)))
+
+fun all_accessor_thms(_):
+  flat(map(o(shell_accessor_thms)(sys_shell_info))(shells(#void)))
+
+// ----------------------------------------------------------------------------
+// `Shell' for natural numbers.
+// ----------------------------------------------------------------------------
+
+def num_shell:
+  let induct = num_INDUCTION   // axiom = num_Axiom
+  let cases = num_CASES
+  let distinct = PairList [NOT_SUC]
+  let one_one = PairList [SUC_INJ]
+  //         and pre = PRE
+  Shell("num",
+        ShellInfo(PairList [],
+                  PairList [["0", PairList [], PairList []],
+                            ["SUC", PairList [@hol|{:num}|], PairList [["PRE", CONJUNCT2(PRE)]]]],
+                  // axiom = axiom;
+                  induct,
+                  cases,
+                  distinct,
+                  one_one,
+                  ONE_STEP_RECTY_EQ_CONV([induct, distinct, one_one])))
+
+// ----------------------------------------------------------------------------
+// `Shell' for lists.
+// ----------------------------------------------------------------------------
+
+def list_shell:
+  // axiom = new_axiom `!x f. ?!fn1. (fn1 [] = x) /\ (!h t. fn1 (CONS h t) = f (fn1 t) h t)`
+  // |- !x f. ?!fn1. (fn1 [] = x) /\ (!h t. fn1 (CONS h t) = f (fn1 t) h t)
+  let induct = list_INDUCT
+  let cases = list_CASES
+  let distinct = PairList [NOT_CONS_NIL]
+  let one_one = PairList [CONS_11]
+  Shell("list",
+        ShellInfo(PairList [@hol|{:'a}|],
+                  PairList [["NIL", PairList [], PairList []],
+                            ["CONS",
+                             PairList [@hol|{:'a}|, @hol|{:('a)list}|], PairList [["HD", HD], ["TL", TL]]]],
+                  // axiom = axiom;
+                  induct,
+                  cases,
+                  distinct,
+                  one_one,
+                  ONE_STEP_RECTY_EQ_CONV([induct, distinct, one_one])))
+
+// ----------------------------------------------------------------------------
+// Set-up the system shell to reflect the basic HOL system.
+// ----------------------------------------------------------------------------
+
+system_shells.value := PairList [list_shell, num_shell]
+
+// The commented-out define_shell of shells.ml (HOL88 code) is not translated.

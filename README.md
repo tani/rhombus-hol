@@ -27,6 +27,9 @@ rhombus/hol/
   preterm.rhm             preterm.ml (preterms, type inference)
   parser.rhm              parser.ml (lexer, type and term parsers)
   lib.rhm                 lib.ml (list utilities, finite partial functions)
+  Boyer_Moore/            Boyer_Moore/*.ml: the Boyer-Moore waterfall prover
+                          (boyer-moore.rhm loads it, make.rhm is the
+                          evaluation script, testset/ its conjectures)
   private/
     ocaml.rhm             OCaml runtime: exceptions, options, polymorphic
                           compare, Hashtbl.hash, int_of_string, Random,
@@ -142,6 +145,41 @@ HOL Light sources, with each quotation's text taken from them. OCaml tuples
 are Rhombus lists (`[a, b]`), OCaml lists are `PairList`, and record types are
 classes.
 
+
+## Boyer-Moore waterfall
+
+`rhombus/hol/Boyer_Moore/` is a hand-written direct translation of HOL
+Light's `Boyer_Moore/` library, the waterfall prover described in
+P. Papapanagiotou and J. Fleuriot, "The Boyer-Moore Waterfall Model
+Revisited" (arXiv:1808.03810), which builds on R. J. Boulton's HOL88 code.
+It is not `tools/ml2rhm` output. Clauses pour over a list of heuristics
+(tautology, clausal form, setify, substitution, simplification, equality
+and cross-fertilization, generalization, irrelevance); the clauses left in
+the pool are proved by induction and poured again. `FILTERED_WATERFALL`
+adds the paper's termination heuristics (the heuristic warehouse,
+`max_var_depth`), `generalize_heuristic_ext`/`_aderhold` the generalization
+techniques with the counterexample checker of `counterexample.rhm`.
+Every heuristic returns a proof function, and the result is a kernel
+theorem.
+
+```rhombus
+import: "rhombus/hol/Boyer_Moore/boyer-moore.rhm" open
+
+// Tell the prover about definitions and rewrite rules, as make.ml's bm_reset.
+new_def(ADD)
+new_rewrite_rule(ADD)
+BOYER_MOORE_FINAL(PairList [])(@hol|{m + n = n + m}|)   // |- m + n = n + m
+prove([@hol|{!m n. m + n = n + m}|, REPEAT(GEN_TAC) then_tac BMF_TAC(PairList [])])
+```
+
+The entry points are those of `main.ml`: `BOYER_MOORE`, `BOYER_MOORE_EXT`,
+`BOYER_MOORE_RE`, `BOYER_MOORE_GEN`, `BOYER_MOORE_FINAL`,
+`BOYER_MOORE_MESON` (conversions to theorems) and the tactics
+`BOYER_MOORE_TAC`, `BMF_TAC`, `BMG_TAC`, `BM_SAFE_TAC`, `BMF_NOEQ_TAC`,
+`BM_SIMPLIFY_TAC`, `BM_INDUCT_TAC`. `make.rhm` translates upstream's
+evaluation script (`bm_reset`, `bm_test`, the `BM`/`BME`/`BMF` shortcuts)
+and `testset/` its 119 arithmetic and 48 list conjectures;
+`tests/upstream/boyer_moore.rhm` (CI `theories` job) runs it.
 
 ## Generated source style
 

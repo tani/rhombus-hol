@@ -36,6 +36,12 @@ and must not become an alternative proof architecture.
 
 Do not reintroduce the deleted Isabelle/HOL kernel, waterfall prover, previous
 Rhombus/HOL frontend, executable-language layer, or multi-package layout.
+The current frontend (`rhombus/frontend/`, see its README) is a new layer on
+top of the port, not those: it writes HOL Light text for the port's own parser
+and uses the engine only through its public functions, so the engine stays a
+translation. Its extended Boyer-Moore prover `rhombus/frontend/bm/` started
+from `tools/ml2rhm` output and may depart from upstream; the literalness rules
+do not apply to `rhombus/frontend/`.
 The waterfall tactic that is part of the port is the direct, hand-written
 translation of HOL Light's own `Boyer_Moore/` library under
 `rhombus/hol/Boyer_Moore/` (one file per upstream file, the logic-layer rules

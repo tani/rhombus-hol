@@ -193,96 +193,130 @@ comparing with the generated function on samples.
 
 ## 9. Waterfall prover (built first)
 
+Reference: Papapanagiotou and Fleuriot, *The Boyer-Moore Waterfall Model
+Revisited* (arXiv:1808.03810), a HOL Light reconstruction of Boulton's HOL90
+Boyer-Moore tactic with extensions. We follow its final configuration (BMF).
+The old Isabelle-era prover (an ACL2-style waterfall with its own goal and
+justification machinery) is not the reference any more.
+
 Why first: it is testable with no new syntax (plain Rhombus calls with `@hol`
 quotations), it fixes what a bare `theorem NAME: stmt` means in the frontend,
 and the frontend's definition forms must feed it rules.
 
-### 9.1 Shape
+### 9.1 Model
 
-A deterministic ACL2-style waterfall, as before: no search, no backtracking.
-A stage either makes progress and sends its subgoals back to the top, or
-passes the goal down. A goal that falls off the bottom fails the proof, with
-the trace as the residue.
+Clauses (disjunctions of literals) are poured from the top of a waterfall.
+Each heuristic either proves the clause (it evaporates), replaces it with
+simpler clauses that are poured again from the top, disproves it (immediate
+failure), or fails and passes it down. Clauses that reach the bottom form a
+*pool*. Induction is applied to a pool clause; the resulting base and step
+clauses go through a *new* waterfall. The overall proof is a tactic: each
+heuristic returns subgoals plus a justification built from engine rules, so a
+bug can leave a true goal unproved but cannot yield a false theorem.
 
-The difference is that every stage is an ordinary HOL Light `tactic` built from
-engine tactics, so the justification is the engine's:
+### 9.2 Shell registry
 
-| Stage | Built from |
-| --- | --- |
-| 0 close | `ITAUT`-style propositional closing, `ARITH_RULE`/`NUM_REDUCE_CONV` for linear `num` facts. No MESON in the default pipeline (it searches). |
-| 1 simplify | `simp.ml` simpset: enabled definition/recursion equations, datatype injectivity and distinctness, `use` facts, assumptions; conditional rewriting as in `simp.ml` |
-| 2 destructor elimination | reconstruction lemmas for pair/list-style selectors (`FST`/`SND`, `HD`/`TL`), kept in the rule registry |
-| 3 fertilize | use a non-cyclic variable equality assumption (`SUBST_ALL_TAC`), then drop it |
-| 4 generalize | `SPEC_TAC` on a repeated non-variable subterm |
-| 5 irrelevance | `POP_ASSUM (K ALL_TAC)` on assumptions sharing no variables, transitively, with the conclusion |
-| 6 induction | pick a variable by recursion-descent from the functions in the goal (or the `induct` hint), apply the type's induction theorem, add hypotheses for recursive fields; nested depth <= 6 |
+Per datatype, the data the heuristics need, read from what the engine returns
+for the type (`ind_types`, `define_type` results), not recomputed:
 
-Soundness is by construction: stages only compose engine tactics, so a bug
-can leave a true goal unproved but cannot produce a false theorem. This is a
-test target (a stage returns subgoals whose justification the kernel checks),
-not a trust assumption.
+name, bottom objects, constructors, accessors, type axiom, induction theorem,
+cases theorem, distinctness and one-one theorems.
 
-### 9.2 API
+Seeded for `num` and `list`; extended by the frontend's `datatype`.
+Function registry: recursive functions with their definitional equations and
+recursive argument position (one recursive argument per function, as in the
+paper; a stated limitation).
+
+### 9.3 Heuristics, top to bottom (BMF)
+
+| # | Heuristic | Built from | Notes |
+| --- | --- | --- | --- |
+| 1 | tautology | `ITAUT` (ported `itab.rhm`) | at the top; proves or fails, never rewrites |
+| 2 | clausal form | HOL Light normalisation of the clause | splits conjunctions; needs quantifiers already gone |
+| 3 | substitution | `SUBST` on `~(x = t)`, `x` not in `t` | |
+| 4 | simplify | `simp.ml` (the paper's `REWRITE_CONV` variant, "BMR") | enabled rules: user rewrites and function definitions |
+| 5 | setify | drop duplicate disjuncts | needed once the HOL simplifier replaces the Boyer-Moore one |
+| 6 | equality (cross-fertilisation) | negated equalities whose side is not an explicit value template | |
+| 7 | generalisation | Boyer-Moore minimal common subterms, **plus** Aderhold's *variables apart* | not Aderhold's common-subterm algorithm (paper: it was worse here) |
+| 8 | irrelevance | partition by shared variables; drop falsifiable partitions | unsafe; may be replaced by "inverse weakening" later |
+| pool | induction | the type's induction theorem, variable chosen from recursive argument positions | not applied twice to the same clause on one branch |
+
+MESON is not in the pipeline. `ARITH_RULE` is not either; the paper's BMF does
+not use it. `NUM_REDUCE_CONV` is used only by the counterexample checker.
+
+### 9.4 Loop control and over-generalisation
+
+The paper found that unguarded runs looped on more than a third of its
+theorems. These are part of v1, not later work:
+
+- **Warehouse filter**: per waterfall, remember clauses already processed and
+  the heuristic applied; on a repeat, skip that heuristic. Not shared across
+  waterfalls (inductions). Also refuse induction on a clause already inducted
+  on in the same branch.
+- **Maximum depth**: bound on the syntax-tree depth at which a variable occurs
+  (default 12). It prevented about four times as many loops as the warehouse.
+- **Counterexample checker** (essential for variables-apart generalisation):
+  ground each free variable with a random constructor term from the shell
+  (depth-limited, increasing chance of a bottom object), evaluate with
+  function definitions, constructor/accessor equations and `NUM_REDUCE_CONV`.
+  Reduces to False: reject. Reduces to True: allow. Does not decide: reject
+  (the safe option). Default 5 checks per generalisation.
+  Determinism departure: the random source is a fixed-seed PRNG owned by the
+  waterfall, so runs and traces are reproducible.
+
+### 9.5 API and feedback
 
 ```rhombus
-WATERFALL_TAC :: Tactic                  // default options; fails with trace
-waterfall(opts) :: Tactic                // use, disable, skip, induct, limit
-SIMPLIFY_TAC  DESTRUCT_TAC  FERTILIZE_TAC
-GENERALIZE_TAC  IRRELEVANCE_TAC  INDUCT_VAR_TAC     // stages, usable alone
-waterfall_trace :: () -> TraceEvent list // last run, printable
+WATERFALL_TAC :: Tactic                  // default options; all-or-nothing
+waterfall(opts) :: Tactic                // rules, gen lemmas, heuristics, depth, checks
+waterfall_trace :: () -> TraceEvent list
 ```
 
-- `use`: extra theorems enabled for this call only. `disable`: rules turned
-  off for this call. `skip`: named stages skipped. `induct`: ordered
-  induction-variable hints, consumed at the first induction on each branch;
-  unresolvable hint fails explicitly. `limit`: step bound.
-- A residue-returning variant exposes the unsolved goals for interactive use
-  (`g`/`e`); `WATERFALL_TAC` itself is all-or-nothing.
+Options (user control, as in the paper section 3.4): enabled rewrite rules,
+generalisation lemmas, which heuristics run and in what order, max depth,
+number of counterexample checks, trace on/off. Per-call options layer over a
+session registry without mutating it; `enable_rules`/`disable_rules` mutate it.
+The paper's registry could not remove rules; ours can.
 
-### 9.3 Rule registry
+Trace format follows the paper's Fig. 3: clause, heuristic name on success,
+resulting clauses, `Proven: |- ...`, and the induction target. A failing run
+reports the pool and the reason. The frontend prints this (section 7).
+A residue-returning variant exposes the pool as goals for `g`/`e`.
 
-A session-level registry of enabled rewrite rules, kept in a plain mutable
-structure in `waterfall/`:
+### 9.6 Frontend interaction
 
-- Seeded from the engine's `basic_rewrites` and the standard recursion
-  equations of `num`, `list`.
-- Extended by the frontend's `function`, `datatype`, `definition` forms with
-  the theorems the engine returned (equations, injectivity, distinctness,
-  induction, recursion). Direct users call `enable_rules`/`disable_rules`.
-- Per-call `use`/`disable` layer over it without mutating it.
+`theorem NAME: stmt` with no `by:` runs `WATERFALL_TAC`. The frontend's
+`datatype`/`function`/`definition` forms add shells, function equations and
+rewrite rules to the registry. Proving a helper lemma and adding it as a
+rewrite rule is the intended workflow (the paper's EVEN/ODD example: the
+looping goals prove once `~ODD n <=> EVEN n` is a rule).
 
-### 9.4 Frontend interaction
+### 9.7 Validation
 
-`theorem NAME: stmt` with no `by:` runs `WATERFALL_TAC`; options map to keyword
-arguments (`~use:`, `~induct:`, `~skip:`, `~limit:`). `by:` blocks may call
-`WATERFALL_TAC` as one tactic among others. On failure the frontend prints the
-trace and the residue goals (section 7).
+The paper gives a benchmark and baselines, so there is a number to hit.
 
-### 9.5 Validation
-
-- Acceptance corpus: the fixtures under
-  `rhombus-hol/.../tests/backend/proof/automation/` at `315f348^`
-  (`waterfall`, `rules`, `tactic`, `limits`, `numeral`) translated from the old
-  surface to HOL Light text. Each must prove, or fail with the recorded
-  residue.
-- Re-prove a set of `lists.rhm`/`arith.rhm` lemmas with `WATERFALL_TAC` plus
-  the same helper lemmas the upstream proof uses, checking `concl` equal to the
-  statement and `hyp` empty.
-- Stage tests: each stage alone on a hand-built goal, checking subgoals and
-  that the justification yields a kernel theorem.
+- Benchmark: the 120 Peano-arithmetic theorems of HOL Light's base plus the
+  Rippling list/arith set (paper: 145 theorems, appendices A and B give the
+  definitions and rewrite rules). Expected for BMF: about 47% of the first
+  set and 37% of the second, with successful proofs averaging under 0.5 s in
+  OCaml. Our target is parity on which theorems prove, not on time.
+- Per-heuristic tests on hand-built clauses, each checked by kernel replay.
+- Regression theorems from the paper's Table 3 (`m + n = n + m`,
+  `m * n = n * m`, `REVERSE (REVERSE x) = x`, ...).
+- Looping cases from Table 4 terminate by failure (depth or warehouse), and
+  prove after the `~ODD n <=> EVEN n` rule is added.
+- Disprover: over-generalisations from the paper (`n <= n0`, `m + n = n0 + m`)
+  are rejected.
 - Determinism: two runs give identical traces.
-- Negative: unprovable and false statements fail without producing a theorem;
-  `limit` exhaustion fails.
-- Replay: no `new_axiom`; the axiom list is unchanged after a run.
+- No `new_axiom`; the axiom list is unchanged after a run.
 
-### 9.6 Cost note
+### 9.8 Cost note
 
-The old prover was about 3.5k lines of Rhombus because it carried its own goal
-type, trace and justification machinery. Here goal state, justification and
-tactic composition come from `tactics.rhm`, so the new code should be mostly
-stage logic and the registry. The numeral evidence stage (~480 lines before)
-should disappear into `ARITH_RULE`/`NUM_REDUCE_CONV`. This is an estimate to
-check against the W1 spike, not a commitment.
+The paper's tool is a reconstruction of Boulton's HOL90 code, and it had to
+rebuild `SUBS_OCCS` and `INDUCT_TAC` for HOL Light. Here `tactics.rhm`,
+`itab.rhm`, `simp.rhm` and `define.rhm` are already ported, so the size is
+mostly the heuristics, registry, disprover and trace. I have not measured
+this; W1 is the spike.
 
 ## 10. Policy changes needed
 
@@ -320,12 +354,14 @@ Tracked separately from implementation, per AGENTS.md.
 
 Waterfall first (W), then frontend (M).
 
-- **W0.** Registry skeleton and `waterfall(opts)` driver with one stage
-  (simplify) proving a trivial lemma; measure engine load time.
-- **W1.** Stages 1, 3, 5 and 0. Spike to check the size estimate in 9.6.
-- **W2.** Stage 6 (induction by recursion descent) and 4 (generalization);
-  port the acceptance corpus.
-- **W3.** Stage 2, `induct`/`use`/`disable`/`skip`/`limit`, trace printing.
+- **W0.** Shell and function registries; `waterfall(opts)` driver with
+  heuristics 1, 2, 4 and the trace; prove a trivial lemma.
+- **W1.** Heuristics 3, 5, 6, 8 and induction; warehouse filter and max depth.
+  Spike to check the size estimate in 9.8.
+- **W2.** Generalisation (Boyer-Moore and variables apart) and the
+  counterexample checker; port the paper's Table 3 and Table 4 cases.
+- **W3.** Full benchmark run against the paper's baselines; options, rule
+  removal, residue-returning variant.
 - **M0 (spike).** `#lang rhombus/hol` resolves through `lang/reader.rkt` and
   runs a module that loads the stack. Measure replay-on-import cost.
 - **M1.** `prelude`, `theorem`, `by:`, diagnostics, waterfall as default.
@@ -337,9 +373,9 @@ Waterfall first (W), then frontend (M).
 
 ## 13. Open decisions
 
-0. **Waterfall scope.** Is the default closing stage allowed to call
-   `ARITH_RULE`/ITAUT (complete but not "simple rewriting"), and is MESON
-   opt-in only? I recommend yes and yes.
+0. **Waterfall baseline.** Follow the paper's BMF (section 9.3) exactly for
+   v1, with ACL2-style destructor elimination and `~induct:` hints left for
+   later? I recommend yes: it has published baselines to check against.
 1. **Scope of the first release.** M1-M2 (HOL text terms, Rhombus
    declarations) or M3 (Rhombus-syntax terms) as the minimum? I recommend
    M1-M2 first.

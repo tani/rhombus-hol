@@ -5,7 +5,7 @@
 
 Matches the arithmetic conjectures of the run (upstream testset/arith.ml)
 with the paper's "HOL Light Test Set" rows (appendix_b.tsv) by their text,
-ignoring spaces and parentheses, and prints how the two results agree, the
+ignoring spaces and a leading `forall`, and prints how the two results agree, the
 classes of the failures, and the proof times. With --rows, every matched
 row as well.
 """
@@ -14,7 +14,8 @@ import csv, os, re, statistics, sys, collections
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 def norm(t):
-    return re.sub(r'[\s()]', '', t)
+    t = re.sub(r'^forall [^.]*\.', '', t.strip())
+    return re.sub(r'\s', '', t)
 
 def read_tsv(path, comment=False):
     with open(path) as f:
@@ -48,7 +49,7 @@ def main(argv):
         rows = [(p, r) for p, r in pairs if (p['proved'] == 'true', r['result'] == 'true') == sel]
         print(f'\n{title}:')
         for p, r in rows:
-            print(f"  {p['#'] if '#' in p else p.get('', '?'):>3} {r['class']:9} {r['time']:>7}s  {p['theorem']}")
+            print(f"  {p.get('', '?'):>3} {r['class']:9} {r['time']:>7}s  {p['theorem']}")
     print('\nfailure classes (all port conjectures):')
     for s in ('arith', 'list'):
         c = collections.Counter(r['class'] for r in run if r['set'] == s)
@@ -60,10 +61,19 @@ def main(argv):
             print(f'  {s:5} n={len(t)} median {statistics.median(t):.3f} mean {statistics.mean(t):.3f} max {max(t):.3f}')
     t = [float(p['time']) for p, _ in pairs if p['proved'] == 'true']
     print(f"  paper n={len(t)} median {statistics.median(t):.3f} mean {statistics.mean(t):.3f} max {max(t):.3f}")
-    both = [(int(p['steps']), int(r['steps']), int(p['inds']), int(r['inds'])) for p, r in pairs
-            if p['proved'] == 'true' and r['result'] == 'true']
-    same = sum(1 for a, b, c, d in both if a == b and c == d)
-    print(f'\nproved by both: {len(both)}; same steps and inductions in {same}')
+    keys = ('steps', 'inds', 'gens', 'over')
+    both = [(p, r) for p, r in pairs if p['proved'] == 'true' and r['result'] == 'true']
+    same2 = sum(1 for p, r in both if all(p[k] == r[k] for k in keys[:2]))
+    same4 = sum(1 for p, r in both if all(p[k] == r[k] for k in keys))
+    print(f'\nproved by both: {len(both)}; same steps and inductions in {same2}, '
+          f'and also the same generalizations and overgeneralizations in {same4}')
+    for p, r in both:
+        d = [f"{k} {p[k]}/{r[k]}" for k in keys if p[k] != r[k]]
+        if d:
+            print(f"  {p.get('', '?'):>3} paper/port: {', '.join(d)}  {p['theorem']}")
+    fails = [r for p, r in pairs if p['proved'] != 'true' and r['result'] != 'true']
+    c = collections.Counter(r['class'] for r in fails)
+    print(f'failed in both: {len(fails)}: ' + ', '.join(f'{k} {v}' for k, v in sorted(c.items(), key=lambda kv: -kv[1])))
     if '--rows' in argv:
         print('\nrow  paper          port')
         for p, r in pairs:

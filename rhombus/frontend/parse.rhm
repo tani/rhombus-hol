@@ -22,9 +22,33 @@ fun fail(msg, stx): Rkt.#{raise-syntax-error}(#false, msg, stx)
 
 // ------------------------------------------------------------------ types
 
-// Nat, Bool, ?a, Name, Name(type, ...)
+// Nat, Bool, ?a, Name, Name(type, ...), and function types
+// `type -> type` (right associative) and `(type, ...) -> type`.
 fun parse_type(g):
   match g
+  | '$t ...':
+      // The terms between top-level `->`s.
+      let segs:
+        for values(segs = [[]]) (x in [t, ...]):
+          match x
+          | '$(o :: Operator)' when to_string(o.unwrap_op()) == "->": segs.add([])
+          | _: segs.set(segs.length() - 1, segs[segs.length() - 1].add(x))
+      if segs.length() == 1
+      | parse_atomic_type(g)
+      | for values(ty = parse_segment(segs[segs.length() - 1], g)) (seg in segs.take(segs.length() - 1).reverse()):
+          match seg
+          | ['($(a :: Group), ...)'] when [a, ...].length() > 1: TFun([parse_type(a), ...], ty)
+          | _: TFun([parse_segment(seg, g)], ty)
+
+fun parse_segment(seg :: List, ctx):
+  if seg == []
+  | fail("expected a type around `->`", ctx)
+  | let [x, ...] = seg
+    parse_type('$x ...')
+
+fun parse_atomic_type(g):
+  match g
+  | '($(t :: Group))': parse_type(t)
   | 'Nat': TNat()
   | 'Bool': TBool()
   | '? $(v :: Identifier)': TVar("?" +& ident_name(v))
@@ -153,14 +177,25 @@ fun parse_primary(ts :: List, ctx):
       if v >= 0 | [ENat(v), rest] | fail("Nat literals are not negative", t)
   | '#true': [EBool(#true), rest]
   | '#false': [EBool(#false), rest]
+  | '$(f :: Identifier)' when ident_name(f) == "fun":
+      // fun(x :: type, ...): body -- the body block ends the group.
+      match rest
+      | ['($(p :: Group), ...)', b, & rest2] when b matches ': $_; ...':
+          [ELam([parse_param(p), ...], parse_block(b)), rest2]
+      | _: fail("expected `fun(x :: type, ...): body`", t)
   | '$(f :: Identifier)':
       let name = ident_name(f)
-      if rest != [] && (rest[0] matches '($(_ :: Group), ...)')
-      | match rest[0]
-        | '($(a :: Group), ...)': [ECall(name, [parse_expr(a), ...]), rest.drop(1)]
-      | [EVar(name), rest]
-  | '($(e :: Group))': [parse_expr(e), rest]
+      match rest
+      | ['($(a :: Group), ...)', & rest2]: applications(ECall(name, [parse_expr(a), ...]), rest2)
+      | _: [EVar(name), rest]
+  | '($(e :: Group))': applications(parse_expr(e), rest)
   | _: fail("unexpected term in an expression", t)
+
+// Further argument lists apply the value of an expression: f(x)(y).
+fun applications(e, ts :: List):
+  match ts
+  | ['($(a :: Group), ...)', & rest]: applications(EApp(e, [parse_expr(a), ...]), rest)
+  | _: [e, ts]
 
 // ---------------------------------------------------------------- patterns
 

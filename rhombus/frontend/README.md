@@ -16,7 +16,7 @@ datatype Tree(?a)
 | Leaf
 | Node(left :: Tree(?a), value :: ?a, right :: Tree(?a))
 
-function mirror(t :: Tree(?a)) :: Tree(?a):
+fun mirror(t :: Tree(?a)) :: Tree(?a):
   match t
   | Leaf: Leaf
   | Node(l, x, r): Node(mirror(r), x, mirror(l))
@@ -40,17 +40,23 @@ declaration; `FRONTEND_TRACE=raise` lets the first error escape.
   A field may use an earlier datatype applied to this one (a nested type).
   Executable: one class per constructor (fields by name, `==` structural); a
   constructor without fields is a value.
-- `function name(x :: type, ...) :: type: body`, and `and name(...)` groups for
+- `fun name(x :: type, ...) :: type: body`, and `and name(...)` groups for
   mutual recursion. The body is an expression; `let x = e` lines may come
-  before it.
+  before it. Only this form, with every parameter and the result typed, is a
+  declaration: any other `fun` (an anonymous `fun(x): ...` in Rhombus code,
+  an untyped definition, `fun | ...`) is Rhombus's own and is not checked.
 - `theorem name(x :: type, ...): statement`, a Bool expression whose
   parameters are read universally.
 - `proof:` after a form, with lines `use: name ...` (theorems or functions to
   use as rewrite rules), `disable: name ...` (rules to leave out), and
   `induct: x` (the variable of the first induction).
 
-Types: `Nat` (HOL's `num`), `Bool`, type variables `?a`, datatypes.
-Expressions: variables, Nat literals, `#true`/`#false`, calls, `+ - * div mod`
+Types: `Nat` (HOL's `num`), `Bool`, type variables `?a`, datatypes, function
+types `?a -> ?b` and `(?a, ?b) -> ?c` (curried in HOL: `a->b->c`).
+Expressions: variables, Nat literals, `#true`/`#false`, calls `f(x, ...)` of
+functions, constructors and function values (also `e(x)(y)`), anonymous
+functions `fun(x :: type, ...): body` (parameter types optional),
+`+ - * div mod`
 (`-` truncates at 0, `x div 0 = 0`, `x mod 0 = x`, as in HOL), comparisons
 `== != < <= > >=` (not chained), `&& || ! ==>`, `if c | a | b`, `match`.
 Patterns: `_`, variables, `Ctor(p, ...)`, a capitalized name (a constructor
@@ -76,7 +82,11 @@ Each proved theorem becomes a rewrite rule for later theorems.
 `bm/` started from `tools/ml2rhm`'s translation of HOL Light's `Boyer_Moore/`
 and is edited freely; `rhombus/hol/Boyer_Moore/` stays the literal port. The
 extensions so far: shells for types made by `define_type` (`define_shell`),
-an induction variable hint, per-proof `use`/`disable` rules (`bm/bm.rhm`).
+an induction variable hint, per-proof `use`/`disable` rules (`bm/bm.rhm`), and
+no generalization of a lambda abstraction (`bm/generalize.rhm`).
+
+A function value of n arguments is an n-argument Rhombus function and a
+curried HOL function: apply it to all its arguments (no partial application).
 
 ## Limits (next steps)
 
@@ -86,4 +96,10 @@ an induction variable hint, per-proof `use`/`disable` rules (`bm/bm.rhm`).
   patterns other than `0`.
 - `inductive` (inductive predicates with intro/induct/cases rules) is not
   implemented yet.
+- Every proved theorem is a rewrite rule for later proofs, with no way yet
+  to opt out: a theorem that undoes a definition (`foldr(g, z, xs) ==
+  total(xs) + z` where `total(xs)` is `foldr(g, 0, xs)`) or an
+  associativity law next to commutativity makes the rewriter loop.
+- A `let` is inlined; a lambda parameter that would capture a name in the
+  inlined text is renamed.
 - Loading the HOL theories for a check takes a few minutes.

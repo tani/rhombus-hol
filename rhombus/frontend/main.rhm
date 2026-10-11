@@ -1,20 +1,25 @@
 #lang rhombus/and_meta
-// The Rhombus/HOL frontend: `datatype`, `function` and `theorem`.
+// The Rhombus/HOL frontend: `datatype`, `fun` and `theorem`.
 //
 // Each form is parsed into IR (ir.rhm, parse.rhm) when it expands, and
 // expands to
-//   - executable code generated from the IR (classes for a datatype, a `fun`
-//     for a function; a theorem has none), and
+//   - executable code generated from the IR (classes for a datatype,
+//     Rhombus's `fun` for a function; a theorem has none), and
 //   - a run-time registration of the IR (runtime.rhm's `declare`), which the
 //     checker (check.rhm) turns into HOL definitions and Boyer-Moore proofs.
 // Running a module runs only the executable code: the HOL theories are
 // loaded by the checker alone.
 //
+// `fun` is a declaration only in the form `fun name(x :: type, ...) :: type:
+// body`, every parameter and the result typed; any other `fun` (an
+// anonymous function in Rhombus code, an untyped definition, `fun | ...`)
+// is Rhombus's own and is not given to the checker.
+//
 //   datatype Tree(?a)
 //   | Leaf
 //   | Node(left :: Tree(?a), value :: ?a, right :: Tree(?a))
 //
-//   function mirror(t :: Tree(?a)) :: Tree(?a):
+//   fun mirror(t :: Tree(?a)) :: Tree(?a):
 //     match t
 //     | Leaf: Leaf
 //     | Node(l, x, r): Node(mirror(r), x, mirror(l))
@@ -32,7 +37,7 @@ import:
 
 export:
   datatype
-  function
+  rename logic_fun as fun
   theorem
   rename rt.declarations as declarations
 
@@ -54,6 +59,9 @@ meta:
     | TBool(): 'IR.TBool()'
     | TVar(n): 'IR.TVar($(lit(n)))'
     | TCon(n, args): 'IR.TCon($(lit(n)), $(ir_syn(args)))'
+    | TFun(args, r): 'IR.TFun($(ir_syn(args)), $(ir_syn(r)))'
+    | ELam(ps, b): 'IR.ELam($(ir_syn(ps)), $(ir_syn(b)))'
+    | EApp(f, args): 'IR.EApp($(ir_syn(f)), $(ir_syn(args)))'
     | EVar(n): 'IR.EVar($(lit(n)))'
     | ENat(n): 'IR.ENat($(lit(n)))'
     | EBool(b): 'IR.EBool($(lit(b)))'
@@ -106,6 +114,12 @@ meta:
         | "&&": '($a && $b)'
         | "||": '($a || $b)'
         | "==>": 'rt.implies($a, $b)'
+    | ELam(ps, b):
+        let [x, ...] = ps.map(fun(p): name_id(p.name, ctx))
+        '(fun ($x, ...): $(ex(b, ctx)))'
+    | EApp(f, args):
+        let [a, ...] = args.map(fun(a): ex(a, ctx))
+        '($(ex(f, ctx)))($a, ...)'
     | EIf(c, t, f): '(if $(ex(c, ctx)) | $(ex(t, ctx)) | $(ex(f, ctx)))'
     | ELet(x, r, b): '(block: let $(name_id(x, ctx)) = $(ex(r, ctx)); $(ex(b, ctx)))'
     | EMatch(s, cases):
@@ -211,22 +225,40 @@ defn.sequence_macro 'datatype $g ...
           rt.declare($(ir_syn(dt)))',
          rest)
 
-defn.sequence_macro 'function $g ...
+meta:
+  // `name(x :: type, ...) :: type: body`
+  fun is_declaration(g):
+    match g
+    | '$(_ :: Identifier) ($(p :: Group), ...) :: $_ ...: $(_ :: Block)':
+        for all (q in [p, ...]):
+          q matches '$(_ :: Identifier) :: $_ ...'
+    | _: #false
+
+  // The executable code and the declaration of a `fun` group (with its
+  // `and` groups and `proof:` block), and the groups after it.
+  fun declare_functions(g, ctx, tail):
+    let values(more, tail2) = take_ands(tail)
+    let values(hints, rest) = split_proof(tail2)
+    let fs = [g, & more].map(function_head)
+    let decl = if fs.length() == 1 | fs[0] | Mutual(fs)
+    let [code, ...]:
+      for List (f in fs):
+        let [x, ...] = f.params.map(fun(p): name_id(p.name, ctx))
+        'fun $(name_id(f.name, ctx))($x, ...): $(ex(f.body, ctx))'
+    values('$code
+            ...
+            rt.declare($(ir_syn(decl)))',
+           rest)
+
+defn.sequence_macro 'logic_fun $g ...
                      $tail
                      ...':
-  let values(more, tail2) = take_ands('$tail; ...')
-  let values(hints, rest) = split_proof(tail2)
-  let fs = ['$g ...', & more].map(function_head)
-  let decl = if fs.length() == 1 | fs[0] | Mutual(fs)
-  let [code, ...]:
-    for List (f in fs):
-      let ctx = [g, ...][0]
-      let [x, ...] = f.params.map(fun(p): name_id(p.name, ctx))
-      'fun $(name_id(f.name, ctx))($x, ...): $(ex(f.body, ctx))'
-  values('$code
-          ...
-          rt.declare($(ir_syn(decl)))',
-         rest)
+  if !is_declaration('$g ...')
+  | values('fun $g ...', '$tail; ...')
+  | declare_functions('$g ...', [g, ...][0], '$tail; ...')
+
+expr.macro 'logic_fun $tail ...':
+  'fun $tail ...'
 
 defn.sequence_macro 'theorem $(name :: Identifier) $(ps :: Term) ...: $(stmt :: Block)
                      $tail

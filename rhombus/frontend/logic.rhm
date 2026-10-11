@@ -71,6 +71,7 @@ class Checker(types :: MutableMap, thms :: MutableMap, mutable fresh :: Int,
               mutable numerals :: Int):
   constructor():
     BM.reset()
+    BM.proof_printing.value := trace_mode == "bm"
     super({}.copy(), {}.copy(), 0, 1)
 
   // The prover knows 1 = SUC 0; a literal n > 1 needs n = SUC (n - 1) down
@@ -82,6 +83,8 @@ class Checker(types :: MutableMap, thms :: MutableMap, mutable fresh :: Int,
           BM.register_rewrite(num_CONV(mk_small_numeral(k)))
         numerals := n
     | ECall(_, args): for (a in args): need_numerals(a)
+    | EApp(f, args): need_numerals(f); for (a in args): need_numerals(a)
+    | ELam(_, b): need_numerals(b)
     | EOp(_, args): for (a in args): need_numerals(a)
     | EIf(c, t, f): need_numerals(c); need_numerals(t); need_numerals(f)
     | EMatch(x, cs): need_numerals(x); for (c in cs): need_numerals(c.body)
@@ -103,6 +106,9 @@ class Checker(types :: MutableMap, thms :: MutableMap, mutable fresh :: Int,
     | TNat(): "num"
     | TBool(): "bool"
     | TVar(n): tyvar(n)
+    | TFun(args, r):
+        // Curried: (a, b) -> c is a->b->c.
+        String.join(for List (a in args): arg_ty_text(a, group), "->") ++ "->" ++ ty_text(r, group)
     | TCon(n, args):
         cond
         | group.contains(n): n
@@ -114,6 +120,10 @@ class Checker(types :: MutableMap, thms :: MutableMap, mutable fresh :: Int,
             let by_name = for Map (p in info.params, a in args): values(p, a)
             let hol_order = info.hol_params
             "(" ++ String.join(for List (p in hol_order): ty_text(by_name[p], group), ",") ++ ")" ++ n
+
+  // A type left of `->`: a function type in parentheses.
+  method arg_ty_text(ty, group :: List) :: String:
+    if ty is_a TFun | "(" ++ ty_text(ty, group) ++ ")" | ty_text(ty, group)
 
   method fail(msg): throw Failure(msg)
 
@@ -177,7 +187,7 @@ class Checker(types :: MutableMap, thms :: MutableMap, mutable fresh :: Int,
   method equations(f :: Function) :: String:
     let fn_ty:
       for values(t = ty_text(f.result || fail("give " +& f.name +& " a result type"), [])) (p in f.params.reverse()):
-        ty_text(p.ty || fail("give parameter " +& p.name +& " a type"), []) ++ "->" ++ t
+        arg_ty_text(p.ty || fail("give parameter " +& p.name +& " a type"), []) ++ "->" ++ t
     let head = "(" ++ f.name ++ ":" ++ fn_ty ++ ")"
     let env0 = for Map (p in f.params): values(p.name, typed_var(p))
     need_numerals(f.body)
@@ -259,7 +269,19 @@ class Checker(types :: MutableMap, thms :: MutableMap, mutable fresh :: Int,
     | EVar(n): env.get(n, n)
     | ENat(n): to_string(n)
     | EBool(b): (if b | "T" | "F")
-    | ECall(n, args): "(" ++ String.join([n] ++ args.map(fun(a): expr(a, env)), " ") ++ ")"
+    | ECall(n, args): "(" ++ String.join([env.get(n, n)] ++ args.map(fun(a): expr(a, env)), " ") ++ ")"
+    | EApp(f, args): "(" ++ String.join([expr(f, env)] ++ args.map(fun(a): expr(a, env)), " ") ++ ")"
+    | ELam(ps, b):
+        // A parameter whose name occurs in the text a `let` inlined is
+        // renamed, so that the text keeps its meaning.
+        let values(vars, env2):
+          for values(vars = [], env2 = env) (p in ps):
+            let name:
+              if (for any ((_, v) in env): mentions(v, p.name)) | fresh_var() | p.name
+            let v:
+              if p.ty | "(" ++ name ++ ":" ++ ty_text(p.ty, []) ++ ")" | name
+            values(vars.add(v), env2 ++ {p.name: name})
+        "(\\" ++ String.join(vars, " ") ++ ". " ++ expr(b, env2) ++ ")"
     | EOp("!", [a]): "(~" ++ expr(a, env) ++ ")"
     | EOp("!=", [a, b]): "(~(" ++ expr(a, env) ++ " = " ++ expr(b, env) ++ "))"
     | EOp(op, [a, b]):
@@ -306,11 +328,16 @@ class Checker(types :: MutableMap, thms :: MutableMap, mutable fresh :: Int,
         [Outcome("theorem", t.name, "failed", describe(exn))]
 
 // FRONTEND_TRACE=1 prints the HOL Light text of each declaration;
-// FRONTEND_TRACE=raise also lets the first error escape, with its context.
+// FRONTEND_TRACE=raise also lets the first error escape, with its context;
+// FRONTEND_TRACE=bm also prints the Boyer-Moore proofs.
 def trace_mode:
   let m = Rkt.getenv("FRONTEND_TRACE")
   m && Rkt.#{string->immutable-string}(m)
-fun trace(text): if trace_mode | println("HOL: " ++ text) | #void
+fun trace(text):
+  if trace_mode
+  | println("HOL: " ++ text)
+    Rkt.#{flush-output}()
+  | #void
 
 fun describe(exn):
   if trace_mode == "raise" | throw exn | #void
@@ -318,6 +345,11 @@ fun describe(exn):
   | f :: Failure: "Failure " +& f.message
   | e :: Exn: e.message
   | _: to_string(exn)
+
+// Whether HOL text has `name` as a whole identifier.
+fun mentions(text :: String, name :: String):
+  let rx = Rkt.pregexp("(^|[^A-Za-z0-9_'])" ++ Rkt.#{regexp-quote}(name) ++ "($|[^A-Za-z0-9_'])")
+  Rkt.#{regexp-match?}(rx, text)
 
 fun result_type(ty):
   try:
